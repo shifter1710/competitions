@@ -1,0 +1,9 @@
+tmp/*
+.env
+.idea/*
+venv
+
+*.pyc
+
+data/*
+!*.gitkeep

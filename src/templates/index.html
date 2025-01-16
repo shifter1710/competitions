@@ -1,0 +1,120 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+
+<form class="import-form">
+    <h3 class="title">Импорт файлов</h3>
+    <div class="input-group">
+        <input class="form-control import-form__input" name="file" type="file">
+        <button class="import-form__button btn btn-success" type="submit" disabled>
+            Импортировать файл
+        </button>
+    </div>
+</form>
+
+<form class="filter-form filter">
+    <h3 class="title">Формирование отчёта</h3>
+    <div class="row align-items-md-bottom">
+        <div class="col">
+            <span class="label">ФИО</span>
+            <div class="input-group">
+                <input class="form-control filter__name" name="name" type="text" autocomplete="off">
+            </div>
+        </div>
+        <div class="col align-self-md-center">
+            <div class="datetime">
+                <div>
+                    <span class="label">Дата (От)</span>
+                    <input class="filter__date-from" name="date_from" type="text" autocomplete="off">
+                </div>
+                <div>
+                    <span class="label">Дата (До)</span>
+                    <input class="filter__date-to" name="date_to" type="text" autocomplete="off">
+                </div>
+            </div>
+        </div>
+        <div class="col align-self-md-center filter__position-wrapper">
+            <span class="label">Место</span>
+            <select class="filter__position select" name="position">
+                <option data-display="Все" value="">Все</option>
+                <option value="<2">Победа</option>
+                <option value="<4">Призовое место</option>
+                <option value=">3">Не призовое место</option>
+            </select>
+        </div>
+        <div class="col align-self-md-center filter__level-wrapper">
+            <span class="label">Уровень соревнований</span>
+            <select class="filter__level select" name="level">
+                <option data-display="Все" value="">Все</option>
+                <option value="внутривузовские">Внутривузовские</option>
+                <option value="межвузовские">Межвузовские</option>
+            </select>
+        </div>
+        <div class="col-clean-button align-self-md-end">
+            <button class="filter-form__clean-button btn btn-danger" type="button">
+                <img src="static/icons/filter-clean.svg" alt="Сбросить фильтр" />
+            </button>
+        </div>
+        <div class="col-button align-self-md-end">
+            <button class="filter-form__button btn btn-primary" type="submit">Сформировать отчет</button>
+        </div>
+    </div>
+</form>
+
+<div class="buttons">
+    <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
+    <button type="button" class="clean-button btn btn-danger">Очистить базу данных</button>
+</div>
+
+
+<div class="content-wrapper">
+    {% if competitions %}
+    <table class="table table-striped table-bordered">
+        <thead class="table-dark">
+            <tr>
+                <th scope="col">№</th>
+                <th scope="col" class="id">Идентификатор студента</th>
+                <th scope="col">ФИО</th>
+                <th scope="col">Пол</th>
+                <th scope="col">Институт</th>
+                <th scope="col">Группа</th>
+                <th scope="col">Вид спорта</th>
+                <th scope="col">Дата</th>
+                <th scope="col">Уровень соревнований</th>
+                <th scope="col">Название соревнований</th>
+                <th scope="col">Место</th>
+                <th scope="col">Курс</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for competition in competitions %}
+            <tr>
+                <td>{{loop.index}}</td>
+                <td class="id">{{competition.student_id}}</td>
+                <td>{{competition.student_name}}</td>
+                <td>{{competition.student_sex}}</td>
+                <td>{{competition.institute}}</td>
+                <td>{{competition.group}}</td>
+                <td>{{competition.sport}}</td>
+                <td>
+                    {{competition.date.strftime('%d.%m.%Y')}}
+                </td>
+                <td>{{competition.level}}</td>
+                <td class="competition">{{competition.name}}</td>
+                <td>{{competition.position}}</td>
+                <td>{{competition.course}}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-content">Нет данных</div>
+    {% endif %}
+</div>
+
+<div class="loader">
+    <div class="loader__icon"></div>
+</div>
+
+{% endblock content %}
