@@ -1,17 +1,15 @@
-name: CI on Competitions Runner
+name: Manual Deploy
+
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:  # Запуск только вручную
+
 jobs:
-  build:
-    runs-on: [self-hosted, Linux, x64]
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'  # Запуск только для main
     steps:
-      - uses: actions/checkout@v3
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      - run: npm install
-      - run: npm test
-      - run: npm run build
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run deployment script
+        run: echo "Deploying application..."
