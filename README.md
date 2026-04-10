@@ -8,6 +8,46 @@
 
 ## Development
 
+### Local run
+
+1. Create environment file
+```
+cp .env.example .env
+```
+
+2. Install requirements
+```
+pip install -r requirements.txt
+```
+
+3. Start application
+```
+sanic src.main:app --host 0.0.0.0 --port 8080
+```
+
+By default the app expects MongoDB on `mongodb://127.0.0.1:27017`.
+
+The app also requires authentication settings. For local development, set at least:
+```
+AUTH_SECRET_KEY=replace-with-random-string
+AUTH_ADMIN_USERNAME=admin
+AUTH_ADMIN_PASSWORD=strong-password
+```
+
+Optional read-only user:
+```
+AUTH_VIEWER_USERNAME=viewer
+AUTH_VIEWER_PASSWORD=viewer-password
+```
+
+### Docker run
+
+```
+docker compose up -d --build
+```
+
+The container is published on `127.0.0.1:8081`, intended to be proxied by nginx.
+
 ### Linting
 
 Python linters in this project are set up as [pre-commit](https://pre-commit.com/) hook. Do these steps to use them:
@@ -34,3 +74,11 @@ When linters are set, they now will be trigered any time you do commit. If there
 
 ### Время
 Время создания записи всегда устанавливается по UTC
+
+## Deployment
+
+Deployment templates are prepared for `dokin-app.online`:
+
+- docker compose: [docker-compose.yml](/root/chatgpt/competitions/docker-compose.yml)
+- systemd unit: [deploy/systemd/competitions-compose.service](/root/chatgpt/competitions/deploy/systemd/competitions-compose.service)
+- nginx config: [deploy/nginx/competitions.conf](/root/chatgpt/competitions/deploy/nginx/competitions.conf)

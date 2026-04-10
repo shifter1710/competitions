@@ -16,6 +16,18 @@
 <body>
 
     <div style="margin: 20px 20px">
+        {% if request.ctx.auth_user %}
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                Пользователь: <strong>{{ request.ctx.auth_user.username }}</strong>
+                ({{ request.ctx.auth_user.role }})
+            </div>
+            <form action="/logout" method="post">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Выйти</button>
+            </form>
+        </div>
+        {% endif %}
+
         {% block content %}
         {% endblock content %}
     </div>

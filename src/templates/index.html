@@ -2,7 +2,7 @@
 
 {% block content %}
 
-
+{% if request.ctx.auth_user.role == 'admin' %}
 <form class="import-form">
     <h3 class="title">Импорт файлов</h3>
     <div class="input-group">
@@ -12,6 +12,66 @@
         </button>
     </div>
 </form>
+
+<form class="manual-form mt-4">
+    <h3 class="title">Добавить запись</h3>
+    <input name="record_id" type="hidden">
+    <div class="row g-3">
+        <div class="col-md-6">
+            <label class="form-label" for="student_name">ФИО</label>
+            <input class="form-control" id="student_name" name="student_name" type="text" required>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="student_sex">Пол</label>
+            <select class="form-select" id="student_sex" name="student_sex" required>
+                <option value="М">М</option>
+                <option value="Ж">Ж</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label" for="institute">Институт</label>
+            <input class="form-control" id="institute" name="institute" type="text" required>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="group">Группа</label>
+            <input class="form-control" id="group" name="group" type="text" required>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="course">Курс</label>
+            <input class="form-control" id="course" name="course" type="number" min="1" step="1" required>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="sport">Вид спорта</label>
+            <input class="form-control" id="sport" name="sport" type="text" required>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="date">Дата</label>
+            <input class="form-control" id="date" name="date" type="text" placeholder="дд.мм.гггг" required>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label" for="level">Уровень соревнований</label>
+            <select class="form-select" id="level" name="level" required>
+                <option value="внутривузовские">Внутривузовские</option>
+                <option value="межвузовские">Межвузовские</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label" for="name">Название соревнований</label>
+            <input class="form-control" id="name" name="name" type="text" required>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="position">Место</label>
+            <input class="form-control" id="position" name="position" type="number" min="0" step="1" required>
+        </div>
+        <div class="col-md-2 d-flex align-items-end">
+            <button class="btn btn-primary w-100 manual-form__button" type="submit">Добавить</button>
+        </div>
+        <div class="col-md-2 d-flex align-items-end">
+            <button class="btn btn-outline-secondary w-100 manual-form__cancel-button" type="button">Сбросить</button>
+        </div>
+    </div>
+</form>
+{% endif %}
 
 <form class="filter-form filter">
     <h3 class="title">Формирование отчёта</h3>
@@ -64,7 +124,6 @@
 
 <div class="buttons">
     <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
-    <button type="button" class="clean-button btn btn-danger">Очистить базу данных</button>
 </div>
 
 
@@ -74,7 +133,6 @@
         <thead class="table-dark">
             <tr>
                 <th scope="col">№</th>
-                <th scope="col" class="id">Идентификатор студента</th>
                 <th scope="col">ФИО</th>
                 <th scope="col">Пол</th>
                 <th scope="col">Институт</th>
@@ -85,13 +143,15 @@
                 <th scope="col">Название соревнований</th>
                 <th scope="col">Место</th>
                 <th scope="col">Курс</th>
+                {% if request.ctx.auth_user.role == 'admin' %}
+                <th scope="col">Действия</th>
+                {% endif %}
             </tr>
         </thead>
         <tbody>
             {% for competition in competitions %}
             <tr>
                 <td>{{loop.index}}</td>
-                <td class="id">{{competition.student_id}}</td>
                 <td>{{competition.student_name}}</td>
                 <td>{{competition.student_sex}}</td>
                 <td>{{competition.institute}}</td>
@@ -104,6 +164,34 @@
                 <td class="competition">{{competition.name}}</td>
                 <td>{{competition.position}}</td>
                 <td>{{competition.course}}</td>
+                {% if request.ctx.auth_user.role == 'admin' %}
+                <td>
+                    <button
+                        class="btn btn-sm btn-outline-primary competition-edit-button"
+                        type="button"
+                        data-record-id="{{ competition.record_id }}"
+                        data-student-name="{{ competition.student_name }}"
+                        data-student-sex="{{ competition.student_sex }}"
+                        data-institute="{{ competition.institute }}"
+                        data-group="{{ competition.group }}"
+                        data-course="{{ competition.course }}"
+                        data-sport="{{ competition.sport }}"
+                        data-date="{{ competition.date.strftime('%d.%m.%Y') }}"
+                        data-level="{{ competition.level }}"
+                        data-name="{{ competition.name }}"
+                        data-position="{{ competition.position }}"
+                    >
+                        Редактировать
+                    </button>
+                    <button
+                        class="btn btn-sm btn-outline-danger competition-delete-button"
+                        type="button"
+                        data-record-id="{{ competition.record_id }}"
+                    >
+                        Удалить
+                    </button>
+                </td>
+                {% endif %}
             </tr>
             {% endfor %}
         </tbody>
