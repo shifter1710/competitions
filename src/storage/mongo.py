@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Iterable
 
+from bson import ObjectId
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 
@@ -15,13 +16,14 @@ class MongoAdapter:
         client = MongoClient(mongo_uri, server_api=ServerApi('1'))
         client.admin.command('ping')
 
-        self.competitions = client.competitions.competitions
+        self.competitions = client[settings.mongo_db_name][settings.mongo_collection_name]
 
     def get_competitions(self) -> Iterable[Competition]:
         competitions = []
 
         records = self.competitions.find({})
         for record in records:
+            record['_id'] = str(record['_id'])
             competition = Competition.parse_obj(record)
             competitions.append(competition)
 
@@ -51,7 +53,7 @@ class MongoAdapter:
 
         if position:
             sign = position[0]
-            value = int(position[1])
+            value = int(position[1:])
             if sign == '>':
                 filter['position'] = {'$gt': value}
             elif sign == '<':
@@ -99,8 +101,17 @@ class MongoAdapter:
         return student_infos
 
     def save_competitions(self, competitons: Iterable[Competition]):
-        records = [item.dict() for item in competitons]
+        records = [item.dict(exclude={'record_id'}) for item in competitons]
         self.competitions.insert_many(records)
+
+    def update_competition(self, record_id: str, competition: Competition):
+        self.competitions.update_one(
+            {'_id': ObjectId(record_id)},
+            {'$set': competition.dict(exclude={'record_id', 'created_at'})},
+        )
+
+    def delete_competition(self, record_id: str):
+        self.competitions.delete_one({'_id': ObjectId(record_id)})
 
     def clean_db(self):
         self.competitions.delete_many({})

@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 COPY ./src /code/src
 RUN mkdir /code/data
 
-CMD ["sanic", "src.main:app", "--host", "0.0.0.0", "--port", "80"]
+CMD ["sh", "-c", "sanic src.main:app --host ${WEB_HOST:-0.0.0.0} --port ${WEB_PORT:-8080}"]

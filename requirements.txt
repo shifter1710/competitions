@@ -1,4 +1,5 @@
 Jinja2==3.1.2
+numpy==1.24.4
 openpyxl==3.1.2
 pandas==2.0.1
 pre-commit==3.3.2
@@ -6,3 +7,5 @@ pydantic==1.10.8
 pymongo==4.3.3
 sanic==23.3.0
 sanic-ext==23.3.0
+sanic-testing==23.3.0
+pytest==7.3.1
