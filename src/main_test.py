@@ -53,14 +53,14 @@ def get_auth_headers(role: str = 'admin') -> dict[str, str]:
 
 @pytest.fixture
 def client() -> SanicTestClient:
-    fake_mongo = Mock()
-    fake_mongo.get_competitions.return_value = []
-    fake_mongo.get_filtered.return_value = []
-    fake_mongo.save_competitions.return_value = None
-    fake_mongo.update_competition.return_value = None
-    fake_mongo.delete_competition.return_value = None
-    fake_mongo.clean_db.return_value = None
-    app.ctx.mongo = fake_mongo
+    fake_storage = Mock()
+    fake_storage.get_competitions.return_value = []
+    fake_storage.get_filtered.return_value = []
+    fake_storage.save_competitions.return_value = None
+    fake_storage.update_competition.return_value = None
+    fake_storage.delete_competition.return_value = None
+    fake_storage.clean_db.return_value = None
+    app.ctx.storage = fake_storage
     client = SanicTestClient(app)
     return client
 
@@ -140,7 +140,7 @@ def test_manual_competition_create_success(client: SanicTestClient):
 
     assert response.status == 302
     assert response.headers['location'] == '/'
-    app.ctx.mongo.save_competitions.assert_called_once()
+    app.ctx.storage.save_competitions.assert_called_once()
 
 
 def test_manual_competition_create_rejects_invalid_date(client: SanicTestClient):
@@ -186,7 +186,7 @@ def test_manual_competition_update_success(client: SanicTestClient):
 
     assert response.status == 302
     assert response.headers['location'] == '/'
-    app.ctx.mongo.update_competition.assert_called_once()
+    app.ctx.storage.update_competition.assert_called_once()
 
 
 def test_manual_competition_delete_success(client: SanicTestClient):
@@ -198,11 +198,11 @@ def test_manual_competition_delete_success(client: SanicTestClient):
 
     assert response.status == 302
     assert response.headers['location'] == '/'
-    app.ctx.mongo.delete_competition.assert_called_once_with('abc123')
+    app.ctx.storage.delete_competition.assert_called_once_with('abc123')
 
 
 def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClient):
-    app.ctx.mongo.get_competitions.return_value = [
+    app.ctx.storage.get_competitions.return_value = [
         Competition(
             student_id='1',
             student_name='Test 1',
@@ -236,7 +236,7 @@ def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClie
 
 
 def test_export_report_omits_dataframe_index_and_student_id(client: SanicTestClient):
-    app.ctx.mongo.get_filtered.return_value = [
+    app.ctx.storage.get_filtered.return_value = [
         StudentInfo(
             student_id='1',
             student_name='Test 1',
