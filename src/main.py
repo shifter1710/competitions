@@ -23,7 +23,7 @@ from sanic_ext import render
 from src.models.competition import Competition
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
-from src.storage.mongo import MongoAdapter
+from src.storage.sqlite import SQLiteAdapter
 
 jinja_env = Environment(
     loader=PackageLoader('src'),
@@ -40,7 +40,7 @@ app.static(
     directory_view=True,
 )
 
-app.ctx.mongo = None
+app.ctx.storage = None
 
 AUTH_ALLOWED_PATHS = {'/healthcheck', '/login'}
 ADMIN_ROLE = 'admin'
@@ -83,16 +83,15 @@ REPORT_EXPORT_COLUMNS: Sequence[str] = (
 
 
 @app.before_server_start
-async def init_mongo(app: Sanic, _):
-    if app.ctx.mongo is None:
-        app.ctx.mongo = MongoAdapter(settings.mongo_uri)
+async def init_storage(app: Sanic, _):
+    if app.ctx.storage is None:
+        app.ctx.storage = SQLiteAdapter(settings.database_path)
 
-
-def get_mongo(app: Sanic) -> MongoAdapter:
-    mongo = getattr(app.ctx, 'mongo', None)
-    if mongo is None:
-        raise RuntimeError('Mongo adapter is not initialized')
-    return mongo
+def get_storage(app: Sanic) -> SQLiteAdapter:
+    storage = getattr(app.ctx, 'storage', None)
+    if storage is None:
+        raise RuntimeError('Storage adapter is not initialized')
+    return storage
 
 
 def get_param(args: dict, key: str) -> str | None:
@@ -315,8 +314,8 @@ async def logout(request: Request):
 
 @app.get('/')
 async def index(request: Request):
-    mongo = get_mongo(request.app)
-    competitions = mongo.get_competitions()
+    storage = get_storage(request.app)
+    competitions = storage.get_competitions()
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
@@ -328,8 +327,8 @@ async def index(request: Request):
 
 @app.get('/export/index')
 async def export_index(request: Request):
-    mongo = get_mongo(request.app)
-    competitions = mongo.get_competitions()
+    storage = get_storage(request.app)
+    competitions = storage.get_competitions()
     df = pd.DataFrame.from_records([comp.dict(by_alias=True) for comp in competitions])
     df = df.reindex(columns=INDEX_EXPORT_COLUMNS)
 
@@ -351,7 +350,7 @@ async def upload(request: Request):
     if not upload_file or not upload_file.body:
         return text(body='No file uploaded', status=400)
 
-    mongo = get_mongo(request.app)
+    storage = get_storage(request.app)
 
     try:
         df = pd.read_excel(io=upload_file.body)
@@ -370,7 +369,7 @@ async def upload(request: Request):
 
         competitions.append(competition)
 
-    mongo.save_competitions(competitions)
+    storage.save_competitions(competitions)
     return redirect(to='/')
 
 
@@ -380,7 +379,7 @@ async def add_competition(request: Request):
     if auth_error is not None:
         return auth_error
 
-    mongo = get_mongo(request.app)
+    storage = get_storage(request.app)
     record = {
         'ФИО': get_form_value(request, 'student_name'),
         'Пол': get_form_value(request, 'student_sex'),
@@ -399,7 +398,7 @@ async def add_competition(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    mongo.save_competitions([competition])
+    storage.save_competitions([competition])
     return redirect(to='/')
 
 
@@ -409,7 +408,7 @@ async def update_competition(request: Request, record_id: str):
     if auth_error is not None:
         return auth_error
 
-    mongo = get_mongo(request.app)
+    storage = get_storage(request.app)
     record = {
         'ФИО': get_form_value(request, 'student_name'),
         'Пол': get_form_value(request, 'student_sex'),
@@ -428,7 +427,7 @@ async def update_competition(request: Request, record_id: str):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    mongo.update_competition(record_id, competition)
+    storage.update_competition(record_id, competition)
     return redirect(to='/')
 
 
@@ -438,8 +437,8 @@ async def delete_competition(request: Request, record_id: str):
     if auth_error is not None:
         return auth_error
 
-    mongo = get_mongo(request.app)
-    mongo.delete_competition(record_id)
+    storage = get_storage(request.app)
+    storage.delete_competition(record_id)
     return redirect(to='/')
 
 
@@ -449,8 +448,8 @@ async def clean_db(request: Request):
     if auth_error is not None:
         return auth_error
 
-    mongo = get_mongo(request.app)
-    mongo.clean_db()
+    storage = get_storage(request.app)
+    storage.clean_db()
     return redirect(to='/')
 
 
@@ -482,9 +481,9 @@ async def export_report(request: Request):
 
 def get_student_infos(request: Request) -> Iterable[StudentInfo]:
     args = dict(request.args)
-    mongo = get_mongo(request.app)
+    storage = get_storage(request.app)
 
-    student_infos = mongo.get_filtered(
+    student_infos = storage.get_filtered(
         date_from=get_param(args, 'date_from'),
         date_to=get_param(args, 'date_to'),
         position=get_param(args, 'position'),
