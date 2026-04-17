@@ -11,10 +11,8 @@ BASE_DIR = dirname(dirname(abspath(__file__)))
 
 class Settings(BaseSettings):
     date_format: str = '%d.%m.%Y'
-    mongo_uri: str = Field(default='mongodb://127.0.0.1:27017', env='MONGO_URI')
-    mongo_db_name: str = Field(default='competitions', env='MONGO_DB_NAME')
-    mongo_collection_name: str = Field(default='competitions', env='MONGO_COLLECTION_NAME')
     data_folder: str = Field(default=join(BASE_DIR, 'data'), env='DATA_FOLDER')
+    database_path: str = Field(default=join(BASE_DIR, 'data', 'competitions.sqlite3'), env='DATABASE_PATH')
     auth_cookie_name: str = Field(default='competitions_auth', env='AUTH_COOKIE_NAME')
     auth_secret_key: str = Field(default='change-me', env='AUTH_SECRET_KEY')
     auth_admin_username: str = Field(default='admin', env='AUTH_ADMIN_USERNAME')
