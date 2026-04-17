@@ -25,7 +25,7 @@ pip install -r requirements.txt
 sanic src.main:app --host 0.0.0.0 --port 8080
 ```
 
-By default the app expects MongoDB on `mongodb://127.0.0.1:27017`.
+By default the app uses SQLite at `./data/competitions.sqlite3`.
 
 The app also requires authentication settings. For local development, set at least:
 ```
@@ -47,6 +47,12 @@ docker compose up -d --build
 ```
 
 The container is published on `127.0.0.1:8081`, intended to be proxied by nginx.
+Application data, including the SQLite database, is stored in `./data`.
+
+### Migrating existing MongoDB data
+
+For one-time migration from MongoDB to SQLite, use `scripts/migrate_mongo_to_sqlite.py`.
+The migration helper is not part of the runtime container and expects `pymongo` to be available in the environment where you run the script.
 
 ### Linting
 
