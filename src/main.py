@@ -2,11 +2,14 @@ import base64
 import binascii
 import hashlib
 import hmac
+import re
 import secrets
 from datetime import datetime
+from io import BytesIO
 from os.path import join
 from typing import Iterable
 from typing import Sequence
+from urllib.parse import urlencode
 
 import pandas as pd
 from jinja2 import Environment
@@ -18,9 +21,11 @@ from sanic import Request
 from sanic import Sanic
 from sanic import text
 from sanic.response import file
+from sanic.response import raw
 from sanic_ext import render
 
 from src.models.competition import Competition
+from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
@@ -44,34 +49,25 @@ app.ctx.storage = None
 
 AUTH_ALLOWED_PATHS = {'/healthcheck', '/login'}
 ADMIN_ROLE = 'admin'
+EDITOR_ROLE = 'editor'
 VIEWER_ROLE = 'viewer'
+WRITE_ROLES = {ADMIN_ROLE, EDITOR_ROLE}
 
-REQUIRED_IMPORT_COLUMNS: Sequence[str] = (
-    'ФИО',
-    'Пол',
-    'Институт',
-    'Группа',
-    'Вид спорта',
-    'Дата',
-    'Уровень соревнований',
-    'Название соревнований',
-    'Место',
-    'Курс',
+BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
+    {'key': 'student_name', 'label': 'ФИО'},
+    {'key': 'student_sex', 'label': 'Пол'},
+    {'key': 'institute', 'label': 'Институт'},
+    {'key': 'group', 'label': 'Группа'},
+    {'key': 'sport', 'label': 'Вид спорта'},
+    {'key': 'date', 'label': 'Дата'},
+    {'key': 'level', 'label': 'Уровень соревнований'},
+    {'key': 'name', 'label': 'Название соревнований'},
+    {'key': 'position', 'label': 'Место'},
+    {'key': 'course', 'label': 'Курс'},
 )
 
-INDEX_EXPORT_COLUMNS: Sequence[str] = (
-    'ФИО',
-    'Пол',
-    'Институт',
-    'Группа',
-    'Вид спорта',
-    'Дата',
-    'Уровень соревнований',
-    'Название соревнований',
-    'Место',
-    'Курс',
-)
-
+REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
+INDEX_EXPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
 REPORT_EXPORT_COLUMNS: Sequence[str] = (
     'ФИО',
     'Пол',
@@ -80,12 +76,14 @@ REPORT_EXPORT_COLUMNS: Sequence[str] = (
     'Курс',
     'Количество участий',
 )
+FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date')
 
 
 @app.before_server_start
 async def init_storage(app: Sanic, _):
     if app.ctx.storage is None:
         app.ctx.storage = SQLiteAdapter(settings.database_path)
+
 
 def get_storage(app: Sanic) -> SQLiteAdapter:
     storage = getattr(app.ctx, 'storage', None)
@@ -106,6 +104,10 @@ def get_form_value(request: Request, key: str) -> str:
     if isinstance(value, list):
         return value[0]
     return value
+
+
+def get_auth_user(request: Request) -> dict | None:
+    return getattr(request.ctx, 'auth_user', None)
 
 
 def create_auth_cookie_value(username: str, role: str) -> str:
@@ -138,14 +140,10 @@ def parse_auth_cookie(request: Request) -> dict | None:
     if not secrets.compare_digest(signature, expected_signature):
         return None
 
-    if role not in {ADMIN_ROLE, VIEWER_ROLE}:
+    if role not in {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE}:
         return None
 
     return {'username': username, 'role': role}
-
-
-def get_auth_user(request: Request) -> dict | None:
-    return getattr(request.ctx, 'auth_user', None)
 
 
 def authenticate_user(username: str, password: str) -> dict | None:
@@ -154,7 +152,12 @@ def authenticate_user(username: str, password: str) -> dict | None:
             'username': settings.auth_admin_username,
             'password': settings.auth_admin_password,
             'role': ADMIN_ROLE,
-        }
+        },
+        {
+            'username': settings.auth_editor_username,
+            'password': settings.auth_editor_password,
+            'role': EDITOR_ROLE,
+        },
     ]
     if settings.auth_viewer_username and settings.auth_viewer_password:
         accounts.append(
@@ -193,6 +196,16 @@ def clear_auth_cookie(response):
     response.delete_cookie(settings.auth_cookie_name, path='/')
 
 
+def user_is_admin(request: Request) -> bool:
+    user = get_auth_user(request)
+    return bool(user and user['role'] == ADMIN_ROLE)
+
+
+def user_can_write(request: Request) -> bool:
+    user = get_auth_user(request)
+    return bool(user and user['role'] in WRITE_ROLES)
+
+
 def require_admin(request: Request):
     user = get_auth_user(request)
     if not user:
@@ -200,6 +213,25 @@ def require_admin(request: Request):
     if user['role'] != ADMIN_ROLE:
         return text(body='Forbidden', status=403)
     return None
+
+
+def require_writer(request: Request):
+    user = get_auth_user(request)
+    if not user:
+        return text(body='Unauthorized', status=401)
+    if user['role'] not in WRITE_ROLES:
+        return text(body='Forbidden', status=403)
+    return None
+
+
+def build_redirect_with_message(*, message: str | None = None, error: str | None = None):
+    params = {}
+    if message:
+        params['admin_message'] = message
+    if error:
+        params['admin_error'] = error
+    query = urlencode(params)
+    return redirect(f'/?{query}' if query else '/')
 
 
 def validate_import_columns(df: pd.DataFrame):
@@ -226,7 +258,78 @@ def parse_manual_date(value: str) -> datetime:
     return datetime.strptime(value, settings.date_format)
 
 
-def build_competition(record: dict, *, manual_input: bool = False) -> Competition:
+def normalize_custom_field_key(label: str) -> str:
+    normalized = re.sub(r'\W+', '_', label.strip().lower())
+    normalized = normalized.strip('_')
+    if not normalized:
+        normalized = 'field'
+    return normalized
+
+
+def make_unique_custom_field_key(label: str, existing_fields: Sequence[CustomField]) -> str:
+    base_key = normalize_custom_field_key(label)
+    existing_keys = {field.key for field in existing_fields}
+    candidate = base_key
+    index = 2
+    while candidate in existing_keys:
+        candidate = f'{base_key}_{index}'
+        index += 1
+    return candidate
+
+
+def checkbox_to_bool(value: str) -> bool:
+    return value.lower() in {'1', 'true', 'on', 'yes'}
+
+
+def parse_checkbox(request: Request, key: str) -> bool:
+    return checkbox_to_bool(get_form_value(request, key))
+
+
+def parse_custom_field_value(raw_value, field: CustomField) -> str:
+    if isna(raw_value):
+        raw_value = ''
+
+    value = str(raw_value).strip()
+    if not value:
+        if field.required:
+            raise ValueError(f'Поле "{field.label}" обязательно')
+        return ''
+
+    if field.field_type == 'number':
+        return str(int(float(value)))
+    if field.field_type == 'date':
+        return datetime.strptime(value, settings.date_format).strftime(settings.date_format)
+    return value
+
+
+def extract_custom_field_values(record: dict, custom_fields: Sequence[CustomField]) -> dict[str, str]:
+    extra_data = {}
+    for field in custom_fields:
+        raw_value = record.get(field.label, '')
+        value = parse_custom_field_value(raw_value, field)
+        extra_data[field.key] = value
+    return extra_data
+
+
+def extract_custom_field_values_from_request(
+    request: Request,
+    custom_fields: Sequence[CustomField],
+) -> dict[str, str]:
+    extra_data = {}
+    for field in custom_fields:
+        extra_data[field.key] = parse_custom_field_value(
+            get_form_value(request, f'custom__{field.key}'),
+            field,
+        )
+    return extra_data
+
+
+def build_competition(
+    record: dict,
+    *,
+    custom_fields: Sequence[CustomField],
+    manual_input: bool = False,
+) -> Competition:
     student_name = str(record['ФИО']).strip()
     if not student_name:
         raise ValueError('ФИО обязательно')
@@ -247,7 +350,36 @@ def build_competition(record: dict, *, manual_input: bool = False) -> Competitio
         name=str(record['Название соревнований']).strip(),
         position=normalize_position(record['Место']),
         course=normalize_course(record['Курс']),
+        extra_data=extract_custom_field_values(record, custom_fields),
     )
+
+
+def competition_to_export_row(
+    competition: Competition,
+    export_custom_fields: Sequence[CustomField],
+) -> dict[str, str | int]:
+    row = competition.dict(by_alias=True)
+    row.pop('_id', None)
+    row.pop('Время создания записи (UTC)', None)
+    row.pop('extra_data', None)
+    for field in export_custom_fields:
+        row[field.label] = competition.extra_data.get(field.key, '')
+    return row
+
+
+def get_student_infos(request: Request) -> Iterable[StudentInfo]:
+    args = dict(request.args)
+    storage = get_storage(request.app)
+
+    student_infos = storage.get_filtered(
+        date_from=get_param(args, 'date_from'),
+        date_to=get_param(args, 'date_to'),
+        position=get_param(args, 'position'),
+        level=get_param(args, 'level'),
+        name=get_param(args, 'name'),
+    )
+
+    return student_infos
 
 
 @app.on_request
@@ -315,12 +447,48 @@ async def logout(request: Request):
 @app.get('/')
 async def index(request: Request):
     storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
     competitions = storage.get_competitions()
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
             'request': request,
             'competitions': competitions,
+            'custom_fields': custom_fields,
+            'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
+            'field_type_options': FIELD_TYPE_OPTIONS,
+            'can_write': user_can_write(request),
+            'is_admin': user_is_admin(request),
+            'admin_message': get_param(dict(request.args), 'admin_message'),
+            'admin_error': get_param(dict(request.args), 'admin_error'),
+        },
+    )
+
+
+@app.get('/template/empty.xlsx')
+async def export_empty_template(request: Request):
+    auth_error = require_writer(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    custom_fields = [
+        field for field in storage.get_custom_fields()
+        if field.show_in_template
+    ]
+    columns = list(REQUIRED_IMPORT_COLUMNS) + [field.label for field in custom_fields]
+
+    df = pd.DataFrame(columns=columns)
+    buffer = BytesIO()
+    df.to_excel(buffer, index=False)
+    buffer.seek(0)
+
+    now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
+    return raw(
+        buffer.getvalue(),
+        headers={
+            'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'content-disposition': f'attachment; filename="Шаблон_соревнования_{now_str}.xlsx"',
         },
     )
 
@@ -329,8 +497,14 @@ async def index(request: Request):
 async def export_index(request: Request):
     storage = get_storage(request.app)
     competitions = storage.get_competitions()
-    df = pd.DataFrame.from_records([comp.dict(by_alias=True) for comp in competitions])
-    df = df.reindex(columns=INDEX_EXPORT_COLUMNS)
+    export_custom_fields = [
+        field for field in storage.get_custom_fields()
+        if field.show_in_export
+    ]
+    df = pd.DataFrame.from_records(
+        [competition_to_export_row(comp, export_custom_fields) for comp in competitions]
+    )
+    df = df.reindex(columns=list(INDEX_EXPORT_COLUMNS) + [field.label for field in export_custom_fields])
 
     now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'
@@ -342,7 +516,7 @@ async def export_index(request: Request):
 
 @app.post('/')
 async def upload(request: Request):
-    auth_error = require_admin(request)
+    auth_error = require_writer(request)
     if auth_error is not None:
         return auth_error
 
@@ -351,6 +525,7 @@ async def upload(request: Request):
         return text(body='No file uploaded', status=400)
 
     storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
 
     try:
         df = pd.read_excel(io=upload_file.body)
@@ -363,7 +538,7 @@ async def upload(request: Request):
         record = row.to_dict()
 
         try:
-            competition = build_competition(record)
+            competition = build_competition(record, custom_fields=custom_fields)
         except (TypeError, ValueError) as exc:
             return text(body=f'Invalid row data: {exc}', status=400)
 
@@ -375,11 +550,12 @@ async def upload(request: Request):
 
 @app.post('/competition')
 async def add_competition(request: Request):
-    auth_error = require_admin(request)
+    auth_error = require_writer(request)
     if auth_error is not None:
         return auth_error
 
     storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
     record = {
         'ФИО': get_form_value(request, 'student_name'),
         'Пол': get_form_value(request, 'student_sex'),
@@ -392,9 +568,10 @@ async def add_competition(request: Request):
         'Место': get_form_value(request, 'position'),
         'Курс': get_form_value(request, 'course'),
     }
+    record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
 
     try:
-        competition = build_competition(record, manual_input=True)
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
@@ -404,11 +581,12 @@ async def add_competition(request: Request):
 
 @app.post('/competition/<record_id>')
 async def update_competition(request: Request, record_id: str):
-    auth_error = require_admin(request)
+    auth_error = require_writer(request)
     if auth_error is not None:
         return auth_error
 
     storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
     record = {
         'ФИО': get_form_value(request, 'student_name'),
         'Пол': get_form_value(request, 'student_sex'),
@@ -421,9 +599,10 @@ async def update_competition(request: Request, record_id: str):
         'Место': get_form_value(request, 'position'),
         'Курс': get_form_value(request, 'course'),
     }
+    record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
 
     try:
-        competition = build_competition(record, manual_input=True)
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
@@ -453,6 +632,72 @@ async def clean_db(request: Request):
     return redirect(to='/')
 
 
+@app.post('/admin/fields')
+async def create_custom_field(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    label = get_form_value(request, 'label').strip()
+    field_type = get_form_value(request, 'field_type').strip() or 'text'
+    if not label:
+        return build_redirect_with_message(error='Название поля обязательно')
+    if field_type not in FIELD_TYPE_OPTIONS:
+        return build_redirect_with_message(error='Недопустимый тип поля')
+
+    try:
+        storage.create_custom_field(
+            key=make_unique_custom_field_key(label, storage.get_custom_fields(include_inactive=True)),
+            label=label,
+            field_type=field_type,
+            required=parse_checkbox(request, 'required'),
+            show_in_table=parse_checkbox(request, 'show_in_table'),
+            show_in_export=parse_checkbox(request, 'show_in_export'),
+            show_in_template=parse_checkbox(request, 'show_in_template'),
+            sort_order=int(get_form_value(request, 'sort_order') or 0),
+        )
+    except Exception as exc:
+        return build_redirect_with_message(error=f'Не удалось создать поле: {exc}')
+    return build_redirect_with_message(message='Поле добавлено')
+
+
+@app.post('/admin/fields/<field_id>')
+async def update_custom_field(request: Request, field_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    field_type = get_form_value(request, 'field_type').strip() or 'text'
+    if field_type not in FIELD_TYPE_OPTIONS:
+        return build_redirect_with_message(error='Недопустимый тип поля')
+
+    storage = get_storage(request.app)
+    storage.update_custom_field(
+        field_id=int(field_id),
+        label=get_form_value(request, 'label').strip(),
+        field_type=field_type,
+        required=parse_checkbox(request, 'required'),
+        show_in_table=parse_checkbox(request, 'show_in_table'),
+        show_in_export=parse_checkbox(request, 'show_in_export'),
+        show_in_template=parse_checkbox(request, 'show_in_template'),
+        sort_order=int(get_form_value(request, 'sort_order') or 0),
+        active=parse_checkbox(request, 'active'),
+    )
+    return build_redirect_with_message(message='Настройки поля сохранены')
+
+
+@app.post('/admin/fields/<field_id>/delete')
+async def delete_custom_field(request: Request, field_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    storage.disable_custom_field(int(field_id))
+    return build_redirect_with_message(message='Поле отключено')
+
+
 @app.get('/report')
 async def get_report(request: Request):
     student_infos = get_student_infos(request)
@@ -477,21 +722,6 @@ async def export_report(request: Request):
     df.to_excel(filepath, index=False)
 
     return await file(filepath, filename=filename)
-
-
-def get_student_infos(request: Request) -> Iterable[StudentInfo]:
-    args = dict(request.args)
-    storage = get_storage(request.app)
-
-    student_infos = storage.get_filtered(
-        date_from=get_param(args, 'date_from'),
-        date_to=get_param(args, 'date_to'),
-        position=get_param(args, 'position'),
-        level=get_param(args, 'level'),
-        name=get_param(args, 'name'),
-    )
-
-    return student_infos
 
 
 @app.get('/healthcheck')

@@ -1,9 +1,11 @@
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from src.models.competition import Competition
+from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
 
@@ -37,6 +39,32 @@ class SQLiteAdapter:
             )
             '''
         )
+
+        columns = {
+            row['name']
+            for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()
+        }
+        if 'extra_data' not in columns:
+            self.connection.execute(
+                "ALTER TABLE competitions ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'"
+            )
+
+        self.connection.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS custom_fields (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                field_type TEXT NOT NULL DEFAULT 'text',
+                required INTEGER NOT NULL DEFAULT 0,
+                show_in_table INTEGER NOT NULL DEFAULT 1,
+                show_in_export INTEGER NOT NULL DEFAULT 1,
+                show_in_template INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+            '''
+        )
         self.connection.commit()
 
     @staticmethod
@@ -56,7 +84,23 @@ class SQLiteAdapter:
                 'Название соревнований': row['name'],
                 'Место': row['position'],
                 'Время создания записи (UTC)': row['created_at'],
+                'extra_data': json.loads(row['extra_data'] or '{}'),
             }
+        )
+
+    @staticmethod
+    def _row_to_custom_field(row: sqlite3.Row) -> CustomField:
+        return CustomField(
+            field_id=row['id'],
+            key=row['key'],
+            label=row['label'],
+            field_type=row['field_type'],
+            required=bool(row['required']),
+            show_in_table=bool(row['show_in_table']),
+            show_in_export=bool(row['show_in_export']),
+            show_in_template=bool(row['show_in_template']),
+            sort_order=row['sort_order'],
+            active=bool(row['active']),
         )
 
     def get_competitions(self) -> Iterable[Competition]:
@@ -75,12 +119,117 @@ class SQLiteAdapter:
                 level,
                 name,
                 position,
-                created_at
+                created_at,
+                extra_data
             FROM competitions
             ORDER BY created_at ASC
             '''
         ).fetchall()
         return [self._row_to_competition(row) for row in rows]
+
+    def get_custom_fields(self, include_inactive: bool = False) -> list[CustomField]:
+        if include_inactive:
+            rows = self.connection.execute(
+                '''
+                SELECT *
+                FROM custom_fields
+                ORDER BY active DESC, sort_order ASC, label ASC
+                '''
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                '''
+                SELECT *
+                FROM custom_fields
+                WHERE active = 1
+                ORDER BY sort_order ASC, label ASC
+                '''
+            ).fetchall()
+        return [self._row_to_custom_field(row) for row in rows]
+
+    def create_custom_field(
+        self,
+        key: str,
+        label: str,
+        field_type: str,
+        required: bool,
+        show_in_table: bool,
+        show_in_export: bool,
+        show_in_template: bool,
+        sort_order: int,
+    ) -> None:
+        self.connection.execute(
+            '''
+            INSERT INTO custom_fields (
+                key,
+                label,
+                field_type,
+                required,
+                show_in_table,
+                show_in_export,
+                show_in_template,
+                sort_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                key,
+                label,
+                field_type,
+                int(required),
+                int(show_in_table),
+                int(show_in_export),
+                int(show_in_template),
+                sort_order,
+            ),
+        )
+        self.connection.commit()
+
+    def update_custom_field(
+        self,
+        field_id: int,
+        label: str,
+        field_type: str,
+        required: bool,
+        show_in_table: bool,
+        show_in_export: bool,
+        show_in_template: bool,
+        sort_order: int,
+        active: bool,
+    ) -> None:
+        self.connection.execute(
+            '''
+            UPDATE custom_fields
+            SET
+                label = ?,
+                field_type = ?,
+                required = ?,
+                show_in_table = ?,
+                show_in_export = ?,
+                show_in_template = ?,
+                sort_order = ?,
+                active = ?
+            WHERE id = ?
+            ''',
+            (
+                label,
+                field_type,
+                int(required),
+                int(show_in_table),
+                int(show_in_export),
+                int(show_in_template),
+                sort_order,
+                int(active),
+                field_id,
+            ),
+        )
+        self.connection.commit()
+
+    def disable_custom_field(self, field_id: int) -> None:
+        self.connection.execute(
+            'UPDATE custom_fields SET active = 0 WHERE id = ?',
+            (field_id,),
+        )
+        self.connection.commit()
 
     def get_filtered(
         self,
@@ -174,6 +323,7 @@ class SQLiteAdapter:
                 item.name,
                 item.position,
                 item.created_at.isoformat(),
+                json.dumps(item.extra_data, ensure_ascii=False),
             )
             for item in competitions
         ]
@@ -191,8 +341,9 @@ class SQLiteAdapter:
                 level,
                 name,
                 position,
-                created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at,
+                extra_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             records,
         )
@@ -213,7 +364,8 @@ class SQLiteAdapter:
                 date = ?,
                 level = ?,
                 name = ?,
-                position = ?
+                position = ?,
+                extra_data = ?
             WHERE id = ?
             ''',
             (
@@ -228,6 +380,7 @@ class SQLiteAdapter:
                 competition.level,
                 competition.name,
                 competition.position,
+                json.dumps(competition.extra_data, ensure_ascii=False),
                 int(record_id),
             ),
         )

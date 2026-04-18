@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     auth_secret_key: str = Field(default='change-me', env='AUTH_SECRET_KEY')
     auth_admin_username: str = Field(default='admin', env='AUTH_ADMIN_USERNAME')
     auth_admin_password: str = Field(default='change-me', env='AUTH_ADMIN_PASSWORD')
+    auth_editor_username: str = Field(default='editor', env='AUTH_EDITOR_USERNAME')
+    auth_editor_password: str = Field(default='change-me-editor', env='AUTH_EDITOR_PASSWORD')
     auth_viewer_username: str = Field(default='', env='AUTH_VIEWER_USERNAME')
     auth_viewer_password: str = Field(default='', env='AUTH_VIEWER_PASSWORD')
 

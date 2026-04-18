@@ -32,6 +32,8 @@ The app also requires authentication settings. For local development, set at lea
 AUTH_SECRET_KEY=replace-with-random-string
 AUTH_ADMIN_USERNAME=admin
 AUTH_ADMIN_PASSWORD=strong-password
+AUTH_EDITOR_USERNAME=operator
+AUTH_EDITOR_PASSWORD=strong-operator-password
 ```
 
 Optional read-only user:
@@ -39,6 +41,25 @@ Optional read-only user:
 AUTH_VIEWER_USERNAME=viewer
 AUTH_VIEWER_PASSWORD=viewer-password
 ```
+
+The `admin` user manages custom fields and destructive actions. The `editor` user is intended for data entry: import, empty template download, and adding or editing records.
+
+### Table management
+
+The main table supports:
+- exporting exactly the currently visible table view
+- hiding and restoring columns
+- reordering columns with drag and drop
+- sorting by clicking column headers
+
+Column visibility and order are stored in the browser per table view.
+
+### Backups
+
+SQLite backup automation is prepared with:
+- `scripts/backup_sqlite.py`
+- `deploy/systemd/competitions-backup.service`
+- `deploy/systemd/competitions-backup.timer`
 
 ### Docker run
 
