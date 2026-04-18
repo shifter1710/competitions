@@ -1,0 +1,10 @@
+[Unit]
+Description=Run competitions SQLite backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=competitions-backup.service
+
+[Install]
+WantedBy=timers.target

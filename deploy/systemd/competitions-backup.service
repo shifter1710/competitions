@@ -1,0 +1,9 @@
+[Unit]
+Description=Backup competitions SQLite database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/chatgpt/competitions
+ExecStart=/usr/bin/python3 /root/chatgpt/competitions/scripts/backup_sqlite.py --db-path /root/chatgpt/competitions/data/competitions.sqlite3 --output-dir /root/chatgpt/competitions/data/backups/sqlite --keep 14

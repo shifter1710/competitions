@@ -2,75 +2,235 @@
 
 {% block content %}
 
-{% if request.ctx.auth_user.role == 'admin' %}
-<form class="import-form">
-    <h3 class="title">Импорт файлов</h3>
-    <div class="input-group">
-        <input class="form-control import-form__input" name="file" type="file">
-        <button class="import-form__button btn btn-success" type="submit" disabled>
-            Импортировать файл
-        </button>
-    </div>
-</form>
+{% if admin_message %}
+<div class="alert alert-success" role="alert">{{ admin_message }}</div>
+{% endif %}
+{% if admin_error %}
+<div class="alert alert-danger" role="alert">{{ admin_error }}</div>
+{% endif %}
 
-<form class="manual-form mt-4">
-    <h3 class="title">Добавить запись</h3>
-    <input name="record_id" type="hidden">
-    <div class="row g-3">
-        <div class="col-md-6">
-            <label class="form-label" for="student_name">ФИО</label>
-            <input class="form-control" id="student_name" name="student_name" type="text" required>
+{% if can_write %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-center">
+            <div>
+                <h3 class="title mb-1">Загрузка данных</h3>
+                <div class="text-muted">Импорт Excel, ручное добавление записей и шаблон для оператора.</div>
+            </div>
+            <a class="btn btn-outline-primary" href="/template/empty.xlsx">Скачать пустой шаблон</a>
         </div>
-        <div class="col-md-2">
-            <label class="form-label" for="student_sex">Пол</label>
-            <select class="form-select" id="student_sex" name="student_sex" required>
-                <option value="М">М</option>
-                <option value="Ж">Ж</option>
-            </select>
-        </div>
-        <div class="col-md-4">
-            <label class="form-label" for="institute">Институт</label>
-            <input class="form-control" id="institute" name="institute" type="text" required>
-        </div>
-        <div class="col-md-3">
-            <label class="form-label" for="group">Группа</label>
-            <input class="form-control" id="group" name="group" type="text" required>
-        </div>
-        <div class="col-md-3">
-            <label class="form-label" for="course">Курс</label>
-            <input class="form-control" id="course" name="course" type="number" min="1" step="1" required>
-        </div>
-        <div class="col-md-3">
-            <label class="form-label" for="sport">Вид спорта</label>
-            <input class="form-control" id="sport" name="sport" type="text" required>
-        </div>
-        <div class="col-md-3">
-            <label class="form-label" for="date">Дата</label>
-            <input class="form-control" id="date" name="date" type="text" placeholder="дд.мм.гггг" required>
-        </div>
-        <div class="col-md-4">
-            <label class="form-label" for="level">Уровень соревнований</label>
-            <select class="form-select" id="level" name="level" required>
-                <option value="внутривузовские">Внутривузовские</option>
-                <option value="межвузовские">Межвузовские</option>
-            </select>
-        </div>
-        <div class="col-md-4">
-            <label class="form-label" for="name">Название соревнований</label>
-            <input class="form-control" id="name" name="name" type="text" required>
-        </div>
-        <div class="col-md-2">
-            <label class="form-label" for="position">Место</label>
-            <input class="form-control" id="position" name="position" type="number" min="0" step="1" required>
-        </div>
-        <div class="col-md-2 d-flex align-items-end">
-            <button class="btn btn-primary w-100 manual-form__button" type="submit">Добавить</button>
-        </div>
-        <div class="col-md-2 d-flex align-items-end">
-            <button class="btn btn-outline-secondary w-100 manual-form__cancel-button" type="button">Сбросить</button>
-        </div>
+
+        <form class="import-form mt-4">
+            <div class="input-group">
+                <input class="form-control import-form__input" name="file" type="file" accept=".xlsx,.xls">
+                <button class="import-form__button btn btn-success" type="submit" disabled>
+                    Импортировать файл
+                </button>
+            </div>
+        </form>
+
+        <form class="manual-form mt-4">
+            <h3 class="title">Добавить запись</h3>
+            <input name="record_id" type="hidden">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label" for="student_name">ФИО</label>
+                    <input class="form-control" id="student_name" name="student_name" type="text" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label" for="student_sex">Пол</label>
+                    <select class="form-select" id="student_sex" name="student_sex" required>
+                        <option value="М">М</option>
+                        <option value="Ж">Ж</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="institute">Институт</label>
+                    <input class="form-control" id="institute" name="institute" type="text" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label" for="group">Группа</label>
+                    <input class="form-control" id="group" name="group" type="text" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label" for="course">Курс</label>
+                    <input class="form-control" id="course" name="course" type="number" min="1" step="1" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label" for="sport">Вид спорта</label>
+                    <input class="form-control" id="sport" name="sport" type="text" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label" for="date">Дата</label>
+                    <input class="form-control" id="date" name="date" type="text" placeholder="дд.мм.гггг" required>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="level">Уровень соревнований</label>
+                    <select class="form-select" id="level" name="level" required>
+                        <option value="внутривузовские">Внутривузовские</option>
+                        <option value="межвузовские">Межвузовские</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="name">Название соревнований</label>
+                    <input class="form-control" id="name" name="name" type="text" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label" for="position">Место</label>
+                    <input class="form-control" id="position" name="position" type="number" min="0" step="1" required>
+                </div>
+                {% for field in custom_fields %}
+                <div class="col-md-4">
+                    <label class="form-label" for="custom__{{ field.key }}">{{ field.label }}</label>
+                    <input
+                        class="form-control custom-field-input"
+                        id="custom__{{ field.key }}"
+                        name="custom__{{ field.key }}"
+                        type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'date' %}text{% else %}text{% endif %}"
+                        {% if field.field_type == 'number' %}step="1"{% endif %}
+                        {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
+                        data-custom-field-key="{{ field.key }}"
+                        data-custom-field-type="{{ field.field_type }}"
+                        {% if field.required %}required{% endif %}
+                    >
+                </div>
+                {% endfor %}
+                <div class="col-md-2 d-flex align-items-end">
+                    <button class="btn btn-primary w-100 manual-form__button" type="submit">Добавить</button>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button class="btn btn-outline-secondary w-100 manual-form__cancel-button" type="button">Сбросить</button>
+                </div>
+            </div>
+        </form>
     </div>
-</form>
+</div>
+{% endif %}
+
+{% if is_admin %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-3">Управление полями</h3>
+        <div class="text-muted mb-3">Администратор задаёт дополнительные колонки, видимость в таблице, выгрузке и шаблоне.</div>
+
+        <form action="/admin/fields" class="row g-3 mb-4" method="post">
+            <div class="col-md-3">
+                <label class="form-label" for="field-label">Название поля</label>
+                <input class="form-control" id="field-label" name="label" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="field-type">Тип</label>
+                <select class="form-select" id="field-type" name="field_type">
+                    {% for option in field_type_options %}
+                    <option value="{{ option }}">{{ option }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="field-order">Порядок</label>
+                <input class="form-control" id="field-order" name="sort_order" type="number" value="0">
+            </div>
+            <div class="col-md-5 d-flex flex-wrap align-items-end gap-3">
+                <div class="form-check">
+                    <input class="form-check-input" id="field-required" name="required" type="checkbox">
+                    <label class="form-check-label" for="field-required">Обязательное</label>
+                </div>
+                <div class="form-check">
+                    <input checked class="form-check-input" id="field-table" name="show_in_table" type="checkbox">
+                    <label class="form-check-label" for="field-table">В таблице</label>
+                </div>
+                <div class="form-check">
+                    <input checked class="form-check-input" id="field-export" name="show_in_export" type="checkbox">
+                    <label class="form-check-label" for="field-export">В Excel</label>
+                </div>
+                <div class="form-check">
+                    <input checked class="form-check-input" id="field-template" name="show_in_template" type="checkbox">
+                    <label class="form-check-label" for="field-template">В шаблоне</label>
+                </div>
+                <button class="btn btn-primary" type="submit">Добавить поле</button>
+            </div>
+        </form>
+
+        {% if admin_custom_fields %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Поле</th>
+                        <th>Тип</th>
+                        <th>Порядок</th>
+                        <th>Флаги</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for field in admin_custom_fields %}
+                    <tr>
+                        <td colspan="5">
+                            <form action="/admin/fields/{{ field.field_id }}" class="row g-2 field-form align-items-end" method="post">
+                                <div class="col-md-3">
+                                    <label class="form-label">Название</label>
+                                    <input class="form-control" name="label" type="text" value="{{ field.label }}" required>
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label">Тип</label>
+                                    <select class="form-select" name="field_type">
+                                        {% for option in field_type_options %}
+                                        <option value="{{ option }}"{% if option == field.field_type %} selected{% endif %}>{{ option }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="col-md-1">
+                                    <label class="form-label">Порядок</label>
+                                    <input class="form-control" name="sort_order" type="number" value="{{ field.sort_order }}">
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="field-form__checks">
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="required-{{ field.field_id }}" name="required" type="checkbox"{% if field.required %} checked{% endif %}>
+                                            <label class="form-check-label" for="required-{{ field.field_id }}">Обязательное</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="table-{{ field.field_id }}" name="show_in_table" type="checkbox"{% if field.show_in_table %} checked{% endif %}>
+                                            <label class="form-check-label" for="table-{{ field.field_id }}">В таблице</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="export-{{ field.field_id }}" name="show_in_export" type="checkbox"{% if field.show_in_export %} checked{% endif %}>
+                                            <label class="form-check-label" for="export-{{ field.field_id }}">В Excel</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="template-{{ field.field_id }}" name="show_in_template" type="checkbox"{% if field.show_in_template %} checked{% endif %}>
+                                            <label class="form-check-label" for="template-{{ field.field_id }}">В шаблоне</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="active-{{ field.field_id }}" name="active" type="checkbox"{% if field.active %} checked{% endif %}>
+                                            <label class="form-check-label" for="active-{{ field.field_id }}">Активно</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-2 field-form__actions">
+                                    <button class="btn btn-sm btn-outline-primary" type="submit">Сохранить</button>
+                                    <button
+                                        class="btn btn-sm btn-outline-danger"
+                                        formaction="/admin/fields/{{ field.field_id }}/delete"
+                                        formmethod="post"
+                                        type="submit"
+                                    >
+                                        Отключить
+                                    </button>
+                                </div>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted">Дополнительных полей пока нет.</div>
+        {% endif %}
+    </div>
+</div>
 {% endif %}
 
 <form class="filter-form filter">
@@ -124,78 +284,107 @@
 
 <div class="buttons">
     <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
+    <button type="button" class="table-layout-button btn btn-outline-secondary">Колонки и вид</button>
+    <button type="button" class="table-layout-reset-button btn btn-outline-secondary">Сбросить вид</button>
+    {% if is_admin %}
+    <button type="button" class="clean-button btn btn-outline-danger">Очистить базу</button>
+    {% endif %}
+</div>
+
+<div class="table-controls-panel card shadow-sm mb-3 d-none">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <h3 class="title mb-1">Настройка таблицы</h3>
+                <div class="text-muted">Скрывайте колонки, перетаскивайте заголовки и сортируйте по клику на них.</div>
+            </div>
+            <button type="button" class="table-layout-close-button btn btn-sm btn-outline-secondary">Закрыть</button>
+        </div>
+        <div class="table-columns-manager row g-2"></div>
+    </div>
 </div>
 
 
 <div class="content-wrapper">
     {% if competitions %}
-    <table class="table table-striped table-bordered">
-        <thead class="table-dark">
-            <tr>
-                <th scope="col">№</th>
-                <th scope="col">ФИО</th>
-                <th scope="col">Пол</th>
-                <th scope="col">Институт</th>
-                <th scope="col">Группа</th>
-                <th scope="col">Вид спорта</th>
-                <th scope="col">Дата</th>
-                <th scope="col">Уровень соревнований</th>
-                <th scope="col">Название соревнований</th>
-                <th scope="col">Место</th>
-                <th scope="col">Курс</th>
-                {% if request.ctx.auth_user.role == 'admin' %}
-                <th scope="col">Действия</th>
-                {% endif %}
-            </tr>
-        </thead>
-        <tbody>
-            {% for competition in competitions %}
-            <tr>
-                <td>{{loop.index}}</td>
-                <td>{{competition.student_name}}</td>
-                <td>{{competition.student_sex}}</td>
-                <td>{{competition.institute}}</td>
-                <td>{{competition.group}}</td>
-                <td>{{competition.sport}}</td>
-                <td>
-                    {{competition.date.strftime('%d.%m.%Y')}}
-                </td>
-                <td>{{competition.level}}</td>
-                <td class="competition">{{competition.name}}</td>
-                <td>{{competition.position}}</td>
-                <td>{{competition.course}}</td>
-                {% if request.ctx.auth_user.role == 'admin' %}
-                <td>
-                    <button
-                        class="btn btn-sm btn-outline-primary competition-edit-button"
-                        type="button"
-                        data-record-id="{{ competition.record_id }}"
-                        data-student-name="{{ competition.student_name }}"
-                        data-student-sex="{{ competition.student_sex }}"
-                        data-institute="{{ competition.institute }}"
-                        data-group="{{ competition.group }}"
-                        data-course="{{ competition.course }}"
-                        data-sport="{{ competition.sport }}"
-                        data-date="{{ competition.date.strftime('%d.%m.%Y') }}"
-                        data-level="{{ competition.level }}"
-                        data-name="{{ competition.name }}"
-                        data-position="{{ competition.position }}"
-                    >
-                        Редактировать
-                    </button>
-                    <button
-                        class="btn btn-sm btn-outline-danger competition-delete-button"
-                        type="button"
-                        data-record-id="{{ competition.record_id }}"
-                    >
-                        Удалить
-                    </button>
-                </td>
-                {% endif %}
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <div class="table-card" data-table-view="index">
+        <div class="table-responsive">
+            <table class="table table-striped table-bordered interactive-table">
+                <thead class="table-dark">
+                    <tr>
+                        <th scope="col" data-column-key="index" data-sort-type="number">№</th>
+                        <th scope="col" data-column-key="student_name" data-sort-type="text">ФИО</th>
+                        <th scope="col" data-column-key="student_sex" data-sort-type="text">Пол</th>
+                        <th scope="col" data-column-key="institute" data-sort-type="text">Институт</th>
+                        <th scope="col" data-column-key="group" data-sort-type="text">Группа</th>
+                        <th scope="col" data-column-key="sport" data-sort-type="text">Вид спорта</th>
+                        <th scope="col" data-column-key="date" data-sort-type="date">Дата</th>
+                        <th scope="col" data-column-key="level" data-sort-type="text">Уровень соревнований</th>
+                        <th scope="col" data-column-key="name" data-sort-type="text">Название соревнований</th>
+                        <th scope="col" data-column-key="position" data-sort-type="number">Место</th>
+                        <th scope="col" data-column-key="course" data-sort-type="number">Курс</th>
+                        {% for field in custom_fields if field.show_in_table %}
+                        <th scope="col" data-column-key="{{ field.key }}" data-sort-type="{{ field.field_type }}">{{ field.label }}</th>
+                        {% endfor %}
+                        {% if can_write %}
+                        <th scope="col" data-column-key="actions" data-sort-type="none" data-exportable="false">Действия</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for competition in competitions %}
+                    <tr>
+                        <td data-column-key="index">{{ loop.index }}</td>
+                        <td data-column-key="student_name">{{ competition.student_name }}</td>
+                        <td data-column-key="student_sex">{{ competition.student_sex }}</td>
+                        <td data-column-key="institute">{{ competition.institute }}</td>
+                        <td data-column-key="group">{{ competition.group }}</td>
+                        <td data-column-key="sport">{{ competition.sport }}</td>
+                        <td data-column-key="date">{{ competition.date.strftime('%d.%m.%Y') }}</td>
+                        <td data-column-key="level">{{ competition.level }}</td>
+                        <td class="competition" data-column-key="name">{{ competition.name }}</td>
+                        <td data-column-key="position">{{ competition.position }}</td>
+                        <td data-column-key="course">{{ competition.course }}</td>
+                        {% for field in custom_fields if field.show_in_table %}
+                        <td data-column-key="{{ field.key }}">{{ competition.extra_data.get(field.key, '') }}</td>
+                        {% endfor %}
+                        {% if can_write %}
+                        <td data-column-key="actions" data-exportable="false">
+                            <button
+                                class="btn btn-sm btn-outline-primary competition-edit-button"
+                                type="button"
+                                data-record-id="{{ competition.record_id }}"
+                                data-student-name="{{ competition.student_name }}"
+                                data-student-sex="{{ competition.student_sex }}"
+                                data-institute="{{ competition.institute }}"
+                                data-group="{{ competition.group }}"
+                                data-course="{{ competition.course }}"
+                                data-sport="{{ competition.sport }}"
+                                data-date="{{ competition.date.strftime('%d.%m.%Y') }}"
+                                data-level="{{ competition.level }}"
+                                data-name="{{ competition.name }}"
+                                data-position="{{ competition.position }}"
+                                data-extra-json='{{ competition.extra_data | tojson }}'
+                            >
+                                Редактировать
+                            </button>
+                            {% if is_admin %}
+                            <button
+                                class="btn btn-sm btn-outline-danger competition-delete-button"
+                                type="button"
+                                data-record-id="{{ competition.record_id }}"
+                            >
+                                Удалить
+                            </button>
+                            {% endif %}
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
     {% else %}
     <div class="empty-content">Нет данных</div>
     {% endif %}

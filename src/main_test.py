@@ -12,6 +12,7 @@ from src.main import app
 from src.main import create_auth_cookie_value
 from src.main import normalize_position
 from src.models.competition import Competition
+from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
 
@@ -45,6 +46,8 @@ def get_xlsx_headers(content: bytes) -> list[str]:
 
 def get_auth_headers(role: str = 'admin') -> dict[str, str]:
     username = settings.auth_admin_username
+    if role == 'editor':
+        username = settings.auth_editor_username
     if role == 'viewer':
         username = settings.auth_viewer_username or 'viewer'
     cookie = create_auth_cookie_value(username=username, role=role)
@@ -56,13 +59,16 @@ def client() -> SanicTestClient:
     fake_storage = Mock()
     fake_storage.get_competitions.return_value = []
     fake_storage.get_filtered.return_value = []
+    fake_storage.get_custom_fields.return_value = []
     fake_storage.save_competitions.return_value = None
     fake_storage.update_competition.return_value = None
     fake_storage.delete_competition.return_value = None
     fake_storage.clean_db.return_value = None
+    fake_storage.create_custom_field.return_value = None
+    fake_storage.update_custom_field.return_value = None
+    fake_storage.disable_custom_field.return_value = None
     app.ctx.storage = fake_storage
-    client = SanicTestClient(app)
-    return client
+    return SanicTestClient(app)
 
 
 def test_healthcheck(client: SanicTestClient):
@@ -112,17 +118,18 @@ def test_upload_rejects_missing_columns(client: SanicTestClient):
     df.to_excel(file_obj, index=False)
     file_obj.seek(0)
 
-    _, response = client.post('/',
-                              headers=get_auth_headers(),
-                              files={'file': ('broken.xlsx', file_obj.getvalue(),
-                                              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
+    _, response = client.post(
+        '/',
+        headers=get_auth_headers(),
+        files={'file': ('broken.xlsx', file_obj.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')},
+    )
     assert response.status == 400
 
 
-def test_manual_competition_create_success(client: SanicTestClient):
+def test_editor_can_create_manual_competition(client: SanicTestClient):
     _, response = client.post(
         '/competition',
-        headers=get_auth_headers(),
+        headers=get_auth_headers(role='editor'),
         data={
             'student_name': 'Иванов Иван Иванович',
             'student_sex': 'М',
@@ -165,10 +172,10 @@ def test_manual_competition_create_rejects_invalid_date(client: SanicTestClient)
     assert response.status == 400
 
 
-def test_manual_competition_update_success(client: SanicTestClient):
+def test_editor_can_update_manual_competition(client: SanicTestClient):
     _, response = client.post(
         '/competition/abc123',
-        headers=get_auth_headers(),
+        headers=get_auth_headers(role='editor'),
         data={
             'student_name': 'Иванов Иван Иванович',
             'student_sex': 'М',
@@ -189,7 +196,7 @@ def test_manual_competition_update_success(client: SanicTestClient):
     app.ctx.storage.update_competition.assert_called_once()
 
 
-def test_manual_competition_delete_success(client: SanicTestClient):
+def test_admin_can_delete_competition(client: SanicTestClient):
     _, response = client.post(
         '/competition/abc123/delete',
         headers=get_auth_headers(),
@@ -199,6 +206,15 @@ def test_manual_competition_delete_success(client: SanicTestClient):
     assert response.status == 302
     assert response.headers['location'] == '/'
     app.ctx.storage.delete_competition.assert_called_once_with('abc123')
+
+
+def test_editor_cannot_delete_competition(client: SanicTestClient):
+    _, response = client.post(
+        '/competition/abc123/delete',
+        headers=get_auth_headers(role='editor'),
+        allow_redirects=False,
+    )
+    assert response.status == 403
 
 
 def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClient):
@@ -235,6 +251,33 @@ def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClie
     ]
 
 
+def test_export_index_includes_custom_fields(client: SanicTestClient):
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Test 1',
+            student_sex='M',
+            institute='Inst',
+            group='A',
+            course=1,
+            sport='Run',
+            date=datetime(2024, 1, 1),
+            level='межвузовские',
+            name='Meet',
+            position=1,
+            extra_data={'trainer': 'Coach'},
+        )
+    ]
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='trainer', label='Тренер', show_in_export=True)
+    ]
+
+    _, response = client.get('/export/index', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'Тренер' in get_xlsx_headers(response.body)
+
+
 def test_export_report_omits_dataframe_index_and_student_id(client: SanicTestClient):
     app.ctx.storage.get_filtered.return_value = [
         StudentInfo(
@@ -259,6 +302,47 @@ def test_export_report_omits_dataframe_index_and_student_id(client: SanicTestCli
         'Курс',
         'Количество участий',
     ]
+
+
+def test_empty_template_includes_custom_fields(client: SanicTestClient):
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='trainer', label='Тренер', show_in_template=True)
+    ]
+
+    _, response = client.get('/template/empty.xlsx', headers=get_auth_headers(role='editor'))
+
+    assert response.status == 200
+    assert 'Тренер' in get_xlsx_headers(response.body)
+
+
+def test_admin_can_create_custom_field(client: SanicTestClient):
+    _, response = client.post(
+        '/admin/fields',
+        headers=get_auth_headers(),
+        data={
+            'label': 'Тренер',
+            'field_type': 'text',
+            'required': 'on',
+            'show_in_table': 'on',
+            'show_in_export': 'on',
+            'show_in_template': 'on',
+            'sort_order': '10',
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    app.ctx.storage.create_custom_field.assert_called_once()
+
+
+def test_viewer_cannot_manage_fields(client: SanicTestClient):
+    _, response = client.post(
+        '/admin/fields',
+        headers=get_auth_headers(role='viewer'),
+        data={'label': 'Тренер', 'field_type': 'text'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
 
 
 def test_normalize_position_allows_multiple_digits():

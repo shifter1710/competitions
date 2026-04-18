@@ -13,6 +13,7 @@ class Competition(Student):
     name: str = Field(alias='Название соревнований')
     position: int = Field(alias='Место')
     created_at: datetime = Field(default_factory=datetime.utcnow, alias='Время создания записи (UTC)')
+    extra_data: dict[str, str] = Field(default_factory=dict)
 
     class Config:
         allow_population_by_field_name = True

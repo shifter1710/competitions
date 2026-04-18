@@ -7,6 +7,10 @@ html {
     margin-bottom: 24px;
 }
 
+.title {
+    margin-bottom: 0;
+}
+
 .label {
     display: block;
     color: #6c757d;
@@ -74,9 +78,58 @@ select {
 
 .buttons {
     display: flex;
+    flex-wrap: wrap;
     gap: 16px;
     align-items: center;
     margin: 24px 0 16px;
+}
+
+.table-card {
+    border-radius: 20px;
+}
+
+.table-column-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+
+.table-header-cell {
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+}
+
+.table-header-cell.sorted-asc::after {
+    content: " ↑";
+}
+
+.table-header-cell.sorted-desc::after {
+    content: " ↓";
+}
+
+.table-column-hidden {
+    display: none;
+}
+
+.field-form__checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+}
+
+.field-form__actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.table-responsive {
+    overflow-x: auto;
 }
 
 .table {
@@ -136,5 +189,15 @@ select {
 
     100% {
         transform: rotate(360deg);
+    }
+}
+
+@media (max-width: 992px) {
+    .field-form__actions {
+        justify-content: flex-start;
+    }
+
+    .datetime {
+        flex-direction: column;
     }
 }
