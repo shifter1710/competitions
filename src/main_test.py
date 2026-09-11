@@ -101,25 +101,35 @@ def test_upload_rejects_missing_columns(client: SanicTestClient):
     _, response = client.post(
         '/',
         headers=get_auth_headers(),
-        files={'file': ('broken.xlsx', file_obj.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')},
+        files={
+            'file': (
+                'broken.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
     )
     assert response.status == 400
 
 
 def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
     app.ctx.storage.save_competitions.reset_mock()
-    df = pd.DataFrame([{
-        'ФИО': 'Тестов Тест Тестович',
-        'Пол': 'М',
-        'Институт': 'ИСИ',
-        'Группа': 'ПГС-101',
-        'Вид спорта': 'Бег',
-        'Дата': '15.03.2026',
-        'Уровень соревнований': 'внутривузовские',
-        'Название соревнований': 'Кубок',
-        'Место': 1,
-        'Курс': 2,
-    }])
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Тестов Тест Тестович',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Бег',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 1,
+                'Курс': 2,
+            }
+        ]
+    )
     file_obj = BytesIO()
     df.to_excel(file_obj, index=False)
     file_obj.seek(0)
@@ -127,7 +137,13 @@ def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
     _, response = client.post(
         '/',
         headers=get_auth_headers(role='editor'),
-        files={'file': ('import.xlsx', file_obj.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')},
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
         allow_redirects=False,
     )
     assert response.status == 302

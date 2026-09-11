@@ -94,9 +94,7 @@ FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date')
 @app.before_server_start
 async def init_storage(app: Sanic, _):
     if not Sanic.test_mode and settings.auth_secret_key in INSECURE_SECRET_VALUES:
-        raise RuntimeError(
-            'AUTH_SECRET_KEY is not configured: set it to a random value in the environment or .env'
-        )
+        raise RuntimeError('AUTH_SECRET_KEY is not configured: set it to a random value in the environment or .env')
     if app.ctx.storage is None:
         app.ctx.storage = SQLiteAdapter(settings.database_path)
 
@@ -550,10 +548,7 @@ async def export_empty_template(request: Request):
         return auth_error
 
     storage = get_storage(request.app)
-    custom_fields = [
-        field for field in storage.get_custom_fields()
-        if field.show_in_template
-    ]
+    custom_fields = [field for field in storage.get_custom_fields() if field.show_in_template]
     columns = list(REQUIRED_IMPORT_COLUMNS) + [field.label for field in custom_fields]
 
     df = pd.DataFrame(columns=columns)
@@ -572,9 +567,7 @@ async def export_empty_template(request: Request):
 
 
 def build_index_dataframe(competitions, export_custom_fields) -> pd.DataFrame:
-    df = pd.DataFrame.from_records(
-        [competition_to_export_row(comp, export_custom_fields) for comp in competitions]
-    )
+    df = pd.DataFrame.from_records([competition_to_export_row(comp, export_custom_fields) for comp in competitions])
     df = df.reindex(columns=list(INDEX_EXPORT_COLUMNS) + [field.label for field in export_custom_fields])
     for column in df.columns:
         if df[column].dtype == object:
@@ -586,10 +579,7 @@ def build_index_dataframe(competitions, export_custom_fields) -> pd.DataFrame:
 async def export_index(request: Request):
     storage = get_storage(request.app)
     competitions = storage.get_competitions()
-    export_custom_fields = [
-        field for field in storage.get_custom_fields()
-        if field.show_in_export
-    ]
+    export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
     df = await asyncio.to_thread(build_index_dataframe, competitions, export_custom_fields)
 
     now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')

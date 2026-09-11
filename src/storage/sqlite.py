@@ -40,14 +40,9 @@ class SQLiteAdapter:
             '''
         )
 
-        columns = {
-            row['name']
-            for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()
-        }
+        columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
         if 'extra_data' not in columns:
-            self.connection.execute(
-                "ALTER TABLE competitions ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'"
-            )
+            self.connection.execute("ALTER TABLE competitions ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'")
 
         self.connection.execute(
             '''
