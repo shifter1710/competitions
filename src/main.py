@@ -140,10 +140,15 @@ def get_auth_user(request: Request) -> dict | None:
     return getattr(request.ctx, 'auth_user', None)
 
 
-def create_auth_cookie_value(username: str, role: str, issued_at: int | None = None) -> str:
+def create_auth_cookie_value(
+    username: str,
+    role: str,
+    issued_at: int | None = None,
+    pwd_ver: int = 0,
+) -> str:
     if issued_at is None:
         issued_at = int(time.time())
-    payload = f'{username}:{role}:{issued_at}'
+    payload = f'{username}:{role}:{issued_at}:{pwd_ver}'
     signature = hmac.new(
         settings.auth_secret_key.encode(),
         payload.encode(),
@@ -153,33 +158,52 @@ def create_auth_cookie_value(username: str, role: str, issued_at: int | None = N
     return base64.urlsafe_b64encode(token.encode()).decode()
 
 
-def parse_auth_cookie(request: Request) -> dict | None:
-    token = request.cookies.get(settings.auth_cookie_name)
-    if not token:
-        return None
-
+def decode_auth_token(token: str) -> dict | None:
     try:
         decoded = base64.urlsafe_b64decode(token.encode()).decode()
-        username, role, issued_at, signature = decoded.split(':', 3)
+        username, role, issued_at, pwd_ver, signature = decoded.split(':', 4)
         issued_at = int(issued_at)
+        pwd_ver = int(pwd_ver)
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
 
+    if role not in {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE}:
+        return None
     if int(time.time()) - issued_at > settings.auth_session_ttl_seconds:
         return None
 
     expected_signature = hmac.new(
         settings.auth_secret_key.encode(),
-        f'{username}:{role}:{issued_at}'.encode(),
+        f'{username}:{role}:{issued_at}:{pwd_ver}'.encode(),
         hashlib.sha256,
     ).hexdigest()
     if not secrets.compare_digest(signature, expected_signature):
         return None
 
-    if role not in {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE}:
+    return {'username': username, 'role': role, 'pwd_ver': pwd_ver}
+
+
+def parse_auth_cookie(request: Request) -> dict | None:
+    token = request.cookies.get(settings.auth_cookie_name)
+    if not token:
         return None
 
-    return {'username': username, 'role': role}
+    payload = decode_auth_token(token)
+    if payload is None:
+        return None
+
+    try:
+        storage = get_storage(request.app)
+    except RuntimeError:
+        storage = None
+    if storage is not None:
+        user = storage.get_user(payload['username'])
+        if user is None or not user.get('active', 1):
+            return None
+        if int(user.get('pwd_ver', 0)) != payload['pwd_ver']:
+            return None
+
+    return {'username': payload['username'], 'role': payload['role']}
 
 
 def authenticate_user(request: Request, username: str, password: str) -> dict | None:
@@ -188,7 +212,11 @@ def authenticate_user(request: Request, username: str, password: str) -> dict | 
         return None
     if not verify_password(password, user['password_hash']):
         return None
-    return {'username': user['username'], 'role': user['role']}
+    return {
+        'username': user['username'],
+        'role': user['role'],
+        'pwd_ver': int(user.get('pwd_ver', 0)),
+    }
 
 
 def register_login_failure(ip: str):
@@ -217,10 +245,10 @@ def request_is_secure(request: Request) -> bool:
     return request.scheme == 'https'
 
 
-def set_auth_cookie(request: Request, response, username: str, role: str):
+def set_auth_cookie(request: Request, response, username: str, role: str, pwd_ver: int = 0):
     response.add_cookie(
         settings.auth_cookie_name,
-        create_auth_cookie_value(username, role),
+        create_auth_cookie_value(username, role, pwd_ver=pwd_ver),
         httponly=True,
         samesite='Lax',
         secure=request_is_secure(request),
@@ -526,7 +554,7 @@ async def login(request: Request):
 
     clear_login_failures(request.ip)
     response = redirect('/')
-    set_auth_cookie(request, response, user['username'], user['role'])
+    set_auth_cookie(request, response, user['username'], user['role'], pwd_ver=user.get('pwd_ver', 0))
     return response
 
 

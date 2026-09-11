@@ -76,10 +76,14 @@ class SQLiteAdapter:
                     username TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1
+                    active INTEGER NOT NULL DEFAULT 1,
+                    pwd_ver INTEGER NOT NULL DEFAULT 0
                 )
                 '''
             )
+            user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
+            if 'pwd_ver' not in user_columns:
+                self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
             self.connection.commit()
 
     @staticmethod
@@ -422,7 +426,7 @@ class SQLiteAdapter:
     def get_user(self, username: str) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, username, password_hash, role, active FROM users WHERE username = ?',
+                'SELECT id, username, password_hash, role, active, pwd_ver FROM users WHERE username = ?',
                 (username,),
             ).fetchone()
             return dict(row) if row else None
@@ -430,7 +434,7 @@ class SQLiteAdapter:
     def get_user_by_id(self, user_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, username, password_hash, role, active FROM users WHERE id = ?',
+                'SELECT id, username, password_hash, role, active, pwd_ver FROM users WHERE id = ?',
                 (user_id,),
             ).fetchone()
             return dict(row) if row else None
@@ -453,7 +457,11 @@ class SQLiteAdapter:
     def set_user_password(self, user_id: int, password_hash: str) -> None:
         with self._lock:
             self.connection.execute(
-                'UPDATE users SET password_hash = ? WHERE id = ?',
+                '''
+                UPDATE users
+                SET password_hash = ?, pwd_ver = pwd_ver + 1
+                WHERE id = ?
+                ''',
                 (password_hash, user_id),
             )
             self.connection.commit()

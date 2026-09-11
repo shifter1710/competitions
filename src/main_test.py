@@ -61,6 +61,7 @@ def fake_get_user(username: str) -> dict | None:
                 'password_hash': hash_password(password),
                 'role': role,
                 'active': 1,
+                'pwd_ver': 0,
             }
     return None
 
@@ -836,3 +837,18 @@ def test_login_verifies_password_hash(client: SanicTestClient):
         allow_redirects=False,
     )
     assert response.status == 401
+
+
+def test_stale_pwd_ver_cookie_is_rejected(client: SanicTestClient):
+    stale_cookie = create_auth_cookie_value(
+        username=settings.auth_admin_username,
+        role='admin',
+        pwd_ver=1,
+    )
+    _, response = client.get(
+        '/',
+        headers={'cookie': f'{settings.auth_cookie_name}={stale_cookie}'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
