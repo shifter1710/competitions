@@ -38,6 +38,10 @@ jinja_env = Environment(
 
 app = Sanic('SIBADI_competitions')
 
+app.config.REQUEST_MAX_SIZE = 10 * 1024 * 1024
+app.config.REQUEST_TIMEOUT = 60
+app.config.RESPONSE_TIMEOUT = 60
+
 app.static(
     uri='/static',
     file_or_directory='src/static',
@@ -557,7 +561,7 @@ async def export_empty_template(request: Request):
     df.to_excel(buffer, index=False)
     buffer.seek(0)
 
-    now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
+    now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
     return raw(
         buffer.getvalue(),
         headers={
@@ -588,7 +592,7 @@ async def export_index(request: Request):
     ]
     df = await asyncio.to_thread(build_index_dataframe, competitions, export_custom_fields)
 
-    now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
+    now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'
     buffer = BytesIO()
     await asyncio.to_thread(df.to_excel, buffer, index=False)
@@ -857,7 +861,7 @@ async def export_report(request: Request):
     student_infos = get_student_infos(request)
     df = await asyncio.to_thread(build_report_dataframe, student_infos)
 
-    now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
+    now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'
     buffer = BytesIO()
     await asyncio.to_thread(df.to_excel, buffer, index=False)
