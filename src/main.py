@@ -639,6 +639,23 @@ def competition_duplicate_key(competition: Competition) -> tuple:
     )
 
 
+def split_import_competitions(
+    competitions: Sequence[Competition],
+    existing_competitions: Iterable[Competition],
+) -> tuple[list[Competition], int]:
+    seen_keys = {competition_duplicate_key(comp) for comp in existing_competitions}
+    new_competitions = []
+    skipped_duplicates = 0
+    for competition in competitions:
+        key = competition_duplicate_key(competition)
+        if key in seen_keys:
+            skipped_duplicates += 1
+            continue
+        seen_keys.add(key)
+        new_competitions.append(competition)
+    return new_competitions, skipped_duplicates
+
+
 @app.post('/')
 async def upload(request: Request):
     auth_error = require_writer(request)
@@ -663,17 +680,8 @@ async def upload(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    seen_keys = {competition_duplicate_key(comp) for comp in await asyncio.to_thread(storage.get_competitions)}
-    new_competitions = []
-    skipped_duplicates = 0
-    for competition in competitions:
-        key = competition_duplicate_key(competition)
-        if key in seen_keys:
-            skipped_duplicates += 1
-            continue
-        seen_keys.add(key)
-        new_competitions.append(competition)
-
+    existing = await asyncio.to_thread(storage.get_competitions)
+    new_competitions, skipped_duplicates = split_import_competitions(competitions, existing)
     if new_competitions:
         storage.save_competitions(new_competitions)
 
