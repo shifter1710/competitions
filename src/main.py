@@ -621,10 +621,22 @@ async def export_index(request: Request):
 
 def build_import_competitions(df: pd.DataFrame, custom_fields) -> list[Competition]:
     competitions = []
-    for _, row in df.iterrows():
+    for index, row in df.iterrows():
         record = row.to_dict()
-        competitions.append(build_competition(record, custom_fields=custom_fields))
+        try:
+            competitions.append(build_competition(record, custom_fields=custom_fields))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'строка {index + 2}: {exc}') from exc
     return competitions
+
+
+def competition_duplicate_key(competition: Competition) -> tuple:
+    return (
+        competition.student_name,
+        competition.date.date().isoformat(),
+        competition.sport,
+        competition.name,
+    )
 
 
 @app.post('/')
@@ -651,8 +663,24 @@ async def upload(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    storage.save_competitions(competitions)
-    return redirect(to='/')
+    seen_keys = {competition_duplicate_key(comp) for comp in await asyncio.to_thread(storage.get_competitions)}
+    new_competitions = []
+    skipped_duplicates = 0
+    for competition in competitions:
+        key = competition_duplicate_key(competition)
+        if key in seen_keys:
+            skipped_duplicates += 1
+            continue
+        seen_keys.add(key)
+        new_competitions.append(competition)
+
+    if new_competitions:
+        storage.save_competitions(new_competitions)
+
+    summary = f'Импортировано записей: {len(new_competitions)}'
+    if skipped_duplicates:
+        summary += f'. Пропущено дублей: {skipped_duplicates}'
+    return text(body=summary)
 
 
 @app.post('/competition')

@@ -500,8 +500,8 @@ class Main {
                 method: "POST",
                 body: formData,
             },
-            onSuccess: () => {
-                alert("Файл успешно импортирован");
+            onSuccess: (body) => {
+                alert(body || "Файл успешно импортирован");
                 this.cleanFileInput();
                 this.refreshCurrentContent();
             },
@@ -613,9 +613,9 @@ class Main {
                 }
                 return response.text();
             })
-            .then(() => {
+            .then((body) => {
                 this.setLoading(false);
-                onSuccess();
+                onSuccess(body);
             })
             .catch((error) => {
                 this.setLoading(false);

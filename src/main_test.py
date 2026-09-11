@@ -163,10 +163,135 @@ def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
         },
         allow_redirects=False,
     )
-    assert response.status == 302
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    assert 'дублей' not in response.text
     app.ctx.storage.save_competitions.assert_called_once()
     saved = app.ctx.storage.save_competitions.call_args[0][0][0]
     assert saved.date == datetime(2026, 3, 15)
+
+
+def test_upload_skips_duplicates(client: SanicTestClient):
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Тестов Тест Тестович',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+        )
+    ]
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Тестов Тест Тестович',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Бег',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 1,
+                'Курс': 2,
+            },
+            {
+                'ФИО': 'Новый Студент',
+                'Пол': 'Ж',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-102',
+                'Вид спорта': 'Бег',
+                'Дата': '16.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 2,
+                'Курс': 1,
+            },
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    assert 'Пропущено дублей: 1' in response.text
+    saved_rows = app.ctx.storage.save_competitions.call_args[0][0]
+    assert len(saved_rows) == 1
+    assert saved_rows[0].student_name == 'Новый Студент'
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_upload_error_mentions_row_number(client: SanicTestClient):
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Нормальный Студент',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Бег',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 1,
+                'Курс': 2,
+            },
+            {
+                'ФИО': 'Бедный Студент',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Бег',
+                'Дата': 'не дата',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 1,
+                'Курс': 2,
+            },
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+
+    assert response.status == 400
+    assert 'строка 3' in response.text
 
 
 def test_editor_can_create_manual_competition(client: SanicTestClient):
