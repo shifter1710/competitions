@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     auth_editor_password: str = Field(default='change-me-editor', env='AUTH_EDITOR_PASSWORD')
     auth_viewer_username: str = Field(default='', env='AUTH_VIEWER_USERNAME')
     auth_viewer_password: str = Field(default='', env='AUTH_VIEWER_PASSWORD')
+    auth_session_ttl_seconds: int = Field(default=43200, env='AUTH_SESSION_TTL_SECONDS')
 
     class Config:
         env_file = '.env'

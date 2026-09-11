@@ -656,14 +656,23 @@ class Main {
         const headers = Array.from(this.tableElement.querySelectorAll("thead th"))
             .filter((header) => header.dataset.columnKey !== "actions");
 
-        this.tableColumnsManager.innerHTML = headers.map((header) => `
-            <div class="col-md-4">
-                <label class="form-check table-column-option">
-                    <input class="form-check-input table-column-toggle" type="checkbox" data-column-key="${header.dataset.columnKey}" ${hidden.has(header.dataset.columnKey) ? "" : "checked"}>
-                    <span class="form-check-label">${header.textContent.trim()}</span>
-                </label>
-            </div>
-        `).join("");
+        this.tableColumnsManager.replaceChildren(...headers.map((header) => {
+            const wrapper = document.createElement("div");
+            wrapper.className = "col-md-4";
+            const label = document.createElement("label");
+            label.className = "form-check table-column-option";
+            const input = document.createElement("input");
+            input.className = "form-check-input table-column-toggle";
+            input.type = "checkbox";
+            input.dataset.columnKey = header.dataset.columnKey;
+            input.checked = !hidden.has(header.dataset.columnKey);
+            const span = document.createElement("span");
+            span.className = "form-check-label";
+            span.textContent = header.textContent.trim();
+            label.append(input, span);
+            wrapper.append(label);
+            return wrapper;
+        }));
 
         this.tableColumnsManager.querySelectorAll(".table-column-toggle").forEach((input) => {
             input.addEventListener("change", () => {

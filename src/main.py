@@ -1,12 +1,13 @@
+import asyncio
 import base64
 import binascii
 import hashlib
 import hmac
 import re
 import secrets
+import time
 from datetime import datetime
 from io import BytesIO
-from os.path import join
 from typing import Iterable
 from typing import Sequence
 from urllib.parse import urlencode
@@ -20,7 +21,6 @@ from sanic import redirect
 from sanic import Request
 from sanic import Sanic
 from sanic import text
-from sanic.response import file
 from sanic.response import raw
 from sanic_ext import render
 
@@ -42,7 +42,7 @@ app.static(
     uri='/static',
     file_or_directory='src/static',
     name='static',
-    directory_view=True,
+    directory_view=False,
 )
 
 app.ctx.storage = None
@@ -52,6 +52,14 @@ ADMIN_ROLE = 'admin'
 EDITOR_ROLE = 'editor'
 VIEWER_ROLE = 'viewer'
 WRITE_ROLES = {ADMIN_ROLE, EDITOR_ROLE}
+
+INSECURE_SECRET_VALUES = {'', 'change-me', 'replace-with-random-string'}
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 900
+LOGIN_LOCKOUT_SECONDS = 900
+LOGIN_REJECT_STATUS = 429
+
+login_failures: dict[str, list] = {}
 
 BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
     {'key': 'student_name', 'label': 'ФИО'},
@@ -81,6 +89,10 @@ FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date')
 
 @app.before_server_start
 async def init_storage(app: Sanic, _):
+    if not Sanic.test_mode and settings.auth_secret_key in INSECURE_SECRET_VALUES:
+        raise RuntimeError(
+            'AUTH_SECRET_KEY is not configured: set it to a random value in the environment or .env'
+        )
     if app.ctx.storage is None:
         app.ctx.storage = SQLiteAdapter(settings.database_path)
 
@@ -110,8 +122,10 @@ def get_auth_user(request: Request) -> dict | None:
     return getattr(request.ctx, 'auth_user', None)
 
 
-def create_auth_cookie_value(username: str, role: str) -> str:
-    payload = f'{username}:{role}'
+def create_auth_cookie_value(username: str, role: str, issued_at: int | None = None) -> str:
+    if issued_at is None:
+        issued_at = int(time.time())
+    payload = f'{username}:{role}:{issued_at}'
     signature = hmac.new(
         settings.auth_secret_key.encode(),
         payload.encode(),
@@ -128,13 +142,17 @@ def parse_auth_cookie(request: Request) -> dict | None:
 
     try:
         decoded = base64.urlsafe_b64decode(token.encode()).decode()
-        username, role, signature = decoded.split(':', 2)
+        username, role, issued_at, signature = decoded.split(':', 3)
+        issued_at = int(issued_at)
     except (ValueError, UnicodeDecodeError, binascii.Error):
+        return None
+
+    if int(time.time()) - issued_at > settings.auth_session_ttl_seconds:
         return None
 
     expected_signature = hmac.new(
         settings.auth_secret_key.encode(),
-        f'{username}:{role}'.encode(),
+        f'{username}:{role}:{issued_at}'.encode(),
         hashlib.sha256,
     ).hexdigest()
     if not secrets.compare_digest(signature, expected_signature):
@@ -169,9 +187,30 @@ def authenticate_user(username: str, password: str) -> dict | None:
         )
 
     for account in accounts:
-        if username == account['username'] and password == account['password']:
+        if hmac.compare_digest(username.encode(), account['username'].encode()) and hmac.compare_digest(
+            password.encode(), account['password'].encode()
+        ):
             return {'username': username, 'role': account['role']}
     return None
+
+
+def register_login_failure(ip: str):
+    now = time.monotonic()
+    attempts = [stamp for stamp in login_failures.get(ip, []) if now - stamp < LOGIN_WINDOW_SECONDS]
+    attempts.append(now)
+    login_failures[ip] = attempts
+    return len(attempts)
+
+
+def login_is_locked(ip: str) -> bool:
+    now = time.monotonic()
+    attempts = [stamp for stamp in login_failures.get(ip, []) if now - stamp < LOGIN_WINDOW_SECONDS]
+    login_failures[ip] = attempts
+    return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+
+def clear_login_failures(ip: str):
+    login_failures.pop(ip, None)
 
 
 def request_is_secure(request: Request) -> bool:
@@ -189,6 +228,7 @@ def set_auth_cookie(request: Request, response, username: str, role: str):
         samesite='Lax',
         secure=request_is_secure(request),
         path='/',
+        max_age=settings.auth_session_ttl_seconds,
     )
 
 
@@ -256,6 +296,17 @@ def parse_manual_date(value: str) -> datetime:
     if not value:
         raise ValueError('Дата обязательна')
     return datetime.strptime(value, settings.date_format)
+
+
+def parse_import_date(value):
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.strptime(value.strip(), settings.date_format)
+        except ValueError:
+            pass
+    return value
 
 
 def normalize_custom_field_key(label: str) -> str:
@@ -337,6 +388,8 @@ def build_competition(
     date = record['Дата']
     if manual_input:
         date = parse_manual_date(str(date).strip())
+    else:
+        date = parse_import_date(date)
 
     return Competition(
         student_id=hashlib.sha256(student_name.encode()).hexdigest(),
@@ -365,6 +418,22 @@ def competition_to_export_row(
     for field in export_custom_fields:
         row[field.label] = competition.extra_data.get(field.key, '')
     return row
+
+
+def validate_report_filters(args: dict) -> str | None:
+    for key in ('date_from', 'date_to'):
+        value = get_param(args, key)
+        if value:
+            try:
+                datetime.strptime(value, settings.date_format)
+            except ValueError:
+                return f'Некорректная дата в фильтре ({key}): {value}'
+
+    position = get_param(args, 'position')
+    if position and not re.fullmatch(r'[<>]\d+', position):
+        return f'Некорректное значение места: {position}'
+
+    return None
 
 
 def get_student_infos(request: Request) -> Iterable[StudentInfo]:
@@ -417,11 +486,15 @@ async def login_page(request: Request):
 
 @app.post('/login')
 async def login(request: Request):
+    if login_is_locked(request.ip):
+        return text(body='Слишком много неудачных попыток входа. Повторите позже', status=LOGIN_REJECT_STATUS)
+
     username = str(get_form_value(request, 'username')).strip()
     password = str(get_form_value(request, 'password'))
 
     user = authenticate_user(username, password)
     if user is None:
+        register_login_failure(request.ip)
         response = await render(
             template_name=jinja_env.get_template('login.html'),
             context={
@@ -432,6 +505,7 @@ async def login(request: Request):
         response.status = 401
         return response
 
+    clear_login_failures(request.ip)
     response = redirect('/')
     set_auth_cookie(request, response, user['username'], user['role'])
     return response
@@ -493,6 +567,17 @@ async def export_empty_template(request: Request):
     )
 
 
+def build_index_dataframe(competitions, export_custom_fields) -> pd.DataFrame:
+    df = pd.DataFrame.from_records(
+        [competition_to_export_row(comp, export_custom_fields) for comp in competitions]
+    )
+    df = df.reindex(columns=list(INDEX_EXPORT_COLUMNS) + [field.label for field in export_custom_fields])
+    for column in df.columns:
+        if df[column].dtype == object:
+            df[column] = df[column].map(sanitize_spreadsheet_value)
+    return df
+
+
 @app.get('/export/index')
 async def export_index(request: Request):
     storage = get_storage(request.app)
@@ -501,17 +586,29 @@ async def export_index(request: Request):
         field for field in storage.get_custom_fields()
         if field.show_in_export
     ]
-    df = pd.DataFrame.from_records(
-        [competition_to_export_row(comp, export_custom_fields) for comp in competitions]
-    )
-    df = df.reindex(columns=list(INDEX_EXPORT_COLUMNS) + [field.label for field in export_custom_fields])
+    df = await asyncio.to_thread(build_index_dataframe, competitions, export_custom_fields)
 
     now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'
-    filepath = join(settings.data_folder, filename)
-    df.to_excel(filepath, index=False)
+    buffer = BytesIO()
+    await asyncio.to_thread(df.to_excel, buffer, index=False)
+    buffer.seek(0)
 
-    return await file(filepath, filename=filename)
+    return raw(
+        buffer.getvalue(),
+        headers={
+            'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'content-disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def build_import_competitions(df: pd.DataFrame, custom_fields) -> list[Competition]:
+    competitions = []
+    for _, row in df.iterrows():
+        record = row.to_dict()
+        competitions.append(build_competition(record, custom_fields=custom_fields))
+    return competitions
 
 
 @app.post('/')
@@ -528,21 +625,15 @@ async def upload(request: Request):
     custom_fields = storage.get_custom_fields()
 
     try:
-        df = pd.read_excel(io=upload_file.body)
+        df = await asyncio.to_thread(pd.read_excel, io=upload_file.body)
         validate_import_columns(df)
     except ValueError as exc:
         return text(body=str(exc), status=400)
 
-    competitions = []
-    for _, row in df.iterrows():
-        record = row.to_dict()
-
-        try:
-            competition = build_competition(record, custom_fields=custom_fields)
-        except (TypeError, ValueError) as exc:
-            return text(body=f'Invalid row data: {exc}', status=400)
-
-        competitions.append(competition)
+    try:
+        competitions = await asyncio.to_thread(build_import_competitions, df, custom_fields)
+    except (TypeError, ValueError) as exc:
+        return text(body=f'Invalid row data: {exc}', status=400)
 
     storage.save_competitions(competitions)
     return redirect(to='/')
@@ -585,6 +676,11 @@ async def update_competition(request: Request, record_id: str):
     if auth_error is not None:
         return auth_error
 
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
     record = {
@@ -606,7 +702,7 @@ async def update_competition(request: Request, record_id: str):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    storage.update_competition(record_id, competition)
+    storage.update_competition(numeric_id, competition)
     return redirect(to='/')
 
 
@@ -616,8 +712,13 @@ async def delete_competition(request: Request, record_id: str):
     if auth_error is not None:
         return auth_error
 
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
     storage = get_storage(request.app)
-    storage.delete_competition(record_id)
+    storage.delete_competition(numeric_id)
     return redirect(to='/')
 
 
@@ -668,20 +769,33 @@ async def update_custom_field(request: Request, field_id: str):
     if auth_error is not None:
         return auth_error
 
+    try:
+        numeric_field_id = int(field_id)
+    except ValueError:
+        return text(body='Invalid field id', status=400)
+
+    label = get_form_value(request, 'label').strip()
     field_type = get_form_value(request, 'field_type').strip() or 'text'
+    if not label:
+        return build_redirect_with_message(error='Название поля обязательно')
     if field_type not in FIELD_TYPE_OPTIONS:
         return build_redirect_with_message(error='Недопустимый тип поля')
 
+    try:
+        sort_order = int(get_form_value(request, 'sort_order') or 0)
+    except ValueError:
+        return build_redirect_with_message(error='Порядок должен быть числом')
+
     storage = get_storage(request.app)
     storage.update_custom_field(
-        field_id=int(field_id),
-        label=get_form_value(request, 'label').strip(),
+        field_id=numeric_field_id,
+        label=label,
         field_type=field_type,
         required=parse_checkbox(request, 'required'),
         show_in_table=parse_checkbox(request, 'show_in_table'),
         show_in_export=parse_checkbox(request, 'show_in_export'),
         show_in_template=parse_checkbox(request, 'show_in_template'),
-        sort_order=int(get_form_value(request, 'sort_order') or 0),
+        sort_order=sort_order,
         active=parse_checkbox(request, 'active'),
     )
     return build_redirect_with_message(message='Настройки поля сохранены')
@@ -693,13 +807,22 @@ async def delete_custom_field(request: Request, field_id: str):
     if auth_error is not None:
         return auth_error
 
+    try:
+        numeric_field_id = int(field_id)
+    except ValueError:
+        return text(body='Invalid field id', status=400)
+
     storage = get_storage(request.app)
-    storage.disable_custom_field(int(field_id))
+    storage.disable_custom_field(numeric_field_id)
     return build_redirect_with_message(message='Поле отключено')
 
 
 @app.get('/report')
 async def get_report(request: Request):
+    error = validate_report_filters(dict(request.args))
+    if error:
+        return text(body=error, status=400)
+
     student_infos = get_student_infos(request)
     return await render(
         template_name=jinja_env.get_template('filtered.html'),
@@ -710,18 +833,48 @@ async def get_report(request: Request):
     )
 
 
-@app.get('/export/report')
-async def export_report(request: Request):
-    student_infos = get_student_infos(request)
+def sanitize_spreadsheet_value(value):
+    if isinstance(value, str) and value[:1] in {'=', '+', '-', '@'}:
+        return f"'{value}"
+    return value
+
+
+def build_report_dataframe(student_infos: Iterable[StudentInfo]) -> pd.DataFrame:
     df = pd.DataFrame.from_records([info.dict(by_alias=True) for info in student_infos])
     df = df.reindex(columns=REPORT_EXPORT_COLUMNS)
+    for column in df.columns:
+        if df[column].dtype == object:
+            df[column] = df[column].map(sanitize_spreadsheet_value)
+    return df
+
+
+@app.get('/export/report')
+async def export_report(request: Request):
+    error = validate_report_filters(dict(request.args))
+    if error:
+        return text(body=error, status=400)
+
+    student_infos = get_student_infos(request)
+    df = await asyncio.to_thread(build_report_dataframe, student_infos)
 
     now_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'
-    filepath = join(settings.data_folder, filename)
-    df.to_excel(filepath, index=False)
+    buffer = BytesIO()
+    await asyncio.to_thread(df.to_excel, buffer, index=False)
+    buffer.seek(0)
 
-    return await file(filepath, filename=filename)
+    return raw(
+        buffer.getvalue(),
+        headers={
+            'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'content-disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@app.exception(IsADirectoryError)
+async def handle_directory_request(_, exception: IsADirectoryError):
+    return text(body='Not Found', status=404)
 
 
 @app.get('/healthcheck')

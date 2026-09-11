@@ -1,8 +1,6 @@
 from datetime import datetime
 from io import BytesIO
 from unittest.mock import Mock
-from xml.etree import ElementTree as ET
-from zipfile import ZipFile
 
 import pandas as pd
 import pytest
@@ -17,31 +15,13 @@ from src.models.http.student_info import StudentInfo
 from src.settings import settings
 
 
-SPREADSHEET_NS = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-
-
 def get_xlsx_headers(content: bytes) -> list[str]:
-    with ZipFile(BytesIO(content)) as archive:
-        shared_strings_xml = archive.read('xl/sharedStrings.xml')
-        sheet_xml = archive.read('xl/worksheets/sheet1.xml')
+    from openpyxl import load_workbook
 
-    shared_strings_root = ET.fromstring(shared_strings_xml)
-    shared_strings = [
-        ''.join(node.itertext())
-        for node in shared_strings_root.findall('main:si', SPREADSHEET_NS)
-    ]
-
-    sheet_root = ET.fromstring(sheet_xml)
-    header_row = sheet_root.find('main:sheetData/main:row[@r="1"]', SPREADSHEET_NS)
-    assert header_row is not None
-
-    headers = []
-    for cell in header_row.findall('main:c', SPREADSHEET_NS):
-        value = cell.find('main:v', SPREADSHEET_NS)
-        assert value is not None
-        headers.append(shared_strings[int(value.text)])
-
-    return headers
+    workbook = load_workbook(BytesIO(content), read_only=True)
+    sheet = workbook.worksheets[0]
+    row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
+    return [str(value) for value in row if value is not None]
 
 
 def get_auth_headers(role: str = 'admin') -> dict[str, str]:
@@ -54,7 +34,7 @@ def get_auth_headers(role: str = 'admin') -> dict[str, str]:
     return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
 
 
-@pytest.fixture
+@pytest.fixture(scope='module')
 def client() -> SanicTestClient:
     fake_storage = Mock()
     fake_storage.get_competitions.return_value = []
@@ -126,7 +106,38 @@ def test_upload_rejects_missing_columns(client: SanicTestClient):
     assert response.status == 400
 
 
+def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
+    app.ctx.storage.save_competitions.reset_mock()
+    df = pd.DataFrame([{
+        'ФИО': 'Тестов Тест Тестович',
+        'Пол': 'М',
+        'Институт': 'ИСИ',
+        'Группа': 'ПГС-101',
+        'Вид спорта': 'Бег',
+        'Дата': '15.03.2026',
+        'Уровень соревнований': 'внутривузовские',
+        'Название соревнований': 'Кубок',
+        'Место': 1,
+        'Курс': 2,
+    }])
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    _, response = client.post(
+        '/',
+        headers=get_auth_headers(role='editor'),
+        files={'file': ('import.xlsx', file_obj.getvalue(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.save_competitions.assert_called_once()
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.date == datetime(2026, 3, 15)
+
+
 def test_editor_can_create_manual_competition(client: SanicTestClient):
+    app.ctx.storage.save_competitions.reset_mock()
     _, response = client.post(
         '/competition',
         headers=get_auth_headers(role='editor'),
@@ -174,7 +185,7 @@ def test_manual_competition_create_rejects_invalid_date(client: SanicTestClient)
 
 def test_editor_can_update_manual_competition(client: SanicTestClient):
     _, response = client.post(
-        '/competition/abc123',
+        '/competition/123',
         headers=get_auth_headers(role='editor'),
         data={
             'student_name': 'Иванов Иван Иванович',
@@ -194,18 +205,19 @@ def test_editor_can_update_manual_competition(client: SanicTestClient):
     assert response.status == 302
     assert response.headers['location'] == '/'
     app.ctx.storage.update_competition.assert_called_once()
+    assert app.ctx.storage.update_competition.call_args[0][0] == 123
 
 
 def test_admin_can_delete_competition(client: SanicTestClient):
     _, response = client.post(
-        '/competition/abc123/delete',
+        '/competition/123/delete',
         headers=get_auth_headers(),
         allow_redirects=False,
     )
 
     assert response.status == 302
     assert response.headers['location'] == '/'
-    app.ctx.storage.delete_competition.assert_called_once_with('abc123')
+    app.ctx.storage.delete_competition.assert_called_once_with(123)
 
 
 def test_editor_cannot_delete_competition(client: SanicTestClient):
@@ -406,3 +418,118 @@ def test_competition_created_at_default_factory():
     )
 
     assert second.created_at >= first.created_at
+
+
+def test_report_rejects_invalid_date(client: SanicTestClient):
+    _, response = client.get('/report?date_from=garbage', headers=get_auth_headers())
+    assert response.status == 400
+
+
+def test_report_rejects_position_without_sign(client: SanicTestClient):
+    _, response = client.get('/report?position=5', headers=get_auth_headers())
+    assert response.status == 400
+
+
+def test_report_rejects_position_with_bad_value(client: SanicTestClient):
+    _, response = client.get('/report?position=%3Eabc', headers=get_auth_headers())
+    assert response.status == 400
+
+
+def test_update_competition_rejects_non_numeric_id(client: SanicTestClient):
+    _, response = client.post(
+        '/competition/abc',
+        headers=get_auth_headers(role='editor'),
+        data={'student_name': 'X', 'course': '1', 'date': '10.04.2026'},
+        allow_redirects=False,
+    )
+    assert response.status == 400
+
+
+def test_delete_custom_field_rejects_non_numeric_id(client: SanicTestClient):
+    _, response = client.post('/admin/fields/abc/delete', headers=get_auth_headers())
+    assert response.status == 400
+
+
+def test_update_custom_field_rejects_invalid_sort_order(client: SanicTestClient):
+    _, response = client.post(
+        '/admin/fields/1',
+        headers=get_auth_headers(),
+        data={'label': 'Поле', 'field_type': 'text', 'sort_order': 'abc'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+
+def test_update_custom_field_rejects_empty_label(client: SanicTestClient):
+    _, response = client.post(
+        '/admin/fields/1',
+        headers=get_auth_headers(),
+        data={'label': '', 'field_type': 'text'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+
+def test_export_index_neutralizes_formula_values(client: SanicTestClient):
+    from openpyxl import load_workbook
+
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='=HYPERLINK("http://evil.example")',
+            student_sex='M',
+            institute='Inst',
+            group='A',
+            course=1,
+            sport='Run',
+            date=datetime(2024, 1, 1),
+            level='межвузовские',
+            name='Meet',
+            position=1,
+        )
+    ]
+
+    _, response = client.get('/export/index', headers=get_auth_headers())
+
+    assert response.status == 200
+    workbook = load_workbook(BytesIO(response.body), read_only=True)
+    cell_value = next(workbook.worksheets[0].iter_rows(min_row=2, max_row=2, values_only=True))[0]
+    assert cell_value == "'=HYPERLINK(\"http://evil.example\")"
+
+
+def test_expired_auth_cookie_is_rejected(client: SanicTestClient):
+    from time import time as time_time
+
+    expired_cookie = create_auth_cookie_value(
+        username=settings.auth_admin_username,
+        role='admin',
+        issued_at=int(time_time()) - settings.auth_session_ttl_seconds - 10,
+    )
+    _, response = client.get(
+        '/',
+        headers={'cookie': f'{settings.auth_cookie_name}={expired_cookie}'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+
+def test_login_rate_limit_locks_out_after_failures(client: SanicTestClient):
+    for _ in range(5):
+        client.post(
+            '/login',
+            data={'username': settings.auth_admin_username, 'password': 'wrong'},
+            allow_redirects=False,
+        )
+
+    _, response = client.post(
+        '/login',
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 429
