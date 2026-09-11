@@ -3,7 +3,7 @@
 
 ## Technical
 - Backend built with [Sanic](https://sanic.dev/en/)
-- Templates built with [Jinja2](https://jinja.palletsprojects.com/en/3.1.x/) 
+- Templates built with [Jinja2](https://jinja.palletsprojects.com/en/3.1.x/)
 - Frontend built with vanila JavaScript
 
 ## Development
@@ -106,6 +106,6 @@ When linters are set, they now will be trigered any time you do commit. If there
 
 Deployment templates are prepared for `dokin-app.online`:
 
-- docker compose: [docker-compose.yml](/root/chatgpt/competitions/docker-compose.yml)
-- systemd unit: [deploy/systemd/competitions-compose.service](/root/chatgpt/competitions/deploy/systemd/competitions-compose.service)
-- nginx config: [deploy/nginx/competitions.conf](/root/chatgpt/competitions/deploy/nginx/competitions.conf)
+- docker compose: [docker-compose.yml](docker-compose.yml)
+- systemd unit: [deploy/systemd/competitions-compose.service](deploy/systemd/competitions-compose.service)
+- nginx config: [deploy/nginx/competitions.conf](deploy/nginx/competitions.conf)
