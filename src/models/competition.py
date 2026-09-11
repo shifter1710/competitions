@@ -1,11 +1,14 @@
 from datetime import datetime
 
+from pydantic import ConfigDict
 from pydantic import Field
 
 from src.models.student import Student
 
 
 class Competition(Student):
+    model_config = ConfigDict(populate_by_name=True)
+
     record_id: str | None = Field(default=None, alias='_id')
     sport: str = Field(alias='Вид спорта')
     date: datetime = Field(alias='Дата')
@@ -14,6 +17,3 @@ class Competition(Student):
     position: int = Field(alias='Место')
     created_at: datetime = Field(default_factory=datetime.utcnow, alias='Время создания записи (UTC)')
     extra_data: dict[str, str] = Field(default_factory=dict)
-
-    class Config:
-        allow_population_by_field_name = True

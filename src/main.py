@@ -455,7 +455,7 @@ def competition_to_export_row(
     competition: Competition,
     export_custom_fields: Sequence[CustomField],
 ) -> dict[str, str | int]:
-    row = competition.dict(by_alias=True)
+    row = competition.model_dump(by_alias=True)
     row.pop('_id', None)
     row.pop('Время создания записи (UTC)', None)
     row.pop('extra_data', None)
@@ -985,7 +985,7 @@ def sanitize_spreadsheet_value(value):
 
 
 def build_report_dataframe(student_infos: Iterable[StudentInfo]) -> pd.DataFrame:
-    df = pd.DataFrame.from_records([info.dict(by_alias=True) for info in student_infos])
+    df = pd.DataFrame.from_records([info.model_dump(by_alias=True) for info in student_infos])
     df = df.reindex(columns=REPORT_EXPORT_COLUMNS)
     for column in df.columns:
         if df[column].dtype == object:

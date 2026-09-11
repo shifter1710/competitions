@@ -88,7 +88,7 @@ class SQLiteAdapter:
 
     @staticmethod
     def _row_to_competition(row: sqlite3.Row) -> Competition:
-        return Competition.parse_obj(
+        return Competition.model_validate(
             {
                 '_id': str(row['id']),
                 'Код студента': row['student_id'],
