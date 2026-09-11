@@ -44,6 +44,8 @@ AUTH_VIEWER_PASSWORD=viewer-password
 
 The `admin` user manages custom fields and destructive actions. The `editor` user is intended for data entry: import, empty template download, and adding or editing records.
 
+User accounts live in the SQLite `users` table with scrypt-hashed passwords. The accounts from the environment variables above are seeded on first start and are not overwritten afterwards; manage passwords and additional accounts in the admin UI ("Пользователи" section).
+
 ### Table management
 
 The main table supports:
