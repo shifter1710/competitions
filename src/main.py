@@ -16,6 +16,7 @@ import pandas as pd
 from jinja2 import Environment
 from jinja2 import PackageLoader
 from jinja2 import select_autoescape
+from openpyxl.utils import get_column_letter
 from pandas import isna
 from sanic import redirect
 from sanic import Request
@@ -602,7 +603,7 @@ async def export_empty_template(request: Request):
     df = pd.DataFrame(columns=columns)
     buffer = BytesIO()
     df.to_excel(buffer, index=False)
-    buffer.seek(0)
+    apply_template_date_format(buffer, columns)
 
     now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
     return raw(
@@ -612,6 +613,24 @@ async def export_empty_template(request: Request):
             'content-disposition': f'attachment; filename="Шаблон_соревнования_{now_str}.xlsx"',
         },
     )
+
+
+def apply_template_date_format(buffer: BytesIO, columns: Sequence[str]) -> None:
+    from openpyxl import load_workbook
+
+    if 'Дата' not in columns:
+        buffer.seek(0)
+        return
+    date_column_letter = get_column_letter(columns.index('Дата') + 1)
+    buffer.seek(0)
+    workbook = load_workbook(buffer)
+    sheet = workbook.worksheets[0]
+    for cell in sheet[date_column_letter]:
+        cell.number_format = 'DD.MM.YYYY'
+    sheet.column_dimensions[date_column_letter].width = 14
+    buffer.seek(0)
+    workbook.save(buffer)
+    buffer.seek(0)
 
 
 def build_index_dataframe(competitions, export_custom_fields) -> pd.DataFrame:

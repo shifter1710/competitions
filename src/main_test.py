@@ -852,3 +852,14 @@ def test_stale_pwd_ver_cookie_is_rejected(client: SanicTestClient):
     )
     assert response.status == 302
     assert response.headers['location'] == '/login'
+
+
+def test_template_date_column_is_typed(client: SanicTestClient):
+    from openpyxl import load_workbook
+
+    _, response = client.get('/template/empty.xlsx', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    workbook = load_workbook(BytesIO(response.body))
+    sheet = workbook.worksheets[0]
+    date_column = get_xlsx_headers(response.body).index('Дата') + 1
+    assert sheet.cell(row=1, column=date_column).number_format == 'DD.MM.YYYY'
