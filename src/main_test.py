@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from sanic_testing.testing import SanicTestClient
 
+from src.auth import hash_password
 from src.main import app
 from src.main import create_auth_cookie_value
 from src.main import normalize_position
@@ -46,6 +47,24 @@ def csrf_for(headers: dict[str, str]) -> dict[str, str]:
     return {'csrf_token': token}
 
 
+def fake_get_user(username: str) -> dict | None:
+    accounts = [
+        (settings.auth_admin_username, settings.auth_admin_password, 'admin'),
+        (settings.auth_editor_username, settings.auth_editor_password, 'editor'),
+        (settings.auth_viewer_username, settings.auth_viewer_password, 'viewer'),
+    ]
+    for account_username, password, role in accounts:
+        if username == account_username and password:
+            return {
+                'id': 1,
+                'username': account_username,
+                'password_hash': hash_password(password),
+                'role': role,
+                'active': 1,
+            }
+    return None
+
+
 @pytest.fixture(scope='module')
 def client() -> SanicTestClient:
     fake_storage = Mock()
@@ -59,6 +78,12 @@ def client() -> SanicTestClient:
     fake_storage.create_custom_field.return_value = None
     fake_storage.update_custom_field.return_value = None
     fake_storage.disable_custom_field.return_value = None
+    fake_storage.get_user.side_effect = fake_get_user
+    fake_storage.get_user_by_id.return_value = None
+    fake_storage.list_users.return_value = []
+    fake_storage.create_user.return_value = None
+    fake_storage.set_user_password.return_value = None
+    fake_storage.set_user_active.return_value = None
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -722,3 +747,92 @@ def test_login_rate_limit_locks_out_after_failures(client: SanicTestClient):
         allow_redirects=False,
     )
     assert response.status == 429
+
+
+def test_admin_can_create_user(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'operator2', 'password': 'secret123', 'role': 'editor'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.create_user.assert_called_once()
+    args = app.ctx.storage.create_user.call_args[0]
+    assert args[0] == 'operator2'
+    assert args[2] == 'editor'
+
+
+def test_create_user_rejects_short_password(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'operator3', 'password': '123', 'role': 'editor'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+
+def test_admin_can_reset_user_password(client: SanicTestClient):
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 7,
+        'username': 'someone',
+        'password_hash': 'x',
+        'role': 'editor',
+        'active': 1,
+    }
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users/7/password',
+        headers=headers,
+        data={**csrf_for(headers), 'password': 'newsecret123'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.set_user_password.assert_called_once()
+    app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_admin_cannot_deactivate_self(client: SanicTestClient):
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 7,
+        'username': settings.auth_admin_username,
+        'password_hash': 'x',
+        'role': 'admin',
+        'active': 1,
+    }
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users/7/active',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.set_user_active.assert_not_called()
+    app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_login_verifies_password_hash(client: SanicTestClient):
+    from src.main import login_failures
+
+    login_failures.clear()
+    _, response = client.post(
+        '/login',
+        data={'username': settings.auth_editor_username, 'password': settings.auth_editor_password},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+
+    _, response = client.post(
+        '/login',
+        data={'username': settings.auth_editor_username, 'password': 'definitely-wrong'},
+        allow_redirects=False,
+    )
+    assert response.status == 401

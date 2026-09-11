@@ -69,6 +69,17 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1
+                )
+                '''
+            )
             self.connection.commit()
 
     @staticmethod
@@ -406,4 +417,51 @@ class SQLiteAdapter:
     def clean_db(self):
         with self._lock:
             self.connection.execute('DELETE FROM competitions')
+            self.connection.commit()
+
+    def get_user(self, username: str) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, username, password_hash, role, active FROM users WHERE username = ?',
+                (username,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, username, password_hash, role, active FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_users(self) -> list[dict]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, username, role, active FROM users ORDER BY username ASC'
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def create_user(self, username: str, password_hash: str, role: str) -> None:
+        with self._lock:
+            self.connection.execute(
+                'INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)',
+                (username, password_hash, role),
+            )
+            self.connection.commit()
+
+    def set_user_password(self, user_id: int, password_hash: str) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE users SET password_hash = ? WHERE id = ?',
+                (password_hash, user_id),
+            )
+            self.connection.commit()
+
+    def set_user_active(self, user_id: int, active: bool) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE users SET active = ? WHERE id = ?',
+                (int(active), user_id),
+            )
             self.connection.commit()

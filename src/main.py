@@ -24,6 +24,8 @@ from sanic import text
 from sanic.response import raw
 from sanic_ext import render
 
+from src.auth import hash_password
+from src.auth import verify_password
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
@@ -89,6 +91,19 @@ REPORT_EXPORT_COLUMNS: Sequence[str] = (
     'Количество участий',
 )
 FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date')
+USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE)
+MIN_PASSWORD_LENGTH = 6
+
+
+def seed_users(storage: SQLiteAdapter):
+    env_accounts = [
+        (settings.auth_admin_username, settings.auth_admin_password, ADMIN_ROLE),
+        (settings.auth_editor_username, settings.auth_editor_password, EDITOR_ROLE),
+        (settings.auth_viewer_username, settings.auth_viewer_password, VIEWER_ROLE),
+    ]
+    for username, password, role in env_accounts:
+        if username and password and storage.get_user(username) is None:
+            storage.create_user(username, hash_password(password), role)
 
 
 @app.before_server_start
@@ -97,6 +112,7 @@ async def init_storage(app: Sanic, _):
         raise RuntimeError('AUTH_SECRET_KEY is not configured: set it to a random value in the environment or .env')
     if app.ctx.storage is None:
         app.ctx.storage = SQLiteAdapter(settings.database_path)
+    seed_users(app.ctx.storage)
 
 
 def get_storage(app: Sanic) -> SQLiteAdapter:
@@ -166,34 +182,13 @@ def parse_auth_cookie(request: Request) -> dict | None:
     return {'username': username, 'role': role}
 
 
-def authenticate_user(username: str, password: str) -> dict | None:
-    accounts = [
-        {
-            'username': settings.auth_admin_username,
-            'password': settings.auth_admin_password,
-            'role': ADMIN_ROLE,
-        },
-        {
-            'username': settings.auth_editor_username,
-            'password': settings.auth_editor_password,
-            'role': EDITOR_ROLE,
-        },
-    ]
-    if settings.auth_viewer_username and settings.auth_viewer_password:
-        accounts.append(
-            {
-                'username': settings.auth_viewer_username,
-                'password': settings.auth_viewer_password,
-                'role': VIEWER_ROLE,
-            }
-        )
-
-    for account in accounts:
-        if hmac.compare_digest(username.encode(), account['username'].encode()) and hmac.compare_digest(
-            password.encode(), account['password'].encode()
-        ):
-            return {'username': username, 'role': account['role']}
-    return None
+def authenticate_user(request: Request, username: str, password: str) -> dict | None:
+    user = get_storage(request.app).get_user(username)
+    if user is None or not user['active']:
+        return None
+    if not verify_password(password, user['password_hash']):
+        return None
+    return {'username': user['username'], 'role': user['role']}
 
 
 def register_login_failure(ip: str):
@@ -516,7 +511,7 @@ async def login(request: Request):
     username = str(get_form_value(request, 'username')).strip()
     password = str(get_form_value(request, 'password'))
 
-    user = authenticate_user(username, password)
+    user = authenticate_user(request, username, password)
     if user is None:
         register_login_failure(request.ip)
         response = await render(
@@ -557,6 +552,9 @@ async def index(request: Request):
             'field_type_options': FIELD_TYPE_OPTIONS,
             'can_write': user_can_write(request),
             'is_admin': user_is_admin(request),
+            'users': storage.list_users() if user_is_admin(request) else [],
+            'user_roles': USER_ROLES,
+            'current_username': (get_auth_user(request) or {}).get('username'),
             'admin_message': get_param(dict(request.args), 'admin_message'),
             'admin_error': get_param(dict(request.args), 'admin_error'),
         },
@@ -867,6 +865,73 @@ async def delete_custom_field(request: Request, field_id: str):
     storage = get_storage(request.app)
     storage.disable_custom_field(numeric_field_id)
     return build_redirect_with_message(message='Поле отключено')
+
+
+@app.post('/admin/users')
+async def create_user(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    username = get_form_value(request, 'username').strip()
+    password = get_form_value(request, 'password')
+    role = get_form_value(request, 'role').strip()
+    if not username:
+        return build_redirect_with_message(error='Имя пользователя обязательно')
+    if role not in USER_ROLES:
+        return build_redirect_with_message(error='Недопустимая роль')
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return build_redirect_with_message(error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов')
+    if storage.get_user(username) is not None:
+        return build_redirect_with_message(error='Пользователь уже существует')
+
+    storage.create_user(username, hash_password(password), role)
+    return build_redirect_with_message(message='Пользователь добавлен')
+
+
+@app.post('/admin/users/<user_id>/password')
+async def reset_user_password(request: Request, user_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_user_id = int(user_id)
+    except ValueError:
+        return text(body='Invalid user id', status=400)
+
+    password = get_form_value(request, 'password')
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return build_redirect_with_message(error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов')
+
+    storage = get_storage(request.app)
+    if storage.get_user_by_id(numeric_user_id) is None:
+        return build_redirect_with_message(error='Пользователь не найден')
+    storage.set_user_password(numeric_user_id, hash_password(password))
+    return build_redirect_with_message(message='Пароль обновлён')
+
+
+@app.post('/admin/users/<user_id>/active')
+async def toggle_user_active(request: Request, user_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_user_id = int(user_id)
+    except ValueError:
+        return text(body='Invalid user id', status=400)
+
+    storage = get_storage(request.app)
+    user = storage.get_user_by_id(numeric_user_id)
+    if user is None:
+        return build_redirect_with_message(error='Пользователь не найден')
+    if user['username'] == (get_auth_user(request) or {}).get('username'):
+        return build_redirect_with_message(error='Нельзя отключить собственную учётную запись')
+
+    storage.set_user_active(numeric_user_id, not user['active'])
+    return build_redirect_with_message(message='Статус пользователя изменён')
 
 
 @app.get('/report')

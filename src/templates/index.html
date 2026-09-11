@@ -235,6 +235,79 @@
 </div>
 {% endif %}
 
+{% if is_admin %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-3">Пользователи</h3>
+        <div class="text-muted mb-3">Учётные записи хранятся в базе данных. Пароли задаёт администратор.</div>
+
+        <form action="/admin/users" class="row g-2 align-items-end mb-4" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-3">
+                <label class="form-label" for="user-username">Логин</label>
+                <input class="form-control" id="user-username" name="username" type="text" required>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="user-password">Пароль</label>
+                <input class="form-control" id="user-password" name="password" type="password" minlength="6" required>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="user-role">Роль</label>
+                <select class="form-select" id="user-role" name="role">
+                    {% for role in user_roles %}
+                    <option value="{{ role }}">{{ role }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">Добавить</button>
+            </div>
+        </form>
+
+        {% if users %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Логин</th>
+                        <th>Роль</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>{{ user.username }}{% if user.username == current_username %} <span class="badge text-bg-secondary">вы</span>{% endif %}</td>
+                        <td>{{ user.role }}</td>
+                        <td>{% if user.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">отключён</span>{% endif %}</td>
+                        <td>
+                            <form action="/admin/users/{{ user.id }}/password" class="d-flex gap-2" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input class="form-control form-control-sm" name="password" placeholder="Новый пароль" type="password" minlength="6" required>
+                                <button class="btn btn-sm btn-outline-primary" type="submit">Сменить пароль</button>
+                            </form>
+                            {% if user.username != current_username %}
+                            <form action="/admin/users/{{ user.id }}/active" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-warning mt-1" type="submit">
+                                    {% if user.active %}Отключить{% else %}Включить{% endif %}
+                                </button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted">Пользователей пока нет.</div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <form class="filter-form filter">
     <h3 class="title">Формирование отчёта</h3>
     <div class="row align-items-md-bottom">
