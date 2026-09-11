@@ -586,7 +586,15 @@ class Main {
         });
     }
 
+    getCsrfToken() {
+        const meta = document.querySelector('meta[name="csrf-token"]');
+        return meta ? meta.content : "";
+    }
+
     makeRequest({ url, options = {}, onSuccess = () => {}, onError = () => {} }) {
+        if (options.body instanceof FormData) {
+            options.body.append("csrf_token", this.getCsrfToken());
+        }
         this.setLoading(true);
         fetch(url, options)
             .then((response) => {

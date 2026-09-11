@@ -1,4 +1,6 @@
+import hmac
 from datetime import datetime
+from hashlib import sha256
 from io import BytesIO
 from unittest.mock import Mock
 
@@ -32,6 +34,16 @@ def get_auth_headers(role: str = 'admin') -> dict[str, str]:
         username = settings.auth_viewer_username or 'viewer'
     cookie = create_auth_cookie_value(username=username, role=role)
     return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+
+
+def csrf_for(headers: dict[str, str]) -> dict[str, str]:
+    cookie = headers['cookie'].split('=', 1)[1]
+    token = hmac.new(
+        settings.auth_secret_key.encode(),
+        b'csrf:' + cookie.encode(),
+        sha256,
+    ).hexdigest()
+    return {'csrf_token': token}
 
 
 @pytest.fixture(scope='module')
@@ -88,7 +100,8 @@ def test_get_report_name(client: SanicTestClient):
 
 
 def test_clean_db_post(client: SanicTestClient):
-    _, response = client.post('/clean_db', headers=get_auth_headers())
+    headers = get_auth_headers()
+    _, response = client.post('/clean_db', headers=headers, data=csrf_for(headers))
     assert response.status == 200
 
 
@@ -98,9 +111,11 @@ def test_upload_rejects_missing_columns(client: SanicTestClient):
     df.to_excel(file_obj, index=False)
     file_obj.seek(0)
 
+    headers = get_auth_headers()
     _, response = client.post(
         '/',
-        headers=get_auth_headers(),
+        headers=headers,
+        data=csrf_for(headers),
         files={
             'file': (
                 'broken.xlsx',
@@ -134,9 +149,11 @@ def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
     df.to_excel(file_obj, index=False)
     file_obj.seek(0)
 
+    headers = get_auth_headers(role='editor')
     _, response = client.post(
         '/',
-        headers=get_auth_headers(role='editor'),
+        headers=headers,
+        data=csrf_for(headers),
         files={
             'file': (
                 'import.xlsx',
@@ -154,10 +171,12 @@ def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
 
 def test_editor_can_create_manual_competition(client: SanicTestClient):
     app.ctx.storage.save_competitions.reset_mock()
+    headers = get_auth_headers(role='editor')
     _, response = client.post(
         '/competition',
-        headers=get_auth_headers(role='editor'),
+        headers=headers,
         data={
+            **csrf_for(headers),
             'student_name': 'Иванов Иван Иванович',
             'student_sex': 'М',
             'institute': 'ИСИ',
@@ -178,10 +197,12 @@ def test_editor_can_create_manual_competition(client: SanicTestClient):
 
 
 def test_manual_competition_create_rejects_invalid_date(client: SanicTestClient):
+    headers = get_auth_headers()
     _, response = client.post(
         '/competition',
-        headers=get_auth_headers(),
+        headers=headers,
         data={
+            **csrf_for(headers),
             'student_name': 'Иванов Иван Иванович',
             'student_sex': 'М',
             'institute': 'ИСИ',
@@ -200,10 +221,12 @@ def test_manual_competition_create_rejects_invalid_date(client: SanicTestClient)
 
 
 def test_editor_can_update_manual_competition(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
     _, response = client.post(
         '/competition/123',
-        headers=get_auth_headers(role='editor'),
+        headers=headers,
         data={
+            **csrf_for(headers),
             'student_name': 'Иванов Иван Иванович',
             'student_sex': 'М',
             'institute': 'ИСИ',
@@ -225,9 +248,11 @@ def test_editor_can_update_manual_competition(client: SanicTestClient):
 
 
 def test_admin_can_delete_competition(client: SanicTestClient):
+    headers = get_auth_headers()
     _, response = client.post(
         '/competition/123/delete',
-        headers=get_auth_headers(),
+        headers=headers,
+        data=csrf_for(headers),
         allow_redirects=False,
     )
 
@@ -237,9 +262,11 @@ def test_admin_can_delete_competition(client: SanicTestClient):
 
 
 def test_editor_cannot_delete_competition(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
     _, response = client.post(
         '/competition/abc123/delete',
-        headers=get_auth_headers(role='editor'),
+        headers=headers,
+        data=csrf_for(headers),
         allow_redirects=False,
     )
     assert response.status == 403
@@ -344,10 +371,12 @@ def test_empty_template_includes_custom_fields(client: SanicTestClient):
 
 
 def test_admin_can_create_custom_field(client: SanicTestClient):
+    headers = get_auth_headers()
     _, response = client.post(
         '/admin/fields',
-        headers=get_auth_headers(),
+        headers=headers,
         data={
+            **csrf_for(headers),
             'label': 'Тренер',
             'field_type': 'text',
             'required': 'on',
@@ -364,10 +393,11 @@ def test_admin_can_create_custom_field(client: SanicTestClient):
 
 
 def test_viewer_cannot_manage_fields(client: SanicTestClient):
+    headers = get_auth_headers(role='viewer')
     _, response = client.post(
         '/admin/fields',
-        headers=get_auth_headers(role='viewer'),
-        data={'label': 'Тренер', 'field_type': 'text'},
+        headers=headers,
+        data={**csrf_for(headers), 'label': 'Тренер', 'field_type': 'text'},
         allow_redirects=False,
     )
     assert response.status == 403
@@ -400,7 +430,8 @@ def test_login_sets_auth_cookie(client: SanicTestClient):
 
 
 def test_viewer_cannot_clean_db(client: SanicTestClient):
-    _, response = client.post('/clean_db', headers=get_auth_headers(role='viewer'))
+    headers = get_auth_headers(role='viewer')
+    _, response = client.post('/clean_db', headers=headers, data=csrf_for(headers))
 
     assert response.status == 403
 
@@ -452,25 +483,32 @@ def test_report_rejects_position_with_bad_value(client: SanicTestClient):
 
 
 def test_update_competition_rejects_non_numeric_id(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
     _, response = client.post(
         '/competition/abc',
-        headers=get_auth_headers(role='editor'),
-        data={'student_name': 'X', 'course': '1', 'date': '10.04.2026'},
+        headers=headers,
+        data={**csrf_for(headers), 'student_name': 'X', 'course': '1', 'date': '10.04.2026'},
         allow_redirects=False,
     )
     assert response.status == 400
 
 
 def test_delete_custom_field_rejects_non_numeric_id(client: SanicTestClient):
-    _, response = client.post('/admin/fields/abc/delete', headers=get_auth_headers())
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/fields/abc/delete',
+        headers=headers,
+        data=csrf_for(headers),
+    )
     assert response.status == 400
 
 
 def test_update_custom_field_rejects_invalid_sort_order(client: SanicTestClient):
+    headers = get_auth_headers()
     _, response = client.post(
         '/admin/fields/1',
-        headers=get_auth_headers(),
-        data={'label': 'Поле', 'field_type': 'text', 'sort_order': 'abc'},
+        headers=headers,
+        data={**csrf_for(headers), 'label': 'Поле', 'field_type': 'text', 'sort_order': 'abc'},
         allow_redirects=False,
     )
     assert response.status == 302
@@ -478,14 +516,24 @@ def test_update_custom_field_rejects_invalid_sort_order(client: SanicTestClient)
 
 
 def test_update_custom_field_rejects_empty_label(client: SanicTestClient):
+    headers = get_auth_headers()
     _, response = client.post(
         '/admin/fields/1',
-        headers=get_auth_headers(),
-        data={'label': '', 'field_type': 'text'},
+        headers=headers,
+        data={**csrf_for(headers), 'label': '', 'field_type': 'text'},
         allow_redirects=False,
     )
     assert response.status == 302
     assert 'admin_error' in response.headers['location']
+
+
+def test_post_without_csrf_token_is_rejected(client: SanicTestClient):
+    _, response = client.post(
+        '/competition/123/delete',
+        headers=get_auth_headers(),
+        allow_redirects=False,
+    )
+    assert response.status == 403
 
 
 def test_export_index_neutralizes_formula_values(client: SanicTestClient):

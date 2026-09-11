@@ -5,6 +5,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Соревнования студентов | СибАДИ</title>
+    {% if request.ctx.auth_user %}
+    <meta name="csrf-token" content="{{ csrf_token(request) }}">
+    {% endif %}
     <link rel="icon" type="image/x-icon" href="/static/icons/favicon.png">
 
     <link rel="stylesheet" href="/static/libs/styles/bootstrap.min.css">
@@ -23,6 +26,7 @@
                 ({{ request.ctx.auth_user.role }})
             </div>
             <form action="/logout" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <button class="btn btn-outline-secondary btn-sm" type="submit">Выйти</button>
             </form>
         </div>

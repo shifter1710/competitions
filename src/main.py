@@ -238,6 +238,25 @@ def clear_auth_cookie(response):
     response.delete_cookie(settings.auth_cookie_name, path='/')
 
 
+def create_csrf_token(request: Request) -> str:
+    auth_cookie = request.cookies.get(settings.auth_cookie_name, '')
+    return hmac.new(
+        settings.auth_secret_key.encode(),
+        b'csrf:' + auth_cookie.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def request_csrf_is_valid(request: Request) -> bool:
+    form_token = get_form_value(request, 'csrf_token')
+    if not form_token:
+        return False
+    return secrets.compare_digest(form_token, create_csrf_token(request))
+
+
+jinja_env.globals['csrf_token'] = create_csrf_token
+
+
 def user_is_admin(request: Request) -> bool:
     user = get_auth_user(request)
     return bool(user and user['role'] == ADMIN_ROLE)
@@ -464,6 +483,9 @@ async def authorize_request(request: Request):
         return None
 
     if get_auth_user(request):
+        if request.method == 'POST' and request.path != '/login':
+            if not request_csrf_is_valid(request):
+                return text(body='CSRF token missing or invalid', status=403)
         return None
 
     if request.method == 'GET':

@@ -114,6 +114,7 @@
         <div class="text-muted mb-3">Администратор задаёт дополнительные колонки, видимость в таблице, выгрузке и шаблоне.</div>
 
         <form action="/admin/fields" class="row g-3 mb-4" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <div class="col-md-3">
                 <label class="form-label" for="field-label">Название поля</label>
                 <input class="form-control" id="field-label" name="label" type="text" required>
@@ -168,6 +169,7 @@
                     <tr>
                         <td colspan="5">
                             <form action="/admin/fields/{{ field.field_id }}" class="row g-2 field-form align-items-end" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                                 <div class="col-md-3">
                                     <label class="form-label">Название</label>
                                     <input class="form-control" name="label" type="text" value="{{ field.label }}" required>
