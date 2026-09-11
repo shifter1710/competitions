@@ -471,7 +471,7 @@ class Main {
 
         const deleteButton = event.target.closest(".competition-delete-button");
         if (deleteButton) {
-            this.deleteCompetition(deleteButton.dataset.recordId);
+            this.deleteCompetition(deleteButton.dataset.recordId, deleteButton.dataset.studentName);
         }
     }
 
@@ -527,8 +527,11 @@ class Main {
         });
     }
 
-    deleteCompetition(recordId) {
-        const result = confirm("Удалить запись?");
+    deleteCompetition(recordId, studentName) {
+        const message = studentName
+            ? `Удалить запись «${studentName}»?`
+            : "Удалить запись?";
+        const result = confirm(message);
         if (!result) {
             return;
         }
