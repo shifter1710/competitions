@@ -47,6 +47,7 @@ The `admin` user manages custom fields and destructive actions. The `editor` use
 ### Table management
 
 The main table supports:
+- editing records directly in table cells (Enter saves, Esc cancels)
 - exporting exactly the currently visible table view
 - hiding and restoring columns
 - reordering columns with drag and drop

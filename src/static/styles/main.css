@@ -201,3 +201,15 @@ select {
         flex-direction: column;
     }
 }
+
+.interactive-table .row-editing input,
+.interactive-table .row-editing select {
+    width: 100%;
+    box-sizing: border-box;
+    min-width: 90px;
+}
+
+.interactive-table .row-editing .inline-save-button,
+.interactive-table .row-editing .inline-cancel-button {
+    margin: 0 2px;
+}
