@@ -3,6 +3,7 @@ services:
     build:
       context: .
     container_name: competitions
+    mem_limit: 384m
     restart: unless-stopped
     env_file:
       - .env
