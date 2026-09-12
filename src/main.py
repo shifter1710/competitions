@@ -965,6 +965,36 @@ async def save_profile(request: Request):
     return json_response({'profile': profile})
 
 
+@app.get('/api/students')
+async def list_students(request: Request):
+    # Полный список ФИО раскрывает персональные данные других студентов —
+    # доступен только admin/editor (см. docs/data-model-decisions.md).
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    names = get_storage(request.app).get_student_names()
+    return json_response(names)
+
+
+@app.get('/api/students/lookup')
+async def lookup_student(request: Request):
+    # Атлету нельзя отдавать чужие ФИО — только факт точного совпадения.
+    user = get_auth_user(request)
+    if user is None:
+        return text(body='Unauthorized', status=401)
+    if user['role'] not in MODERATOR_ROLES and user['role'] != ATHLETE_ROLE:
+        return text(body='Forbidden', status=403)
+
+    name = str(request.args.get('name', '')).strip()
+    if not name:
+        return text(body='Параметр name обязателен', status=400)
+
+    # Тот же хеш, что использует привязка записей к кабинету атлета.
+    name_hash = hashlib.sha256(name.encode()).hexdigest()
+    records_count = get_storage(request.app).count_records_by_student_hash(name_hash)
+    return json_response({'found': records_count > 0})
+
+
 @app.post('/competition')
 async def add_competition(request: Request):
     auth_error = require_writer(request)
