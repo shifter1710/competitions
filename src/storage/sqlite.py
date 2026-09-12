@@ -746,6 +746,14 @@ class SQLiteAdapter:
             ).fetchone()
             return row['total']
 
+    def get_student_names(self) -> list[str]:
+        """Unique student names as stored in records, sorted alphabetically."""
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT DISTINCT student_name FROM competitions ORDER BY student_name ASC'
+            ).fetchall()
+            return [row['student_name'] for row in rows]
+
     def merge_students(self, old_hash: str, new_hash: str, new_name: str | None = None) -> int:
         with self._lock:
             if new_name:

@@ -94,6 +94,7 @@ def client() -> SanicTestClient:
     fake_storage.get_name_aliases.return_value = []
     fake_storage.add_name_alias.return_value = None
     fake_storage.count_records_by_student_hash.return_value = 2
+    fake_storage.get_student_names.return_value = ['Абрамов Артём Артёмович', 'Иванов Иван Иванович']
     fake_storage.merge_students.return_value = 2
     fake_storage.get_attachment.return_value = None
     fake_storage.get_attachments.return_value = []
@@ -1369,3 +1370,75 @@ def test_profile_save_appends_alias(client: SanicTestClient):
     assert response.status == 200
     app.ctx.storage.add_name_alias.assert_called_once_with(1, 'Спортсменов Спорт Спортович')
     app.ctx.storage.get_name_aliases.return_value = []
+
+
+STUDENT_NAMES = ['Абрамов Артём Артёмович', 'Иванов Иван Иванович']
+
+
+def test_students_list_for_admin_and_editor(client: SanicTestClient):
+    app.ctx.storage.get_student_names.return_value = STUDENT_NAMES
+    for role in ('admin', 'editor'):
+        _, response = client.get('/api/students', headers=get_auth_headers(role))
+        assert response.status == 200
+        assert response.json == STUDENT_NAMES
+
+
+def test_students_list_forbidden_for_viewer_and_athlete(client: SanicTestClient):
+    _, response = client.get('/api/students', headers=get_auth_headers('viewer'))
+    assert response.status == 403
+
+    _, response = client.get('/api/students', headers=athlete_headers())
+    assert response.status == 403
+
+
+def test_students_lookup_requires_auth_and_role(client: SanicTestClient):
+    _, response = client.get(
+        '/api/students/lookup?name=Иванов Иван Иванович',
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+    _, response = client.get(
+        '/api/students/lookup',
+        headers=get_auth_headers('viewer'),
+        params={'name': 'Иванов Иван Иванович'},
+    )
+    assert response.status == 403
+
+
+def test_students_lookup_exact_match(client: SanicTestClient):
+    known_name = 'Иванов Иван Иванович'
+    known_hash = sha256(known_name.encode()).hexdigest()
+    app.ctx.storage.count_records_by_student_hash.side_effect = lambda value: 1 if value == known_hash else 0
+    headers = athlete_headers()
+    _, response = client.get(
+        '/api/students/lookup',
+        headers=headers,
+        params={'name': known_name},
+    )
+    assert response.status == 200
+    assert response.json == {'found': True}
+
+    # опечатка или другой регистр — уже другой sha256, совпадения нет
+    _, response = client.get(
+        '/api/students/lookup',
+        headers=headers,
+        params={'name': 'Иванов Иван Ивановеч'},
+    )
+    assert response.status == 200
+    assert response.json == {'found': False}
+
+    _, response = client.get(
+        '/api/students/lookup',
+        headers=headers,
+        params={'name': 'иванов иван иванович'},
+    )
+    assert response.status == 200
+    assert response.json == {'found': False}
+    app.ctx.storage.count_records_by_student_hash.side_effect = None
+
+
+def test_students_lookup_requires_name_param(client: SanicTestClient):
+    _, response = client.get('/api/students/lookup', headers=get_auth_headers())
+    assert response.status == 400
