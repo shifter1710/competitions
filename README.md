@@ -1,114 +1,179 @@
-# SIBADI Competitions
-Сервис для учета участия в спортивных соревнованиях студентов [СибАДИ](https://sibadi.org/).
+# СибАДИ Competitions
 
-## Technical
-- Backend built with [Sanic](https://sanic.dev/en/)
-- Templates built with [Jinja2](https://jinja.palletsprojects.com/en/3.1.x/)
-- Frontend built with vanila JavaScript
+Сервис для учёта участия студентов [СибАДИ](https://sibadi.org/) в спортивных
+соревнованиях: общий реестр записей с ручным вводом и импортом из Excel,
+отчёт «количество участий», кабинеты атлетов с модерацией, кастомные поля,
+справочники, вложения и аудит-журнал. Роли: admin, editor, viewer, athlete.
 
-## Development
+## Возможности
 
-### Local run
+- **Таблица записей** (главная страница): правка прямо в ячейках (Enter —
+  сохранить, Esc — отмена), «+ Пустая строка» для быстрого ввода, сортировка
+  кликом по заголовку, скрытие и восстановление колонок, перетаскивание
+  колонок, выгрузка в Excel ровно того вида, который сейчас на экране.
+  Настройки вида хранятся в браузере (localStorage) отдельно для каждого
+  представления таблицы.
+- **Ручной ввод и импорт**: форма «Добавить запись» (для атлета — с
+  автоподстановкой ФИО/пола/института/группы/курса из профиля), импорт
+  xlsx-файла со строгим шаблоном колонок (пустой шаблон скачивается из
+  админки), пропуски дублей при импорте с итоговым счётчиком.
+- **Кастомные поля** (admin): дополнительные колонки записей — текст, число,
+  дата, ссылка; обязательность, показ в таблице, выгрузке и шаблоне.
+- **Справочники** (admin): значения видов спорта, институтов и уровней
+  соревнований. Новое значение из записи или импорта попадает в справочник
+  автоматически; админ может добавить значение руками, скрыть из подсказок
+  или удалить (если на нём нет записей). Справочник — только подсказки
+  (datalist) в формах: значения в существующих записях не валидируются и не
+  перезаписываются.
+- **Модерация**: записи атлетов попадают в реестр только после подтверждения
+  модератором (admin/editor); отклонение — с комментарием. Правка
+  модератора подтверждает запись автоматически, правка атлета снова
+  отправляет её «на проверке».
+- **Кабинет атлета**: атлет видит свои записи плюс записи, привязанные по
+  ФИО из профиля и псевдонимов (привязка через `sha256(ФИО)`). Профиль
+  хранится в базе; при вводе ФИО показывается подсказка «найдены/не найдены
+  записи с таким ФИО» без раскрытия чужих данных.
+- **Объединение студентов (merge)** (admin): перенос записей со старого ФИО
+  на новое (смена фамилии) с предпросмотром количества записей и
+  автоматическим переносом псевдонимов.
+- **Отчёт «количество участий»**: фильтры по ФИО, датам, месту (победа /
+  призовое / не призовое), уровню и кастомным полям; выгрузка в Excel с
+  выбором колонок. Доступен всем ролям, кроме athlete.
+- **Вложения**: к записи можно прикрепить файл PDF, JPEG или PNG до 5 МБ
+  (проверяются и расширение, и сигнатура файла).
+- **Обслуживание базы** (admin): выгрузка всей базы в один xlsx-файл по
+  листам (записи, пользователи с псевдонимами, уровни, виды спорта) и
+  защищённая очистка в два шага — выбор объёма (все записи / записи и
+  вложения / только вложения) плюс ввод подтверждающего слова. Пользователи,
+  кастомные поля, справочники и журнал аудита очистка не трогает.
+- **Журнал аудита** (admin, `/admin/audit`): входы (успешные и нет), смены
+  паролей, решения модерации, merge, привязки псевдонимов, очистки базы.
+  Журнал только читается, последние события сверху.
+- **Тёмная тема**: переключатель в шапке, выбор хранится в браузере.
+- **Безопасность**: пароли — scrypt; сессия — подписанная cookie (12 часов,
+  смена пароля отзывает активные сессии); CSRF-токен прикрепляется ко всем
+  POST-запросам автоматически; защита от перебора пароля (5 неудачных
+  попыток с одного IP блокируют вход на 15 минут).
 
-1. Create environment file
-```
+## Роли
+
+Кратко (подробно — в [docs/roles.md](docs/roles.md)):
+
+| Роль | Что может |
+|---|---|
+| `admin` | Всё: записи, импорт, модерация, пользователи и пароли, справочники, кастомные поля, merge, обслуживание базы, журнал аудита, удаление записей и вложений |
+| `editor` | Ввод, правка и импорт записей (правка = авто-подтверждение), шаблон, модерация записей атлетов, выгрузки |
+| `viewer` | Только чтение: таблица, отчёты, выгрузки |
+| `athlete` | Личный кабинет: свои записи и записи по своим ФИО; всё новое и отредактированное — «на проверке» |
+
+## Стек
+
+- Backend: [Sanic](https://sanic.dev/) 25 + pydantic v2
+- БД: SQLite (режим WAL) по пути `./data/competitions.sqlite3`
+- Шаблоны: Jinja2
+- Фронтенд: vanilla JavaScript + Bootstrap, без сборки
+- Python 3.10+
+
+## Быстрый запуск локально
+
+Нужен `.env` со случайным `AUTH_SECRET_KEY` — без него приложение откажется
+стартовать (кроме режима тестов).
+
+```bash
 cp .env.example .env
-```
+# сгенерируйте ключ, например:
+python -c "import secrets; print(secrets.token_hex(32))"
+# впишите его в .env как AUTH_SECRET_KEY=...
 
-2. Install requirements
-```
+python -m venv venv
 pip install -r requirements.txt
+
+# сервер разработки
+./venv/bin/sanic src.main:app --host 0.0.0.0 --port 8080
 ```
 
-3. Start application
-```
-sanic src.main:app --host 0.0.0.0 --port 8080
-```
+Учётные записи из `AUTH_*` переменных создаются при первом старте и дальше
+не перезаписываются; пароли и новые аккаунты управляются в админке
+(«Админ → Пользователи»).
 
-By default the app uses SQLite at `./data/competitions.sqlite3`.
+Проверки (обе должны быть зелёными перед отчётом):
 
-The app also requires authentication settings. For local development, set at least:
-```
-AUTH_SECRET_KEY=replace-with-random-string
-AUTH_ADMIN_USERNAME=admin
-AUTH_ADMIN_PASSWORD=strong-password
-AUTH_EDITOR_USERNAME=operator
-AUTH_EDITOR_PASSWORD=strong-operator-password
+```bash
+./venv/bin/python -m pytest src/ -q
+./venv/bin/pre-commit run --all-files
 ```
 
-Optional read-only user:
-```
-AUTH_VIEWER_USERNAME=viewer
-AUTH_VIEWER_PASSWORD=viewer-password
-```
+## Переменные окружения
 
-The `admin` user manages custom fields and destructive actions. The `editor` user is intended for data entry: import, empty template download, and adding or editing records.
+Фактический список — `src/settings.py`; пример файла — `.env.example`.
 
-User accounts live in the SQLite `users` table with scrypt-hashed passwords. The accounts from the environment variables above are seeded on first start and are not overwritten afterwards; manage passwords and additional accounts in the admin UI ("Пользователи" section).
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `AUTH_SECRET_KEY` | `change-me` | Ключ подписи сессий и CSRF-токенов. Обязателен, со «слабыми» значениями приложение не стартует |
+| `AUTH_ADMIN_USERNAME` / `AUTH_ADMIN_PASSWORD` | `admin` / `change-me` | Учётка админа, создаётся при первом старте |
+| `AUTH_EDITOR_USERNAME` / `AUTH_EDITOR_PASSWORD` | `editor` / `change-me-editor` | Учётка эдитора, создаётся при первом старте |
+| `AUTH_VIEWER_USERNAME` / `AUTH_VIEWER_PASSWORD` | пусто | Опциональная учётка viewer; не создаётся, если переменные пустые |
+| `AUTH_SESSION_TTL_SECONDS` | `43200` (12 часов) | Время жизни сессионной cookie |
+| `AUTH_COOKIE_NAME` | `competitions_auth` | Имя сессионной cookie |
+| `DATA_FOLDER` | `<репозиторий>/data` | Каталог данных: БД, вложения (`data/files`), бэкапы |
+| `DATABASE_PATH` | `<репозиторий>/data/competitions.sqlite3` | Путь к файлу SQLite |
+| `WEB_HOST` / `WEB_PORT` | `0.0.0.0` / `8080` | Используются командой запуска в контейнере (Dockerfile) |
 
-### Table management
-
-The main table supports:
-- editing records directly in table cells (Enter saves, Esc cancels)
-- exporting exactly the currently visible table view
-- hiding and restoring columns
-- reordering columns with drag and drop
-- sorting by clicking column headers
-
-Column visibility and order are stored in the browser per table view.
-
-### Backups
-
-SQLite backup automation is prepared with:
-- `scripts/backup_sqlite.py`
-- `deploy/systemd/competitions-backup.service`
-- `deploy/systemd/competitions-backup.timer`
-
-### Docker run
+## Структура репозитория
 
 ```
-docker compose up -d --build
+src/                  приложение: main.py (маршруты), auth.py, settings.py,
+                      models/, storage/ (SQLite), templates/, static/
+data/                 живые данные контейнера (БД, вложения) — в git не хранится
+deploy/nginx/         конфиг nginx (проксирование на 127.0.0.1:8081, TLS)
+deploy/systemd/       юниты: compose-сервис и бэкап-таймер
+scripts/              backup_sqlite.py, migrate_mongo_to_sqlite.py
+docs/                 документация проекта (см. ниже)
+docker-compose.yml    прод-запуск: образ + том ./data + порт 127.0.0.1:8081
+Dockerfile            python:3.10-slim + sanic
 ```
 
-The container is published on `127.0.0.1:8081`, intended to be proxied by nginx.
-Application data, including the SQLite database, is stored in `./data`.
+## Документация
 
-### Migrating existing MongoDB data
+- [docs/quickstart.md](docs/quickstart.md) — быстрый старт: новая раскатка
+  и перенос на другой сервер
+- [docs/roles.md](docs/roles.md) — роли: что каждая может делать в системе
+- [docs/data-model-decisions.md](docs/data-model-decisions.md) — решения по
+  модели данных (историчность записей, псевдонимы, merge, справочники,
+  аудит, очистка)
+- [docs/backlog.md](docs/backlog.md) — бэклог и статус задач
+- [docs/post-deploy-roadmap.md](docs/post-deploy-roadmap.md) — план после
+  деплоя и «триггеры» для отложенных задач
+- [docs/future-ideas.md](docs/future-ideas.md) — отложенные идеи
 
-For one-time migration from MongoDB to SQLite, use `scripts/migrate_mongo_to_sqlite.py`.
-The migration helper is not part of the runtime container and expects `pymongo` to be available in the environment where you run the script.
+## Деплой
 
-### Linting
+Прод — docker compose за nginx; контейнер публикуется на `127.0.0.1:8081`,
+данные живут в `./data`. Пошагово (включая TLS и бэкап-таймер) —
+[docs/quickstart.md](docs/quickstart.md). Шаблоны:
 
-Python linters in this project are set up as [pre-commit](https://pre-commit.com/) hook. Do these steps to use them:
-1. Install requirements
-```
-pip install -r requirements.txt
-```
+- [docker-compose.yml](docker-compose.yml)
+- [deploy/systemd/competitions-compose.service](deploy/systemd/competitions-compose.service)
+- [deploy/nginx/competitions.conf](deploy/nginx/competitions.conf)
 
-2. Initialize pre-commit hook
-```
-pre-commit install
-```
+Бэкапы SQLite: `scripts/backup_sqlite.py` + `deploy/systemd/competitions-backup.{service,timer}`
+(ежедневно, gzip-архивы с проверкой целостности и ротацией, вложения —
+отдельным zip).
 
-3. Run linters
-```
-pre-commit run --all-files
-```
+Разовая миграция данных из MongoDB: `scripts/migrate_mongo_to_sqlite.py`
+(нужен `pymongo`, в рантайм-контейнер не входит).
 
-When linters are set, they now will be trigered any time you do commit. If there are any errors detected before commit, fix them, then do `git add .` and commit once again.
+## Соглашения
 
-## Договоренности
-### Порядок атрибутов
-На главной и в excel-файле: ФИО	Пол	Институт Группа Вид спорта Дата Уровень соревнований Название соревнований Место Курс
+- Порядок колонок на главной и в Excel-файлах фиксирован:
+  ФИО, Пол, Институт, Группа, Вид спорта, Дата, Уровень соревнований,
+  Название соревнований, Место, Курс (затем кастомные поля).
+- Время создания записи всегда пишется по UTC.
 
-### Время
-Время создания записи всегда устанавливается по UTC
+## Участие в разработке
 
-## Deployment
-
-Deployment templates are prepared for `dokin-app.online`:
-
-- docker compose: [docker-compose.yml](docker-compose.yml)
-- systemd unit: [deploy/systemd/competitions-compose.service](deploy/systemd/competitions-compose.service)
-- nginx config: [deploy/nginx/competitions.conf](deploy/nginx/competitions.conf)
+Работа идёт в отдельных worktree-ветках от `dev`: исполнитель коммитит в
+свою `feature/*`-ветку, мержит в `dev`/`main` только аналитик после ревью.
+Перед отчётом обязательны зелёные `pytest src/ -q` и
+`pre-commit run --all-files`. Живые данные `data/` не перемещать и не
+переписывать; прод-секреты в git не попадают (`.env` игнорируется).
