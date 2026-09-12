@@ -405,6 +405,18 @@
                 {% endfor %}
             </select>
         </div>
+        {% for field in custom_fields %}
+        <div class="col align-self-md-center">
+            <span class="label">{{ field.label }}</span>
+            <input
+                class="form-control filter__custom"
+                name="custom__{{ field.key }}"
+                type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'url' %}url{% else %}text{% endif %}"
+                autocomplete="off"
+                {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
+            >
+        </div>
+        {% endfor %}
         <div class="col-clean-button align-self-md-end">
             <button class="filter-form__clean-button btn btn-danger" type="button">
                 <img src="static/icons/filter-clean.svg" alt="Сбросить фильтр" />

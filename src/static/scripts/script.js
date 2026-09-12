@@ -227,6 +227,9 @@ class Main {
         this.createInstances();
         this.dateFromInput.value = "";
         this.dateToInput.value = "";
+        this.reportForm.querySelectorAll('[name^="custom__"]').forEach((input) => {
+            input.value = "";
+        });
     }
 
     handleSubmitImportForm(event) {

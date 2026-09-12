@@ -6,7 +6,7 @@ from src.models.competition import Competition
 from src.storage.sqlite import SQLiteAdapter
 
 
-def make_competition(name: str, date: datetime) -> Competition:
+def make_competition(name: str, date: datetime, extra: dict | None = None) -> Competition:
     return Competition(
         student_id=f'id-{name}',
         student_name=name,
@@ -19,7 +19,12 @@ def make_competition(name: str, date: datetime) -> Competition:
         level='внутривузовские',
         name='Кубок',
         position=1,
+        extra_data=extra or {},
     )
+
+
+def make_legacy_competition(name: str, date: datetime) -> Competition:
+    return make_competition(name, date)
 
 
 @pytest.fixture
@@ -113,3 +118,37 @@ def test_levels_seed_and_directory(adapter):
     adapter.disable_level(2)
     assert 'межвузовские' not in adapter.get_level_names()
     assert 'межвузовские' in adapter.get_level_names(include_inactive=True)
+
+
+def test_report_filters_by_custom_text_field(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('С тренером А', datetime(2026, 1, 1), {'trainer': 'Иванов'}),
+            make_competition('С тренером Б', datetime(2026, 1, 2), {'trainer': 'Петров'}),
+            make_competition('Без тренера', datetime(2026, 1, 3)),
+        ]
+    )
+    infos = adapter.get_filtered('', '', '', '', '', custom_filters=[('trainer', 'text', 'Иванов')])
+    assert [info.student_name for info in infos] == ['С тренером А']
+
+
+def test_report_filters_by_custom_number_field(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('Год 2024', datetime(2026, 1, 1), {'season': '2024'}),
+            make_competition('Год 2025', datetime(2026, 1, 2), {'season': '2025'}),
+        ]
+    )
+    infos = adapter.get_filtered('', '', '', '', '', custom_filters=[('season', 'number', '2025')])
+    assert [info.student_name for info in infos] == ['Год 2025']
+
+
+def test_report_filters_by_custom_date_field(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('Заявка ранняя', datetime(2026, 1, 1), {'application': '01.01.2026'}),
+            make_competition('Заявка поздняя', datetime(2026, 1, 2), {'application': '15.02.2026'}),
+        ]
+    )
+    infos = adapter.get_filtered('', '', '', '', '', custom_filters=[('application', 'date', '15.02.2026')])
+    assert [info.student_name for info in infos] == ['Заявка поздняя']

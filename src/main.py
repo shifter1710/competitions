@@ -508,7 +508,26 @@ def validate_report_filters(args: dict) -> str | None:
     return None
 
 
-def get_student_infos(request: Request) -> Iterable[StudentInfo]:
+def collect_custom_filters(request: Request) -> tuple[list[tuple[str, str, str]], str | None]:
+    fields = {field.key: field for field in get_storage(request.app).get_custom_fields()}
+    filters: list[tuple[str, str, str]] = []
+    for key, raw_values in request.args.items():
+        if not key.startswith('custom__'):
+            continue
+        field = fields.get(key[len('custom__') :])
+        value = raw_values[0].strip() if raw_values else ''
+        if field is None or not value:
+            continue
+        if field.field_type == 'number':
+            try:
+                value = str(int(value))
+            except ValueError:
+                return [], f'Фильтр «{field.label}» должен быть числом'
+        filters.append((field.key, field.field_type, value))
+    return filters, None
+
+
+def get_student_infos(request: Request) -> Iterable[StudentInfo] | None:
     args = dict(request.args)
     storage = get_storage(request.app)
 
@@ -518,6 +537,7 @@ def get_student_infos(request: Request) -> Iterable[StudentInfo]:
         position=get_param(args, 'position'),
         level=get_param(args, 'level'),
         name=get_param(args, 'name'),
+        custom_filters=collect_custom_filters(request)[0],
     )
 
     return student_infos
@@ -1102,7 +1122,7 @@ async def disable_level(request: Request, level_id: str):
 
 @app.get('/report')
 async def get_report(request: Request):
-    error = validate_report_filters(dict(request.args))
+    error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
 
@@ -1133,7 +1153,7 @@ def build_report_dataframe(student_infos: Iterable[StudentInfo]) -> pd.DataFrame
 
 @app.get('/export/report')
 async def export_report(request: Request):
-    error = validate_report_filters(dict(request.args))
+    error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
 

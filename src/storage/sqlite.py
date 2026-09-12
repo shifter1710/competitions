@@ -285,6 +285,7 @@ class SQLiteAdapter:
         position: str,
         level: str,
         name: str,
+        custom_filters: Iterable[tuple[str, str, str]] = (),
     ) -> list[StudentInfo]:
         with self._lock:
             filters = ["review_status = 'approved'"]
@@ -317,6 +318,18 @@ class SQLiteAdapter:
             if name:
                 filters.append('student_name LIKE ?')
                 params.append(f'%{name}%')
+
+            for key, field_type, value in custom_filters:
+                column = f'json_extract(extra_data, \'$."' + key + '"\')'
+                if field_type == 'number':
+                    filters.append(f'CAST({column} AS INTEGER) = ?')
+                    params.append(int(value))
+                elif field_type == 'date':
+                    filters.append(f'{column} = ?')
+                    params.append(value)
+                else:
+                    filters.append(f'{column} LIKE ?')
+                    params.append(f'%{value}%')
 
             where_clause = f'WHERE {" AND ".join(filters)}' if filters else ''
             rows = self.connection.execute(
