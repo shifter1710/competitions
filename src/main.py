@@ -1049,8 +1049,9 @@ async def update_competition(request: Request, record_id: str):
         return text(body=f'Invalid row data: {exc}', status=400)
 
     storage.update_competition(numeric_id, competition)
-    # Роль решает статус после правки: модератор подтверждает, атлет/эдитор
-    # отправляет на повторную проверку — независимо от прежнего статуса.
+    # Роль решает статус после правки: модератор (admin/editor)
+    # подтверждает, атлет отправляет на повторную проверку — независимо
+    # от прежнего статуса записи.
     if user_is_moderator(request):
         storage.set_competition_review(numeric_id, 'approved')
     else:
