@@ -782,6 +782,7 @@ async def reports_page(request: Request):
             'request': request,
             'custom_fields': storage.get_custom_fields(),
             'levels': storage.get_level_names(),
+            'report_export_columns': REPORT_EXPORT_COLUMNS,
         },
     )
 
@@ -1992,9 +1993,32 @@ def sanitize_spreadsheet_value(value):
     return value
 
 
-def build_report_dataframe(student_infos: Iterable[StudentInfo]) -> pd.DataFrame:
+def parse_report_export_columns(request: Request) -> tuple[Sequence[str], str | None]:
+    """Выбор колонок для выгрузки отчёта (GET-параметр ``columns``).
+
+    Формат — повторённые параметры и/или список через запятую. Порядок в
+    файле всегда канонический (как в HTML-отчёте), неизвестные имена
+    игнорируются. Без параметра — полный набор (обратная совместимость;
+    пустой ``?columns=`` парсер запроса отбрасывает так же, как отсутствие
+    параметра). Параметр есть, но валидных колонок не осталось — 400:
+    минимум одна колонка обязательна.
+    """
+    raw_values = request.args.getlist('columns')
+    if not raw_values:
+        return list(REPORT_EXPORT_COLUMNS), None
+    requested = {part.strip() for value in raw_values for part in value.split(',') if part.strip()}
+    columns = [column for column in REPORT_EXPORT_COLUMNS if column in requested]
+    if not columns:
+        return [], 'Не выбрано ни одной колонки для выгрузки'
+    return columns, None
+
+
+def build_report_dataframe(
+    student_infos: Iterable[StudentInfo],
+    columns: Sequence[str] = REPORT_EXPORT_COLUMNS,
+) -> pd.DataFrame:
     df = pd.DataFrame.from_records([info.model_dump(by_alias=True) for info in student_infos])
-    df = df.reindex(columns=REPORT_EXPORT_COLUMNS)
+    df = df.reindex(columns=columns)
     for column in df.columns:
         if df[column].dtype == object:
             df[column] = df[column].map(sanitize_spreadsheet_value)
@@ -2003,14 +2027,18 @@ def build_report_dataframe(student_infos: Iterable[StudentInfo]) -> pd.DataFrame
 
 @app.get('/export/report')
 async def export_report(request: Request):
+    # Доступ как у просмотра отчёта: всем, кроме athlete.
     if user_is_athlete(request):
         return text(body='Forbidden', status=403)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
+    columns, columns_error = parse_report_export_columns(request)
+    if columns_error:
+        return text(body=columns_error, status=400)
 
     student_infos = get_student_infos(request)
-    df = await asyncio.to_thread(build_report_dataframe, student_infos)
+    df = await asyncio.to_thread(build_report_dataframe, student_infos, columns)
 
     now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'

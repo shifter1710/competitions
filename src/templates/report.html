@@ -64,6 +64,29 @@
     </div>
 </form>
 
+<form class="report-export-form" method="get" action="/export/report">
+    <h3 class="title">Выгрузить в Excel</h3>
+    <div class="row align-items-center">
+        {% for column in report_export_columns %}
+        <div class="col-auto">
+            <label class="form-check report-export-form__column">
+                <input
+                    class="form-check-input report-export-column"
+                    type="checkbox"
+                    name="columns"
+                    value="{{ column }}"
+                    checked
+                >
+                <span class="form-check-label">{{ column }}</span>
+            </label>
+        </div>
+        {% endfor %}
+        <div class="col-auto">
+            <button class="report-export-form__button btn btn-success" type="submit">Экспорт</button>
+        </div>
+    </div>
+</form>
+
 <div class="content-wrapper">
     <div class="empty-content">Задайте условия фильтра и нажмите «Сформировать отчет»</div>
 </div>
