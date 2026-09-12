@@ -1,0 +1,131 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Кастомные поля{% endblock admin_title %}
+{% block admin_description %}Администратор задаёт дополнительные колонки, видимость в таблице, выгрузке и шаблоне.{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <form action="/admin/fields" class="row g-3 mb-4" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-3">
+                <label class="form-label" for="field-label">Название поля</label>
+                <input class="form-control" id="field-label" name="label" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="field-type">Тип</label>
+                <select class="form-select" id="field-type" name="field_type">
+                    {% for option in field_type_options %}
+                    <option value="{{ option }}">{{ option }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="field-order">Порядок</label>
+                <input class="form-control" id="field-order" name="sort_order" type="number" value="0">
+            </div>
+            <div class="col-md-5 d-flex flex-wrap align-items-end gap-3">
+                <div class="form-check">
+                    <input class="form-check-input" id="field-required" name="required" type="checkbox">
+                    <label class="form-check-label" for="field-required">Обязательное</label>
+                </div>
+                <div class="form-check">
+                    <input checked class="form-check-input" id="field-table" name="show_in_table" type="checkbox">
+                    <label class="form-check-label" for="field-table">В таблице</label>
+                </div>
+                <div class="form-check">
+                    <input checked class="form-check-input" id="field-export" name="show_in_export" type="checkbox">
+                    <label class="form-check-label" for="field-export">В Excel</label>
+                </div>
+                <div class="form-check">
+                    <input checked class="form-check-input" id="field-template" name="show_in_template" type="checkbox">
+                    <label class="form-check-label" for="field-template">В шаблоне</label>
+                </div>
+                <button class="btn btn-primary" type="submit">Добавить поле</button>
+            </div>
+        </form>
+
+        {% if admin_custom_fields %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Поле</th>
+                        <th>Тип</th>
+                        <th>Порядок</th>
+                        <th>Флаги</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for field in admin_custom_fields %}
+                    <tr>
+                        <td colspan="5">
+                            <form action="/admin/fields/{{ field.field_id }}" class="row g-2 field-form align-items-end" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <div class="col-md-3">
+                                    <label class="form-label">Название</label>
+                                    <input class="form-control" name="label" type="text" value="{{ field.label }}" required>
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label">Тип</label>
+                                    <select class="form-select" name="field_type">
+                                        {% for option in field_type_options %}
+                                        <option value="{{ option }}"{% if option == field.field_type %} selected{% endif %}>{{ option }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="col-md-1">
+                                    <label class="form-label">Порядок</label>
+                                    <input class="form-control" name="sort_order" type="number" value="{{ field.sort_order }}">
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="field-form__checks">
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="required-{{ field.field_id }}" name="required" type="checkbox"{% if field.required %} checked{% endif %}>
+                                            <label class="form-check-label" for="required-{{ field.field_id }}">Обязательное</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="table-{{ field.field_id }}" name="show_in_table" type="checkbox"{% if field.show_in_table %} checked{% endif %}>
+                                            <label class="form-check-label" for="table-{{ field.field_id }}">В таблице</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="export-{{ field.field_id }}" name="show_in_export" type="checkbox"{% if field.show_in_export %} checked{% endif %}>
+                                            <label class="form-check-label" for="export-{{ field.field_id }}">В Excel</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="template-{{ field.field_id }}" name="show_in_template" type="checkbox"{% if field.show_in_template %} checked{% endif %}>
+                                            <label class="form-check-label" for="template-{{ field.field_id }}">В шаблоне</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" id="active-{{ field.field_id }}" name="active" type="checkbox"{% if field.active %} checked{% endif %}>
+                                            <label class="form-check-label" for="active-{{ field.field_id }}">Активно</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-2 field-form__actions">
+                                    <button class="btn btn-sm btn-outline-primary" type="submit">Сохранить</button>
+                                    <button
+                                        class="btn btn-sm btn-outline-danger"
+                                        formaction="/admin/fields/{{ field.field_id }}/delete"
+                                        formmethod="post"
+                                        type="submit"
+                                    >
+                                        Отключить
+                                    </button>
+                                </div>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted">Дополнительных полей пока нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock admin_content %}

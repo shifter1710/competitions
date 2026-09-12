@@ -1,0 +1,41 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Объединение студентов (merge){% endblock admin_title %}
+{% block admin_description %}
+    Переносит все записи со старого ФИО на новое (по хэшу студента).
+    Сначала «Предпросмотр», затем «Объединить» — действие необратимо.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <form class="merge-form row g-3">
+            <div class="col-md-5">
+                <label class="form-label" for="merge-from-name">ФИО-источник (старое)</label>
+                <input class="form-control" id="merge-from-name" name="from_name" type="text" autocomplete="off" list="student-names-list" required>
+            </div>
+            <div class="col-md-5">
+                <label class="form-label" for="merge-to-name">ФИО-цель (новое)</label>
+                <input class="form-control" id="merge-to-name" name="to_name" type="text" autocomplete="off" list="student-names-list" required>
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+                <button class="btn btn-outline-primary w-100 merge-preview-button" type="submit">Предпросмотр</button>
+            </div>
+            <div class="col-12 merge-controls d-none">
+                <div class="form-check mb-2">
+                    <input checked class="form-check-input" id="merge-rewrite-names" name="rewrite_names" type="checkbox">
+                    <label class="form-check-label" for="merge-rewrite-names">
+                        Переписать отображаемые ФИО в записях (исторические ФИО в существующих записях будут изменены на новые)
+                    </label>
+                </div>
+                <button class="btn btn-success merge-apply-button" type="button" disabled>Объединить</button>
+            </div>
+            <div class="col-12 merge-status"></div>
+        </form>
+
+        <datalist id="student-names-list"></datalist>
+    </div>
+</div>
+
+{% endblock admin_content %}

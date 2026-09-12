@@ -1,0 +1,59 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Уровни соревнований{% endblock admin_title %}
+{% block admin_description %}Список используется в формах и фильтрах. Новые уровни из импортируемых файлов добавляются автоматически.{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <form action="/admin/levels" class="row g-2 align-items-end mb-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="level-name">Название уровня</label>
+                <input class="form-control" id="level-name" name="name" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">Добавить</button>
+            </div>
+        </form>
+
+        {% if admin_levels %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Уровень</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for level in admin_levels %}
+                    <tr>
+                        <td>
+                            <form action="/admin/levels/{{ level.id }}" class="d-flex gap-2" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input class="form-control form-control-sm" name="name" type="text" value="{{ level.name }}" required>
+                                <button class="btn btn-sm btn-outline-primary" type="submit">Переименовать</button>
+                            </form>
+                        </td>
+                        <td>{% if level.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
+                        <td>
+                            <form action="/admin/levels/{{ level.id }}/delete" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-warning" type="submit">Скрыть</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted">Уровней пока нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock admin_content %}

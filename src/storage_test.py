@@ -319,3 +319,92 @@ def test_repeated_merge_does_not_duplicate_alias(adapter):
     _, second_run = merge_for(adapter, old_name, new_name)
     assert second_run == 0
     assert adapter.get_name_aliases(user_id) == [old_name, new_name]
+
+
+def test_wipe_competitions_and_attachments(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('Первый', datetime(2026, 1, 1)),
+            make_competition('Второй', datetime(2026, 2, 1)),
+        ]
+    )
+    adapter.create_attachment(
+        record_id=1,
+        filename='diploma.png',
+        stored_name='stored.png',
+        content_type='image/png',
+        size=100,
+        uploaded_by=None,
+    )
+    adapter.create_attachment(
+        record_id=2,
+        filename='protocol.pdf',
+        stored_name='stored.pdf',
+        content_type='application/pdf',
+        size=200,
+        uploaded_by=None,
+    )
+
+    assert adapter.count_competitions() == 2
+    assert adapter.count_attachments() == 2
+
+    assert adapter.delete_all_attachments() == 2
+    assert adapter.count_attachments() == 0
+    assert adapter.count_competitions() == 2
+    assert adapter.get_attachments() == []
+
+    assert adapter.delete_all_competitions() == 2
+    assert adapter.count_competitions() == 0
+    assert list(adapter.get_competitions()) == []
+
+    # Повторная очистка пустой базы — ноль удалений, без ошибок.
+    assert adapter.delete_all_competitions() == 0
+    assert adapter.delete_all_attachments() == 0
+
+
+def test_wipe_keeps_users_levels_fields_and_audit(adapter):
+    adapter.save_competitions([make_competition('Запись', datetime(2026, 1, 1))])
+    adapter.create_user('admin', 'hash', 'admin')
+    adapter.create_level('городские')
+    adapter.create_custom_field(
+        key='trainer',
+        label='Тренер',
+        field_type='text',
+        required=False,
+        show_in_table=True,
+        show_in_export=True,
+        show_in_template=True,
+        sort_order=0,
+    )
+    adapter.add_audit_event(user_id=1, username='admin', action='db_wiped')
+
+    adapter.delete_all_competitions()
+    adapter.delete_all_attachments()
+
+    assert adapter.get_user('admin') is not None
+    assert 'городские' in adapter.get_level_names()
+    assert [field.label for field in adapter.get_custom_fields()] == ['Тренер']
+    assert [event['action'] for event in adapter.get_audit_events()] == ['db_wiped']
+
+
+def test_get_sport_names_unique_sorted(adapter):
+    skier = make_competition('Лыжников', datetime(2026, 1, 1))
+    skier.sport = 'Лыжи'
+    first_runner = make_competition('Бегунов 1', datetime(2026, 2, 1))
+    second_runner = make_competition('Бегунов 2', datetime(2026, 3, 1))
+    adapter.save_competitions([skier, first_runner, second_runner])
+
+    assert adapter.get_sport_names() == ['Бег', 'Лыжи']
+
+
+def test_list_users_includes_name_aliases(adapter):
+    adapter.create_user('anna', 'hash', 'athlete')
+    user_id = adapter.get_user('anna')['id']
+    adapter.add_name_alias(user_id, 'Иванова Анна Петровна')
+
+    users = adapter.list_users()
+    assert len(users) == 1
+    assert users[0]['username'] == 'anna'
+    assert users[0]['role'] == 'athlete'
+    assert users[0]['active'] == 1
+    assert users[0]['name_aliases'] == ['Иванова Анна Петровна']

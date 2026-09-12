@@ -1,0 +1,16 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+<div class="d-flex flex-column flex-sm-row justify-content-between gap-2 align-items-sm-center mb-4">
+    <div>
+        <h3 class="title mb-1">{% block admin_title %}{% endblock admin_title %}</h3>
+        <div class="text-muted">{% block admin_description %}{% endblock admin_description %}</div>
+    </div>
+    <a class="btn btn-outline-secondary align-self-sm-start" href="/admin">← В админку</a>
+</div>
+
+{% block admin_content %}
+{% endblock admin_content %}
+
+{% endblock content %}

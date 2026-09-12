@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import secrets
+import shutil
 import time
 import uuid
 from datetime import datetime
@@ -67,6 +68,11 @@ ATHLETE_ROLE = 'athlete'
 MODERATOR_ROLES = {ADMIN_ROLE, EDITOR_ROLE}
 WRITE_ROLES = {ADMIN_ROLE, EDITOR_ROLE, ATHLETE_ROLE}
 KNOWN_ROLES = {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE}
+
+# Очистка базы — явное админское действие в два шага (объём + фраза).
+# См. docs/data-model-decisions.md «Очистка и выгрузка базы».
+WIPE_SCOPES = ('records', 'records_attachments', 'attachments')
+WIPE_CONFIRM_PHRASE = 'УДАЛИТЬ'
 
 INSECURE_SECRET_VALUES = {'', 'change-me', 'replace-with-random-string'}
 LOGIN_MAX_ATTEMPTS = 5
@@ -427,14 +433,22 @@ def require_writer(request: Request):
     return None
 
 
-def build_redirect_with_message(*, message: str | None = None, error: str | None = None):
+def build_redirect_with_message(*, message: str | None = None, error: str | None = None, url: str = '/'):
     params = {}
     if message:
         params['admin_message'] = message
     if error:
         params['admin_error'] = error
     query = urlencode(params)
-    return redirect(f'/?{query}' if query else '/')
+    return redirect(f'{url}?{query}' if query else url)
+
+
+def get_flash_args(request: Request) -> dict[str, str | None]:
+    args = dict(request.args)
+    return {
+        'admin_message': get_param(args, 'admin_message'),
+        'admin_error': get_param(args, 'admin_error'),
+    }
 
 
 def validate_import_columns(df: pd.DataFrame):
@@ -770,22 +784,92 @@ async def admin_page(request: Request):
     auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
-    storage = get_storage(request.app)
-    is_admin = user_is_admin(request)
     return await render(
         template_name=jinja_env.get_template('admin.html'),
         context={
             'request': request,
             'can_import': user_is_moderator(request),
-            'is_admin': is_admin,
-            'admin_custom_fields': storage.get_custom_fields(include_inactive=True) if is_admin else [],
+            'is_admin': user_is_admin(request),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/import')
+async def admin_import_page(request: Request):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    return await render(
+        template_name=jinja_env.get_template('admin_import.html'),
+        context={
+            'request': request,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/fields')
+async def admin_fields_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    return await render(
+        template_name=jinja_env.get_template('admin_fields.html'),
+        context={
+            'request': request,
+            'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
             'field_type_options': FIELD_TYPE_OPTIONS,
-            'users': storage.list_users() if is_admin else [],
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/levels')
+async def admin_levels_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    return await render(
+        template_name=jinja_env.get_template('admin_levels.html'),
+        context={
+            'request': request,
+            'admin_levels': storage.list_levels(),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/users')
+async def admin_users_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    return await render(
+        template_name=jinja_env.get_template('admin_users.html'),
+        context={
+            'request': request,
+            'users': storage.list_users(),
             'user_roles': USER_ROLES,
-            'admin_levels': storage.list_levels() if is_admin else [],
             'current_username': (get_auth_user(request) or {}).get('username'),
-            'admin_message': get_param(dict(request.args), 'admin_message'),
-            'admin_error': get_param(dict(request.args), 'admin_error'),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/students')
+async def admin_students_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    return await render(
+        template_name=jinja_env.get_template('admin_students.html'),
+        context={
+            'request': request,
+            **get_flash_args(request),
         },
     )
 
@@ -1200,9 +1284,9 @@ async def create_custom_field(request: Request):
     label = get_form_value(request, 'label').strip()
     field_type = get_form_value(request, 'field_type').strip() or 'text'
     if not label:
-        return build_redirect_with_message(error='Название поля обязательно')
+        return build_redirect_with_message(error='Название поля обязательно', url='/admin/fields')
     if field_type not in FIELD_TYPE_OPTIONS:
-        return build_redirect_with_message(error='Недопустимый тип поля')
+        return build_redirect_with_message(error='Недопустимый тип поля', url='/admin/fields')
 
     try:
         storage.create_custom_field(
@@ -1216,8 +1300,8 @@ async def create_custom_field(request: Request):
             sort_order=int(get_form_value(request, 'sort_order') or 0),
         )
     except Exception as exc:
-        return build_redirect_with_message(error=f'Не удалось создать поле: {exc}')
-    return build_redirect_with_message(message='Поле добавлено')
+        return build_redirect_with_message(error=f'Не удалось создать поле: {exc}', url='/admin/fields')
+    return build_redirect_with_message(message='Поле добавлено', url='/admin/fields')
 
 
 @app.post('/admin/fields/<field_id>')
@@ -1234,14 +1318,14 @@ async def update_custom_field(request: Request, field_id: str):
     label = get_form_value(request, 'label').strip()
     field_type = get_form_value(request, 'field_type').strip() or 'text'
     if not label:
-        return build_redirect_with_message(error='Название поля обязательно')
+        return build_redirect_with_message(error='Название поля обязательно', url='/admin/fields')
     if field_type not in FIELD_TYPE_OPTIONS:
-        return build_redirect_with_message(error='Недопустимый тип поля')
+        return build_redirect_with_message(error='Недопустимый тип поля', url='/admin/fields')
 
     try:
         sort_order = int(get_form_value(request, 'sort_order') or 0)
     except ValueError:
-        return build_redirect_with_message(error='Порядок должен быть числом')
+        return build_redirect_with_message(error='Порядок должен быть числом', url='/admin/fields')
 
     storage = get_storage(request.app)
     storage.update_custom_field(
@@ -1255,7 +1339,7 @@ async def update_custom_field(request: Request, field_id: str):
         sort_order=sort_order,
         active=parse_checkbox(request, 'active'),
     )
-    return build_redirect_with_message(message='Настройки поля сохранены')
+    return build_redirect_with_message(message='Настройки поля сохранены', url='/admin/fields')
 
 
 @app.post('/admin/fields/<field_id>/delete')
@@ -1271,7 +1355,7 @@ async def delete_custom_field(request: Request, field_id: str):
 
     storage = get_storage(request.app)
     storage.disable_custom_field(numeric_field_id)
-    return build_redirect_with_message(message='Поле отключено')
+    return build_redirect_with_message(message='Поле отключено', url='/admin/fields')
 
 
 @app.post('/admin/users')
@@ -1285,16 +1369,18 @@ async def create_user(request: Request):
     password = get_form_value(request, 'password')
     role = get_form_value(request, 'role').strip()
     if not username:
-        return build_redirect_with_message(error='Имя пользователя обязательно')
+        return build_redirect_with_message(error='Имя пользователя обязательно', url='/admin/users')
     if role not in USER_ROLES:
-        return build_redirect_with_message(error='Недопустимая роль')
+        return build_redirect_with_message(error='Недопустимая роль', url='/admin/users')
     if len(password) < MIN_PASSWORD_LENGTH:
-        return build_redirect_with_message(error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов')
+        return build_redirect_with_message(
+            error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов', url='/admin/users'
+        )
     if storage.get_user(username) is not None:
-        return build_redirect_with_message(error='Пользователь уже существует')
+        return build_redirect_with_message(error='Пользователь уже существует', url='/admin/users')
 
     storage.create_user(username, hash_password(password), role)
-    return build_redirect_with_message(message='Пользователь добавлен')
+    return build_redirect_with_message(message='Пользователь добавлен', url='/admin/users')
 
 
 @app.post('/admin/users/<user_id>/password')
@@ -1310,19 +1396,21 @@ async def reset_user_password(request: Request, user_id: str):
 
     password = get_form_value(request, 'password')
     if len(password) < MIN_PASSWORD_LENGTH:
-        return build_redirect_with_message(error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов')
+        return build_redirect_with_message(
+            error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов', url='/admin/users'
+        )
 
     storage = get_storage(request.app)
     target_user = storage.get_user_by_id(numeric_user_id)
     if target_user is None:
-        return build_redirect_with_message(error='Пользователь не найден')
+        return build_redirect_with_message(error='Пользователь не найден', url='/admin/users')
     storage.set_user_password(numeric_user_id, hash_password(password))
     log_audit_event(
         request,
         'password_changed',
         {'target_user_id': numeric_user_id, 'target_username': target_user['username']},
     )
-    return build_redirect_with_message(message='Пароль обновлён')
+    return build_redirect_with_message(message='Пароль обновлён', url='/admin/users')
 
 
 @app.post('/admin/users/<user_id>/active')
@@ -1339,12 +1427,12 @@ async def toggle_user_active(request: Request, user_id: str):
     storage = get_storage(request.app)
     user = storage.get_user_by_id(numeric_user_id)
     if user is None:
-        return build_redirect_with_message(error='Пользователь не найден')
+        return build_redirect_with_message(error='Пользователь не найден', url='/admin/users')
     if user['username'] == (get_auth_user(request) or {}).get('username'):
-        return build_redirect_with_message(error='Нельзя отключить собственную учётную запись')
+        return build_redirect_with_message(error='Нельзя отключить собственную учётную запись', url='/admin/users')
 
     storage.set_user_active(numeric_user_id, not user['active'])
-    return build_redirect_with_message(message='Статус пользователя изменён')
+    return build_redirect_with_message(message='Статус пользователя изменён', url='/admin/users')
 
 
 def build_attachments_by_record(all_attachments: list[dict]) -> dict[int, list[dict]]:
@@ -1476,12 +1564,12 @@ async def create_level(request: Request):
 
     name = get_form_value(request, 'name').strip()
     if not name:
-        return build_redirect_with_message(error='Название уровня обязательно')
+        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/levels')
     if name in get_storage(request.app).get_level_names(include_inactive=True):
-        return build_redirect_with_message(error='Такой уровень уже существует')
+        return build_redirect_with_message(error='Такой уровень уже существует', url='/admin/levels')
 
     get_storage(request.app).create_level(name)
-    return build_redirect_with_message(message='Уровень добавлен')
+    return build_redirect_with_message(message='Уровень добавлен', url='/admin/levels')
 
 
 @app.post('/admin/levels/<level_id>')
@@ -1497,10 +1585,10 @@ async def rename_level(request: Request, level_id: str):
 
     name = get_form_value(request, 'name').strip()
     if not name:
-        return build_redirect_with_message(error='Название уровня обязательно')
+        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/levels')
 
     get_storage(request.app).rename_level(numeric_level_id, name)
-    return build_redirect_with_message(message='Уровень переименован')
+    return build_redirect_with_message(message='Уровень переименован', url='/admin/levels')
 
 
 @app.post('/admin/levels/<level_id>/delete')
@@ -1515,7 +1603,7 @@ async def disable_level(request: Request, level_id: str):
         return text(body='Invalid level id', status=400)
 
     get_storage(request.app).disable_level(numeric_level_id)
-    return build_redirect_with_message(message='Уровень скрыт из списков')
+    return build_redirect_with_message(message='Уровень скрыт из списков', url='/admin/levels')
 
 
 @app.post('/admin/users/<user_id>/alias')
@@ -1531,11 +1619,11 @@ async def add_user_alias(request: Request, user_id: str):
 
     storage = get_storage(request.app)
     if storage.get_user_by_id(numeric_user_id) is None:
-        return build_redirect_with_message(error='Пользователь не найден')
+        return build_redirect_with_message(error='Пользователь не найден', url='/admin/users')
 
     name = get_form_value(request, 'name').strip()
     if not name:
-        return build_redirect_with_message(error='ФИО обязательно')
+        return build_redirect_with_message(error='ФИО обязательно', url='/admin/users')
 
     target_user = storage.get_user_by_id(numeric_user_id)
     storage.add_name_alias(numeric_user_id, name)
@@ -1548,7 +1636,7 @@ async def add_user_alias(request: Request, user_id: str):
             'name': name,
         },
     )
-    return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту')
+    return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту', url='/admin/users')
 
 
 @app.post('/admin/students/merge')
@@ -1602,18 +1690,156 @@ async def merge_students(request: Request):
     )
 
 
+@app.get('/admin/maintenance')
+async def admin_maintenance_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    return await render(
+        template_name=jinja_env.get_template('admin_maintenance.html'),
+        context={
+            'request': request,
+            'wipe_confirm_phrase': WIPE_CONFIRM_PHRASE,
+            'records_count': storage.count_competitions(),
+            'attachments_count': storage.count_attachments(),
+            **get_flash_args(request),
+        },
+    )
+
+
+def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    for column in df.columns:
+        if df[column].dtype == object:
+            df[column] = df[column].map(sanitize_spreadsheet_value)
+    return df
+
+
+def build_users_dataframe(users: Sequence[dict]) -> pd.DataFrame:
+    rows = [
+        {
+            'Логин': user['username'],
+            'Роль': user['role'],
+            'Активен': 'да' if user.get('active') else 'нет',
+            'Псевдонимы ФИО': ', '.join(user.get('name_aliases') or []),
+        }
+        for user in users
+    ]
+    return sanitize_dataframe(pd.DataFrame.from_records(rows, columns=['Логин', 'Роль', 'Активен', 'Псевдонимы ФИО']))
+
+
+def build_levels_dataframe(levels: Sequence[dict]) -> pd.DataFrame:
+    rows = [{'Уровень': level['name'], 'Статус': 'активен' if level.get('active') else 'скрыт'} for level in levels]
+    return sanitize_dataframe(pd.DataFrame.from_records(rows, columns=['Уровень', 'Статус']))
+
+
+def build_sports_dataframe(sport_names: Sequence[str]) -> pd.DataFrame:
+    return sanitize_dataframe(
+        pd.DataFrame.from_records([{'Вид спорта': name} for name in sport_names], columns=['Вид спорта'])
+    )
+
+
+def build_database_export_frames(storage: SQLiteAdapter) -> dict[str, pd.DataFrame]:
+    """All database sheets for the maintenance export (one xlsx, one sheet per entity)."""
+    competitions = storage.get_competitions()
+    export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
+    return {
+        'Записи': build_index_dataframe(competitions, export_custom_fields),
+        'Пользователи': build_users_dataframe(storage.list_users()),
+        'Уровни': build_levels_dataframe(storage.list_levels()),
+        'Виды спорта': build_sports_dataframe(storage.get_sport_names()),
+    }
+
+
+def write_database_workbook(frames: dict[str, pd.DataFrame], buffer: BytesIO) -> None:
+    with pd.ExcelWriter(buffer) as writer:
+        for sheet_name, frame in frames.items():
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
+
+
+@app.get('/admin/maintenance/export')
+async def export_database(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    frames = await asyncio.to_thread(build_database_export_frames, storage)
+    buffer = BytesIO()
+    await asyncio.to_thread(write_database_workbook, frames, buffer)
+
+    now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
+    filename = f'База_данных_{now_str}.xlsx'
+    return raw(
+        buffer.getvalue(),
+        headers={
+            'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'content-disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def remove_attachment_files() -> None:
+    """Remove uploaded attachment files only (data/files), nothing else inside data/."""
+    files_dir = Path(settings.data_folder) / 'files'
+    if files_dir.is_dir():
+        shutil.rmtree(files_dir, ignore_errors=True)
+
+
+@app.post('/admin/maintenance/wipe')
+async def wipe_database(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    scope = get_form_value(request, 'scope').strip()
+    confirm_phrase = get_form_value(request, 'confirm_phrase').strip()
+    if scope not in WIPE_SCOPES:
+        return text(body='Некорректный объём очистки', status=400)
+    if confirm_phrase != WIPE_CONFIRM_PHRASE:
+        return text(body=f'Для подтверждения введите слово «{WIPE_CONFIRM_PHRASE}»', status=400)
+
+    storage = get_storage(request.app)
+    records_deleted = 0
+    attachments_deleted = 0
+    if scope in ('records', 'records_attachments'):
+        records_deleted = storage.delete_all_competitions()
+    if scope in ('records_attachments', 'attachments'):
+        attachments_deleted = storage.delete_all_attachments()
+        remove_attachment_files()
+
+    log_audit_event(
+        request,
+        'db_wiped',
+        {
+            'scope': scope,
+            'records_deleted': records_deleted,
+            'attachments_deleted': attachments_deleted,
+        },
+    )
+    summary = f'Очистка выполнена: удалено записей {records_deleted}, вложений {attachments_deleted}'
+    return build_redirect_with_message(message=summary, url='/admin/maintenance')
+
+
 @app.get('/admin/audit')
 async def audit_page(request: Request):
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
 
-    events = get_storage(request.app).get_audit_events(limit=AUDIT_PAGE_LIMIT)
+    events: list[dict] = []
+    audit_available = True
+    try:
+        events = get_storage(request.app).get_audit_events(limit=AUDIT_PAGE_LIMIT)
+    except Exception:
+        logger.exception('Failed to read audit events')
+        audit_available = False
     return await render(
         template_name=jinja_env.get_template('audit.html'),
         context={
             'request': request,
             'events': events,
+            'audit_available': audit_available,
         },
     )
 
