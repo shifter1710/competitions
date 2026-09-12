@@ -90,7 +90,7 @@
 {% endif %}
 
 <div class="buttons">
-    {% if is_moderator %}
+    {% if can_write %}
     <button type="button" class="add-empty-row-button btn btn-success">+ Пустая строка</button>
     {% endif %}
     {% if not is_athlete %}

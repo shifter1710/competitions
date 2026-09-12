@@ -143,6 +143,10 @@ class Main {
                 this.fillProfileForm();
                 this.checkStudentNameHint(this.loadProfile().student_name);
             });
+        } else if (this.isAthlete) {
+            // На странице таблицы формы профиля нет, но профиль нужен для
+            // автоподстановки в новые записи (форма и инлайн-строка).
+            this.fetchProfile().then(() => this.applyProfileToManualForm());
         }
         if (this.profileFormCancelButton) {
             this.profileFormCancelButton.addEventListener("click", () => this.resetProfile());
@@ -469,15 +473,32 @@ class Main {
             .catch(() => {});
     }
 
+    // Автоподстановка из профиля (docs/data-model-decisions.md): профиль
+    // подставляет значения в новые записи атлета, пока поле не заполнено
+    // в форме; введённое вручную всегда приоритетнее.
+    getProfileFieldDefaults() {
+        if (!this.isAthlete) {
+            return {};
+        }
+        const profile = this.loadProfile();
+        const defaults = {};
+        ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
+            const value = String(profile[key] ?? "").trim();
+            if (value) {
+                defaults[key] = value;
+            }
+        });
+        return defaults;
+    }
+
     applyProfileToManualForm() {
         if (!this.isAthlete || !this.manualForm) {
             return;
         }
-        const profile = this.loadProfile();
-        ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
+        Object.entries(this.getProfileFieldDefaults()).forEach(([key, value]) => {
             const input = this.manualForm.querySelector(`[name="${key}"]`);
-            if (input && !input.value && profile[key]) {
-                input.value = profile[key];
+            if (input && !input.value) {
+                input.value = value;
             }
         });
     }
@@ -831,6 +852,7 @@ class Main {
         }
 
         const fieldTypes = this.getCustomFieldTypes();
+        const profileDefaults = this.getProfileFieldDefaults();
         const row = document.createElement("tr");
         row.classList.add("row-editing", "row-new");
 
@@ -849,11 +871,13 @@ class Main {
                 row.append(cell);
                 return;
             }
-            cell.append(this.createInlineInput(key, "", fieldTypes));
+            cell.append(this.createInlineInput(key, profileDefaults[key] ?? "", fieldTypes));
             row.append(cell);
         });
 
-        tbody.append(row);
+        // Новая строка открывается первой строкой таблицы, сразу после
+        // заголовков, — до неё не нужно прокручивать сотню записей.
+        tbody.prepend(row);
         this.newEditRow = row;
 
         const dateInput = row.querySelector('[data-edit-key="date"]');
@@ -868,10 +892,12 @@ class Main {
             () => this.saveNewRowEdit(),
             () => this.cancelNewRowEdit()
         );
-        const firstInput = row.querySelector("[data-edit-key]");
-        if (firstInput) {
-            firstInput.focus();
-        }
+        row.scrollIntoView({behavior: "smooth", block: "center"});
+        // Фокус на первое незаполненное поле (при автоподстановке из профиля
+        // заполненные пропускаем); preventScroll, чтобы не сбивать плавную
+        // прокрутку к строке.
+        const inputs = Array.from(row.querySelectorAll("[data-edit-key]"));
+        (inputs.find((input) => !input.value) || inputs[0])?.focus({preventScroll: true});
     }
 
     saveNewRowEdit() {
