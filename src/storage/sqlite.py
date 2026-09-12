@@ -158,7 +158,11 @@ class SQLiteAdapter:
             active=bool(row['active']),
         )
 
-    def get_competitions(self, owner_id: int | None = None) -> Iterable[Competition]:
+    def get_competitions(
+        self,
+        owner_id: int | None = None,
+        student_id_hash: str | None = None,
+    ) -> Iterable[Competition]:
         with self._lock:
             query = '''
                 SELECT
@@ -182,11 +186,16 @@ class SQLiteAdapter:
                 FROM competitions
                 '''
             if owner_id is not None:
-                query += 'WHERE owner_id = ?\n'
-            query += 'ORDER BY created_at ASC'
-            if owner_id is not None:
-                rows = self.connection.execute(query, (owner_id,)).fetchall()
+                if student_id_hash:
+                    query += 'WHERE (owner_id = ? OR student_id = ?)\n'
+                    params: tuple = (owner_id, student_id_hash)
+                else:
+                    query += 'WHERE owner_id = ?\n'
+                    params = (owner_id,)
+                query += 'ORDER BY created_at ASC'
+                rows = self.connection.execute(query, params).fetchall()
             else:
+                query += 'ORDER BY created_at ASC'
                 rows = self.connection.execute(query).fetchall()
             return [self._row_to_competition(row) for row in rows]
 
@@ -596,7 +605,7 @@ class SQLiteAdapter:
     def get_competition_review(self, record_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, review_status, owner_id FROM competitions WHERE id = ?',
+                'SELECT id, review_status, owner_id, student_id FROM competitions WHERE id = ?',
                 (record_id,),
             ).fetchone()
             return dict(row) if row else None

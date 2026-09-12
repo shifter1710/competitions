@@ -341,10 +341,26 @@ def user_is_athlete(request: Request) -> bool:
     return bool(user and user['role'] == ATHLETE_ROLE)
 
 
+def profile_student_id_hash(request: Request) -> str | None:
+    if not user_is_athlete(request):
+        return None
+    user_id = get_current_user_id(request)
+    if user_id is None:
+        return None
+    student_name = get_storage(request.app).get_profile(user_id).get('student_name', '')
+    student_name = student_name.strip()
+    if not student_name:
+        return None
+    return hashlib.sha256(student_name.encode()).hexdigest()
+
+
 def user_owns_record(request: Request, review: dict) -> bool:
     if not user_is_athlete(request):
         return True
-    return review.get('owner_id') == get_current_user_id(request)
+    if review.get('owner_id') == get_current_user_id(request):
+        return True
+    expected_hash = profile_student_id_hash(request)
+    return bool(expected_hash and review.get('student_id') == expected_hash)
 
 
 def require_admin(request: Request):
@@ -662,7 +678,8 @@ async def index(request: Request):
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
     owner_filter = get_current_user_id(request) if user_is_athlete(request) else None
-    competitions = storage.get_competitions(owner_id=owner_filter)
+    profile_hash = profile_student_id_hash(request)
+    competitions = storage.get_competitions(owner_id=owner_filter, student_id_hash=profile_hash)
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
@@ -980,11 +997,10 @@ async def update_competition(request: Request, record_id: str):
     storage.update_competition(numeric_id, competition)
     review = storage.get_competition_review(numeric_id)
     if review and review['review_status'] != 'approved':
-        current_user_id = get_current_user_id(request)
-        if review['owner_id'] == current_user_id:
-            storage.set_competition_review(numeric_id, 'pending')
-        else:
+        if user_is_moderator(request):
             storage.set_competition_review(numeric_id, 'approved')
+        else:
+            storage.set_competition_review(numeric_id, 'pending')
     return redirect(to='/')
 
 

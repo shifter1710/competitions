@@ -95,7 +95,13 @@ def test_review_lifecycle(adapter):
     record_id = int(adapter.get_competitions()[0].record_id)
 
     review = adapter.get_competition_review(record_id)
-    assert review == {'id': record_id, 'review_status': 'pending', 'owner_id': 7}
+    expected_hash = make_competition('Спортсменов', datetime(2026, 2, 1)).student_id
+    assert review == {
+        'id': record_id,
+        'review_status': 'pending',
+        'owner_id': 7,
+        'student_id': expected_hash,
+    }
 
     adapter.set_competition_review(record_id, 'rejected', 'проверьте место')
     assert adapter.get_competitions()[0].review_comment == 'проверьте место'
@@ -152,3 +158,23 @@ def test_report_filters_by_custom_date_field(adapter):
     )
     infos = adapter.get_filtered('', '', '', '', '', custom_filters=[('application', 'date', '15.02.2026')])
     assert [info.student_name for info in infos] == ['Заявка поздняя']
+
+
+def test_athlete_sees_admin_created_records_matching_profile(adapter):
+    admin_record = make_competition('Сидоров Сид Сидорович', datetime(2026, 1, 1))
+    adapter.save_competitions([admin_record], owner_id=1)  # создал админ
+    adapter.save_competitions(
+        [make_competition('Сидоров Сид Сидорович', datetime(2026, 2, 1))],
+        review_status='pending',
+        owner_id=5,  # добавил сам атлет
+    )
+    adapter.save_competitions(
+        [make_competition('Чужой Человек', datetime(2026, 3, 1))],
+        owner_id=1,
+    )
+
+    profile_hash = admin_record.student_id
+    visible = adapter.get_competitions(owner_id=5, student_id_hash=profile_hash)
+    names = [comp.student_name for comp in visible]
+    assert names == ['Сидоров Сид Сидорович', 'Сидоров Сид Сидорович']
+    assert 'Чужой Человек' not in names

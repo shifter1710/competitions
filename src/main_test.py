@@ -1188,7 +1188,7 @@ def test_athlete_sees_only_own_records(client: SanicTestClient):
     headers = athlete_headers()
     _, response = client.get('/', headers=headers)
     assert response.status == 200
-    assert app.ctx.storage.get_competitions.call_args[1] == {'owner_id': 1}
+    assert app.ctx.storage.get_competitions.call_args[1] == {'owner_id': 1, 'student_id_hash': None}
 
 
 def test_athlete_cannot_update_foreign_record(client: SanicTestClient):
