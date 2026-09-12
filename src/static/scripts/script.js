@@ -134,7 +134,7 @@ class Main {
         }
         if (this.profileForm) {
             this.profileForm.addEventListener("submit", (event) => this.handleSubmitProfileForm(event));
-            this.fillProfileForm();
+            this.fetchProfile().then(() => this.fillProfileForm());
         }
         if (this.profileFormCancelButton) {
             this.profileFormCancelButton.addEventListener("click", () => this.resetProfile());
@@ -304,22 +304,48 @@ class Main {
         this.applyProfileToManualForm();
     }
 
-    // Источник данных профиля. Когда появится бэкенд, достаточно заменить
-    // тело loadProfile/saveProfile — остальной код работает с объектом profile.
+    // Источник данных профиля — сервер (/api/profile). Профиль хранится
+    // в базе и привязывает записи к аккаунту; localStorage больше не нужен.
     loadProfile() {
-        try {
-            return JSON.parse(localStorage.getItem("athlete-profile") || "{}") || {};
-        } catch {
-            return {};
-        }
+        return this.cachedProfile || {};
+    }
+
+    fetchProfile() {
+        return fetch("/api/profile")
+            .then((response) => (response.ok ? response.json() : {profile: {}}))
+            .then((data) => {
+                this.cachedProfile = data.profile || {};
+                return this.cachedProfile;
+            })
+            .catch(() => {
+                this.cachedProfile = {};
+                return this.cachedProfile;
+            });
     }
 
     saveProfile(profile) {
-        localStorage.setItem("athlete-profile", JSON.stringify(profile));
+        this.cachedProfile = profile;
+        const formData = new FormData();
+        Object.entries(profile).forEach(([key, value]) => formData.append(key, value));
+        formData.append("csrf_token", this.getCsrfToken());
+        return fetch("/api/profile", {method: "POST", body: formData})
+            .then((response) => {
+                if (!response.ok) {
+                    return response.text().then((message) => {
+                        throw new Error(message || "Ошибка сохранения профиля");
+                    });
+                }
+                return response.json();
+            })
+            .then((data) => {
+                this.cachedProfile = data.profile || profile;
+                return this.cachedProfile;
+            });
     }
 
     clearProfile() {
-        localStorage.removeItem("athlete-profile");
+        this.cachedProfile = {};
+        return this.saveProfile({});
     }
 
     handleSubmitProfileForm(event) {
@@ -329,10 +355,17 @@ class Main {
         ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
             profile[key] = String(formData.get(key) || "").trim();
         });
-        this.saveProfile(profile);
-        if (this.profileFormStatus) {
-            this.profileFormStatus.textContent = "Профиль сохранён";
-        }
+        this.saveProfile(profile)
+            .then(() => {
+                if (this.profileFormStatus) {
+                    this.profileFormStatus.textContent = "Профиль сохранён";
+                }
+            })
+            .catch((error) => {
+                if (this.profileFormStatus) {
+                    this.profileFormStatus.textContent = error.message;
+                }
+            });
     }
 
     fillProfileForm() {
