@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime
 
 import pytest
@@ -95,7 +96,13 @@ def test_review_lifecycle(adapter):
     record_id = int(adapter.get_competitions()[0].record_id)
 
     review = adapter.get_competition_review(record_id)
-    assert review == {'id': record_id, 'review_status': 'pending', 'owner_id': 7}
+    expected_hash = make_competition('Спортсменов', datetime(2026, 2, 1)).student_id
+    assert review == {
+        'id': record_id,
+        'review_status': 'pending',
+        'owner_id': 7,
+        'student_id': expected_hash,
+    }
 
     adapter.set_competition_review(record_id, 'rejected', 'проверьте место')
     assert adapter.get_competitions()[0].review_comment == 'проверьте место'
@@ -152,3 +159,71 @@ def test_report_filters_by_custom_date_field(adapter):
     )
     infos = adapter.get_filtered('', '', '', '', '', custom_filters=[('application', 'date', '15.02.2026')])
     assert [info.student_name for info in infos] == ['Заявка поздняя']
+
+
+def test_athlete_sees_admin_created_records_matching_profile(adapter):
+    admin_record = make_competition('Сидоров Сид Сидорович', datetime(2026, 1, 1))
+    adapter.save_competitions([admin_record], owner_id=1)  # создал админ
+    adapter.save_competitions(
+        [make_competition('Сидоров Сид Сидорович', datetime(2026, 2, 1))],
+        review_status='pending',
+        owner_id=5,  # добавил сам атлет
+    )
+    adapter.save_competitions(
+        [make_competition('Чужой Человек', datetime(2026, 3, 1))],
+        owner_id=1,
+    )
+
+    profile_hash = admin_record.student_id
+    visible = adapter.get_competitions(owner_id=5, student_id_hashes=[profile_hash])
+    names = [comp.student_name for comp in visible]
+    assert names == ['Сидоров Сид Сидорович', 'Сидоров Сид Сидорович']
+    assert 'Чужой Человек' not in names
+
+
+def with_real_hash(competition):
+    competition.student_id = hashlib.sha256(competition.student_name.encode()).hexdigest()
+    return competition
+
+
+def test_alias_survives_surname_change(adapter):
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.save_competitions([with_real_hash(make_competition(old_name, datetime(2026, 1, 1)))], owner_id=1)
+
+    adapter.create_user('anna', 'hash', 'athlete')
+    user_id = adapter.get_user('anna')['id']
+    adapter.add_name_alias(user_id, old_name)
+    adapter.add_name_alias(user_id, new_name)
+
+    visible = adapter.get_competitions(
+        owner_id=user_id,
+        student_id_hashes=[hashlib.sha256(n.encode()).hexdigest() for n in adapter.get_name_aliases(user_id)],
+    )
+    names = [comp.student_name for comp in visible]
+    assert names == [old_name]
+
+
+def test_merge_students_unifies_report_grouping(adapter):
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.save_competitions(
+        [
+            with_real_hash(make_competition(old_name, datetime(2025, 1, 1))),
+            with_real_hash(make_competition(old_name, datetime(2025, 2, 1))),
+        ]
+    )
+    adapter.save_competitions([with_real_hash(make_competition(new_name, datetime(2026, 1, 1)))])
+
+    old_hash = hashlib.sha256(old_name.encode()).hexdigest()
+    new_hash = hashlib.sha256(new_name.encode()).hexdigest()
+    assert adapter.count_records_by_student_hash(old_hash) == 2
+
+    merged = adapter.merge_students(old_hash, new_hash, new_name=new_name)
+    assert merged == 2
+    assert adapter.count_records_by_student_hash(old_hash) == 0
+
+    infos = adapter.get_filtered('', '', '', '', '')
+    assert len(infos) == 1
+    assert infos[0].count_participation == 3
+    assert infos[0].student_name == new_name

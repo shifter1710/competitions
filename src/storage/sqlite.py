@@ -4,6 +4,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
+from typing import Sequence
 
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
@@ -116,6 +117,10 @@ class SQLiteAdapter:
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
+            if 'profile_data' not in user_columns:
+                self.connection.execute("ALTER TABLE users ADD COLUMN profile_data TEXT NOT NULL DEFAULT '{}'")
+            if 'name_aliases' not in user_columns:
+                self.connection.execute("ALTER TABLE users ADD COLUMN name_aliases TEXT NOT NULL DEFAULT '[]'")
             self.connection.commit()
 
     @staticmethod
@@ -156,7 +161,11 @@ class SQLiteAdapter:
             active=bool(row['active']),
         )
 
-    def get_competitions(self, owner_id: int | None = None) -> Iterable[Competition]:
+    def get_competitions(
+        self,
+        owner_id: int | None = None,
+        student_id_hashes: Sequence[str] = (),
+    ) -> Iterable[Competition]:
         with self._lock:
             query = '''
                 SELECT
@@ -180,11 +189,17 @@ class SQLiteAdapter:
                 FROM competitions
                 '''
             if owner_id is not None:
-                query += 'WHERE owner_id = ?\n'
-            query += 'ORDER BY created_at ASC'
-            if owner_id is not None:
-                rows = self.connection.execute(query, (owner_id,)).fetchall()
+                if student_id_hashes:
+                    placeholders = ', '.join('?' for _ in student_id_hashes)
+                    query += f'WHERE (owner_id = ? OR student_id IN ({placeholders}))\n'
+                    params = (owner_id, *student_id_hashes)
+                else:
+                    query += 'WHERE owner_id = ?\n'
+                    params = (owner_id,)
+                query += 'ORDER BY created_at ASC'
+                rows = self.connection.execute(query, params).fetchall()
             else:
+                query += 'ORDER BY created_at ASC'
                 rows = self.connection.execute(query).fetchall()
             return [self._row_to_competition(row) for row in rows]
 
@@ -594,7 +609,7 @@ class SQLiteAdapter:
     def get_competition_review(self, record_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, review_status, owner_id FROM competitions WHERE id = ?',
+                'SELECT id, review_status, owner_id, student_id FROM competitions WHERE id = ?',
                 (record_id,),
             ).fetchone()
             return dict(row) if row else None
@@ -674,3 +689,78 @@ class SQLiteAdapter:
         with self._lock:
             self.connection.execute('DELETE FROM attachments WHERE id = ?', (attachment_id,))
             self.connection.commit()
+
+    def get_profile(self, user_id: int) -> dict:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT profile_data FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return {}
+            return json.loads(row['profile_data'] or '{}')
+
+    def set_profile(self, user_id: int, profile: dict) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE users SET profile_data = ? WHERE id = ?',
+                (json.dumps(profile, ensure_ascii=False), user_id),
+            )
+            self.connection.commit()
+
+    def get_name_aliases(self, user_id: int) -> list[str]:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT name_aliases FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return []
+            return json.loads(row['name_aliases'] or '[]')
+
+    def add_name_alias(self, user_id: int, name: str) -> None:
+        name = name.strip()
+        if not name:
+            return
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT name_aliases FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return
+            aliases = json.loads(row['name_aliases'] or '[]')
+            if name not in aliases:
+                aliases.append(name)
+                self.connection.execute(
+                    'UPDATE users SET name_aliases = ? WHERE id = ?',
+                    (json.dumps(aliases, ensure_ascii=False), user_id),
+                )
+                self.connection.commit()
+
+    def count_records_by_student_hash(self, student_id_hash: str) -> int:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM competitions WHERE student_id = ?',
+                (student_id_hash,),
+            ).fetchone()
+            return row['total']
+
+    def merge_students(self, old_hash: str, new_hash: str, new_name: str | None = None) -> int:
+        with self._lock:
+            if new_name:
+                cursor = self.connection.execute(
+                    '''
+                    UPDATE competitions
+                    SET student_id = ?, student_name = ?
+                    WHERE student_id = ?
+                    ''',
+                    (new_hash, new_name, old_hash),
+                )
+            else:
+                cursor = self.connection.execute(
+                    'UPDATE competitions SET student_id = ? WHERE student_id = ?',
+                    (new_hash, old_hash),
+                )
+            self.connection.commit()
+            return cursor.rowcount

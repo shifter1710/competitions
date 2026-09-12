@@ -24,6 +24,7 @@ from sanic import redirect
 from sanic import Request
 from sanic import Sanic
 from sanic import text
+from sanic.response import json as json_response
 from sanic.response import raw
 from sanic_ext import render
 
@@ -106,6 +107,7 @@ ATTACHMENT_EXTENSIONS = {
     'jpg': 'image/jpeg',
     'jpeg': 'image/jpeg',
 }
+PROFILE_FIELDS = ('student_name', 'student_sex', 'institute', 'group', 'course')
 ATTACHMENT_SIGNATURES = {
     'application/pdf': b'%PDF-',
     'image/png': b'\x89PNG\r\n\x1a\n',
@@ -339,10 +341,26 @@ def user_is_athlete(request: Request) -> bool:
     return bool(user and user['role'] == ATHLETE_ROLE)
 
 
+def student_hashes_for_request(request: Request) -> list[str]:
+    if not user_is_athlete(request):
+        return []
+    user_id = get_current_user_id(request)
+    if user_id is None:
+        return []
+    storage = get_storage(request.app)
+    names = storage.get_name_aliases(user_id)
+    profile_name = storage.get_profile(user_id).get('student_name', '').strip()
+    if profile_name and profile_name not in names:
+        names = names + [profile_name]
+    return [hashlib.sha256(name.strip().encode()).hexdigest() for name in names if name.strip()]
+
+
 def user_owns_record(request: Request, review: dict) -> bool:
     if not user_is_athlete(request):
         return True
-    return review.get('owner_id') == get_current_user_id(request)
+    if review.get('owner_id') == get_current_user_id(request):
+        return True
+    return review.get('student_id') in student_hashes_for_request(request)
 
 
 def require_admin(request: Request):
@@ -660,7 +678,8 @@ async def index(request: Request):
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
     owner_filter = get_current_user_id(request) if user_is_athlete(request) else None
-    competitions = storage.get_competitions(owner_id=owner_filter)
+    profile_hashes = student_hashes_for_request(request)
+    competitions = storage.get_competitions(owner_id=owner_filter, student_id_hashes=profile_hashes)
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
@@ -895,6 +914,57 @@ async def upload(request: Request):
     return text(body=summary)
 
 
+def get_athlete_profile_defaults(request: Request, storage: SQLiteAdapter) -> dict:
+    if not user_is_athlete(request):
+        return {}
+    user_id = get_current_user_id(request)
+    if user_id is None:
+        return {}
+    return storage.get_profile(user_id)
+
+
+def read_profile_payload(request: Request) -> tuple[dict, str | None]:
+    profile = {}
+    for field in PROFILE_FIELDS:
+        value = get_form_value(request, field).strip()
+        if value:
+            profile[field] = value
+    if profile.get('student_sex') not in (None, '', 'М', 'Ж'):
+        return {}, 'Пол должен быть М или Ж'
+    if 'course' in profile:
+        try:
+            profile['course'] = str(int(profile['course']))
+        except ValueError:
+            return {}, 'Курс должен быть числом'
+    return profile, None
+
+
+@app.get('/api/profile')
+async def get_profile(request: Request):
+    if get_auth_user(request) is None:
+        return text(body='Unauthorized', status=401)
+    user_id = get_current_user_id(request)
+    profile = get_storage(request.app).get_profile(user_id) if user_id else {}
+    return json_response({'profile': profile})
+
+
+@app.post('/api/profile')
+async def save_profile(request: Request):
+    if get_auth_user(request) is None:
+        return text(body='Unauthorized', status=401)
+    user_id = get_current_user_id(request)
+    if user_id is None:
+        return text(body='Unknown user', status=400)
+    profile, error = read_profile_payload(request)
+    if error:
+        return text(body=error, status=400)
+    storage = get_storage(request.app)
+    storage.set_profile(user_id, profile)
+    if profile.get('student_name'):
+        storage.add_name_alias(user_id, profile['student_name'])
+    return json_response({'profile': profile})
+
+
 @app.post('/competition')
 async def add_competition(request: Request):
     auth_error = require_writer(request)
@@ -916,6 +986,17 @@ async def add_competition(request: Request):
         'Курс': get_form_value(request, 'course'),
     }
     record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
+
+    profile_defaults = get_athlete_profile_defaults(request, storage)
+    for form_key, profile_key in (
+        ('ФИО', 'student_name'),
+        ('Пол', 'student_sex'),
+        ('Институт', 'institute'),
+        ('Группа', 'group'),
+        ('Курс', 'course'),
+    ):
+        if not str(record.get(form_key, '')).strip() and profile_key in profile_defaults:
+            record[form_key] = profile_defaults[profile_key]
 
     try:
         competition = build_competition(record, custom_fields=custom_fields, manual_input=True)
@@ -970,11 +1051,10 @@ async def update_competition(request: Request, record_id: str):
     storage.update_competition(numeric_id, competition)
     review = storage.get_competition_review(numeric_id)
     if review and review['review_status'] != 'approved':
-        current_user_id = get_current_user_id(request)
-        if review['owner_id'] == current_user_id:
-            storage.set_competition_review(numeric_id, 'pending')
-        else:
+        if user_is_moderator(request):
             storage.set_competition_review(numeric_id, 'approved')
+        else:
+            storage.set_competition_review(numeric_id, 'pending')
     return redirect(to='/')
 
 
@@ -1348,6 +1428,62 @@ async def disable_level(request: Request, level_id: str):
 
     get_storage(request.app).disable_level(numeric_level_id)
     return build_redirect_with_message(message='Уровень скрыт из списков')
+
+
+@app.post('/admin/users/<user_id>/alias')
+async def add_user_alias(request: Request, user_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_user_id = int(user_id)
+    except ValueError:
+        return text(body='Invalid user id', status=400)
+
+    storage = get_storage(request.app)
+    if storage.get_user_by_id(numeric_user_id) is None:
+        return build_redirect_with_message(error='Пользователь не найден')
+
+    name = get_form_value(request, 'name').strip()
+    if not name:
+        return build_redirect_with_message(error='ФИО обязательно')
+
+    storage.add_name_alias(numeric_user_id, name)
+    return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту')
+
+
+@app.post('/admin/students/merge')
+async def merge_students(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    from_name = get_form_value(request, 'from_name').strip()
+    to_name = get_form_value(request, 'to_name').strip()
+    confirm = checkbox_to_bool(get_form_value(request, 'confirm'))
+    rewrite_names = checkbox_to_bool(get_form_value(request, 'rewrite_names'))
+    if not from_name or not to_name:
+        return text(body='Укажите оба ФИО', status=400)
+    if from_name == to_name:
+        return text(body='ФИО совпадают', status=400)
+
+    from_hash = hashlib.sha256(from_name.encode()).hexdigest()
+    to_hash = hashlib.sha256(to_name.encode()).hexdigest()
+    storage = get_storage(request.app)
+    affected = storage.count_records_by_student_hash(from_hash)
+    if not confirm:
+        return json_response(
+            {
+                'preview': True,
+                'from_name': from_name,
+                'to_name': to_name,
+                'records_to_merge': affected,
+            }
+        )
+
+    merged = storage.merge_students(from_hash, to_hash, new_name=to_name if rewrite_names else None)
+    return json_response({'merged': merged, 'rewritten_names': rewrite_names})
 
 
 @app.get('/report')
