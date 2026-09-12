@@ -156,10 +156,9 @@ class SQLiteAdapter:
             active=bool(row['active']),
         )
 
-    def get_competitions(self) -> Iterable[Competition]:
+    def get_competitions(self, owner_id: int | None = None) -> Iterable[Competition]:
         with self._lock:
-            rows = self.connection.execute(
-                '''
+            query = '''
                 SELECT
                     id,
                     student_id,
@@ -179,9 +178,14 @@ class SQLiteAdapter:
                     owner_id,
                     review_comment
                 FROM competitions
-                ORDER BY created_at ASC
                 '''
-            ).fetchall()
+            if owner_id is not None:
+                query += 'WHERE owner_id = ?\n'
+            query += 'ORDER BY created_at ASC'
+            if owner_id is not None:
+                rows = self.connection.execute(query, (owner_id,)).fetchall()
+            else:
+                rows = self.connection.execute(query).fetchall()
             return [self._row_to_competition(row) for row in rows]
 
     def get_custom_fields(self, include_inactive: bool = False) -> list[CustomField]:

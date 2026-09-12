@@ -12,6 +12,11 @@
 {% if can_write %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
+        {% if is_athlete %}
+        <h3 class="title">Мои соревнования</h3>
+        <div class="text-muted">Добавляйте свои участия — после проверки ответственным они попадут в общий реестр. Записи «на проверке» видны пока только вам.</div>
+        {% endif %}
+        {% if can_import %}
         <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-center">
             <div>
                 <h3 class="title mb-1">Загрузка данных</h3>
@@ -29,6 +34,7 @@
             </div>
         </form>
 
+        {% endif %}
         <form class="manual-form mt-4">
             <h3 class="title">Добавить запись</h3>
             <input name="record_id" type="hidden">
@@ -366,6 +372,7 @@
 </div>
 {% endif %}
 
+{% if not is_athlete %}
 <form class="filter-form filter">
     <h3 class="title">Формирование отчёта</h3>
     <div class="row align-items-md-bottom">
@@ -428,8 +435,12 @@
     </div>
 </form>
 
+{% endif %}
+
 <div class="buttons">
+    {% if not is_athlete %}
     <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
+    {% endif %}
     <button type="button" class="table-layout-button btn btn-outline-secondary">Колонки и вид</button>
     <button type="button" class="table-layout-reset-button btn btn-outline-secondary">Сбросить вид</button>
     {% if is_admin %}
@@ -563,7 +574,7 @@
                             >
                                 Редактировать
                             </button>
-                            {% if competition.review_status != 'approved' %}
+                            {% if competition.review_status != 'approved' and is_moderator %}
                             <button
                                 class="btn btn-sm btn-success competition-approve-button"
                                 type="button"

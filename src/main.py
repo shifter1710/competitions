@@ -60,7 +60,10 @@ AUTH_ALLOWED_PATHS = {'/healthcheck', '/login'}
 ADMIN_ROLE = 'admin'
 EDITOR_ROLE = 'editor'
 VIEWER_ROLE = 'viewer'
-WRITE_ROLES = {ADMIN_ROLE, EDITOR_ROLE}
+ATHLETE_ROLE = 'athlete'
+MODERATOR_ROLES = {ADMIN_ROLE, EDITOR_ROLE}
+WRITE_ROLES = {ADMIN_ROLE, EDITOR_ROLE, ATHLETE_ROLE}
+KNOWN_ROLES = {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE}
 
 INSECURE_SECRET_VALUES = {'', 'change-me', 'replace-with-random-string'}
 LOGIN_MAX_ATTEMPTS = 5
@@ -94,7 +97,7 @@ REPORT_EXPORT_COLUMNS: Sequence[str] = (
     'Количество участий',
 )
 FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date', 'url')
-USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE)
+USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE)
 MIN_PASSWORD_LENGTH = 6
 ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024
 ATTACHMENT_EXTENSIONS = {
@@ -203,7 +206,7 @@ def decode_auth_token(token: str) -> dict | None:
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
 
-    if role not in {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE}:
+    if role not in KNOWN_ROLES:
         return None
     if int(time.time()) - issued_at > settings.auth_session_ttl_seconds:
         return None
@@ -326,11 +329,36 @@ def user_can_write(request: Request) -> bool:
     return bool(user and user['role'] in WRITE_ROLES)
 
 
+def user_is_moderator(request: Request) -> bool:
+    user = get_auth_user(request)
+    return bool(user and user['role'] in MODERATOR_ROLES)
+
+
+def user_is_athlete(request: Request) -> bool:
+    user = get_auth_user(request)
+    return bool(user and user['role'] == ATHLETE_ROLE)
+
+
+def user_owns_record(request: Request, review: dict) -> bool:
+    if not user_is_athlete(request):
+        return True
+    return review.get('owner_id') == get_current_user_id(request)
+
+
 def require_admin(request: Request):
     user = get_auth_user(request)
     if not user:
         return text(body='Unauthorized', status=401)
     if user['role'] != ADMIN_ROLE:
+        return text(body='Forbidden', status=403)
+    return None
+
+
+def require_moderator(request: Request):
+    user = get_auth_user(request)
+    if not user:
+        return text(body='Unauthorized', status=401)
+    if user['role'] not in MODERATOR_ROLES:
         return text(body='Forbidden', status=403)
     return None
 
@@ -631,7 +659,8 @@ async def logout(request: Request):
 async def index(request: Request):
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
-    competitions = storage.get_competitions()
+    owner_filter = get_current_user_id(request) if user_is_athlete(request) else None
+    competitions = storage.get_competitions(owner_id=owner_filter)
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
@@ -641,6 +670,9 @@ async def index(request: Request):
             'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
             'field_type_options': FIELD_TYPE_OPTIONS,
             'can_write': user_can_write(request),
+            'can_import': user_is_moderator(request),
+            'is_moderator': user_is_moderator(request),
+            'is_athlete': user_is_athlete(request),
             'is_admin': user_is_admin(request),
             'users': storage.list_users() if user_is_admin(request) else [],
             'user_roles': USER_ROLES,
@@ -657,7 +689,7 @@ async def index(request: Request):
 
 @app.get('/template/empty.xlsx')
 async def export_empty_template(request: Request):
-    auth_error = require_writer(request)
+    auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
 
@@ -709,6 +741,8 @@ def build_index_dataframe(competitions, export_custom_fields) -> pd.DataFrame:
 
 @app.get('/export/index')
 async def export_index(request: Request):
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
     storage = get_storage(request.app)
     competitions = storage.get_competitions()
     export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
@@ -776,7 +810,7 @@ def split_import_competitions(
 
 @app.post('/')
 async def upload(request: Request):
-    auth_error = require_writer(request)
+    auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
 
@@ -837,7 +871,12 @@ async def add_competition(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    storage.save_competitions([competition], owner_id=get_current_user_id(request))
+    review_status = 'pending' if user_is_athlete(request) else 'approved'
+    storage.save_competitions(
+        [competition],
+        review_status=review_status,
+        owner_id=get_current_user_id(request),
+    )
     return redirect(to='/')
 
 
@@ -853,6 +892,10 @@ async def update_competition(request: Request, record_id: str):
         return text(body='Invalid record id', status=400)
 
     storage = get_storage(request.app)
+    existing_review = storage.get_competition_review(numeric_id)
+    if existing_review is not None and not user_owns_record(request, existing_review):
+        return text(body='Forbidden', status=403)
+
     custom_fields = storage.get_custom_fields()
     record = {
         'ФИО': get_form_value(request, 'student_name'),
@@ -886,7 +929,7 @@ async def update_competition(request: Request, record_id: str):
 
 @app.post('/competition/<record_id>/review/<decision>')
 async def review_competition(request: Request, record_id: str, decision: str):
-    auth_error = require_writer(request)
+    auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
 
@@ -1119,8 +1162,11 @@ async def upload_attachment(request: Request, record_id: str):
         return text(body='Invalid record id', status=400)
 
     storage = get_storage(request.app)
-    if storage.get_competition_review(numeric_id) is None:
+    review = storage.get_competition_review(numeric_id)
+    if review is None:
         return text(body='Record not found', status=404)
+    if not user_owns_record(request, review):
+        return text(body='Forbidden', status=403)
 
     upload_file = request.files.get('file')
     if not upload_file or not upload_file.body:
@@ -1160,9 +1206,13 @@ async def download_attachment(request: Request, attachment_id: str):
     except ValueError:
         return text(body='Invalid attachment id', status=400)
 
-    attachment = get_storage(request.app).get_attachment(numeric_attachment_id)
+    storage = get_storage(request.app)
+    attachment = storage.get_attachment(numeric_attachment_id)
     if attachment is None:
         return text(body='Not Found', status=404)
+    review = storage.get_competition_review(attachment['record_id'])
+    if review is not None and not user_owns_record(request, review):
+        return text(body='Forbidden', status=403)
 
     file_path = attachments_dir() / str(attachment['record_id']) / attachment['stored_name']
     if not file_path.is_file():
@@ -1251,6 +1301,8 @@ async def disable_level(request: Request, level_id: str):
 
 @app.get('/report')
 async def get_report(request: Request):
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
@@ -1282,6 +1334,8 @@ def build_report_dataframe(student_infos: Iterable[StudentInfo]) -> pd.DataFrame
 
 @app.get('/export/report')
 async def export_report(request: Request):
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)

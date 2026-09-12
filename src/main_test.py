@@ -48,6 +48,15 @@ def csrf_for(headers: dict[str, str]) -> dict[str, str]:
 
 
 def fake_get_user(username: str) -> dict | None:
+    if username == 'sportik':
+        return {
+            'id': 1,
+            'username': 'sportik',
+            'password_hash': 'x',
+            'role': 'athlete',
+            'active': 1,
+            'pwd_ver': 0,
+        }
     accounts = [
         (settings.auth_admin_username, settings.auth_admin_password, 'admin'),
         (settings.auth_editor_username, settings.auth_editor_password, 'editor'),
@@ -1135,3 +1144,88 @@ def test_attachment_delete_removes_file(client: SanicTestClient, tmp_path, monke
     assert response.status == 302
     assert not stored.exists()
     app.ctx.storage.get_attachment.return_value = None
+
+
+def athlete_headers() -> dict[str, str]:
+    cookie = create_auth_cookie_value(username='sportik', role='athlete')
+    return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+
+
+ATHLETE_RECORD_DATA = {
+    'student_name': 'Спортсменов Спорт Спортович',
+    'student_sex': 'М',
+    'institute': 'ИСИ',
+    'group': 'СБ-101',
+    'course': '1',
+    'sport': 'Бег',
+    'date': '10.04.2026',
+    'level': 'внутривузовские',
+    'name': 'Кубок',
+    'position': '2',
+}
+
+
+def test_athlete_create_goes_to_moderation(client: SanicTestClient):
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    headers = athlete_headers()
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    kwargs = app.ctx.storage.save_competitions.call_args[1]
+    assert kwargs['review_status'] == 'pending'
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_athlete_sees_only_own_records(client: SanicTestClient):
+    app.ctx.storage.get_competitions.reset_mock()
+    headers = athlete_headers()
+    _, response = client.get('/', headers=headers)
+    assert response.status == 200
+    assert app.ctx.storage.get_competitions.call_args[1] == {'owner_id': 1}
+
+
+def test_athlete_cannot_update_foreign_record(client: SanicTestClient):
+    app.ctx.storage.get_competition_review.return_value = {
+        'id': 9,
+        'review_status': 'approved',
+        'owner_id': 42,
+    }
+    headers = athlete_headers()
+    _, response = client.post(
+        '/competition/9',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    app.ctx.storage.get_competition_review.return_value = None
+
+
+def test_athlete_cannot_import_review_or_report(client: SanicTestClient):
+    headers = athlete_headers()
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+    _, response = client.post(
+        '/competition/5/review/approve',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+    _, response = client.get('/report', headers=headers)
+    assert response.status == 403
+
+    _, response = client.get('/export/index', headers=headers)
+    assert response.status == 403
