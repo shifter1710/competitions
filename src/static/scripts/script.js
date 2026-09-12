@@ -2,10 +2,12 @@ class Main {
     constructor() {
         this.currentReportUrl = null;
         this.draggedColumnKey = null;
+        this.isAthlete = document.body.dataset.role === "athlete";
         this.initializeDomReferences();
         this.createInstances();
         this.hangEvents();
         this.initTableFeatures();
+        this.applyProfileToManualForm();
     }
 
     initializeDomReferences() {
@@ -16,6 +18,10 @@ class Main {
         this.manualFormCancelButton = document.querySelector(".manual-form__cancel-button");
         this.manualDateInput = document.querySelector('.manual-form [name="date"]');
         this.customFieldInputs = Array.from(document.querySelectorAll(".custom-field-input"));
+        this.profileForm = document.querySelector(".profile-form");
+        this.profileFormStatus = document.querySelector(".profile-form__status");
+        this.profileFormCancelButton = document.querySelector(".profile-form__cancel-button");
+        this.addEmptyRowButton = document.querySelector(".add-empty-row-button");
         this.reportForm = document.querySelector(".filter-form");
         this.fileInput = document.querySelector(".import-form__input");
         this.attachmentFileInput = document.querySelector(".attachment-file-input");
@@ -122,6 +128,16 @@ class Main {
         }
         if (this.cleanButton) {
             this.cleanButton.addEventListener("click", () => this.cleanDb());
+        }
+        if (this.addEmptyRowButton) {
+            this.addEmptyRowButton.addEventListener("click", () => this.startNewRowEdit());
+        }
+        if (this.profileForm) {
+            this.profileForm.addEventListener("submit", (event) => this.handleSubmitProfileForm(event));
+            this.fillProfileForm();
+        }
+        if (this.profileFormCancelButton) {
+            this.profileFormCancelButton.addEventListener("click", () => this.resetProfile());
         }
         if (this.attachmentFileInput) {
             this.attachmentFileInput.addEventListener("change", () => this.handleAttachmentSelected());
@@ -285,6 +301,75 @@ class Main {
         this.manualForm.querySelector('[name="record_id"]').value = "";
         this.manualForm.querySelector(".title").textContent = "Добавить запись";
         this.manualFormButton.textContent = "Добавить";
+        this.applyProfileToManualForm();
+    }
+
+    // Источник данных профиля. Когда появится бэкенд, достаточно заменить
+    // тело loadProfile/saveProfile — остальной код работает с объектом profile.
+    loadProfile() {
+        try {
+            return JSON.parse(localStorage.getItem("athlete-profile") || "{}") || {};
+        } catch {
+            return {};
+        }
+    }
+
+    saveProfile(profile) {
+        localStorage.setItem("athlete-profile", JSON.stringify(profile));
+    }
+
+    clearProfile() {
+        localStorage.removeItem("athlete-profile");
+    }
+
+    handleSubmitProfileForm(event) {
+        event.preventDefault();
+        const formData = new FormData(this.profileForm);
+        const profile = {};
+        ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
+            profile[key] = String(formData.get(key) || "").trim();
+        });
+        this.saveProfile(profile);
+        if (this.profileFormStatus) {
+            this.profileFormStatus.textContent = "Профиль сохранён";
+        }
+    }
+
+    fillProfileForm() {
+        if (!this.profileForm) {
+            return;
+        }
+        const profile = this.loadProfile();
+        this.profileForm.querySelectorAll("input, select").forEach((input) => {
+            const value = profile[input.name];
+            if (value !== undefined) {
+                input.value = value;
+            }
+        });
+    }
+
+    resetProfile() {
+        if (!this.profileForm) {
+            return;
+        }
+        this.clearProfile();
+        this.profileForm.reset();
+        if (this.profileFormStatus) {
+            this.profileFormStatus.textContent = "";
+        }
+    }
+
+    applyProfileToManualForm() {
+        if (!this.isAthlete || !this.manualForm) {
+            return;
+        }
+        const profile = this.loadProfile();
+        ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
+            const input = this.manualForm.querySelector(`[name="${key}"]`);
+            if (input && !input.value && profile[key]) {
+                input.value = profile[key];
+            }
+        });
     }
 
     getTableLevels() {
@@ -346,6 +431,7 @@ class Main {
             return;
         }
         this.cancelInlineEdit();
+        this.cancelNewRowEdit();
 
         const dataset = button.dataset;
         const extraData = dataset.extraJson ? JSON.parse(dataset.extraJson) : {};
@@ -468,6 +554,140 @@ class Main {
         this.inlineEditBackup = null;
     }
 
+    hasActiveRowEdit() {
+        return Boolean(this.inlineEditRow || this.newEditRow);
+    }
+
+    buildRowActionsCell(cell, saveClassName) {
+        const saveButton = document.createElement("button");
+        saveButton.type = "button";
+        saveButton.className = `btn btn-sm btn-success ${saveClassName}`;
+        saveButton.textContent = "✓";
+        saveButton.title = "Сохранить";
+        const cancelButton = document.createElement("button");
+        cancelButton.type = "button";
+        cancelButton.className = "btn btn-sm btn-outline-secondary new-row-cancel-button";
+        cancelButton.textContent = "✗";
+        cancelButton.title = "Отмена";
+        cell.append(saveButton, cancelButton);
+    }
+
+    bindRowKeyboardNavigation(row, saveAction, cancelAction) {
+        const handler = (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                cancelAction();
+            } else if (event.key === "Enter" && event.target.tagName !== "SELECT") {
+                event.preventDefault();
+                saveAction();
+            }
+        };
+        row.addEventListener("keydown", handler);
+        return handler;
+    }
+
+    startNewRowEdit() {
+        if (!this.tableElement) {
+            alert("Таблица недоступна: нет данных");
+            return;
+        }
+        if (this.hasActiveRowEdit()) {
+            return;
+        }
+        const tbody = this.tableElement.querySelector("tbody");
+        if (!tbody) {
+            return;
+        }
+
+        const fieldTypes = this.getCustomFieldTypes();
+        const row = document.createElement("tr");
+        row.classList.add("row-editing", "row-new");
+
+        Array.from(this.tableElement.querySelectorAll("thead th")).forEach((header) => {
+            const key = header.dataset.columnKey;
+            const cell = document.createElement("td");
+            if (key) {
+                cell.dataset.columnKey = key;
+            }
+            if (!key || key === "index" || key === "status" || key === "attachments") {
+                row.append(cell);
+                return;
+            }
+            if (key === "actions") {
+                this.buildRowActionsCell(cell, "new-row-save-button");
+                row.append(cell);
+                return;
+            }
+            cell.append(this.createInlineInput(key, "", fieldTypes));
+            row.append(cell);
+        });
+
+        tbody.append(row);
+        this.newEditRow = row;
+
+        const dateInput = row.querySelector('[data-edit-key="date"]');
+        if (dateInput) {
+            this.newRowDatePicker = new Datepicker(dateInput, {
+                autohide: true,
+                format: "dd.mm.yyyy"
+            });
+        }
+        this.newRowKeydownHandler = this.bindRowKeyboardNavigation(
+            row,
+            () => this.saveNewRowEdit(),
+            () => this.cancelNewRowEdit()
+        );
+        const firstInput = row.querySelector("[data-edit-key]");
+        if (firstInput) {
+            firstInput.focus();
+        }
+    }
+
+    saveNewRowEdit() {
+        if (!this.newEditRow) {
+            return;
+        }
+        const fieldTypes = this.getCustomFieldTypes();
+        const formData = new FormData();
+        this.newEditRow.querySelectorAll("[data-edit-key]").forEach((input) => {
+            const key = input.dataset.editKey;
+            const name = Object.prototype.hasOwnProperty.call(fieldTypes, key)
+                ? `custom__${key}`
+                : key;
+            formData.append(name, input.value);
+        });
+
+        this.makeRequest({
+            url: "/competition",
+            options: {
+                method: "POST",
+                body: formData,
+            },
+            onSuccess: () => {
+                alert("Запись успешно добавлена");
+                this.refreshCurrentContent();
+            },
+            onError: (message) => alert(message || "Ошибка добавления записи")
+        });
+    }
+
+    cancelNewRowEdit() {
+        if (!this.newEditRow) {
+            return;
+        }
+        const row = this.newEditRow;
+        if (this.newRowKeydownHandler) {
+            row.removeEventListener("keydown", this.newRowKeydownHandler);
+            this.newRowKeydownHandler = null;
+        }
+        if (this.newRowDatePicker) {
+            this.newRowDatePicker.destroy();
+            this.newRowDatePicker = null;
+        }
+        row.remove();
+        this.newEditRow = null;
+    }
+
     uploadAttachment(recordId, file) {
         const formData = new FormData();
         formData.append("file", file);
@@ -556,6 +776,18 @@ class Main {
         const rejectButton = event.target.closest(".competition-reject-button");
         if (rejectButton) {
             this.reviewCompetition(rejectButton.dataset.recordId, "reject");
+            return;
+        }
+
+        const newRowSaveButton = event.target.closest(".new-row-save-button");
+        if (newRowSaveButton) {
+            this.saveNewRowEdit();
+            return;
+        }
+
+        const newRowCancelButton = event.target.closest(".new-row-cancel-button");
+        if (newRowCancelButton) {
+            this.cancelNewRowEdit();
             return;
         }
 
@@ -784,6 +1016,7 @@ class Main {
         this.inlineEditRow = null;
         this.inlineEditRecordId = null;
         this.inlineEditBackup = null;
+        this.newEditRow = null;
         if (!this.tableElement) {
             if (this.tableColumnsManager) {
                 this.tableColumnsManager.innerHTML = "";
@@ -874,7 +1107,7 @@ class Main {
 
     handleHeaderDrop(event, targetHeader) {
         event.preventDefault();
-        if (this.inlineEditRow) {
+        if (this.hasActiveRowEdit()) {
             return;
         }
         if (!this.draggedColumnKey || this.draggedColumnKey === targetHeader.dataset.columnKey) {
@@ -892,7 +1125,7 @@ class Main {
     }
 
     sortByHeader(header) {
-        if (this.inlineEditRow) {
+        if (this.hasActiveRowEdit()) {
             return;
         }
         const columnKey = header.dataset.columnKey;
@@ -991,6 +1224,7 @@ class Main {
             return;
         }
         this.cancelInlineEdit();
+        this.cancelNewRowEdit();
 
         const columns = this.getVisibleExportColumns();
         const rows = Array.from(this.tableElement.querySelectorAll("tbody tr")).map((row) =>

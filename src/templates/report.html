@@ -1,0 +1,71 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+<form class="filter-form filter">
+    <h3 class="title">Формирование отчёта</h3>
+    <div class="row align-items-md-bottom">
+        <div class="col">
+            <span class="label">ФИО</span>
+            <div class="input-group">
+                <input class="form-control filter__name" name="name" type="text" autocomplete="off">
+            </div>
+        </div>
+        <div class="col align-self-md-center">
+            <div class="datetime">
+                <div>
+                    <span class="label">Дата (От)</span>
+                    <input class="filter__date-from" name="date_from" type="text" autocomplete="off">
+                </div>
+                <div>
+                    <span class="label">Дата (До)</span>
+                    <input class="filter__date-to" name="date_to" type="text" autocomplete="off">
+                </div>
+            </div>
+        </div>
+        <div class="col align-self-md-center filter__position-wrapper">
+            <span class="label">Место</span>
+            <select class="filter__position select" name="position">
+                <option data-display="Все" value="">Все</option>
+                <option value="<2">Победа</option>
+                <option value="<4">Призовое место</option>
+                <option value=">3">Не призовое место</option>
+            </select>
+        </div>
+        <div class="col align-self-md-center filter__level-wrapper">
+            <span class="label">Уровень соревнований</span>
+            <select class="filter__level select" name="level">
+                <option data-display="Все" value="">Все</option>
+                {% for level in levels %}
+                <option value="{{ level }}">{{ level }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% for field in custom_fields %}
+        <div class="col align-self-md-center">
+            <span class="label">{{ field.label }}</span>
+            <input
+                class="form-control filter__custom"
+                name="custom__{{ field.key }}"
+                type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'url' %}url{% else %}text{% endif %}"
+                autocomplete="off"
+                {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
+            >
+        </div>
+        {% endfor %}
+        <div class="col-clean-button align-self-md-end">
+            <button class="filter-form__clean-button btn btn-danger" type="button">
+                <img src="/static/icons/filter-clean.svg" alt="Сбросить фильтр" />
+            </button>
+        </div>
+        <div class="col-button align-self-md-end">
+            <button class="filter-form__button btn btn-primary" type="submit">Сформировать отчет</button>
+        </div>
+    </div>
+</form>
+
+<div class="content-wrapper">
+    <div class="empty-content">Задайте условия фильтра и нажмите «Сформировать отчет»</div>
+</div>
+
+{% endblock content %}

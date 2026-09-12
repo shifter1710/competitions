@@ -687,6 +687,57 @@ async def index(request: Request):
     )
 
 
+@app.get('/reports')
+async def reports_page(request: Request):
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
+    storage = get_storage(request.app)
+    return await render(
+        template_name=jinja_env.get_template('report.html'),
+        context={
+            'request': request,
+            'custom_fields': storage.get_custom_fields(),
+            'levels': storage.get_level_names(),
+        },
+    )
+
+
+@app.get('/admin')
+async def admin_page(request: Request):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    is_admin = user_is_admin(request)
+    return await render(
+        template_name=jinja_env.get_template('admin.html'),
+        context={
+            'request': request,
+            'can_import': user_is_moderator(request),
+            'is_admin': is_admin,
+            'admin_custom_fields': storage.get_custom_fields(include_inactive=True) if is_admin else [],
+            'field_type_options': FIELD_TYPE_OPTIONS,
+            'users': storage.list_users() if is_admin else [],
+            'user_roles': USER_ROLES,
+            'admin_levels': storage.list_levels() if is_admin else [],
+            'current_username': (get_auth_user(request) or {}).get('username'),
+            'admin_message': get_param(dict(request.args), 'admin_message'),
+            'admin_error': get_param(dict(request.args), 'admin_error'),
+        },
+    )
+
+
+@app.get('/profile')
+async def profile_page(request: Request):
+    return await render(
+        template_name=jinja_env.get_template('profile.html'),
+        context={
+            'request': request,
+            'is_athlete': user_is_athlete(request),
+        },
+    )
+
+
 @app.get('/template/empty.xlsx')
 async def export_empty_template(request: Request):
     auth_error = require_moderator(request)

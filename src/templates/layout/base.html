@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 
 <head>
     <meta charset="UTF-8">
@@ -16,20 +16,59 @@
     <link rel="stylesheet" href="/static/styles/main.css">
 </head>
 
-<body>
+<body {% if request.ctx.auth_user %}data-role="{{ request.ctx.auth_user.role }}"{% endif %}>
+
+    {% set auth_role = request.ctx.auth_user.role if request.ctx.auth_user else None %}
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+        <div class="container-fluid" style="margin: 0 20px">
+            <a class="navbar-brand" href="/">Соревнования студентов</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNavbar"
+                aria-controls="mainNavbar" aria-expanded="false" aria-label="Переключить навигацию">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="mainNavbar">
+                {% if request.ctx.auth_user %}
+                <ul class="navbar-nav me-auto gap-lg-2">
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.path == '/' %} active{% endif %}" href="/">Таблица</a>
+                    </li>
+                    {% if auth_role != 'athlete' %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.path == '/reports' %} active{% endif %}" href="/reports">Отчёт</a>
+                    </li>
+                    {% endif %}
+                    {% if auth_role == 'admin' or auth_role == 'editor' %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.path == '/admin' %} active{% endif %}" href="/admin">Админ</a>
+                    </li>
+                    {% endif %}
+                    {% if auth_role == 'athlete' %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.path == '/profile' %} active{% endif %}" href="/profile">Профиль</a>
+                    </li>
+                    {% endif %}
+                </ul>
+                {% endif %}
+                {% if request.ctx.auth_user %}
+                <div class="d-flex align-items-center gap-3 text-light">
+                    <span>Пользователь: <strong>{{ request.ctx.auth_user.username }}</strong>
+                        ({{ request.ctx.auth_user.role }})</span>
+                    <form action="/logout" method="post">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                        <button class="btn btn-outline-light btn-sm" type="submit">Выйти</button>
+                    </form>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </nav>
 
     <div style="margin: 20px 20px">
-        {% if request.ctx.auth_user %}
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <div>
-                Пользователь: <strong>{{ request.ctx.auth_user.username }}</strong>
-                ({{ request.ctx.auth_user.role }})
-            </div>
-            <form action="/logout" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                <button class="btn btn-outline-secondary btn-sm" type="submit">Выйти</button>
-            </form>
-        </div>
+        {% if admin_message %}
+        <div class="alert alert-success" role="alert">{{ admin_message }}</div>
+        {% endif %}
+        {% if admin_error %}
+        <div class="alert alert-danger" role="alert">{{ admin_error }}</div>
         {% endif %}
 
         {% block content %}

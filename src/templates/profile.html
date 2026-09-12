@@ -1,0 +1,57 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+{% if is_athlete %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Профиль</h3>
+        <div class="text-muted mb-3">
+            Данные профиля подставляются в форму добавления записи (поля остаются редактируемыми).
+            Пока данные хранятся только в этом браузере.
+        </div>
+
+        <form class="profile-form row g-3">
+            <div class="col-md-6">
+                <label class="form-label" for="profile-student-name">ФИО</label>
+                <input class="form-control" id="profile-student-name" name="student_name" type="text">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="profile-student-sex">Пол</label>
+                <select class="form-select" id="profile-student-sex" name="student_sex">
+                    <option value="М">М</option>
+                    <option value="Ж">Ж</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label" for="profile-institute">Институт</label>
+                <input class="form-control" id="profile-institute" name="institute" type="text">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label" for="profile-group">Группа</label>
+                <input class="form-control" id="profile-group" name="group" type="text">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="profile-course">Курс</label>
+                <input class="form-control" id="profile-course" name="course" type="number" min="1" step="1">
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+                <button class="btn btn-primary w-100" type="submit">Сохранить</button>
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+                <button class="btn btn-outline-secondary w-100 profile-form__cancel-button" type="button">Сбросить</button>
+            </div>
+        </form>
+        <div class="profile-form__status text-muted mt-2"></div>
+    </div>
+</div>
+{% else %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Профиль</h3>
+        <div class="text-muted">Профиль доступен только пользователям с ролью «athlete».</div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock content %}
