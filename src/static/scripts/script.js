@@ -507,8 +507,9 @@ class Main {
         });
     }
 
-    // makeRequest прикрепляет CSRF только к FormData, поэтому для
-    // form-encoded тела токен добавляется здесь, до передачи в хелпер.
+    // Формирует form-encoded тело для merge-запросов. CSRF-токен
+    // прикрепляется в makeRequest ко всем POST (FormData, URLSearchParams
+    // и запросам без тела), здесь дублирование исключено проверкой has().
     buildMergeRequestBody(extraFields = {}) {
         const body = new URLSearchParams(extraFields);
         body.append("csrf_token", this.getCsrfToken());
