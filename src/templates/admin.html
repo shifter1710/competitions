@@ -269,6 +269,11 @@
                                 </button>
                             </form>
                             {% endif %}
+                            <form action="/admin/users/{{ user.id }}/alias" class="d-flex gap-2 mt-1" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input class="form-control form-control-sm" name="name" placeholder="Привязать ФИО" type="text" list="student-names-list" required>
+                                <button class="btn btn-sm btn-outline-primary" type="submit">Привязать ФИО</button>
+                            </form>
                         </td>
                     </tr>
                     {% endfor %}
@@ -294,11 +299,11 @@
         <form class="merge-form row g-3">
             <div class="col-md-5">
                 <label class="form-label" for="merge-from-name">ФИО-источник (старое)</label>
-                <input class="form-control" id="merge-from-name" name="from_name" type="text" autocomplete="off" required>
+                <input class="form-control" id="merge-from-name" name="from_name" type="text" autocomplete="off" list="student-names-list" required>
             </div>
             <div class="col-md-5">
                 <label class="form-label" for="merge-to-name">ФИО-цель (новое)</label>
-                <input class="form-control" id="merge-to-name" name="to_name" type="text" autocomplete="off" required>
+                <input class="form-control" id="merge-to-name" name="to_name" type="text" autocomplete="off" list="student-names-list" required>
             </div>
             <div class="col-md-2 d-flex align-items-end">
                 <button class="btn btn-outline-primary w-100 merge-preview-button" type="submit">Предпросмотр</button>
@@ -314,6 +319,8 @@
             </div>
             <div class="col-12 merge-status"></div>
         </form>
+
+        <datalist id="student-names-list"></datalist>
     </div>
 </div>
 {% endif %}
