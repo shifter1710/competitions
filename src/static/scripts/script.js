@@ -49,6 +49,7 @@ class Main {
         this.dateRangePickerElement = document.querySelector('.datetime');
         this.tableCard = document.querySelector(".table-card");
         this.tableElement = document.querySelector(".interactive-table");
+        this.themeToggleButton = document.querySelector(".theme-toggle-button");
         this.filterIsApplied = Boolean(this.tableCard && this.tableCard.dataset.tableView === "report");
     }
 
@@ -165,7 +166,30 @@ class Main {
         if (this.attachmentFileInput) {
             this.attachmentFileInput.addEventListener("change", () => this.handleAttachmentSelected());
         }
+        if (this.themeToggleButton) {
+            this.updateThemeToggleButton();
+            this.themeToggleButton.addEventListener("click", () => this.handleThemeToggle());
+        }
         this.bindContentWrapperEvents();
+    }
+
+    // Тема живёт только на клиенте: атрибут data-bs-theme на <html> ставит
+    // inline-скрипт в base.html до отрисовки, здесь — переключение и запись
+    // выбора в localStorage (ключ "theme": light|dark). Дефолт — светлая.
+    handleThemeToggle() {
+        const nextTheme = document.documentElement.dataset.bsTheme === "dark" ? "light" : "dark";
+        document.documentElement.dataset.bsTheme = nextTheme;
+        localStorage.setItem("theme", nextTheme);
+        this.updateThemeToggleButton();
+    }
+
+    updateThemeToggleButton() {
+        if (!this.themeToggleButton) {
+            return;
+        }
+        const isDark = document.documentElement.dataset.bsTheme === "dark";
+        this.themeToggleButton.textContent = isDark ? "☀️" : "🌙";
+        this.themeToggleButton.title = isDark ? "Включить светлую тему" : "Включить тёмную тему";
     }
 
     bindContentWrapperEvents() {
