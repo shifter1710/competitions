@@ -22,6 +22,10 @@ class Main {
         this.profileFormStatus = document.querySelector(".profile-form__status");
         this.profileFormCancelButton = document.querySelector(".profile-form__cancel-button");
         this.addEmptyRowButton = document.querySelector(".add-empty-row-button");
+        this.mergeForm = document.querySelector(".merge-form");
+        this.mergeControls = document.querySelector(".merge-controls");
+        this.mergeApplyButton = document.querySelector(".merge-apply-button");
+        this.mergeStatus = document.querySelector(".merge-status");
         this.reportForm = document.querySelector(".filter-form");
         this.fileInput = document.querySelector(".import-form__input");
         this.attachmentFileInput = document.querySelector(".attachment-file-input");
@@ -138,6 +142,13 @@ class Main {
         }
         if (this.profileFormCancelButton) {
             this.profileFormCancelButton.addEventListener("click", () => this.resetProfile());
+        }
+        if (this.mergeForm) {
+            this.mergePreview = null;
+            this.mergeForm.addEventListener("submit", (event) => this.handleMergePreview(event));
+        }
+        if (this.mergeApplyButton) {
+            this.mergeApplyButton.addEventListener("click", () => this.handleMergeApply());
         }
         if (this.attachmentFileInput) {
             this.attachmentFileInput.addEventListener("change", () => this.handleAttachmentSelected());
@@ -402,6 +413,127 @@ class Main {
             if (input && !input.value && profile[key]) {
                 input.value = profile[key];
             }
+        });
+    }
+
+    // makeRequest прикрепляет CSRF только к FormData, поэтому для
+    // form-encoded тела токен добавляется здесь, до передачи в хелпер.
+    buildMergeRequestBody(extraFields = {}) {
+        const body = new URLSearchParams(extraFields);
+        body.append("csrf_token", this.getCsrfToken());
+        return body;
+    }
+
+    setMergeStatus(message, tone = "muted") {
+        if (!this.mergeStatus) {
+            return;
+        }
+        this.mergeStatus.textContent = message;
+        this.mergeStatus.className = `merge-status text-${tone}`;
+    }
+
+    resetMergeControls(message, tone) {
+        this.mergePreview = null;
+        if (this.mergeControls) {
+            this.mergeControls.classList.add("d-none");
+        }
+        if (this.mergeApplyButton) {
+            this.mergeApplyButton.disabled = true;
+        }
+        if (message !== undefined) {
+            this.setMergeStatus(message, tone);
+        }
+    }
+
+    handleMergePreview(event) {
+        event.preventDefault();
+        this.resetMergeControls();
+        const fromName = this.mergeForm.querySelector('[name="from_name"]').value.trim();
+        const toName = this.mergeForm.querySelector('[name="to_name"]').value.trim();
+        if (!fromName || !toName) {
+            this.setMergeStatus("Укажите оба ФИО", "danger");
+            return;
+        }
+
+        this.makeRequest({
+            url: "/admin/students/merge",
+            options: {
+                method: "POST",
+                body: this.buildMergeRequestBody({from_name: fromName, to_name: toName}),
+            },
+            onSuccess: (responseBody) => {
+                let preview;
+                try {
+                    preview = JSON.parse(responseBody);
+                } catch {
+                    this.setMergeStatus("Неожиданный ответ сервера", "danger");
+                    return;
+                }
+                const count = preview.records_to_merge;
+                if (!count) {
+                    this.setMergeStatus("Записей с таким ФИО не найдено", "warning");
+                    return;
+                }
+                this.mergePreview = {fromName, toName, count};
+                this.setMergeStatus(`Найдено записей для объединения: ${count}`, "success");
+                if (this.mergeControls) {
+                    this.mergeControls.classList.remove("d-none");
+                }
+                if (this.mergeApplyButton) {
+                    this.mergeApplyButton.disabled = false;
+                }
+            },
+            onError: (message) => this.setMergeStatus(message || "Ошибка предпросмотра", "danger"),
+        });
+    }
+
+    handleMergeApply() {
+        if (!this.mergePreview || !this.mergeApplyButton || this.mergeApplyButton.disabled) {
+            return;
+        }
+        const {fromName, toName, count} = this.mergePreview;
+        const confirmed = confirm(
+            `Объединить ${count} записей с «${fromName}» на «${toName}»? Действие необратимо`
+        );
+        if (!confirmed) {
+            return;
+        }
+
+        const fields = {
+            from_name: fromName,
+            to_name: toName,
+            confirm: "on",
+        };
+        const rewriteCheckbox = this.mergeForm.querySelector('[name="rewrite_names"]');
+        if (rewriteCheckbox && rewriteCheckbox.checked) {
+            fields.rewrite_names = "on";
+        }
+
+        this.mergeApplyButton.disabled = true;
+        this.makeRequest({
+            url: "/admin/students/merge",
+            options: {
+                method: "POST",
+                body: this.buildMergeRequestBody(fields),
+            },
+            onSuccess: (responseBody) => {
+                let result;
+                try {
+                    result = JSON.parse(responseBody);
+                } catch {
+                    result = {};
+                }
+                const merged = typeof result.merged === "number" ? result.merged : count;
+                this.resetMergeControls(
+                    `Объединено записей: ${merged}` +
+                        (result.rewritten_names ? ". Отображаемые ФИО в записях переписаны" : ""),
+                    "success"
+                );
+            },
+            onError: (message) => {
+                this.mergeApplyButton.disabled = false;
+                this.setMergeStatus(message || "Ошибка объединения", "danger");
+            },
         });
     }
 
