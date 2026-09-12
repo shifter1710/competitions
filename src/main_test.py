@@ -3,6 +3,7 @@ from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from unittest.mock import Mock
+from urllib.parse import urlencode
 
 import pandas as pd
 import pytest
@@ -107,6 +108,17 @@ def client() -> SanicTestClient:
     fake_storage.create_level.return_value = None
     fake_storage.rename_level.return_value = None
     fake_storage.disable_level.return_value = None
+    fake_storage.list_catalog.side_effect = lambda category: {
+        'sport': ['Бег', 'Лыжи'],
+        'institute': ['ИСИ'],
+    }.get(category, [])
+    fake_storage.list_catalog_all.return_value = []
+    fake_storage.add_catalog_value.return_value = None
+    fake_storage.get_catalog_value.return_value = None
+    fake_storage.hide_catalog_value.return_value = None
+    fake_storage.unhide_catalog_value.return_value = None
+    fake_storage.delete_catalog_value.return_value = None
+    fake_storage.count_records_using.return_value = 0
     fake_storage.get_user.side_effect = fake_get_user
     fake_storage.get_user_by_id.return_value = None
     fake_storage.list_users.return_value = []
@@ -1074,6 +1086,213 @@ def test_admin_cannot_create_duplicate_level(client: SanicTestClient):
     assert 'admin_error' in response.headers['location']
 
 
+def test_admin_catalogs_page_available_for_admin_only(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.get('/admin/catalogs', headers=headers)
+    assert response.status == 200
+    for title in ('Виды спорта', 'Институты', 'Уровни'):
+        assert title in response.text
+    assert 'action="/admin/catalogs/sport"' in response.text
+    assert 'action="/admin/catalogs/institute"' in response.text
+    assert 'action="/admin/levels"' in response.text  # секция уровней перенесена сюда
+
+    _, response = client.get('/admin/catalogs', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = client.get('/admin/catalogs', headers=get_auth_headers(role='viewer'))
+    assert response.status == 403
+
+    _, response = client.get('/admin/catalogs', headers=athlete_headers())
+    assert response.status == 403
+
+    _, response = client.get('/admin/catalogs', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+
+def test_old_levels_url_redirects_to_catalogs(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.get('/admin/levels', headers=headers, allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/admin/catalogs'
+
+    # flash-параметры сохраняются в редиректе (query string как есть)
+    _, response = client.get('/admin/levels?admin_message=готово', headers=headers, allow_redirects=False)
+    expected_query = urlencode({'admin_message': 'готово'})
+    assert response.headers['location'] == f'/admin/catalogs?{expected_query}'
+
+
+def test_admin_can_add_catalog_value(client: SanicTestClient):
+    app.ctx.storage.add_catalog_value.reset_mock()
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/catalogs/sport',
+        headers=headers,
+        data={**csrf_for(headers), 'value': 'Плавание'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.add_catalog_value.assert_called_once_with('sport', 'Плавание')
+
+    _, response = client.post(
+        '/admin/catalogs/sport',
+        headers=headers,
+        data={**csrf_for(headers), 'value': '   '},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+
+def test_catalog_value_actions_forbidden_for_non_admin(client: SanicTestClient):
+    editor_headers = get_auth_headers(role='editor')
+    for path in ('/admin/catalogs/sport', '/admin/catalogs/sport/5/hide', '/admin/catalogs/sport/5/delete'):
+        _, response = client.post(path, headers=editor_headers, data=csrf_for(editor_headers))
+        assert response.status == 403, path
+
+
+def test_catalog_hide_unhide_endpoints(client: SanicTestClient):
+    app.ctx.storage.get_catalog_value.return_value = {'id': 5, 'category': 'sport', 'value': 'Лыжи', 'active': 1}
+    app.ctx.storage.hide_catalog_value.reset_mock()
+    app.ctx.storage.unhide_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = client.post(
+        '/admin/catalogs/sport/5/hide', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.hide_catalog_value.assert_called_once_with(5)
+
+    _, response = client.post(
+        '/admin/catalogs/sport/5/unhide', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    app.ctx.storage.unhide_catalog_value.assert_called_once_with(5)
+
+    app.ctx.storage.get_catalog_value.return_value = None
+
+
+def test_catalog_delete_rejects_value_with_records(client: SanicTestClient):
+    app.ctx.storage.get_catalog_value.return_value = {'id': 5, 'category': 'sport', 'value': 'Бег', 'active': 1}
+    app.ctx.storage.count_records_using.return_value = 3
+    app.ctx.storage.delete_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = client.post('/admin/catalogs/sport/5/delete', headers=headers, data=csrf_for(headers))
+    assert response.status == 400
+    app.ctx.storage.delete_catalog_value.assert_not_called()
+
+    app.ctx.storage.count_records_using.return_value = 0
+    _, response = client.post(
+        '/admin/catalogs/sport/5/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.delete_catalog_value.assert_called_once_with(5)
+
+    app.ctx.storage.get_catalog_value.return_value = None
+    app.ctx.storage.count_records_using.return_value = 0
+
+
+def test_create_competition_auto_adds_catalog_values(client: SanicTestClient):
+    app.ctx.storage.add_catalog_value.reset_mock()
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ФМА',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Плавание',
+            'date': '10.04.2026',
+            'level': 'межвузовские',
+            'name': 'Кубок',
+            'position': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    added = {(call[0][0], call[0][1]) for call in app.ctx.storage.add_catalog_value.call_args_list}
+    assert ('sport', 'Плавание') in added
+    assert ('institute', 'ФМА') in added
+
+
+def test_import_auto_adds_catalog_values(client: SanicTestClient):
+    app.ctx.storage.add_catalog_value.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Шахматистов Шах Шахович',
+                'Пол': 'М',
+                'Институт': 'АДИ',
+                'Группа': 'ША-101',
+                'Вид спорта': 'Шахматы',
+                'Дата': '01.02.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Турнир',
+                'Место': 2,
+                'Курс': 1,
+            }
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+    assert response.status == 200
+    added = {(call[0][0], call[0][1]) for call in app.ctx.storage.add_catalog_value.call_args_list}
+    assert ('sport', 'Шахматы') in added
+    assert ('institute', 'АДИ') in added
+
+
+def test_index_datalists_show_active_catalog_values(client: SanicTestClient):
+    # фикстура: list_catalog('sport') → ['Бег', 'Лыжи'], list_catalog('institute') → ['ИСИ']
+    _, response = client.get('/', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    assert '<datalist id="sport-options">' in response.text
+    assert '<datalist id="institute-options">' in response.text
+    assert 'list="sport-options"' in response.text  # ручная форма ввода
+    assert 'list="institute-options"' in response.text
+    assert '<option value="Бег"></option>' in response.text
+    assert '<option value="Лыжи"></option>' in response.text
+    assert '<option value="ИСИ"></option>' in response.text
+    called_categories = {call[0][0] for call in app.ctx.storage.list_catalog.call_args_list}
+    assert {'sport', 'institute'} <= called_categories
+
+
+def test_hidden_catalog_value_not_in_datalist(client: SanicTestClient):
+    # list_catalog отдаёт только активные значения — скрытое в подсказки не попадает
+    original_side_effect = app.ctx.storage.list_catalog.side_effect
+    app.ctx.storage.list_catalog.side_effect = lambda category: {'sport': ['Бег']}.get(category, [])
+    try:
+        _, response = client.get('/', headers=get_auth_headers(role='editor'))
+        assert response.status == 200
+        assert '<option value="Бег"></option>' in response.text
+        assert '<option value="Лыжи"></option>' not in response.text
+    finally:
+        app.ctx.storage.list_catalog.side_effect = original_side_effect
+
+
 def test_url_custom_field_validated(client: SanicTestClient):
     app.ctx.storage.get_custom_fields.return_value = [
         CustomField(field_id=1, key='link', label='Ссылка', field_type='url')
@@ -1694,7 +1913,7 @@ def test_audit_page_available_for_admin_only(client: SanicTestClient):
 ADMIN_SECTION_PAGES = (
     '/admin/import',
     '/admin/fields',
-    '/admin/levels',
+    '/admin/catalogs',
     '/admin/users',
     '/admin/students',
     '/admin/maintenance',
@@ -1715,7 +1934,7 @@ def test_admin_hub_shows_only_import_for_editor(client: SanicTestClient):
     _, response = client.get('/admin', headers=get_auth_headers(role='editor'))
     assert response.status == 200
     assert '/admin/import' in response.text
-    for path in ('/admin/fields', '/admin/levels', '/admin/users', '/admin/students', '/admin/maintenance'):
+    for path in ('/admin/fields', '/admin/catalogs', '/admin/users', '/admin/students', '/admin/maintenance'):
         assert path not in response.text
 
 

@@ -11,6 +11,11 @@ from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
 
+# Справочники значений ведут себя как уровни: записи остаются свободным
+# текстом, справочник — только подсказки (docs/data-model-decisions.md,
+# «Справочники значений»). Уровни живут в своей таблице и сюда не входят.
+CATALOG_CATEGORIES: tuple[str, ...] = ('sport', 'institute')
+
 
 class SQLiteAdapter:
     def __init__(self, database_path: str):
@@ -104,6 +109,19 @@ class SQLiteAdapter:
             )
             self.connection.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS catalog_values (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (category, value)
+                )
+                '''
+            )
+            self._populate_catalog_values()
+            self.connection.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
@@ -134,6 +152,28 @@ class SQLiteAdapter:
             if 'name_aliases' not in user_columns:
                 self.connection.execute("ALTER TABLE users ADD COLUMN name_aliases TEXT NOT NULL DEFAULT '[]'")
             self.connection.commit()
+
+    def _populate_catalog_values(self):
+        """Наполнить справочники уникальными значениями из существующих записей.
+
+        Идемпотентно: благодаря UNIQUE (category, value) повторная инициализация
+        не дублирует строки и не трогает скрытые. Пустые значения пропускаются.
+        В вырожденных легаси-базах без колонок sport/institute populate молчит.
+        """
+        columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
+        if not set(CATALOG_CATEGORIES) <= columns:
+            return
+        created_at = datetime.utcnow().isoformat()
+        for category in CATALOG_CATEGORIES:
+            self.connection.execute(
+                f'''
+                INSERT OR IGNORE INTO catalog_values (category, value, active, created_at)
+                SELECT DISTINCT '{category}', {category}, 1, ?
+                FROM competitions
+                WHERE TRIM({category}) != ''
+                ''',
+                (created_at,),
+            )
 
     @staticmethod
     def _row_to_competition(row: sqlite3.Row) -> Competition:
@@ -652,6 +692,73 @@ class SQLiteAdapter:
                 (level_id,),
             )
             self.connection.commit()
+
+    def list_catalog(self, category: str) -> list[str]:
+        """Активные значения справочника (подсказки для форм), по алфавиту."""
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT value FROM catalog_values WHERE category = ? AND active = 1 ORDER BY value ASC',
+                (category,),
+            ).fetchall()
+            return [row['value'] for row in rows]
+
+    def list_catalog_all(self, category: str) -> list[dict]:
+        """Все значения справочника (для админки): активные сверху, по алфавиту."""
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, category, value, active FROM catalog_values '
+                'WHERE category = ? ORDER BY active DESC, value ASC',
+                (category,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def add_catalog_value(self, category: str, value: str) -> None:
+        """Добавить значение в справочник; дубликат игнорируется без ошибки."""
+        value = value.strip()
+        if not value:
+            return
+        with self._lock:
+            self.connection.execute(
+                'INSERT OR IGNORE INTO catalog_values (category, value, active, created_at) VALUES (?, ?, 1, ?)',
+                (category, value, datetime.utcnow().isoformat()),
+            )
+            self.connection.commit()
+
+    def get_catalog_value(self, value_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, category, value, active FROM catalog_values WHERE id = ?',
+                (value_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def hide_catalog_value(self, value_id: int) -> None:
+        with self._lock:
+            self.connection.execute('UPDATE catalog_values SET active = 0 WHERE id = ?', (value_id,))
+            self.connection.commit()
+
+    def unhide_catalog_value(self, value_id: int) -> None:
+        with self._lock:
+            self.connection.execute('UPDATE catalog_values SET active = 1 WHERE id = ?', (value_id,))
+            self.connection.commit()
+
+    def delete_catalog_value(self, value_id: int) -> None:
+        with self._lock:
+            self.connection.execute('DELETE FROM catalog_values WHERE id = ?', (value_id,))
+            self.connection.commit()
+
+    def count_records_using(self, category: str, value: str) -> int:
+        """Сколько записей соревнований содержат это значение справочника."""
+        # 'level' не входит в CATALOG_CATEGORIES, но таблица уровней своя —
+        # для счётчика на странице справочников колонка записей та же.
+        if category not in (*CATALOG_CATEGORIES, 'level'):
+            return 0
+        with self._lock:
+            row = self.connection.execute(
+                f'SELECT COUNT(*) AS total FROM competitions WHERE {category} = ?',
+                (value,),
+            ).fetchone()
+            return row['total']
 
     def get_competition_review(self, record_id: int) -> dict | None:
         with self._lock:
