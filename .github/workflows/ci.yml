@@ -25,4 +25,4 @@ jobs:
         run: pre-commit run --all-files
 
       - name: Run tests
-        run: pytest src/main_test.py
+        run: pytest src/

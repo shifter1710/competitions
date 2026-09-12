@@ -460,6 +460,9 @@
                         {% for field in custom_fields if field.show_in_table %}
                         <th scope="col" data-column-key="{{ field.key }}" data-sort-type="{{ field.field_type }}">{{ field.label }}</th>
                         {% endfor %}
+                        {% if has_unapproved %}
+                        <th scope="col" data-column-key="status" data-sort-type="text" data-exportable="false">Статус</th>
+                        {% endif %}
                         {% if can_write %}
                         <th scope="col" data-column-key="actions" data-sort-type="none" data-exportable="false">Действия</th>
                         {% endif %}
@@ -489,11 +492,23 @@
                             {%- endif -%}
                         </td>
                         {% endfor %}
+                        {% if has_unapproved %}
+                        <td data-column-key="status">
+                            {% if competition.review_status == 'pending' %}
+                            <span class="badge text-bg-warning">на проверке</span>
+                            {% elif competition.review_status == 'rejected' %}
+                            <span class="badge text-bg-danger" title="{{ competition.review_comment }}">отклонена</span>
+                            {% else %}
+                            <span class="badge text-bg-light text-muted">подтверждена</span>
+                            {% endif %}
+                        </td>
+                        {% endif %}
                         {% if can_write %}
                         <td data-column-key="actions" data-exportable="false">
                             <button
                                 class="btn btn-sm btn-outline-primary competition-edit-button"
                                 type="button"
+                                data-review-status="{{ competition.review_status }}"
                                 data-record-id="{{ competition.record_id }}"
                                 data-student-name="{{ competition.student_name }}"
                                 data-student-sex="{{ competition.student_sex }}"
@@ -509,6 +524,23 @@
                             >
                                 Редактировать
                             </button>
+                            {% if competition.review_status != 'approved' %}
+                            <button
+                                class="btn btn-sm btn-success competition-approve-button"
+                                type="button"
+                                data-record-id="{{ competition.record_id }}"
+                            >
+                                ✓ Подтвердить
+                            </button>
+                            <button
+                                class="btn btn-sm btn-outline-danger competition-reject-button"
+                                type="button"
+                                data-record-id="{{ competition.record_id }}"
+                                title="{{ competition.review_comment }}"
+                            >
+                                ✗ Отклонить
+                            </button>
+                            {% endif %}
                             {% if is_admin %}
                             <button
                                 class="btn btn-sm btn-outline-danger competition-delete-button"

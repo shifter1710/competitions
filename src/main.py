@@ -151,6 +151,17 @@ def get_auth_user(request: Request) -> dict | None:
     return getattr(request.ctx, 'auth_user', None)
 
 
+def get_current_user_id(request: Request) -> int | None:
+    user = get_auth_user(request)
+    if not user:
+        return None
+    try:
+        record = get_storage(request.app).get_user(user['username'])
+    except RuntimeError:
+        return None
+    return record['id'] if record else None
+
+
 def create_auth_cookie_value(
     username: str,
     role: str,
@@ -474,6 +485,8 @@ def competition_to_export_row(
     row.pop('_id', None)
     row.pop('Время создания записи (UTC)', None)
     row.pop('extra_data', None)
+    row.pop('Статус проверки', None)
+    row.pop('Комментарий проверки', None)
     for field in export_custom_fields:
         row[field.label] = competition.extra_data.get(field.key, '')
     return row
@@ -598,6 +611,7 @@ async def index(request: Request):
             'users': storage.list_users() if user_is_admin(request) else [],
             'user_roles': USER_ROLES,
             'levels': storage.get_level_names(),
+            'has_unapproved': any(c.review_status != 'approved' for c in competitions),
             'admin_levels': storage.list_levels() if user_is_admin(request) else [],
             'current_username': (get_auth_user(request) or {}).get('username'),
             'admin_message': get_param(dict(request.args), 'admin_message'),
@@ -753,7 +767,7 @@ async def upload(request: Request):
     existing = await asyncio.to_thread(storage.get_competitions)
     new_competitions, skipped_duplicates = split_import_competitions(competitions, existing)
     if new_competitions:
-        storage.save_competitions(new_competitions)
+        storage.save_competitions(new_competitions, owner_id=get_current_user_id(request))
 
     summary = f'Импортировано записей: {len(new_competitions)}'
     if skipped_duplicates:
@@ -788,7 +802,7 @@ async def add_competition(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    storage.save_competitions([competition])
+    storage.save_competitions([competition], owner_id=get_current_user_id(request))
     return redirect(to='/')
 
 
@@ -825,6 +839,36 @@ async def update_competition(request: Request, record_id: str):
         return text(body=f'Invalid row data: {exc}', status=400)
 
     storage.update_competition(numeric_id, competition)
+    review = storage.get_competition_review(numeric_id)
+    if review and review['review_status'] != 'approved':
+        current_user_id = get_current_user_id(request)
+        if review['owner_id'] == current_user_id:
+            storage.set_competition_review(numeric_id, 'pending')
+        else:
+            storage.set_competition_review(numeric_id, 'approved')
+    return redirect(to='/')
+
+
+@app.post('/competition/<record_id>/review/<decision>')
+async def review_competition(request: Request, record_id: str, decision: str):
+    auth_error = require_writer(request)
+    if auth_error is not None:
+        return auth_error
+
+    if decision not in ('approve', 'reject'):
+        return text(body='Unknown review decision', status=400)
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    if get_storage(request.app).get_competition_review(numeric_id) is None:
+        return text(body='Record not found', status=404)
+
+    status = 'approved' if decision == 'approve' else 'rejected'
+    comment = get_form_value(request, 'comment').strip() if decision == 'reject' else ''
+    get_storage(request.app).set_competition_review(numeric_id, status, comment)
     return redirect(to='/')
 
 

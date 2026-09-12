@@ -52,6 +52,14 @@ class SQLiteAdapter:
             columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
             if 'extra_data' not in columns:
                 self.connection.execute("ALTER TABLE competitions ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'")
+            if 'review_status' not in columns:
+                self.connection.execute(
+                    "ALTER TABLE competitions ADD COLUMN review_status TEXT NOT NULL DEFAULT 'approved'"
+                )
+            if 'owner_id' not in columns:
+                self.connection.execute('ALTER TABLE competitions ADD COLUMN owner_id INTEGER')
+            if 'review_comment' not in columns:
+                self.connection.execute("ALTER TABLE competitions ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
 
             self.connection.execute(
                 '''
@@ -114,6 +122,8 @@ class SQLiteAdapter:
                 'Место': row['position'],
                 'Время создания записи (UTC)': row['created_at'],
                 'extra_data': json.loads(row['extra_data'] or '{}'),
+                'Статус проверки': row['review_status'],
+                'Комментарий проверки': row['review_comment'],
             }
         )
 
@@ -150,7 +160,10 @@ class SQLiteAdapter:
                     name,
                     position,
                     created_at,
-                    extra_data
+                    extra_data,
+                    review_status,
+                    owner_id,
+                    review_comment
                 FROM competitions
                 ORDER BY created_at ASC
                 '''
@@ -274,7 +287,7 @@ class SQLiteAdapter:
         name: str,
     ) -> list[StudentInfo]:
         with self._lock:
-            filters = []
+            filters = ["review_status = 'approved'"]
             params: list[object] = []
 
             if date_from:
@@ -343,7 +356,12 @@ class SQLiteAdapter:
                 for row in rows
             ]
 
-    def save_competitions(self, competitions: Iterable[Competition]):
+    def save_competitions(
+        self,
+        competitions: Iterable[Competition],
+        review_status: str = 'approved',
+        owner_id: int | None = None,
+    ):
         with self._lock:
             records = [
                 (
@@ -360,6 +378,9 @@ class SQLiteAdapter:
                     item.position,
                     item.created_at.isoformat(),
                     json.dumps(item.extra_data, ensure_ascii=False),
+                    review_status,
+                    owner_id,
+                    '',
                 )
                 for item in competitions
             ]
@@ -378,8 +399,11 @@ class SQLiteAdapter:
                     name,
                     position,
                     created_at,
-                    extra_data
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    extra_data,
+                    review_status,
+                    owner_id,
+                    review_comment
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 records,
             )
@@ -522,5 +546,30 @@ class SQLiteAdapter:
             self.connection.execute(
                 'UPDATE levels SET active = 0 WHERE id = ?',
                 (level_id,),
+            )
+            self.connection.commit()
+
+    def get_competition_review(self, record_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, review_status, owner_id FROM competitions WHERE id = ?',
+                (record_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def set_competition_review(
+        self,
+        record_id: int,
+        review_status: str,
+        review_comment: str = '',
+    ) -> None:
+        with self._lock:
+            self.connection.execute(
+                """
+                UPDATE competitions
+                SET review_status = ?, review_comment = ?
+                WHERE id = ?
+                """,
+                (review_status, review_comment, record_id),
             )
             self.connection.commit()

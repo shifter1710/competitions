@@ -79,6 +79,8 @@ def client() -> SanicTestClient:
     fake_storage.create_custom_field.return_value = None
     fake_storage.update_custom_field.return_value = None
     fake_storage.disable_custom_field.return_value = None
+    fake_storage.get_competition_review.return_value = None
+    fake_storage.set_competition_review.return_value = None
     fake_storage.get_level_names.return_value = ['внутривузовские', 'межвузовские']
     fake_storage.list_levels.return_value = []
     fake_storage.create_level.return_value = None
@@ -823,6 +825,63 @@ def test_admin_cannot_deactivate_self(client: SanicTestClient):
     assert 'admin_error' in response.headers['location']
     app.ctx.storage.set_user_active.assert_not_called()
     app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_editor_can_approve_pending_record(client: SanicTestClient):
+    app.ctx.storage.get_competition_review.return_value = {
+        'id': 5,
+        'review_status': 'pending',
+        'owner_id': 2,
+    }
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition/5/review/approve',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.set_competition_review.assert_called_with(5, 'approved', '')
+    app.ctx.storage.get_competition_review.return_value = None
+
+
+def test_editor_can_reject_record_with_comment(client: SanicTestClient):
+    app.ctx.storage.get_competition_review.return_value = {
+        'id': 5,
+        'review_status': 'pending',
+        'owner_id': 2,
+    }
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition/5/review/reject',
+        headers=headers,
+        data={**csrf_for(headers), 'comment': 'укажите верное место'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.set_competition_review.assert_called_with(5, 'rejected', 'укажите верное место')
+    app.ctx.storage.get_competition_review.return_value = None
+
+
+def test_viewer_cannot_review(client: SanicTestClient):
+    headers = get_auth_headers(role='viewer')
+    _, response = client.post(
+        '/competition/5/review/approve',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+
+def test_review_rejects_unknown_decision(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/competition/5/review/delete',
+        headers=headers,
+        data=csrf_for(headers),
+    )
+    assert response.status == 400
 
 
 def test_login_verifies_password_hash(client: SanicTestClient):

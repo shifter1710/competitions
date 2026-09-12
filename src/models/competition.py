@@ -17,3 +17,5 @@ class Competition(Student):
     position: int = Field(alias='Место')
     created_at: datetime = Field(default_factory=datetime.utcnow, alias='Время создания записи (UTC)')
     extra_data: dict[str, str] = Field(default_factory=dict)
+    review_status: str = Field(default='approved', alias='Статус проверки')
+    review_comment: str = Field(default='', alias='Комментарий проверки')

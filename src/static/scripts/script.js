@@ -461,7 +461,41 @@ class Main {
         this.inlineEditBackup = null;
     }
 
+    reviewCompetition(recordId, decision) {
+        if (decision === "reject") {
+            const comment = prompt("Комментарий для владельца записи (необязательно):") ?? "";
+            this.makeRequest({
+                url: `/competition/${recordId}/review/reject`,
+                options: {
+                    method: "POST",
+                    body: new URLSearchParams({comment}),
+                },
+                onSuccess: () => this.refreshCurrentContent(),
+                onError: (message) => alert(message || "Ошибка отклонения записи")
+            });
+            return;
+        }
+        this.makeRequest({
+            url: `/competition/${recordId}/review/approve`,
+            options: {method: "POST"},
+            onSuccess: () => this.refreshCurrentContent(),
+            onError: (message) => alert(message || "Ошибка подтверждения записи")
+        });
+    }
+
     handleContentWrapperClick(event) {
+        const approveButton = event.target.closest(".competition-approve-button");
+        if (approveButton) {
+            this.reviewCompetition(approveButton.dataset.recordId, "approve");
+            return;
+        }
+
+        const rejectButton = event.target.closest(".competition-reject-button");
+        if (rejectButton) {
+            this.reviewCompetition(rejectButton.dataset.recordId, "reject");
+            return;
+        }
+
         const saveButton = event.target.closest(".inline-save-button");
         if (saveButton) {
             this.saveInlineEdit();
