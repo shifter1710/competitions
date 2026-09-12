@@ -112,6 +112,8 @@ def client() -> SanicTestClient:
     fake_storage.create_user.return_value = None
     fake_storage.set_user_password.return_value = None
     fake_storage.set_user_active.return_value = None
+    fake_storage.add_audit_event.return_value = None
+    fake_storage.get_audit_events.return_value = []
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -1494,3 +1496,187 @@ def test_students_lookup_exact_match(client: SanicTestClient):
 def test_students_lookup_requires_name_param(client: SanicTestClient):
     _, response = client.get('/api/students/lookup', headers=get_auth_headers())
     assert response.status == 400
+
+
+def audit_calls():
+    import json as json_module
+
+    return [
+        (call[1]['action'], json_module.loads(call[1]['details']))
+        for call in app.ctx.storage.add_audit_event.call_args_list
+    ]
+
+
+def test_login_success_writes_audit_event(client: SanicTestClient):
+    from src.main import login_failures
+
+    login_failures.clear()
+    app.ctx.storage.add_audit_event.reset_mock()
+    _, response = client.post(
+        '/login',
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.add_audit_event.assert_called_once()
+    kwargs = app.ctx.storage.add_audit_event.call_args[1]
+    assert kwargs['action'] == 'login_success'
+    assert kwargs['username'] == settings.auth_admin_username
+    assert kwargs['user_id'] == 1
+
+
+def test_login_failure_writes_audit_event_without_user_id(client: SanicTestClient):
+    from src.main import login_failures
+
+    login_failures.clear()
+    app.ctx.storage.add_audit_event.reset_mock()
+    _, response = client.post(
+        '/login',
+        data={'username': settings.auth_admin_username, 'password': 'wrong'},
+        allow_redirects=False,
+    )
+    assert response.status == 401
+    app.ctx.storage.add_audit_event.assert_called_once()
+    kwargs = app.ctx.storage.add_audit_event.call_args[1]
+    assert kwargs['action'] == 'login_failed'
+    assert kwargs['username'] == settings.auth_admin_username
+    assert kwargs['user_id'] is None
+
+
+def test_audit_failure_does_not_break_login(client: SanicTestClient):
+    from src.main import login_failures
+
+    login_failures.clear()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.add_audit_event.side_effect = RuntimeError('audit db is down')
+    _, response = client.post(
+        '/login',
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+    app.ctx.storage.add_audit_event.side_effect = None
+    assert response.status == 302
+
+
+def test_merge_writes_audit_event(client: SanicTestClient):
+    app.ctx.storage.add_audit_event.reset_mock()
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/students/merge',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'from_name': 'Иванова Анна',
+            'to_name': 'Петрова Анна',
+            'confirm': 'on',
+            'rewrite_names': 'on',
+        },
+    )
+    assert response.status == 200
+    assert (
+        'students_merged',
+        {
+            'from_name': 'Иванова Анна',
+            'to_name': 'Петрова Анна',
+            'merged': 2,
+            'rewrite_names': True,
+        },
+    ) in audit_calls()
+
+
+def test_review_decisions_write_audit_events(client: SanicTestClient):
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.get_competition_review.return_value = {
+        'id': 5,
+        'review_status': 'pending',
+        'owner_id': 2,
+    }
+    headers = get_auth_headers(role='editor')
+
+    _, response = client.post(
+        '/competition/5/review/approve',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert ('record_approved', {'record_id': 5, 'comment': ''}) in audit_calls()
+
+    app.ctx.storage.add_audit_event.reset_mock()
+    _, response = client.post(
+        '/competition/5/review/reject',
+        headers=headers,
+        data={**csrf_for(headers), 'comment': 'укажите верное место'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert ('record_rejected', {'record_id': 5, 'comment': 'укажите верное место'}) in audit_calls()
+    app.ctx.storage.get_competition_review.return_value = None
+
+
+def test_alias_added_writes_audit_event(client: SanicTestClient):
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.get_user_by_id.return_value = {'id': 7, 'username': 'anna', 'role': 'athlete'}
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users/7/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванова Анна Петровна'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert (
+        'alias_added',
+        {
+            'target_user_id': 7,
+            'target_username': 'anna',
+            'name': 'Иванова Анна Петровна',
+        },
+    ) in audit_calls()
+    app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_password_change_writes_audit_event(client: SanicTestClient):
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 7,
+        'username': 'someone',
+        'password_hash': 'x',
+        'role': 'editor',
+        'active': 1,
+    }
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users/7/password',
+        headers=headers,
+        data={**csrf_for(headers), 'password': 'newsecret123'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert ('password_changed', {'target_user_id': 7, 'target_username': 'someone'}) in audit_calls()
+    app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_audit_page_available_for_admin_only(client: SanicTestClient):
+    _, response = client.get('/admin/audit', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Журнал безопасности' in response.text
+
+    _, response = client.get('/admin/audit', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = client.get('/admin/audit', headers=get_auth_headers(role='viewer'))
+    assert response.status == 403
+
+    _, response = client.get('/admin/audit', headers=athlete_headers())
+    assert response.status == 403
+
+    _, response = client.get('/admin/audit', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'

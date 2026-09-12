@@ -1,0 +1,49 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Журнал безопасности</h3>
+        <div class="text-muted">
+            Последние {{ events | length }} событий (максимум 200, новые сверху).
+            Журнал только для чтения: записи не редактируются и не удаляются.
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Время (UTC)</th>
+                        <th scope="col">Пользователь</th>
+                        <th scope="col">Действие</th>
+                        <th scope="col">Детали</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for event in events %}
+                    <tr>
+                        <td>{{ event.created_at }}</td>
+                        <td>
+                            {{ event.username }}
+                            {% if event.user_id %}<span class="text-muted">#{{ event.user_id }}</span>{% endif %}
+                        </td>
+                        <td><code>{{ event.action }}</code></td>
+                        <td><code class="text-break">{{ event.details }}</code></td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td class="text-muted" colspan="4">Событий пока нет</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock content %}

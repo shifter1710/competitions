@@ -204,6 +204,43 @@ def test_alias_survives_surname_change(adapter):
     assert names == [old_name]
 
 
+def test_audit_log_table_created_for_legacy_db(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / 'legacy.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute('CREATE TABLE competitions (id INTEGER PRIMARY KEY)')
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    tables = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert 'audit_log' in tables
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(audit_log)')}
+    assert {'id', 'created_at', 'user_id', 'username', 'action', 'details'} <= columns
+
+
+def test_audit_log_append_and_order(adapter):
+    adapter.add_audit_event(user_id=1, username='admin', action='login_success', details='{}')
+    adapter.add_audit_event(user_id=None, username='ghost', action='login_failed')
+
+    events = adapter.get_audit_events()
+    assert [event['action'] for event in events] == ['login_failed', 'login_success']
+    assert events[0]['user_id'] is None
+    assert events[0]['username'] == 'ghost'
+    assert events[1]['user_id'] == 1
+    assert events[1]['details'] == '{}'
+    assert events[0]['created_at'] >= events[1]['created_at']
+
+
+def test_audit_log_limit(adapter):
+    for index in range(5):
+        adapter.add_audit_event(user_id=1, username='admin', action='login_success')
+    events = adapter.get_audit_events(limit=3)
+    assert len(events) == 3
+    assert events[0]['id'] == 5
+
+
 def test_merge_students_unifies_report_grouping(adapter):
     old_name = 'Иванова Анна Петровна'
     new_name = 'Петрова Анна Ивановна'

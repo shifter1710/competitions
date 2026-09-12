@@ -114,6 +114,18 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    user_id INTEGER,
+                    username TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    details TEXT NOT NULL DEFAULT ''
+                )
+                '''
+            )
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
@@ -737,6 +749,29 @@ class SQLiteAdapter:
                     (json.dumps(aliases, ensure_ascii=False), user_id),
                 )
                 self.connection.commit()
+
+    def add_audit_event(
+        self,
+        user_id: int | None,
+        username: str,
+        action: str,
+        details: str = '',
+    ) -> None:
+        """Append a security audit event. The log is append-only by design."""
+        with self._lock:
+            self.connection.execute(
+                'INSERT INTO audit_log (created_at, user_id, username, action, details) VALUES (?, ?, ?, ?, ?)',
+                (datetime.utcnow().isoformat(), user_id, username, action, details),
+            )
+            self.connection.commit()
+
+    def get_audit_events(self, limit: int = 200) -> list[dict]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, created_at, user_id, username, action, details FROM audit_log ORDER BY id DESC LIMIT ?',
+                (int(limit),),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def count_records_by_student_hash(self, student_id_hash: str) -> int:
         with self._lock:
