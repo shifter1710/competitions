@@ -3,6 +3,8 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
+import logging
 import re
 import secrets
 import time
@@ -73,6 +75,10 @@ LOGIN_LOCKOUT_SECONDS = 900
 LOGIN_REJECT_STATUS = 429
 
 login_failures: dict[str, list] = {}
+
+logger = logging.getLogger(__name__)
+
+AUDIT_PAGE_LIMIT = 200
 
 BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
     {'key': 'student_name', 'label': 'ФИО'},
@@ -181,6 +187,36 @@ def get_current_user_id(request: Request) -> int | None:
     return record['id'] if record else None
 
 
+def log_audit_event(
+    request: Request,
+    action: str,
+    details: dict | None = None,
+    *,
+    user_id: int | None = None,
+    username: str | None = None,
+) -> None:
+    """Записать событие в журнал безопасности.
+
+    Журнал — вспомогательный инструмент: сбой записи не должен ломать
+    основной сценарий, поэтому любые ошибки глотаем с логом.
+    """
+    try:
+        user = get_auth_user(request)
+        if username is None:
+            username = (user or {}).get('username') or ''
+        if user_id is None and user:
+            record = get_storage(request.app).get_user(user['username'])
+            user_id = record['id'] if record else None
+        get_storage(request.app).add_audit_event(
+            user_id=user_id,
+            username=username or '',
+            action=action,
+            details=json.dumps(details or {}, ensure_ascii=False),
+        )
+    except Exception:
+        logger.exception('Failed to write audit event %s', action)
+
+
 def create_auth_cookie_value(
     username: str,
     role: str,
@@ -254,6 +290,7 @@ def authenticate_user(request: Request, username: str, password: str) -> dict | 
     if not verify_password(password, user['password_hash']):
         return None
     return {
+        'id': user['id'],
         'username': user['username'],
         'role': user['role'],
         'pwd_ver': int(user.get('pwd_ver', 0)),
@@ -650,6 +687,7 @@ async def login(request: Request):
     user = authenticate_user(request, username, password)
     if user is None:
         register_login_failure(request.ip)
+        log_audit_event(request, 'login_failed', username=username)
         response = await render(
             template_name=jinja_env.get_template('login.html'),
             context={
@@ -661,6 +699,12 @@ async def login(request: Request):
         return response
 
     clear_login_failures(request.ip)
+    log_audit_event(
+        request,
+        'login_success',
+        user_id=user.get('id'),
+        username=user['username'],
+    )
     response = redirect('/')
     set_auth_cookie(request, response, user['username'], user['role'], pwd_ver=user.get('pwd_ver', 0))
     return response
@@ -1084,6 +1128,8 @@ async def update_competition(request: Request, record_id: str):
     # от прежнего статуса записи.
     if user_is_moderator(request):
         storage.set_competition_review(numeric_id, 'approved')
+        # Правка модератора = авто-подтверждение, фиксируем как record_approved.
+        log_audit_event(request, 'record_approved', {'record_id': numeric_id, 'auto': True})
     else:
         storage.set_competition_review(numeric_id, 'pending')
     return redirect(to='/')
@@ -1109,6 +1155,11 @@ async def review_competition(request: Request, record_id: str, decision: str):
     status = 'approved' if decision == 'approve' else 'rejected'
     comment = get_form_value(request, 'comment').strip() if decision == 'reject' else ''
     get_storage(request.app).set_competition_review(numeric_id, status, comment)
+    log_audit_event(
+        request,
+        'record_approved' if decision == 'approve' else 'record_rejected',
+        {'record_id': numeric_id, 'comment': comment},
+    )
     return redirect(to='/')
 
 
@@ -1262,9 +1313,15 @@ async def reset_user_password(request: Request, user_id: str):
         return build_redirect_with_message(error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов')
 
     storage = get_storage(request.app)
-    if storage.get_user_by_id(numeric_user_id) is None:
+    target_user = storage.get_user_by_id(numeric_user_id)
+    if target_user is None:
         return build_redirect_with_message(error='Пользователь не найден')
     storage.set_user_password(numeric_user_id, hash_password(password))
+    log_audit_event(
+        request,
+        'password_changed',
+        {'target_user_id': numeric_user_id, 'target_username': target_user['username']},
+    )
     return build_redirect_with_message(message='Пароль обновлён')
 
 
@@ -1480,7 +1537,17 @@ async def add_user_alias(request: Request, user_id: str):
     if not name:
         return build_redirect_with_message(error='ФИО обязательно')
 
+    target_user = storage.get_user_by_id(numeric_user_id)
     storage.add_name_alias(numeric_user_id, name)
+    log_audit_event(
+        request,
+        'alias_added',
+        {
+            'target_user_id': numeric_user_id,
+            'target_username': target_user['username'] if target_user else '',
+            'name': name,
+        },
+    )
     return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту')
 
 
@@ -1514,7 +1581,33 @@ async def merge_students(request: Request):
         )
 
     merged = storage.merge_students(from_hash, to_hash, new_name=to_name if rewrite_names else None)
+    log_audit_event(
+        request,
+        'students_merged',
+        {
+            'from_name': from_name,
+            'to_name': to_name,
+            'merged': merged,
+            'rewrite_names': rewrite_names,
+        },
+    )
     return json_response({'merged': merged, 'rewritten_names': rewrite_names})
+
+
+@app.get('/admin/audit')
+async def audit_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    events = get_storage(request.app).get_audit_events(limit=AUDIT_PAGE_LIMIT)
+    return await render(
+        template_name=jinja_env.get_template('audit.html'),
+        context={
+            'request': request,
+            'events': events,
+        },
+    )
 
 
 @app.get('/report')
