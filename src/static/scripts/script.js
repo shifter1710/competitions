@@ -20,6 +20,7 @@ class Main {
         this.customFieldInputs = Array.from(document.querySelectorAll(".custom-field-input"));
         this.profileForm = document.querySelector(".profile-form");
         this.profileFormStatus = document.querySelector(".profile-form__status");
+        this.profileNameHint = document.querySelector(".profile-form__name-hint");
         this.profileFormCancelButton = document.querySelector(".profile-form__cancel-button");
         this.addEmptyRowButton = document.querySelector(".add-empty-row-button");
         this.mergeForm = document.querySelector(".merge-form");
@@ -138,7 +139,10 @@ class Main {
         }
         if (this.profileForm) {
             this.profileForm.addEventListener("submit", (event) => this.handleSubmitProfileForm(event));
-            this.fetchProfile().then(() => this.fillProfileForm());
+            this.fetchProfile().then(() => {
+                this.fillProfileForm();
+                this.checkStudentNameHint(this.loadProfile().student_name);
+            });
         }
         if (this.profileFormCancelButton) {
             this.profileFormCancelButton.addEventListener("click", () => this.resetProfile());
@@ -371,6 +375,7 @@ class Main {
                 if (this.profileFormStatus) {
                     this.profileFormStatus.textContent = "Профиль сохранён";
                 }
+                this.checkStudentNameHint(profile.student_name);
             })
             .catch((error) => {
                 if (this.profileFormStatus) {
@@ -401,6 +406,67 @@ class Main {
         if (this.profileFormStatus) {
             this.profileFormStatus.textContent = "";
         }
+        this.checkStudentNameHint("");
+    }
+
+    // Тихая проверка ФИО атлета: Lookup возвращает только факт точного
+    // совпадения, чужие ФИО атлету не раскрываются. При любой ошибке сети
+    // подсказка не показывается.
+    checkStudentNameHint(name) {
+        if (!this.isAthlete || !this.profileNameHint) {
+            return;
+        }
+        const trimmed = String(name || "").trim();
+        if (!trimmed) {
+            this.profileNameHint.textContent = "";
+            this.profileNameHint.classList.remove("text-success", "text-warning");
+            return;
+        }
+        fetch(`/api/students/lookup?name=${encodeURIComponent(trimmed)}`)
+            .then((response) => (response.ok ? response.json() : Promise.reject(new Error("lookup failed"))))
+            .then((data) => {
+                if (data.found) {
+                    this.profileNameHint.textContent =
+                        "Найдены записи с таким ФИО — участия привяжутся к кабинету";
+                    this.profileNameHint.className = "profile-form__name-hint form-text mt-1 text-success";
+                } else {
+                    this.profileNameHint.textContent =
+                        "Записей с таким ФИО не найдено — проверьте написание (например, полное ФИО вместо инициалов)";
+                    this.profileNameHint.className = "profile-form__name-hint form-text mt-1 text-warning";
+                }
+            })
+            .catch(() => {
+                this.profileNameHint.textContent = "";
+                this.profileNameHint.classList.remove("text-success", "text-warning");
+            });
+    }
+
+    // Подсказки ФИО в админке: datalist наполняется один раз за сессию,
+    // повторно — после перерисовки контента. Список чужих ФИО доступен
+    // только admin/editor; при 403 или ошибке сети поля просто без подсказок.
+    renderStudentNamesList() {
+        const datalist = document.querySelector("#student-names-list");
+        if (!datalist) {
+            return;
+        }
+        if (this.studentNames) {
+            datalist.replaceChildren(...this.studentNames.map((name) => {
+                const option = document.createElement("option");
+                option.value = name;
+                return option;
+            }));
+            return;
+        }
+        fetch("/api/students")
+            .then((response) => (response.ok ? response.json() : Promise.reject(new Error("students list failed"))))
+            .then((names) => {
+                if (!Array.isArray(names)) {
+                    return;
+                }
+                this.studentNames = names;
+                this.renderStudentNamesList();
+            })
+            .catch(() => {});
     }
 
     applyProfileToManualForm() {
@@ -1178,6 +1244,7 @@ class Main {
     initTableFeatures() {
         this.tableCard = document.querySelector(".table-card");
         this.tableElement = document.querySelector(".interactive-table");
+        this.renderStudentNamesList();
         this.inlineEditRow = null;
         this.inlineEditRecordId = null;
         this.inlineEditBackup = null;
