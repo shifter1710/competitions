@@ -514,7 +514,7 @@ def collect_custom_filters(request: Request) -> tuple[list[tuple[str, str, str]]
     for key, raw_values in request.args.items():
         if not key.startswith('custom__'):
             continue
-        field = fields.get(key[len('custom__') :])
+        field = fields.get(key.removeprefix('custom__'))
         value = raw_values[0].strip() if raw_values else ''
         if field is None or not value:
             continue
