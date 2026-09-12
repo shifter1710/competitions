@@ -91,6 +91,10 @@ def client() -> SanicTestClient:
     fake_storage.get_competition_review.return_value = None
     fake_storage.get_profile.return_value = {}
     fake_storage.set_profile.return_value = None
+    fake_storage.get_name_aliases.return_value = []
+    fake_storage.add_name_alias.return_value = None
+    fake_storage.count_records_by_student_hash.return_value = 2
+    fake_storage.merge_students.return_value = 2
     fake_storage.get_attachment.return_value = None
     fake_storage.get_attachments.return_value = []
     fake_storage.create_attachment.return_value = 1
@@ -1188,7 +1192,7 @@ def test_athlete_sees_only_own_records(client: SanicTestClient):
     headers = athlete_headers()
     _, response = client.get('/', headers=headers)
     assert response.status == 200
-    assert app.ctx.storage.get_competitions.call_args[1] == {'owner_id': 1, 'student_id_hash': None}
+    assert app.ctx.storage.get_competitions.call_args[1] == {'owner_id': 1, 'student_id_hashes': []}
 
 
 def test_athlete_cannot_update_foreign_record(client: SanicTestClient):
@@ -1307,3 +1311,61 @@ def test_athlete_record_uses_profile_defaults(client: SanicTestClient):
     saved = app.ctx.storage.save_competitions.call_args[0][0][0]
     assert saved.student_name == ATHLETE_RECORD_DATA['student_name']
     app.ctx.storage.get_profile.return_value = {}
+
+
+def test_admin_merge_endpoint_preview_and_apply(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/students/merge',
+        headers=headers,
+        data={**csrf_for(headers), 'from_name': 'Иванова Анна', 'to_name': 'Петрова Анна'},
+    )
+    assert response.status == 200
+    assert response.json['preview'] is True
+    assert 'records_to_merge' in response.json
+
+    _, response = client.post(
+        '/admin/students/merge',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'from_name': 'Иванова Анна',
+            'to_name': 'Петрова Анна',
+            'confirm': 'on',
+            'rewrite_names': 'on',
+        },
+    )
+    assert response.status == 200
+    app.ctx.storage.merge_students.assert_called_once()
+    call = app.ctx.storage.merge_students.call_args
+    assert call[1]['new_name'] == 'Петрова Анна'
+
+
+def test_admin_can_add_alias_to_user(client: SanicTestClient):
+    app.ctx.storage.add_name_alias.reset_mock()
+    app.ctx.storage.get_user_by_id.return_value = {'id': 7, 'username': 'anna', 'role': 'athlete'}
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users/7/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванова Анна Петровна'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.add_name_alias.assert_called_once_with(7, 'Иванова Анна Петровна')
+    app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_profile_save_appends_alias(client: SanicTestClient):
+    app.ctx.storage.add_name_alias.reset_mock()
+    app.ctx.storage.get_name_aliases.return_value = []
+    headers = athlete_headers()
+    _, response = client.post(
+        '/api/profile',
+        headers=headers,
+        data={**csrf_for(headers), 'student_name': 'Спортсменов Спорт Спортович'},
+    )
+    assert response.status == 200
+    app.ctx.storage.add_name_alias.assert_called_once_with(1, 'Спортсменов Спорт Спортович')
+    app.ctx.storage.get_name_aliases.return_value = []

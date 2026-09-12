@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime
 
 import pytest
@@ -174,7 +175,55 @@ def test_athlete_sees_admin_created_records_matching_profile(adapter):
     )
 
     profile_hash = admin_record.student_id
-    visible = adapter.get_competitions(owner_id=5, student_id_hash=profile_hash)
+    visible = adapter.get_competitions(owner_id=5, student_id_hashes=[profile_hash])
     names = [comp.student_name for comp in visible]
     assert names == ['Сидоров Сид Сидорович', 'Сидоров Сид Сидорович']
     assert 'Чужой Человек' not in names
+
+
+def with_real_hash(competition):
+    competition.student_id = hashlib.sha256(competition.student_name.encode()).hexdigest()
+    return competition
+
+
+def test_alias_survives_surname_change(adapter):
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.save_competitions([with_real_hash(make_competition(old_name, datetime(2026, 1, 1)))], owner_id=1)
+
+    adapter.create_user('anna', 'hash', 'athlete')
+    user_id = adapter.get_user('anna')['id']
+    adapter.add_name_alias(user_id, old_name)
+    adapter.add_name_alias(user_id, new_name)
+
+    visible = adapter.get_competitions(
+        owner_id=user_id,
+        student_id_hashes=[hashlib.sha256(n.encode()).hexdigest() for n in adapter.get_name_aliases(user_id)],
+    )
+    names = [comp.student_name for comp in visible]
+    assert names == [old_name]
+
+
+def test_merge_students_unifies_report_grouping(adapter):
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.save_competitions(
+        [
+            with_real_hash(make_competition(old_name, datetime(2025, 1, 1))),
+            with_real_hash(make_competition(old_name, datetime(2025, 2, 1))),
+        ]
+    )
+    adapter.save_competitions([with_real_hash(make_competition(new_name, datetime(2026, 1, 1)))])
+
+    old_hash = hashlib.sha256(old_name.encode()).hexdigest()
+    new_hash = hashlib.sha256(new_name.encode()).hexdigest()
+    assert adapter.count_records_by_student_hash(old_hash) == 2
+
+    merged = adapter.merge_students(old_hash, new_hash, new_name=new_name)
+    assert merged == 2
+    assert adapter.count_records_by_student_hash(old_hash) == 0
+
+    infos = adapter.get_filtered('', '', '', '', '')
+    assert len(infos) == 1
+    assert infos[0].count_participation == 3
+    assert infos[0].student_name == new_name

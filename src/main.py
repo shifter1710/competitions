@@ -341,17 +341,18 @@ def user_is_athlete(request: Request) -> bool:
     return bool(user and user['role'] == ATHLETE_ROLE)
 
 
-def profile_student_id_hash(request: Request) -> str | None:
+def student_hashes_for_request(request: Request) -> list[str]:
     if not user_is_athlete(request):
-        return None
+        return []
     user_id = get_current_user_id(request)
     if user_id is None:
-        return None
-    student_name = get_storage(request.app).get_profile(user_id).get('student_name', '')
-    student_name = student_name.strip()
-    if not student_name:
-        return None
-    return hashlib.sha256(student_name.encode()).hexdigest()
+        return []
+    storage = get_storage(request.app)
+    names = storage.get_name_aliases(user_id)
+    profile_name = storage.get_profile(user_id).get('student_name', '').strip()
+    if profile_name and profile_name not in names:
+        names = names + [profile_name]
+    return [hashlib.sha256(name.strip().encode()).hexdigest() for name in names if name.strip()]
 
 
 def user_owns_record(request: Request, review: dict) -> bool:
@@ -359,8 +360,7 @@ def user_owns_record(request: Request, review: dict) -> bool:
         return True
     if review.get('owner_id') == get_current_user_id(request):
         return True
-    expected_hash = profile_student_id_hash(request)
-    return bool(expected_hash and review.get('student_id') == expected_hash)
+    return review.get('student_id') in student_hashes_for_request(request)
 
 
 def require_admin(request: Request):
@@ -678,8 +678,8 @@ async def index(request: Request):
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
     owner_filter = get_current_user_id(request) if user_is_athlete(request) else None
-    profile_hash = profile_student_id_hash(request)
-    competitions = storage.get_competitions(owner_id=owner_filter, student_id_hash=profile_hash)
+    profile_hashes = student_hashes_for_request(request)
+    competitions = storage.get_competitions(owner_id=owner_filter, student_id_hashes=profile_hashes)
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
@@ -907,7 +907,10 @@ async def save_profile(request: Request):
     profile, error = read_profile_payload(request)
     if error:
         return text(body=error, status=400)
-    get_storage(request.app).set_profile(user_id, profile)
+    storage = get_storage(request.app)
+    storage.set_profile(user_id, profile)
+    if profile.get('student_name'):
+        storage.add_name_alias(user_id, profile['student_name'])
     return json_response({'profile': profile})
 
 
@@ -1374,6 +1377,62 @@ async def disable_level(request: Request, level_id: str):
 
     get_storage(request.app).disable_level(numeric_level_id)
     return build_redirect_with_message(message='Уровень скрыт из списков')
+
+
+@app.post('/admin/users/<user_id>/alias')
+async def add_user_alias(request: Request, user_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_user_id = int(user_id)
+    except ValueError:
+        return text(body='Invalid user id', status=400)
+
+    storage = get_storage(request.app)
+    if storage.get_user_by_id(numeric_user_id) is None:
+        return build_redirect_with_message(error='Пользователь не найден')
+
+    name = get_form_value(request, 'name').strip()
+    if not name:
+        return build_redirect_with_message(error='ФИО обязательно')
+
+    storage.add_name_alias(numeric_user_id, name)
+    return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту')
+
+
+@app.post('/admin/students/merge')
+async def merge_students(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    from_name = get_form_value(request, 'from_name').strip()
+    to_name = get_form_value(request, 'to_name').strip()
+    confirm = checkbox_to_bool(get_form_value(request, 'confirm'))
+    rewrite_names = checkbox_to_bool(get_form_value(request, 'rewrite_names'))
+    if not from_name or not to_name:
+        return text(body='Укажите оба ФИО', status=400)
+    if from_name == to_name:
+        return text(body='ФИО совпадают', status=400)
+
+    from_hash = hashlib.sha256(from_name.encode()).hexdigest()
+    to_hash = hashlib.sha256(to_name.encode()).hexdigest()
+    storage = get_storage(request.app)
+    affected = storage.count_records_by_student_hash(from_hash)
+    if not confirm:
+        return json_response(
+            {
+                'preview': True,
+                'from_name': from_name,
+                'to_name': to_name,
+                'records_to_merge': affected,
+            }
+        )
+
+    merged = storage.merge_students(from_hash, to_hash, new_name=to_name if rewrite_names else None)
+    return json_response({'merged': merged, 'rewritten_names': rewrite_names})
 
 
 @app.get('/report')
