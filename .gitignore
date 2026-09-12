@@ -5,6 +5,8 @@ venv
 
 *.pyc
 
+node_modules/
+
 data/*
 !*.gitkeep
 

@@ -130,7 +130,8 @@ deploy/systemd/       юниты: compose-сервис и бэкап-тайме�
 scripts/              backup_sqlite.py, migrate_mongo_to_sqlite.py
 docs/                 документация проекта (см. ниже)
 docker-compose.yml    прод-запуск: образ + том ./data + порт 127.0.0.1:8081
-Dockerfile            python:3.10-slim + sanic
+Dockerfile            multi-stage: jsbuild (terser) + python:3.10-slim + sanic
+package.json          манифест инструментов сборки (terser) — не приложение на Node
 ```
 
 ## Документация
@@ -147,6 +148,11 @@ Dockerfile            python:3.10-slim + sanic
 - [docs/future-ideas.md](docs/future-ideas.md) — отложенные идеи
 
 ## Деплой
+
+JS минифицируется на этапе сборки образа (multi-stage Dockerfile, стадия
+`jsbuild`: node:22-slim + terser `--compress --mangle`); в репозитории
+`src/static/scripts/script.js` хранится читаемым исходником, в контейнер
+попадает минифицированная копия по тому же пути.
 
 Прод — docker compose за nginx; контейнер публикуется на `127.0.0.1:8081`,
 данные живут в `./data`. Пошагово (включая TLS и бэкап-таймер) —

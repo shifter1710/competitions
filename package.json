@@ -1,0 +1,8 @@
+{
+  "name": "competitions-build",
+  "private": true,
+  "description": "Инструменты сборки Docker-образа (минификация JS через terser). Не является приложением на Node.",
+  "devDependencies": {
+    "terser": "^5.51.2"
+  }
+}
