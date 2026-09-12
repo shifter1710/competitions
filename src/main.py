@@ -1049,12 +1049,12 @@ async def update_competition(request: Request, record_id: str):
         return text(body=f'Invalid row data: {exc}', status=400)
 
     storage.update_competition(numeric_id, competition)
-    review = storage.get_competition_review(numeric_id)
-    if review and review['review_status'] != 'approved':
-        if user_is_moderator(request):
-            storage.set_competition_review(numeric_id, 'approved')
-        else:
-            storage.set_competition_review(numeric_id, 'pending')
+    # Роль решает статус после правки: модератор подтверждает, атлет/эдитор
+    # отправляет на повторную проверку — независимо от прежнего статуса.
+    if user_is_moderator(request):
+        storage.set_competition_review(numeric_id, 'approved')
+    else:
+        storage.set_competition_review(numeric_id, 'pending')
     return redirect(to='/')
 
 

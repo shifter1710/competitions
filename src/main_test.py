@@ -422,6 +422,58 @@ def test_editor_can_update_manual_competition(client: SanicTestClient):
     assert response.headers['location'] == '/'
     app.ctx.storage.update_competition.assert_called_once()
     assert app.ctx.storage.update_competition.call_args[0][0] == 123
+    # Правка модератора (editor входит в MODERATOR_ROLES) подтверждает запись.
+    app.ctx.storage.set_competition_review.assert_called_once_with(123, 'approved')
+
+
+def test_moderator_update_pending_competition_approves_it(client: SanicTestClient):
+    app.ctx.storage.update_competition.reset_mock()
+    app.ctx.storage.set_competition_review.reset_mock()
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition/7',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Легкая атлетика',
+            'date': '10.04.2026',
+            'level': 'межвузовские',
+            'name': 'Весенний кубок',
+            'position': '1',
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    app.ctx.storage.set_competition_review.assert_called_once_with(7, 'approved')
+
+
+def test_athlete_update_approved_competition_returns_to_pending(client: SanicTestClient):
+    app.ctx.storage.update_competition.reset_mock()
+    app.ctx.storage.set_competition_review.reset_mock()
+    app.ctx.storage.get_competition_review.return_value = {
+        'id': 5,
+        'review_status': 'approved',
+        'owner_id': 1,  # sportik (athlete, id=1) владеет записью
+    }
+    headers = athlete_headers()
+    _, response = client.post(
+        '/competition/5',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    app.ctx.storage.update_competition.assert_called_once()
+    assert app.ctx.storage.update_competition.call_args[0][0] == 5
+    app.ctx.storage.set_competition_review.assert_called_once_with(5, 'pending')
+    app.ctx.storage.get_competition_review.return_value = None
 
 
 def test_admin_can_delete_competition(client: SanicTestClient):
