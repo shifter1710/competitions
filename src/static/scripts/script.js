@@ -1222,8 +1222,17 @@ class Main {
     }
 
     makeRequest({ url, options = {}, onSuccess = () => {}, onError = () => {} }) {
+        const csrfToken = this.getCsrfToken();
         if (options.body instanceof FormData) {
-            options.body.append("csrf_token", this.getCsrfToken());
+            if (!options.body.has("csrf_token")) {
+                options.body.append("csrf_token", csrfToken);
+            }
+        } else if (options.body instanceof URLSearchParams) {
+            if (!options.body.has("csrf_token")) {
+                options.body.append("csrf_token", csrfToken);
+            }
+        } else if (!options.body && String(options.method || "").toUpperCase() === "POST") {
+            options.body = new URLSearchParams({csrf_token: csrfToken});
         }
         this.setLoading(true);
         fetch(url, options)
@@ -1249,9 +1258,14 @@ class Main {
             })
             .catch((error) => {
                 this.setLoading(false);
-                if (error.message !== "Redirected to login" && error.message !== "Unauthorized") {
-                    onError(error.message);
+                if (error.message === "Redirected to login" || error.message === "Unauthorized") {
+                    return;
                 }
+                if (error.message && error.message.includes("CSRF")) {
+                    alert("Сессия обновлена в другой вкладке. Обновите страницу (F5) и повторите действие");
+                    return;
+                }
+                onError(error.message);
             });
     }
 
