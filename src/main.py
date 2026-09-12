@@ -24,6 +24,7 @@ from sanic import redirect
 from sanic import Request
 from sanic import Sanic
 from sanic import text
+from sanic.response import json as json_response
 from sanic.response import raw
 from sanic_ext import render
 
@@ -106,6 +107,7 @@ ATTACHMENT_EXTENSIONS = {
     'jpg': 'image/jpeg',
     'jpeg': 'image/jpeg',
 }
+PROFILE_FIELDS = ('student_name', 'student_sex', 'institute', 'group', 'course')
 ATTACHMENT_SIGNATURES = {
     'application/pdf': b'%PDF-',
     'image/png': b'\x89PNG\r\n\x1a\n',
@@ -844,6 +846,54 @@ async def upload(request: Request):
     return text(body=summary)
 
 
+def get_athlete_profile_defaults(request: Request, storage: SQLiteAdapter) -> dict:
+    if not user_is_athlete(request):
+        return {}
+    user_id = get_current_user_id(request)
+    if user_id is None:
+        return {}
+    return storage.get_profile(user_id)
+
+
+def read_profile_payload(request: Request) -> tuple[dict, str | None]:
+    profile = {}
+    for field in PROFILE_FIELDS:
+        value = get_form_value(request, field).strip()
+        if value:
+            profile[field] = value
+    if profile.get('student_sex') not in (None, '', 'М', 'Ж'):
+        return {}, 'Пол должен быть М или Ж'
+    if 'course' in profile:
+        try:
+            profile['course'] = str(int(profile['course']))
+        except ValueError:
+            return {}, 'Курс должен быть числом'
+    return profile, None
+
+
+@app.get('/api/profile')
+async def get_profile(request: Request):
+    if get_auth_user(request) is None:
+        return text(body='Unauthorized', status=401)
+    user_id = get_current_user_id(request)
+    profile = get_storage(request.app).get_profile(user_id) if user_id else {}
+    return json_response({'profile': profile})
+
+
+@app.post('/api/profile')
+async def save_profile(request: Request):
+    if get_auth_user(request) is None:
+        return text(body='Unauthorized', status=401)
+    user_id = get_current_user_id(request)
+    if user_id is None:
+        return text(body='Unknown user', status=400)
+    profile, error = read_profile_payload(request)
+    if error:
+        return text(body=error, status=400)
+    get_storage(request.app).set_profile(user_id, profile)
+    return json_response({'profile': profile})
+
+
 @app.post('/competition')
 async def add_competition(request: Request):
     auth_error = require_writer(request)
@@ -865,6 +915,17 @@ async def add_competition(request: Request):
         'Курс': get_form_value(request, 'course'),
     }
     record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
+
+    profile_defaults = get_athlete_profile_defaults(request, storage)
+    for form_key, profile_key in (
+        ('ФИО', 'student_name'),
+        ('Пол', 'student_sex'),
+        ('Институт', 'institute'),
+        ('Группа', 'group'),
+        ('Курс', 'course'),
+    ):
+        if not str(record.get(form_key, '')).strip() and profile_key in profile_defaults:
+            record[form_key] = profile_defaults[profile_key]
 
     try:
         competition = build_competition(record, custom_fields=custom_fields, manual_input=True)

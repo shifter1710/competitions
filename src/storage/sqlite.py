@@ -116,6 +116,8 @@ class SQLiteAdapter:
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
+            if 'profile_data' not in user_columns:
+                self.connection.execute("ALTER TABLE users ADD COLUMN profile_data TEXT NOT NULL DEFAULT '{}'")
             self.connection.commit()
 
     @staticmethod
@@ -673,4 +675,22 @@ class SQLiteAdapter:
     def delete_attachment(self, attachment_id: int) -> None:
         with self._lock:
             self.connection.execute('DELETE FROM attachments WHERE id = ?', (attachment_id,))
+            self.connection.commit()
+
+    def get_profile(self, user_id: int) -> dict:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT profile_data FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return {}
+            return json.loads(row['profile_data'] or '{}')
+
+    def set_profile(self, user_id: int, profile: dict) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE users SET profile_data = ? WHERE id = ?',
+                (json.dumps(profile, ensure_ascii=False), user_id),
+            )
             self.connection.commit()

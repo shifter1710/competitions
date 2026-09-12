@@ -89,6 +89,8 @@ def client() -> SanicTestClient:
     fake_storage.update_custom_field.return_value = None
     fake_storage.disable_custom_field.return_value = None
     fake_storage.get_competition_review.return_value = None
+    fake_storage.get_profile.return_value = {}
+    fake_storage.set_profile.return_value = None
     fake_storage.get_attachment.return_value = None
     fake_storage.get_attachments.return_value = []
     fake_storage.create_attachment.return_value = 1
@@ -1229,3 +1231,79 @@ def test_athlete_cannot_import_review_or_report(client: SanicTestClient):
 
     _, response = client.get('/export/index', headers=headers)
     assert response.status == 403
+
+
+def test_profile_save_and_fetch(client: SanicTestClient):
+    headers = athlete_headers()
+    _, response = client.post(
+        '/api/profile',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Спортсменов Спорт Спортович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'СБ-101',
+            'course': '2',
+        },
+    )
+    assert response.status == 200
+    app.ctx.storage.set_profile.assert_called_once()
+    saved = app.ctx.storage.set_profile.call_args[0][1]
+    assert saved['group'] == 'СБ-101'
+
+    _, response = client.get('/api/profile', headers=headers)
+    assert response.status == 200
+
+
+def test_profile_rejects_bad_sex_and_course(client: SanicTestClient):
+    headers = athlete_headers()
+    _, response = client.post(
+        '/api/profile',
+        headers=headers,
+        data={**csrf_for(headers), 'student_sex': 'другое'},
+    )
+    assert response.status == 400
+
+    _, response = client.post(
+        '/api/profile',
+        headers=headers,
+        data={**csrf_for(headers), 'course': 'второй'},
+    )
+    assert response.status == 400
+
+
+def test_athlete_record_uses_profile_defaults(client: SanicTestClient):
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.get_profile.return_value = {
+        'student_name': 'Спортсменов Спорт Спортович',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'СБ-101',
+        'course': '2',
+    }
+    headers = athlete_headers()
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.group == 'СБ-101'
+
+    # а если в форме данные есть — профиль не подменяет их
+    app.ctx.storage.get_profile.return_value = {
+        'student_name': 'Другое ФИО',
+    }
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.student_name == ATHLETE_RECORD_DATA['student_name']
+    app.ctx.storage.get_profile.return_value = {}
