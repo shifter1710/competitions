@@ -1,10 +1,24 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-bs-theme="light">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Соревнования студентов | СибАДИ</title>
+    {# Тема применяется до загрузки стилей, чтобы не было вспышки светлой
+       при перезагрузке в тёмной. Хранится только в localStorage (ключ
+       "theme": light|dark), серверное состояние пользователя не используется. #}
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("theme") === "dark") {
+                    document.documentElement.dataset.bsTheme = "dark";
+                }
+            } catch (error) {
+                // localStorage недоступен — остаётся светлая тема
+            }
+        })();
+    </script>
     {% if request.ctx.auth_user %}
     <meta name="csrf-token" content="{{ csrf_token(request) }}">
     {% endif %}
@@ -49,16 +63,20 @@
                     {% endif %}
                 </ul>
                 {% endif %}
-                {% if request.ctx.auth_user %}
                 <div class="d-flex align-items-center gap-3 text-light">
+                    {% if request.ctx.auth_user %}
                     <span>Пользователь: <strong>{{ request.ctx.auth_user.username }}</strong>
                         ({{ request.ctx.auth_user.role }})</span>
+                    {% endif %}
+                    <button class="btn btn-outline-light btn-sm theme-toggle-button" type="button"
+                        aria-label="Переключить тему">🌙</button>
+                    {% if request.ctx.auth_user %}
                     <form action="/logout" method="post">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                         <button class="btn btn-outline-light btn-sm" type="submit">Выйти</button>
                     </form>
+                    {% endif %}
                 </div>
-                {% endif %}
             </div>
         </div>
     </nav>

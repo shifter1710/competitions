@@ -221,3 +221,138 @@ select {
 .report-export-form__column {
     gap: 8px;
 }
+
+/* Тёмная тема ([data-bs-theme="dark"] на <html>): Bootstrap 5.3 перекрашивает
+   свои компоненты сам, здесь — только собственные правила с захардкоженными
+   цветами и сторонние виджеты (datepicker, nice-select2), которые про
+   data-bs-theme не знают. Цвета берём из переменных Bootstrap, чтобы
+   держаться единой палитры. Экспорт xlsx и печать не завязаны на тему. */
+
+[data-bs-theme="dark"] .label,
+[data-bs-theme="dark"] .empty-content {
+    color: var(--bs-secondary-color);
+}
+
+[data-bs-theme="dark"] .table-column-option {
+    background: var(--bs-secondary-bg);
+    border-color: var(--bs-border-color);
+}
+
+/* Бейдж «подтверждена» (text-bg-light text-muted): .text-muted в собранном
+   Bootstrap идёт позже .text-bg-light и в тёмной теме красит текст бейджа
+   в светлый --bs-secondary-color — на светлом фоне бейджа он не читается. */
+[data-bs-theme="dark"] .badge.text-bg-light {
+    color: #000 !important;
+}
+
+/* nice-select2: белые фон/границы/наведение зашиты в библиотеке. */
+
+[data-bs-theme="dark"] .nice-select {
+    background-color: var(--bs-body-bg);
+    border-color: var(--bs-border-color);
+    color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .nice-select:hover {
+    border-color: var(--bs-secondary-color);
+}
+
+[data-bs-theme="dark"] .nice-select.open,
+[data-bs-theme="dark"] .nice-select:focus {
+    border-color: var(--bs-secondary-color);
+}
+
+[data-bs-theme="dark"] .nice-select .nice-select-dropdown {
+    background-color: var(--bs-body-bg);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .5), 0 0 0 1px var(--bs-border-color-translucent);
+}
+
+[data-bs-theme="dark"] .nice-select .option:hover,
+[data-bs-theme="dark"] .nice-select .option.focus,
+[data-bs-theme="dark"] .nice-select .option.selected.focus {
+    background-color: var(--bs-secondary-bg);
+}
+
+[data-bs-theme="dark"] .nice-select .option.disabled {
+    color: var(--bs-tertiary-color);
+}
+
+[data-bs-theme="dark"] .nice-select .nice-select-search {
+    background-color: var(--bs-body-bg);
+    border-color: var(--bs-border-color);
+    color: var(--bs-body-color);
+}
+
+/* datepicker (fengyuanchen): белые панели и светлые ховеры зашиты в
+   библиотеке, в тёмной теме без оверрайдов календарь нечитаем. */
+
+[data-bs-theme="dark"] .datepicker-picker {
+    background-color: var(--bs-body-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-dropdown .datepicker-picker {
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .5), 0 0 0 1px var(--bs-border-color-translucent);
+}
+
+[data-bs-theme="dark"] .datepicker-footer,
+[data-bs-theme="dark"] .datepicker-title {
+    background-color: var(--bs-secondary-bg);
+    box-shadow: none;
+}
+
+[data-bs-theme="dark"] .datepicker-controls .button {
+    background-color: var(--bs-body-bg);
+    border-color: var(--bs-border-color);
+    color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .datepicker-controls .button:hover {
+    border-color: var(--bs-secondary-color);
+    color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .datepicker-header .datepicker-controls .button:hover {
+    background-color: var(--bs-secondary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-header .datepicker-controls .button:active {
+    background-color: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell:not(.disabled):hover {
+    background-color: var(--bs-secondary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.focused:not(.selected) {
+    background-color: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.next:not(.disabled),
+[data-bs-theme="dark"] .datepicker-cell.prev:not(.disabled) {
+    color: var(--bs-secondary-color);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.highlighted:not(.selected):not(.range):not(.today) {
+    background-color: var(--bs-secondary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.highlighted:not(.selected):not(.range):not(.today):not(.disabled):hover {
+    background-color: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.highlighted:not(.selected):not(.range):not(.today).focused {
+    background-color: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.range {
+    background-color: var(--bs-secondary-bg);
+    color: var(--bs-body-color);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.range:not(.disabled):not(.focused):not(.today):hover {
+    background-color: var(--bs-tertiary-bg);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.range.focused {
+    background-color: var(--bs-tertiary-bg);
+}
