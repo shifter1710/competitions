@@ -526,6 +526,36 @@ class SQLiteAdapter:
             self.connection.execute('DELETE FROM competitions')
             self.connection.commit()
 
+    def count_competitions(self) -> int:
+        with self._lock:
+            row = self.connection.execute('SELECT COUNT(*) AS total FROM competitions').fetchone()
+            return row['total']
+
+    def count_attachments(self) -> int:
+        with self._lock:
+            row = self.connection.execute('SELECT COUNT(*) AS total FROM attachments').fetchone()
+            return row['total']
+
+    def delete_all_competitions(self) -> int:
+        """Wipe all competition records (admin maintenance action). Returns deleted row count."""
+        with self._lock:
+            cursor = self.connection.execute('DELETE FROM competitions')
+            self.connection.commit()
+            return cursor.rowcount
+
+    def delete_all_attachments(self) -> int:
+        """Wipe all attachment rows (admin maintenance action). Returns deleted row count."""
+        with self._lock:
+            cursor = self.connection.execute('DELETE FROM attachments')
+            self.connection.commit()
+            return cursor.rowcount
+
+    def get_sport_names(self) -> list[str]:
+        """Unique sport names as stored in records, sorted alphabetically."""
+        with self._lock:
+            rows = self.connection.execute('SELECT DISTINCT sport FROM competitions ORDER BY sport ASC').fetchall()
+            return [row['sport'] for row in rows]
+
     def get_user(self, username: str) -> dict | None:
         with self._lock:
             row = self.connection.execute(
@@ -545,9 +575,14 @@ class SQLiteAdapter:
     def list_users(self) -> list[dict]:
         with self._lock:
             rows = self.connection.execute(
-                'SELECT id, username, role, active FROM users ORDER BY username ASC'
+                'SELECT id, username, role, active, name_aliases FROM users ORDER BY username ASC'
             ).fetchall()
-            return [dict(row) for row in rows]
+            users = []
+            for row in rows:
+                user = dict(row)
+                user['name_aliases'] = json.loads(row['name_aliases'] or '[]')
+                users.append(user)
+            return users
 
     def create_user(self, username: str, password_hash: str, role: str) -> None:
         with self._lock:

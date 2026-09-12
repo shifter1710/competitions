@@ -113,6 +113,11 @@ def client() -> SanicTestClient:
     fake_storage.create_user.return_value = None
     fake_storage.set_user_password.return_value = None
     fake_storage.set_user_active.return_value = None
+    fake_storage.count_competitions.return_value = 0
+    fake_storage.count_attachments.return_value = 0
+    fake_storage.delete_all_competitions.return_value = 0
+    fake_storage.delete_all_attachments.return_value = 0
+    fake_storage.get_sport_names.return_value = []
     fake_storage.add_audit_event.return_value = None
     fake_storage.get_audit_events.return_value = []
     app.ctx.storage = fake_storage
@@ -1684,3 +1689,260 @@ def test_audit_page_available_for_admin_only(client: SanicTestClient):
     _, response = client.get('/admin/audit', allow_redirects=False)
     assert response.status == 302
     assert response.headers['location'] == '/login'
+
+
+ADMIN_SECTION_PAGES = (
+    '/admin/import',
+    '/admin/fields',
+    '/admin/levels',
+    '/admin/users',
+    '/admin/students',
+    '/admin/maintenance',
+    '/admin/maintenance/export',
+)
+
+
+def test_admin_hub_shows_all_sections_for_admin(client: SanicTestClient):
+    _, response = client.get('/admin', headers=get_auth_headers())
+    assert response.status == 200
+    for path in ADMIN_SECTION_PAGES + ('/admin/audit',):
+        if path == '/admin/maintenance/export':  # хаб ссылается на раздел, не на выгрузку
+            continue
+        assert path in response.text
+
+
+def test_admin_hub_shows_only_import_for_editor(client: SanicTestClient):
+    _, response = client.get('/admin', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    assert '/admin/import' in response.text
+    for path in ('/admin/fields', '/admin/levels', '/admin/users', '/admin/students', '/admin/maintenance'):
+        assert path not in response.text
+
+
+def test_admin_hub_access_for_viewer_athlete_and_anonymous(client: SanicTestClient):
+    _, response = client.get('/admin', headers=get_auth_headers(role='viewer'))
+    assert response.status == 403
+
+    _, response = client.get('/admin', headers=athlete_headers())
+    assert response.status == 403
+
+    _, response = client.get('/admin', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+
+def test_admin_section_pages_available_for_admin(client: SanicTestClient):
+    headers = get_auth_headers()
+    for path in ADMIN_SECTION_PAGES:
+        _, response = client.get(path, headers=headers)
+        assert response.status == 200, path
+
+
+def test_admin_import_page_available_for_editor(client: SanicTestClient):
+    _, response = client.get('/admin/import', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    assert 'import-form' in response.text
+    assert '/template/empty.xlsx' in response.text
+
+
+def test_admin_sections_forbidden_for_editor(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
+    for path in ADMIN_SECTION_PAGES:
+        if path == '/admin/import':
+            continue
+        _, response = client.get(path, headers=headers)
+        assert response.status == 403, path
+
+
+def test_admin_sections_forbidden_for_viewer_and_athlete(client: SanicTestClient):
+    for headers in (get_auth_headers(role='viewer'), athlete_headers()):
+        for path in ADMIN_SECTION_PAGES:
+            _, response = client.get(path, headers=headers)
+            assert response.status == 403, path
+
+
+def test_admin_pages_render_own_markup(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.get('/admin/students', headers=headers)
+    assert response.status == 200
+    assert 'merge-form' in response.text
+    assert 'student-names-list' in response.text
+
+    _, response = client.get('/admin/maintenance', headers=headers)
+    assert response.status == 200
+    assert '/admin/maintenance/export' in response.text
+    assert 'УДАЛИТЬ' in response.text
+
+    _, response = client.get('/admin/users', headers=headers)
+    assert response.status == 200
+    assert 'student-names-list' in response.text
+
+
+def test_index_shows_import_link_for_moderators_only(client: SanicTestClient):
+    _, response = client.get('/', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    assert 'href="/admin/import"' in response.text
+
+    _, response = client.get('/', headers=athlete_headers())
+    assert response.status == 200
+    assert 'href="/admin/import"' not in response.text
+
+
+def wipe_request(client, headers, scope, phrase='УДАЛИТЬ'):
+    return client.post(
+        '/admin/maintenance/wipe',
+        headers=headers,
+        data={**csrf_for(headers), 'scope': scope, 'confirm_phrase': phrase},
+        allow_redirects=False,
+    )
+
+
+def test_wipe_records_scope(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    app.ctx.storage.delete_all_competitions.reset_mock()
+    app.ctx.storage.delete_all_attachments.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.delete_all_competitions.return_value = 5
+
+    _, response = wipe_request(client, get_auth_headers(), 'records')
+
+    assert response.status == 302
+    assert response.headers['location'].startswith('/admin/maintenance?')
+    app.ctx.storage.delete_all_competitions.assert_called_once()
+    app.ctx.storage.delete_all_attachments.assert_not_called()
+    assert ('db_wiped', {'scope': 'records', 'records_deleted': 5, 'attachments_deleted': 0}) in audit_calls()
+
+
+def test_wipe_attachments_scope_removes_files_only(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    files_dir = tmp_path / 'files' / '3'
+    files_dir.mkdir(parents=True)
+    (files_dir / 'stored.png').write_bytes(PNG_BYTES)
+    keep_me = tmp_path / 'competitions.sqlite3'
+    keep_me.write_bytes(b'db')
+    app.ctx.storage.delete_all_competitions.reset_mock()
+    app.ctx.storage.delete_all_attachments.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.delete_all_attachments.return_value = 2
+
+    _, response = wipe_request(client, get_auth_headers(), 'attachments')
+
+    assert response.status == 302
+    app.ctx.storage.delete_all_attachments.assert_called_once()
+    app.ctx.storage.delete_all_competitions.assert_not_called()
+    assert not (tmp_path / 'files').exists()
+    assert keep_me.exists()
+    assert ('db_wiped', {'scope': 'attachments', 'records_deleted': 0, 'attachments_deleted': 2}) in audit_calls()
+
+
+def test_wipe_records_attachments_scope(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    (tmp_path / 'files').mkdir(parents=True)
+    app.ctx.storage.delete_all_competitions.reset_mock()
+    app.ctx.storage.delete_all_attachments.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.delete_all_competitions.return_value = 4
+    app.ctx.storage.delete_all_attachments.return_value = 3
+
+    _, response = wipe_request(client, get_auth_headers(), 'records_attachments')
+
+    assert response.status == 302
+    app.ctx.storage.delete_all_competitions.assert_called_once()
+    app.ctx.storage.delete_all_attachments.assert_called_once()
+    assert not (tmp_path / 'files').exists()
+    assert (
+        'db_wiped',
+        {'scope': 'records_attachments', 'records_deleted': 4, 'attachments_deleted': 3},
+    ) in audit_calls()
+
+
+def test_wipe_rejects_wrong_confirm_phrase(client: SanicTestClient):
+    app.ctx.storage.delete_all_competitions.reset_mock()
+    _, response = wipe_request(client, get_auth_headers(), 'records', phrase='удалить')
+    assert response.status == 400
+    app.ctx.storage.delete_all_competitions.assert_not_called()
+
+
+def test_wipe_rejects_unknown_scope(client: SanicTestClient):
+    _, response = wipe_request(client, get_auth_headers(), 'everything')
+    assert response.status == 400
+
+
+def test_wipe_forbidden_for_non_admin(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
+    _, response = wipe_request(client, headers, 'records')
+    assert response.status == 403
+
+    viewer_headers = get_auth_headers(role='viewer')
+    _, response = client.post(
+        '/admin/maintenance/wipe',
+        headers=viewer_headers,
+        data={**csrf_for(viewer_headers), 'scope': 'records', 'confirm_phrase': 'УДАЛИТЬ'},
+    )
+    assert response.status == 403
+
+
+def test_maintenance_export_for_admin(client: SanicTestClient):
+    from openpyxl import load_workbook
+
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.list_users.return_value = [
+        {'id': 1, 'username': 'admin', 'role': 'admin', 'active': 1, 'name_aliases': ['Иванов Иван']},
+    ]
+    app.ctx.storage.list_levels.return_value = [{'id': 1, 'name': 'внутривузовские', 'sort_order': 0, 'active': 1}]
+    app.ctx.storage.get_sport_names.return_value = ['Бег', 'Лыжи']
+
+    _, response = client.get('/admin/maintenance/export', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert response.headers['content-type'].startswith(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    workbook = load_workbook(BytesIO(response.body), read_only=True)
+    assert workbook.sheetnames == ['Записи', 'Пользователи', 'Уровни', 'Виды спорта']
+    users_sheet = workbook['Пользователи']
+    rows = list(users_sheet.iter_rows(values_only=True))
+    assert rows[0] == ('Логин', 'Роль', 'Активен', 'Псевдонимы ФИО')
+    assert rows[1][0] == 'admin'
+    assert rows[1][3] == 'Иванов Иван'
+    sports_sheet = workbook['Виды спорта']
+    assert [row[0] for row in sports_sheet.iter_rows(min_row=2, values_only=True)] == ['Бег', 'Лыжи']
+
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.list_users.return_value = []
+    app.ctx.storage.list_levels.return_value = []
+    app.ctx.storage.get_sport_names.return_value = []
+
+
+def test_maintenance_export_forbidden_for_editor(client: SanicTestClient):
+    _, response = client.get('/admin/maintenance/export', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+
+def test_audit_page_shows_message_when_log_unavailable(client: SanicTestClient):
+    app.ctx.storage.get_audit_events.side_effect = RuntimeError('audit db is down')
+    _, response = client.get('/admin/audit', headers=get_auth_headers())
+    app.ctx.storage.get_audit_events.side_effect = None
+
+    assert response.status == 200
+    assert 'Журнал недоступен' in response.text
+
+
+def test_old_admin_post_still_works_and_returns_to_section(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/fields',
+        headers=headers,
+        data={**csrf_for(headers), 'label': 'Тренер', 'field_type': 'text'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/admin/fields')

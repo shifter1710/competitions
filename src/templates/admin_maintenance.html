@@ -1,0 +1,66 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Обслуживание базы{% endblock admin_title %}
+{% block admin_description %}Выгрузка всей базы для архива и очистка записей/вложений с явным подтверждением.{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Выгрузка базы</h3>
+        <div class="text-muted mb-3">
+            Один xlsx-файл со всеми данными по листам: записи (все колонки, включая кастомные),
+            пользователи с ролями, активностью и ФИО-псевдонимами, справочник уровней и виды спорта
+            из записей. Существующие выгрузки таблицы и отчёта остаются на своих страницах.
+        </div>
+        <a class="btn btn-primary" href="/admin/maintenance/export">Выгрузить базу (xlsx)</a>
+    </div>
+</div>
+
+<div class="card shadow-sm mb-4 border-danger">
+    <div class="card-body">
+        <h3 class="title mb-1">Очистка базы</h3>
+        <div class="text-muted mb-3">
+            Сейчас в базе: записей — {{ records_count }}, вложений — {{ attachments_count }}.
+            Действие необратимо. Пользователи, кастомные поля, справочники и журнал аудита
+            не затрагиваются. Перед очисткой рекомендуется выгрузить базу.
+        </div>
+
+        <form action="/admin/maintenance/wipe" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+
+            <div class="mb-3">
+                <div class="form-check">
+                    <input checked class="form-check-input" id="wipe-records" name="scope" type="radio" value="records" required>
+                    <label class="form-check-label" for="wipe-records">
+                        Все записи соревнований <span class="text-muted">(вложения не трогаются)</span>
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" id="wipe-records-attachments" name="scope" type="radio" value="records_attachments">
+                    <label class="form-check-label" for="wipe-records-attachments">
+                        Записи + вложения <span class="text-muted">(записи, строки и файлы вложений)</span>
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" id="wipe-attachments" name="scope" type="radio" value="attachments">
+                    <label class="form-check-label" for="wipe-attachments">
+                        Только вложения <span class="text-muted">(строки и файлы вложений, записи остаются)</span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="row g-2 align-items-end">
+                <div class="col-md-4">
+                    <label class="form-label" for="wipe-confirm-phrase">Для подтверждения введите слово «{{ wipe_confirm_phrase }}»</label>
+                    <input class="form-control" id="wipe-confirm-phrase" name="confirm_phrase" type="text" autocomplete="off" required>
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-danger w-100" type="submit">Очистить</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock admin_content %}

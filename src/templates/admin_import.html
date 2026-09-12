@@ -1,0 +1,29 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Импорт записей{% endblock admin_title %}
+{% block admin_description %}Импорт Excel и шаблон для оператора.{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-center">
+            <div>
+                <h3 class="title mb-1">Загрузка данных</h3>
+                <div class="text-muted">Импортируйте заполненный Excel-файл. Дубли записей пропускаются автоматически.</div>
+            </div>
+            <a class="btn btn-outline-primary" href="/template/empty.xlsx">Скачать пустой шаблон</a>
+        </div>
+
+        <form class="import-form mt-4">
+            <div class="input-group">
+                <input class="form-control import-form__input" name="file" type="file" accept=".xlsx,.xls">
+                <button class="import-form__button btn btn-success" type="submit" disabled>
+                    Импортировать файл
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock admin_content %}

@@ -96,6 +96,9 @@
     {% if not is_athlete %}
     <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
     {% endif %}
+    {% if is_moderator %}
+    <a class="btn btn-outline-primary" href="/admin/import">Импорт</a>
+    {% endif %}
     <button type="button" class="table-layout-button btn btn-outline-secondary">Колонки и вид</button>
     <button type="button" class="table-layout-reset-button btn btn-outline-secondary">Сбросить вид</button>
     {% if is_admin %}

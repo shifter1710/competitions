@@ -1,16 +1,20 @@
-{% extends "layout/base.html" %}
+{% extends "layout/admin.html" %}
 
-{% block content %}
+{% block admin_title %}Журнал безопасности{% endblock admin_title %}
+{% block admin_description %}
+    {% if audit_available %}
+        Последние {{ events | length }} событий (максимум 200, новые сверху).
+        Журнал только для чтения: записи не редактируются и не удаляются.
+    {% else %}
+        Аудит-журнал событий безопасности.
+    {% endif %}
+{% endblock admin_description %}
 
-<div class="card shadow-sm mb-4">
-    <div class="card-body">
-        <h3 class="title mb-1">Журнал безопасности</h3>
-        <div class="text-muted">
-            Последние {{ events | length }} событий (максимум 200, новые сверху).
-            Журнал только для чтения: записи не редактируются и не удаляются.
-        </div>
-    </div>
-</div>
+{% block admin_content %}
+
+{% if not audit_available %}
+<div class="alert alert-warning" role="alert">Журнал недоступен</div>
+{% else %}
 
 <div class="card shadow-sm">
     <div class="card-body">
@@ -46,4 +50,6 @@
     </div>
 </div>
 
-{% endblock content %}
+{% endif %}
+
+{% endblock admin_content %}
