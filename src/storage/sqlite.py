@@ -750,6 +750,33 @@ class SQLiteAdapter:
                 )
                 self.connection.commit()
 
+    def carry_name_aliases(self, from_name: str, to_name: str) -> int:
+        """After a student merge, add `to_name` to accounts that have `from_name` alias.
+
+        Keeps athlete dashboards intact: records rewritten to the new name hash
+        stay visible via the new alias. `from_name` is never removed
+        (aliases list only grows). Returns the number of updated accounts.
+        """
+        from_name = from_name.strip()
+        to_name = to_name.strip()
+        if not from_name or not to_name or from_name == to_name:
+            return 0
+        with self._lock:
+            rows = self.connection.execute('SELECT id, name_aliases FROM users').fetchall()
+            updated = 0
+            for row in rows:
+                aliases = json.loads(row['name_aliases'] or '[]')
+                if from_name in aliases and to_name not in aliases:
+                    aliases.append(to_name)
+                    self.connection.execute(
+                        'UPDATE users SET name_aliases = ? WHERE id = ?',
+                        (json.dumps(aliases, ensure_ascii=False), row['id']),
+                    )
+                    updated += 1
+            if updated:
+                self.connection.commit()
+            return updated
+
     def add_audit_event(
         self,
         user_id: int | None,
