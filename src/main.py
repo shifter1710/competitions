@@ -91,9 +91,18 @@ REPORT_EXPORT_COLUMNS: Sequence[str] = (
     'Курс',
     'Количество участий',
 )
-FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date')
+FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date', 'url')
 USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE)
 MIN_PASSWORD_LENGTH = 6
+
+
+DEFAULT_LEVELS = ('внутривузовские', 'межвузовские')
+
+
+def seed_levels(storage: SQLiteAdapter):
+    if not storage.get_level_names(include_inactive=True):
+        for name in DEFAULT_LEVELS:
+            storage.create_level(name)
 
 
 def seed_users(storage: SQLiteAdapter):
@@ -113,6 +122,7 @@ async def init_storage(app: Sanic, _):
         raise RuntimeError('AUTH_SECRET_KEY is not configured: set it to a random value in the environment or .env')
     if app.ctx.storage is None:
         app.ctx.storage = SQLiteAdapter(settings.database_path)
+    seed_levels(app.ctx.storage)
     seed_users(app.ctx.storage)
 
 
@@ -395,6 +405,10 @@ def parse_custom_field_value(raw_value, field: CustomField) -> str:
         return str(int(float(value)))
     if field.field_type == 'date':
         return datetime.strptime(value, settings.date_format).strftime(settings.date_format)
+    if field.field_type == 'url':
+        if not re.fullmatch(r'https?://\S+', value):
+            raise ValueError(f'Поле "{field.label}" должно быть ссылкой (http:// или https://)')
+        return value
     return value
 
 
@@ -583,6 +597,8 @@ async def index(request: Request):
             'is_admin': user_is_admin(request),
             'users': storage.list_users() if user_is_admin(request) else [],
             'user_roles': USER_ROLES,
+            'levels': storage.get_level_names(),
+            'admin_levels': storage.list_levels() if user_is_admin(request) else [],
             'current_username': (get_auth_user(request) or {}).get('username'),
             'admin_message': get_param(dict(request.args), 'admin_message'),
             'admin_error': get_param(dict(request.args), 'admin_error'),
@@ -684,6 +700,14 @@ def competition_duplicate_key(competition: Competition) -> tuple:
     )
 
 
+def ensure_levels(storage: SQLiteAdapter, competitions: Iterable[Competition]):
+    known = set(storage.get_level_names(include_inactive=True))
+    for competition in competitions:
+        if competition.level not in known:
+            storage.create_level(competition.level)
+            known.add(competition.level)
+
+
 def split_import_competitions(
     competitions: Sequence[Competition],
     existing_competitions: Iterable[Competition],
@@ -725,6 +749,7 @@ async def upload(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
+    ensure_levels(storage, competitions)
     existing = await asyncio.to_thread(storage.get_competitions)
     new_competitions, skipped_duplicates = split_import_competitions(competitions, existing)
     if new_competitions:
@@ -979,6 +1004,56 @@ async def toggle_user_active(request: Request, user_id: str):
 
     storage.set_user_active(numeric_user_id, not user['active'])
     return build_redirect_with_message(message='Статус пользователя изменён')
+
+
+@app.post('/admin/levels')
+async def create_level(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    name = get_form_value(request, 'name').strip()
+    if not name:
+        return build_redirect_with_message(error='Название уровня обязательно')
+    if name in get_storage(request.app).get_level_names(include_inactive=True):
+        return build_redirect_with_message(error='Такой уровень уже существует')
+
+    get_storage(request.app).create_level(name)
+    return build_redirect_with_message(message='Уровень добавлен')
+
+
+@app.post('/admin/levels/<level_id>')
+async def rename_level(request: Request, level_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_level_id = int(level_id)
+    except ValueError:
+        return text(body='Invalid level id', status=400)
+
+    name = get_form_value(request, 'name').strip()
+    if not name:
+        return build_redirect_with_message(error='Название уровня обязательно')
+
+    get_storage(request.app).rename_level(numeric_level_id, name)
+    return build_redirect_with_message(message='Уровень переименован')
+
+
+@app.post('/admin/levels/<level_id>/delete')
+async def disable_level(request: Request, level_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_level_id = int(level_id)
+    except ValueError:
+        return text(body='Invalid level id', status=400)
+
+    get_storage(request.app).disable_level(numeric_level_id)
+    return build_redirect_with_message(message='Уровень скрыт из списков')
 
 
 @app.get('/report')

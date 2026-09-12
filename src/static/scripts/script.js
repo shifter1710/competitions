@@ -280,6 +280,14 @@ class Main {
         this.manualFormButton.textContent = "Добавить";
     }
 
+    getTableLevels() {
+        try {
+            return JSON.parse(this.tableElement?.dataset.levels || "[]");
+        } catch {
+            return [];
+        }
+    }
+
     getCustomFieldTypes() {
         const types = {};
         this.customFieldInputs.forEach((input) => {
@@ -294,7 +302,7 @@ class Main {
             input = document.createElement("select");
             const options = key === "student_sex"
                 ? ["М", "Ж"]
-                : ["внутривузовские", "межвузовские"];
+                : this.getTableLevels();
             options.forEach((optionValue) => {
                 const option = document.createElement("option");
                 option.value = optionValue;
@@ -309,6 +317,9 @@ class Main {
             if (key === "position" || key === "course" || fieldType === "number") {
                 input.type = "number";
                 input.step = "1";
+            } else if (fieldType === "url") {
+                input.type = "url";
+                input.placeholder = "https://";
             } else {
                 input.type = "text";
             }

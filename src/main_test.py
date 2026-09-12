@@ -79,6 +79,11 @@ def client() -> SanicTestClient:
     fake_storage.create_custom_field.return_value = None
     fake_storage.update_custom_field.return_value = None
     fake_storage.disable_custom_field.return_value = None
+    fake_storage.get_level_names.return_value = ['внутривузовские', 'межвузовские']
+    fake_storage.list_levels.return_value = []
+    fake_storage.create_level.return_value = None
+    fake_storage.rename_level.return_value = None
+    fake_storage.disable_level.return_value = None
     fake_storage.get_user.side_effect = fake_get_user
     fake_storage.get_user_by_id.return_value = None
     fake_storage.list_users.return_value = []
@@ -863,3 +868,117 @@ def test_template_date_column_is_typed(client: SanicTestClient):
     sheet = workbook.worksheets[0]
     date_column = get_xlsx_headers(response.body).index('Дата') + 1
     assert sheet.cell(row=1, column=date_column).number_format == 'DD.MM.YYYY'
+
+
+def test_import_auto_adds_unknown_level(client: SanicTestClient):
+    app.ctx.storage.create_level.reset_mock()
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Лыжников Лыж Лыжович',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ЛС-101',
+                'Вид спорта': 'Лыжи',
+                'Дата': '01.02.2026',
+                'Уровень соревнований': 'всероссийские',
+                'Название соревнований': 'Чемпионат РФ',
+                'Место': 5,
+                'Курс': 1,
+            }
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+
+    assert response.status == 200
+    app.ctx.storage.create_level.assert_called_once_with('всероссийские')
+
+
+def test_admin_can_create_level(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/levels',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'городские'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.create_level.assert_called_with('городские')
+
+
+def test_admin_cannot_create_duplicate_level(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/levels',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'внутривузовские'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+
+def test_url_custom_field_validated(client: SanicTestClient):
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='link', label='Ссылка', field_type='url')
+    ]
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Легкая атлетика',
+            'date': '10.04.2026',
+            'level': 'межвузовские',
+            'name': 'Кубок',
+            'position': '1',
+            'custom__link': 'ftp://bad.example',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Легкая атлетика',
+            'date': '10.04.2026',
+            'level': 'межвузовские',
+            'name': 'Кубок',
+            'position': '1',
+            'custom__link': 'https://example.com/results',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.get_custom_fields.return_value = []

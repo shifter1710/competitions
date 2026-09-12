@@ -71,6 +71,16 @@ class SQLiteAdapter:
             )
             self.connection.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS levels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    active INTEGER NOT NULL DEFAULT 1
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
@@ -471,5 +481,46 @@ class SQLiteAdapter:
             self.connection.execute(
                 'UPDATE users SET active = ? WHERE id = ?',
                 (int(active), user_id),
+            )
+            self.connection.commit()
+
+    def get_level_names(self, include_inactive: bool = False) -> list[str]:
+        with self._lock:
+            if include_inactive:
+                rows = self.connection.execute('SELECT name FROM levels ORDER BY sort_order ASC, name ASC').fetchall()
+            else:
+                rows = self.connection.execute(
+                    'SELECT name FROM levels WHERE active = 1 ORDER BY sort_order ASC, name ASC'
+                ).fetchall()
+            return [row['name'] for row in rows]
+
+    def list_levels(self) -> list[dict]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, name, sort_order, active FROM levels ORDER BY active DESC, sort_order ASC, name ASC'
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def create_level(self, name: str, sort_order: int = 0) -> None:
+        with self._lock:
+            self.connection.execute(
+                'INSERT INTO levels (name, sort_order) VALUES (?, ?)',
+                (name, sort_order),
+            )
+            self.connection.commit()
+
+    def rename_level(self, level_id: int, name: str) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE levels SET name = ? WHERE id = ?',
+                (name, level_id),
+            )
+            self.connection.commit()
+
+    def disable_level(self, level_id: int) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE levels SET active = 0 WHERE id = ?',
+                (level_id,),
             )
             self.connection.commit()

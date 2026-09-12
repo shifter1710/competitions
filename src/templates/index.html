@@ -67,8 +67,9 @@
                 <div class="col-md-4">
                     <label class="form-label" for="level">Уровень соревнований</label>
                     <select class="form-select" id="level" name="level" required>
-                        <option value="внутривузовские">Внутривузовские</option>
-                        <option value="межвузовские">Межвузовские</option>
+                        {% for level in levels %}
+                        <option value="{{ level }}">{{ level }}</option>
+                        {% endfor %}
                     </select>
                 </div>
                 <div class="col-md-4">
@@ -86,9 +87,10 @@
                         class="form-control custom-field-input"
                         id="custom__{{ field.key }}"
                         name="custom__{{ field.key }}"
-                        type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'date' %}text{% else %}text{% endif %}"
+                        type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'url' %}url{% else %}text{% endif %}"
                         {% if field.field_type == 'number' %}step="1"{% endif %}
                         {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
+                        {% if field.field_type == 'url' %}placeholder="https://"{% endif %}
                         data-custom-field-key="{{ field.key }}"
                         data-custom-field-type="{{ field.field_type }}"
                         {% if field.required %}required{% endif %}
@@ -238,6 +240,62 @@
 {% if is_admin %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
+        <h3 class="title mb-3">Уровни соревнований</h3>
+        <div class="text-muted mb-3">Список используется в формах и фильтрах. Новые уровни из импортируемых файлов добавляются автоматически.</div>
+
+        <form action="/admin/levels" class="row g-2 align-items-end mb-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="level-name">Название уровня</label>
+                <input class="form-control" id="level-name" name="name" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">Добавить</button>
+            </div>
+        </form>
+
+        {% if admin_levels %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Уровень</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for level in admin_levels %}
+                    <tr>
+                        <td>
+                            <form action="/admin/levels/{{ level.id }}" class="d-flex gap-2" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input class="form-control form-control-sm" name="name" type="text" value="{{ level.name }}" required>
+                                <button class="btn btn-sm btn-outline-primary" type="submit">Переименовать</button>
+                            </form>
+                        </td>
+                        <td>{% if level.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
+                        <td>
+                            <form action="/admin/levels/{{ level.id }}/delete" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-warning" type="submit">Скрыть</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted">Уровней пока нет.</div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% if is_admin %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
         <h3 class="title mb-3">Пользователи</h3>
         <div class="text-muted mb-3">Учётные записи хранятся в базе данных. Пароли задаёт администратор.</div>
 
@@ -342,8 +400,9 @@
             <span class="label">Уровень соревнований</span>
             <select class="filter__level select" name="level">
                 <option data-display="Все" value="">Все</option>
-                <option value="внутривузовские">Внутривузовские</option>
-                <option value="межвузовские">Межвузовские</option>
+                {% for level in levels %}
+                <option value="{{ level }}">{{ level }}</option>
+                {% endfor %}
             </select>
         </div>
         <div class="col-clean-button align-self-md-end">
@@ -384,7 +443,7 @@
     {% if competitions %}
     <div class="table-card" data-table-view="index">
         <div class="table-responsive">
-            <table class="table table-striped table-bordered interactive-table">
+            <table class="table table-striped table-bordered interactive-table" data-levels='{{ levels | tojson }}'>
                 <thead class="table-dark">
                     <tr>
                         <th scope="col" data-column-key="index" data-sort-type="number">№</th>
@@ -421,7 +480,14 @@
                         <td data-column-key="position">{{ competition.position }}</td>
                         <td data-column-key="course">{{ competition.course }}</td>
                         {% for field in custom_fields if field.show_in_table %}
-                        <td data-column-key="{{ field.key }}">{{ competition.extra_data.get(field.key, '') }}</td>
+                        <td data-column-key="{{ field.key }}">
+                            {%- set field_value = competition.extra_data.get(field.key, '') -%}
+                            {%- if field.field_type == 'url' and field_value -%}
+                            <a href="{{ field_value }}" rel="noopener noreferrer" target="_blank">{{ field_value }}</a>
+                            {%- else -%}
+                            {{ field_value }}
+                            {%- endif -%}
+                        </td>
                         {% endfor %}
                         {% if can_write %}
                         <td data-column-key="actions" data-exportable="false">
