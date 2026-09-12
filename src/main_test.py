@@ -96,6 +96,7 @@ def client() -> SanicTestClient:
     fake_storage.count_records_by_student_hash.return_value = 2
     fake_storage.get_student_names.return_value = ['Абрамов Артём Артёмович', 'Иванов Иван Иванович']
     fake_storage.merge_students.return_value = 2
+    fake_storage.carry_name_aliases.return_value = 1
     fake_storage.get_attachment.return_value = None
     fake_storage.get_attachments.return_value = []
     fake_storage.create_attachment.return_value = 1
@@ -1394,6 +1395,8 @@ def test_admin_merge_endpoint_preview_and_apply(client: SanicTestClient):
     app.ctx.storage.merge_students.assert_called_once()
     call = app.ctx.storage.merge_students.call_args
     assert call[1]['new_name'] == 'Петрова Анна'
+    app.ctx.storage.carry_name_aliases.assert_called_once_with('Иванова Анна', 'Петрова Анна')
+    assert 'aliases_updated' in response.json
 
 
 def test_admin_can_add_alias_to_user(client: SanicTestClient):
@@ -1586,6 +1589,7 @@ def test_merge_writes_audit_event(client: SanicTestClient):
             'to_name': 'Петрова Анна',
             'merged': 2,
             'rewrite_names': True,
+            'aliases_updated': 1,
         },
     ) in audit_calls()
 

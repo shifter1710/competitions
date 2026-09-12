@@ -1581,6 +1581,7 @@ async def merge_students(request: Request):
         )
 
     merged = storage.merge_students(from_hash, to_hash, new_name=to_name if rewrite_names else None)
+    aliases_updated = storage.carry_name_aliases(from_name, to_name)
     log_audit_event(
         request,
         'students_merged',
@@ -1589,9 +1590,16 @@ async def merge_students(request: Request):
             'to_name': to_name,
             'merged': merged,
             'rewrite_names': rewrite_names,
+            'aliases_updated': aliases_updated,
         },
     )
-    return json_response({'merged': merged, 'rewritten_names': rewrite_names})
+    return json_response(
+        {
+            'merged': merged,
+            'rewritten_names': rewrite_names,
+            'aliases_updated': aliases_updated,
+        }
+    )
 
 
 @app.get('/admin/audit')

@@ -264,3 +264,58 @@ def test_merge_students_unifies_report_grouping(adapter):
     assert len(infos) == 1
     assert infos[0].count_participation == 3
     assert infos[0].student_name == new_name
+
+
+def merge_for(adapter, old_name, new_name):
+    old_hash = hashlib.sha256(old_name.encode()).hexdigest()
+    new_hash = hashlib.sha256(new_name.encode()).hexdigest()
+    merged = adapter.merge_students(old_hash, new_hash, new_name=new_name)
+    return merged, adapter.carry_name_aliases(old_name, new_name)
+
+
+def test_merge_carries_alias_to_account_with_from_name(adapter):
+    # QA scenario: athlete has alias `from_name`, records under that name,
+    # merge rewrites records to the new hash — dashboard must stay intact.
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.save_competitions([with_real_hash(make_competition(old_name, datetime(2025, 1, 1)))])
+    adapter.create_user('anna', 'hash', 'athlete')
+    user_id = adapter.get_user('anna')['id']
+    adapter.add_name_alias(user_id, old_name)
+
+    merged, aliases_updated = merge_for(adapter, old_name, new_name)
+    assert merged == 1
+    assert aliases_updated == 1
+    aliases = adapter.get_name_aliases(user_id)
+    assert old_name in aliases
+    assert new_name in aliases
+
+    # records stay visible in the athlete dashboard via the new alias
+    hashes = [hashlib.sha256(n.encode()).hexdigest() for n in aliases]
+    visible = adapter.get_competitions(owner_id=user_id, student_id_hashes=hashes)
+    assert [comp.student_name for comp in visible] == [new_name]
+
+
+def test_merge_does_not_touch_accounts_without_alias(adapter):
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.create_user('anna', 'hash', 'athlete')
+    user_id = adapter.get_user('anna')['id']
+    adapter.add_name_alias(user_id, 'Смирнова Ольга Сергеевна')
+
+    _, aliases_updated = merge_for(adapter, old_name, new_name)
+    assert aliases_updated == 0
+    assert adapter.get_name_aliases(user_id) == ['Смирнова Ольга Сергеевна']
+
+
+def test_repeated_merge_does_not_duplicate_alias(adapter):
+    old_name = 'Иванова Анна Петровна'
+    new_name = 'Петрова Анна Ивановна'
+    adapter.create_user('anna', 'hash', 'athlete')
+    user_id = adapter.get_user('anna')['id']
+    adapter.add_name_alias(user_id, old_name)
+
+    merge_for(adapter, old_name, new_name)
+    _, second_run = merge_for(adapter, old_name, new_name)
+    assert second_run == 0
+    assert adapter.get_name_aliases(user_id) == [old_name, new_name]
