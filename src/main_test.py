@@ -3,6 +3,7 @@ from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from unittest.mock import Mock
+from urllib.parse import quote
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -26,6 +27,14 @@ def get_xlsx_headers(content: bytes) -> list[str]:
     sheet = workbook.worksheets[0]
     row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
     return [str(value) for value in row if value is not None]
+
+
+def get_xlsx_rows(content: bytes) -> list[tuple]:
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(content), read_only=True)
+    sheet = workbook.worksheets[0]
+    return list(sheet.iter_rows(values_only=True))
 
 
 def get_auth_headers(role: str = 'admin') -> dict[str, str]:
@@ -607,6 +616,121 @@ def test_export_report_omits_dataframe_index_and_student_id(client: SanicTestCli
         'Курс',
         'Количество участий',
     ]
+
+
+def make_report_infos() -> list[StudentInfo]:
+    return [
+        StudentInfo(
+            student_id='1',
+            student_name='Иванов Иван',
+            student_sex='М',
+            institute='ИСИ',
+            group='А-101',
+            course=2,
+            count_participation=5,
+        ),
+        StudentInfo(
+            student_id='2',
+            student_name='Петров Пётр',
+            student_sex='Ж',
+            institute='ИМИ',
+            group='Б-202',
+            course=1,
+            count_participation=1,
+        ),
+    ]
+
+
+def test_export_report_returns_rows_in_report_order(client: SanicTestClient):
+    app.ctx.storage.get_filtered.return_value = make_report_infos()
+
+    _, response = client.get('/export/report', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Количество участий'),
+        ('Иванов Иван', 'М', 'ИСИ', 'А-101', 2, 5),
+        ('Петров Пётр', 'Ж', 'ИМИ', 'Б-202', 1, 1),
+    ]
+
+
+def test_export_report_with_column_subset(client: SanicTestClient):
+    app.ctx.storage.get_filtered.return_value = make_report_infos()
+
+    _, response = client.get(
+        '/export/report?' + urlencode({'columns': ['ФИО', 'Количество участий']}, doseq=True),
+        headers=get_auth_headers(),
+    )
+
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('ФИО', 'Количество участий'),
+        ('Иванов Иван', 5),
+        ('Петров Пётр', 1),
+    ]
+
+
+def test_export_report_accepts_comma_separated_columns(client: SanicTestClient):
+    app.ctx.storage.get_filtered.return_value = make_report_infos()
+
+    _, response = client.get(
+        '/export/report?columns=' + quote('Группа,ФИО'),
+        headers=get_auth_headers(),
+    )
+
+    # порядок колонок всегда канонический, как в HTML-отчёте
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('ФИО', 'Группа'),
+        ('Иванов Иван', 'А-101'),
+        ('Петров Пётр', 'Б-202'),
+    ]
+
+
+def test_export_report_requires_at_least_one_column(client: SanicTestClient):
+    # значение из пробелов: параметр есть, валидных колонок нет — 400
+    _, response = client.get('/export/report?columns=%20', headers=get_auth_headers())
+    assert response.status == 400
+
+    _, response = client.get('/export/report?columns=' + quote('Нет такой колонки'), headers=get_auth_headers())
+    assert response.status == 400
+
+
+def test_export_report_applies_report_filters(client: SanicTestClient):
+    app.ctx.storage.get_filtered.reset_mock()
+
+    _, response = client.get(
+        '/export/report?date_from=01.02.2024&name=Иван&position=<4',
+        headers=get_auth_headers(),
+    )
+
+    assert response.status == 200
+    assert app.ctx.storage.get_filtered.call_args[1] == {
+        'date_from': '01.02.2024',
+        'date_to': None,
+        'position': '<4',
+        'level': None,
+        'name': 'Иван',
+        'custom_filters': [],
+    }
+
+
+def test_export_report_available_for_viewer(client: SanicTestClient):
+    _, response = client.get(
+        '/export/report?' + urlencode({'columns': ['ФИО']}, doseq=True),
+        headers=get_auth_headers(role='viewer'),
+    )
+    assert response.status == 200
+
+
+def test_reports_page_shows_export_column_panel(client: SanicTestClient):
+    _, response = client.get('/reports', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'report-export-form' in response.text
+    assert 'action="/export/report"' in response.text
+    for column in ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Количество участий'):
+        assert f'value="{column}"' in response.text
 
 
 def test_empty_template_includes_custom_fields(client: SanicTestClient):
@@ -1514,6 +1638,9 @@ def test_athlete_cannot_import_review_or_report(client: SanicTestClient):
     assert response.status == 403
 
     _, response = client.get('/export/index', headers=headers)
+    assert response.status == 403
+
+    _, response = client.get('/export/report', headers=headers)
     assert response.status == 403
 
 

@@ -28,6 +28,7 @@ class Main {
         this.mergeApplyButton = document.querySelector(".merge-apply-button");
         this.mergeStatus = document.querySelector(".merge-status");
         this.reportForm = document.querySelector(".filter-form");
+        this.reportExportForm = document.querySelector(".report-export-form");
         this.fileInput = document.querySelector(".import-form__input");
         this.attachmentFileInput = document.querySelector(".attachment-file-input");
         this.importButton = document.querySelector(".import-form__button");
@@ -115,6 +116,9 @@ class Main {
         }
         if (this.reportForm) {
             this.reportForm.addEventListener("submit", (event) => this.handleSubmitReportForm(event));
+        }
+        if (this.reportExportForm) {
+            this.reportExportForm.addEventListener("submit", (event) => this.handleSubmitReportExportForm(event));
         }
         if (this.cleanFilterButton) {
             this.cleanFilterButton.addEventListener("click", () => this.handleResetFilterButton());
@@ -1093,6 +1097,27 @@ class Main {
         event.preventDefault();
         const params = this.prepareParamsForReport();
         this.getReport(params);
+    }
+
+    // Выгрузка отчёта в Excel: колонки — из чекбоксов панели, фильтры —
+    // текущие (применённые к показанной таблице, а до первого применения —
+    // из полей формы фильтра). Всё уходит GET-параметрами, состояния на
+    // сервере нет.
+    handleSubmitReportExportForm(event) {
+        event.preventDefault();
+        const selectedColumns = Array.from(
+            this.reportExportForm.querySelectorAll(".report-export-column:checked")
+        ).map((input) => input.value);
+        if (!selectedColumns.length) {
+            alert("Выберите хотя бы одну колонку");
+            return;
+        }
+        const filterParams = this.currentReportUrl
+            ? this.currentReportUrl.split("?")[1] || ""
+            : this.prepareParamsForReport();
+        const params = new URLSearchParams(filterParams);
+        selectedColumns.forEach((column) => params.append("columns", column));
+        window.location.href = `/export/report?${params.toString()}`;
     }
 
     importFile(formData) {

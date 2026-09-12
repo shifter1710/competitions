@@ -213,3 +213,11 @@ select {
 .interactive-table .row-editing .inline-cancel-button {
     margin: 0 2px;
 }
+
+.report-export-form {
+    margin: 24px 0;
+}
+
+.report-export-form__column {
+    gap: 8px;
+}
