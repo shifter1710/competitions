@@ -39,7 +39,6 @@ class Main {
         this.levelSelectWrapper = document.querySelector(".filter__level-wrapper");
         this.positionSelectWrapper = document.querySelector(".filter__position-wrapper");
         this.cleanFilterButton = document.querySelector(".filter-form__clean-button");
-        this.cleanButton = document.querySelector(".clean-button");
         this.exportButton = document.querySelector(".export-button");
         this.tableLayoutButton = document.querySelector(".table-layout-button");
         this.tableLayoutResetButton = document.querySelector(".table-layout-reset-button");
@@ -134,9 +133,6 @@ class Main {
         }
         if (this.tableLayoutResetButton) {
             this.tableLayoutResetButton.addEventListener("click", () => this.resetTableLayout());
-        }
-        if (this.cleanButton) {
-            this.cleanButton.addEventListener("click", () => this.cleanDb());
         }
         if (this.addEmptyRowButton) {
             this.addEmptyRowButton.addEventListener("click", () => this.startNewRowEdit());
@@ -1197,24 +1193,6 @@ class Main {
                 this.setLoading(false);
                 alert("Ошибка применения фильтра. Попробуйте позже");
             });
-    }
-
-    cleanDb() {
-        const result = confirm("Вы действительно хотите очистить базу данных?");
-        if (!result) {
-            return;
-        }
-        this.makeRequest({
-            url: "/clean_db",
-            options: {
-                method: "POST"
-            },
-            onSuccess: () => {
-                alert("База данных успешно очищена");
-                this.refreshCurrentContent();
-            },
-            onError: (message) => alert(message || "Ошибка очистки базы данных")
-        });
     }
 
     getCsrfToken() {

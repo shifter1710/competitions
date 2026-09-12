@@ -94,7 +94,6 @@ def client() -> SanicTestClient:
     fake_storage.save_competitions.return_value = None
     fake_storage.update_competition.return_value = None
     fake_storage.delete_competition.return_value = None
-    fake_storage.clean_db.return_value = None
     fake_storage.create_custom_field.return_value = None
     fake_storage.update_custom_field.return_value = None
     fake_storage.disable_custom_field.return_value = None
@@ -181,10 +180,18 @@ def test_get_report_name(client: SanicTestClient):
     assert response.status == 200
 
 
-def test_clean_db_post(client: SanicTestClient):
-    headers = get_auth_headers()
+def test_clean_db_route_removed(client: SanicTestClient):
+    # Старый эндпоинт очистки удалён: защищённая версия живёт на /admin/maintenance
+    # (docs/data-model-decisions.md). Проверяем через GET: с валидной сессией он
+    # доходит до роутера и возвращает 404. POST к несуществующему пути всегда
+    # перехватывается глобальным CSRF-middleware (Sanic не парсит form-body для
+    # unmatched-маршрутов → 403/401), поэтому 404 по POST недостижим в принципе.
+    headers = get_auth_headers(role='admin')
+    _, response = client.get('/clean_db', headers=headers, allow_redirects=False)
+    assert response.status == 404
+
     _, response = client.post('/clean_db', headers=headers, data=csrf_for(headers))
-    assert response.status == 200
+    assert response.status == 403
 
 
 def test_upload_rejects_missing_columns(client: SanicTestClient):
@@ -801,13 +808,6 @@ def test_login_sets_auth_cookie(client: SanicTestClient):
     assert response.status == 302
     assert response.headers['location'] == '/'
     assert settings.auth_cookie_name in response.headers.get('set-cookie', '')
-
-
-def test_viewer_cannot_clean_db(client: SanicTestClient):
-    headers = get_auth_headers(role='viewer')
-    _, response = client.post('/clean_db', headers=headers, data=csrf_for(headers))
-
-    assert response.status == 403
 
 
 def test_competition_created_at_default_factory():

@@ -1388,17 +1388,6 @@ async def delete_competition(request: Request, record_id: str):
     return redirect(to='/')
 
 
-@app.post('/clean_db')
-async def clean_db(request: Request):
-    auth_error = require_admin(request)
-    if auth_error is not None:
-        return auth_error
-
-    storage = get_storage(request.app)
-    storage.clean_db()
-    return redirect(to='/')
-
-
 @app.post('/admin/fields')
 async def create_custom_field(request: Request):
     auth_error = require_admin(request)
