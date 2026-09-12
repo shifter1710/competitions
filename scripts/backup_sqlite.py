@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Create compressed SQLite backups with retention.')
     parser.add_argument('--db-path', required=True)
     parser.add_argument('--output-dir', required=True)
+    parser.add_argument('--files-dir', default=None, help='attachment directory to archive alongside the database')
     parser.add_argument('--keep', type=int, default=14)
     return parser.parse_args()
 
@@ -59,13 +61,32 @@ def run_backup(db_path: Path, output_dir: Path, keep: int) -> Path:
     for backup in backups[keep:]:
         backup.unlink()
 
+    return archive_path, timestamp
+
+
+def backup_files(files_dir: Path, output_dir: Path, timestamp: str, keep: int) -> Path | None:
+    if not files_dir.is_dir():
+        return None
+    archive_path = output_dir / f'competitions-{timestamp}-files.zip'
+    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for file_path in sorted(files_dir.rglob('*')):
+            if file_path.is_file():
+                archive.write(file_path, file_path.relative_to(files_dir))
+    os.chmod(archive_path, 0o600)
+    file_backups = sorted(output_dir.glob('competitions-*-files.zip'), reverse=True)
+    for backup in file_backups[keep:]:
+        backup.unlink()
     return archive_path
 
 
 def main():
     args = parse_args()
-    archive = run_backup(Path(args.db_path), Path(args.output_dir), args.keep)
+    archive, timestamp = run_backup(Path(args.db_path), Path(args.output_dir), args.keep)
     print(archive)
+    if args.files_dir:
+        files_archive = backup_files(Path(args.files_dir), Path(args.output_dir), timestamp, args.keep)
+        if files_archive:
+            print(files_archive)
 
 
 if __name__ == '__main__':

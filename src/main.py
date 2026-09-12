@@ -6,8 +6,10 @@ import hmac
 import re
 import secrets
 import time
+import uuid
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Iterable
 from typing import Sequence
 from urllib.parse import urlencode
@@ -94,6 +96,18 @@ REPORT_EXPORT_COLUMNS: Sequence[str] = (
 FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date', 'url')
 USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE)
 MIN_PASSWORD_LENGTH = 6
+ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024
+ATTACHMENT_EXTENSIONS = {
+    'pdf': 'application/pdf',
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+}
+ATTACHMENT_SIGNATURES = {
+    'application/pdf': b'%PDF-',
+    'image/png': b'\x89PNG\r\n\x1a\n',
+    'image/jpeg': b'\xff\xd8\xff',
+}
 
 
 DEFAULT_LEVELS = ('внутривузовские', 'межвузовские')
@@ -632,6 +646,7 @@ async def index(request: Request):
             'user_roles': USER_ROLES,
             'levels': storage.get_level_names(),
             'has_unapproved': any(c.review_status != 'approved' for c in competitions),
+            'attachments_by_record': build_attachments_by_record(storage.get_attachments()),
             'admin_levels': storage.list_levels() if user_is_admin(request) else [],
             'current_username': (get_auth_user(request) or {}).get('username'),
             'admin_message': get_param(dict(request.args), 'admin_message'),
@@ -1068,6 +1083,120 @@ async def toggle_user_active(request: Request, user_id: str):
 
     storage.set_user_active(numeric_user_id, not user['active'])
     return build_redirect_with_message(message='Статус пользователя изменён')
+
+
+def build_attachments_by_record(all_attachments: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for attachment in all_attachments:
+        grouped.setdefault(attachment['record_id'], []).append(attachment)
+    return grouped
+
+
+def attachments_dir() -> Path:
+    base = Path(settings.data_folder) / 'files'
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def detect_attachment_type(body: bytes, filename: str) -> str | None:
+    extension = Path(filename).suffix.lower().lstrip('.')
+    expected_type = ATTACHMENT_EXTENSIONS.get(extension)
+    if expected_type is None:
+        return None
+    signature = ATTACHMENT_SIGNATURES[expected_type]
+    return expected_type if body.startswith(signature) else None
+
+
+@app.post('/competition/<record_id>/attachments')
+async def upload_attachment(request: Request, record_id: str):
+    auth_error = require_writer(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    if storage.get_competition_review(numeric_id) is None:
+        return text(body='Record not found', status=404)
+
+    upload_file = request.files.get('file')
+    if not upload_file or not upload_file.body:
+        return text(body='No file uploaded', status=400)
+    if len(upload_file.body) > ATTACHMENT_MAX_SIZE:
+        return text(body='Файл больше 5 МБ', status=400)
+
+    filename = (upload_file.name or 'attachment').rsplit('/', 1)[-1]
+    content_type = detect_attachment_type(upload_file.body, filename)
+    if content_type is None:
+        return text(body='Допустимы только PDF, JPEG и PNG', status=400)
+
+    extension = Path(filename).suffix.lower().lstrip('.') or 'bin'
+    stored_name = f'{uuid.uuid4().hex}.{extension}'
+    record_dir = attachments_dir() / str(numeric_id)
+    record_dir.mkdir(parents=True, exist_ok=True)
+    (record_dir / stored_name).write_bytes(upload_file.body)
+
+    storage.create_attachment(
+        record_id=numeric_id,
+        filename=filename,
+        stored_name=stored_name,
+        content_type=content_type,
+        size=len(upload_file.body),
+        uploaded_by=get_current_user_id(request),
+    )
+    return text(body='Файл загружен')
+
+
+@app.get('/attachment/<attachment_id>')
+async def download_attachment(request: Request, attachment_id: str):
+    if get_auth_user(request) is None:
+        return text(body='Unauthorized', status=401)
+
+    try:
+        numeric_attachment_id = int(attachment_id)
+    except ValueError:
+        return text(body='Invalid attachment id', status=400)
+
+    attachment = get_storage(request.app).get_attachment(numeric_attachment_id)
+    if attachment is None:
+        return text(body='Not Found', status=404)
+
+    file_path = attachments_dir() / str(attachment['record_id']) / attachment['stored_name']
+    if not file_path.is_file():
+        return text(body='Not Found', status=404)
+
+    return raw(
+        await asyncio.to_thread(file_path.read_bytes),
+        headers={
+            'content-type': attachment['content_type'],
+            'content-disposition': f'attachment; filename="{attachment["stored_name"]}"',
+        },
+    )
+
+
+@app.post('/attachment/<attachment_id>/delete')
+async def delete_attachment(request: Request, attachment_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_attachment_id = int(attachment_id)
+    except ValueError:
+        return text(body='Invalid attachment id', status=400)
+
+    storage = get_storage(request.app)
+    attachment = storage.get_attachment(numeric_attachment_id)
+    if attachment is None:
+        return text(body='Not Found', status=404)
+
+    file_path = attachments_dir() / str(attachment['record_id']) / attachment['stored_name']
+    file_path.unlink(missing_ok=True)
+    storage.delete_attachment(numeric_attachment_id)
+    return redirect(to='/')
 
 
 @app.post('/admin/levels')

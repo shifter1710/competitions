@@ -18,6 +18,7 @@ class Main {
         this.customFieldInputs = Array.from(document.querySelectorAll(".custom-field-input"));
         this.reportForm = document.querySelector(".filter-form");
         this.fileInput = document.querySelector(".import-form__input");
+        this.attachmentFileInput = document.querySelector(".attachment-file-input");
         this.importButton = document.querySelector(".import-form__button");
         this.loader = document.querySelector(".loader");
         this.inputName = document.querySelector(".filter__name");
@@ -121,6 +122,9 @@ class Main {
         }
         if (this.cleanButton) {
             this.cleanButton.addEventListener("click", () => this.cleanDb());
+        }
+        if (this.attachmentFileInput) {
+            this.attachmentFileInput.addEventListener("change", () => this.handleAttachmentSelected());
         }
         this.bindContentWrapperEvents();
     }
@@ -464,6 +468,46 @@ class Main {
         this.inlineEditBackup = null;
     }
 
+    uploadAttachment(recordId, file) {
+        const formData = new FormData();
+        formData.append("file", file);
+        this.makeRequest({
+            url: `/competition/${recordId}/attachments`,
+            options: {method: "POST", body: formData},
+            onSuccess: (body) => {
+                alert(body || "Файл загружен");
+                this.refreshCurrentContent();
+            },
+            onError: (message) => alert(message || "Ошибка загрузки файла")
+        });
+    }
+
+    handleAttachmentSelected() {
+        const input = this.attachmentFileInput;
+        const file = input && input.files && input.files[0];
+        const recordId = input && input.dataset.recordId;
+        input.value = "";
+        if (!file || !recordId) {
+            return;
+        }
+        this.uploadAttachment(recordId, file);
+    }
+
+    deleteAttachment(attachmentId, filename) {
+        const message = filename
+            ? `Удалить вложение «${filename}»?`
+            : "Удалить вложение?";
+        if (!confirm(message)) {
+            return;
+        }
+        this.makeRequest({
+            url: `/attachment/${attachmentId}/delete`,
+            options: {method: "POST"},
+            onSuccess: () => this.refreshCurrentContent(),
+            onError: (message2) => alert(message2 || "Ошибка удаления вложения")
+        });
+    }
+
     reviewCompetition(recordId, decision) {
         if (decision === "reject") {
             const comment = prompt("Комментарий для владельца записи (необязательно):") ?? "";
@@ -487,6 +531,22 @@ class Main {
     }
 
     handleContentWrapperClick(event) {
+        const attachmentAddButton = event.target.closest(".attachment-add-button");
+        if (attachmentAddButton && this.attachmentFileInput) {
+            this.attachmentFileInput.dataset.recordId = attachmentAddButton.dataset.recordId;
+            this.attachmentFileInput.click();
+            return;
+        }
+
+        const attachmentDeleteButton = event.target.closest(".attachment-delete-button");
+        if (attachmentDeleteButton) {
+            this.deleteAttachment(
+                attachmentDeleteButton.dataset.attachmentId,
+                attachmentDeleteButton.dataset.filename
+            );
+            return;
+        }
+
         const approveButton = event.target.closest(".competition-approve-button");
         if (approveButton) {
             this.reviewCompetition(approveButton.dataset.recordId, "approve");

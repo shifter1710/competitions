@@ -79,6 +79,20 @@ class SQLiteAdapter:
             )
             self.connection.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL,
+                    stored_name TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    uploaded_by INTEGER,
+                    created_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS levels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
@@ -596,4 +610,63 @@ class SQLiteAdapter:
                 """,
                 (review_status, review_comment, record_id),
             )
+            self.connection.commit()
+
+    def create_attachment(
+        self,
+        record_id: int,
+        filename: str,
+        stored_name: str,
+        content_type: str,
+        size: int,
+        uploaded_by: int | None,
+    ) -> int:
+        from datetime import datetime as dt
+
+        with self._lock:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO attachments (
+                    record_id, filename, stored_name, content_type, size, uploaded_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    filename,
+                    stored_name,
+                    content_type,
+                    size,
+                    uploaded_by,
+                    dt.utcnow().isoformat(),
+                ),
+            )
+            self.connection.commit()
+            return cursor.lastrowid
+
+    def get_attachments(self, record_id: int | None = None) -> list[dict]:
+        with self._lock:
+            if record_id is None:
+                rows = self.connection.execute(
+                    'SELECT id, record_id, filename, stored_name, content_type, size '
+                    'FROM attachments ORDER BY record_id ASC, id ASC'
+                ).fetchall()
+            else:
+                rows = self.connection.execute(
+                    'SELECT id, record_id, filename, stored_name, content_type, size '
+                    'FROM attachments WHERE record_id = ? ORDER BY id ASC',
+                    (record_id,),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_attachment(self, attachment_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, record_id, filename, stored_name, content_type, size ' 'FROM attachments WHERE id = ?',
+                (attachment_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def delete_attachment(self, attachment_id: int) -> None:
+        with self._lock:
+            self.connection.execute('DELETE FROM attachments WHERE id = ?', (attachment_id,))
             self.connection.commit()

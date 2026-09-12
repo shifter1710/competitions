@@ -80,6 +80,10 @@ def client() -> SanicTestClient:
     fake_storage.update_custom_field.return_value = None
     fake_storage.disable_custom_field.return_value = None
     fake_storage.get_competition_review.return_value = None
+    fake_storage.get_attachment.return_value = None
+    fake_storage.get_attachments.return_value = []
+    fake_storage.create_attachment.return_value = 1
+    fake_storage.delete_attachment.return_value = None
     fake_storage.set_competition_review.return_value = None
     fake_storage.get_level_names.return_value = ['внутривузовские', 'межвузовские']
     fake_storage.list_levels.return_value = []
@@ -1041,3 +1045,93 @@ def test_url_custom_field_validated(client: SanicTestClient):
     )
     assert response.status == 302
     app.ctx.storage.get_custom_fields.return_value = []
+
+
+PNG_BYTES = b'\x89PNG\r\n\x1a\n' + b'0' * 32
+
+
+def upload_attachment(client, headers, filename, payload):
+    return client.post(
+        '/competition/3/attachments',
+        headers=headers,
+        data=csrf_for(headers),
+        files={'file': (filename, payload, 'application/octet-stream')},
+    )
+
+
+def test_attachment_upload_and_download(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    app.ctx.storage.get_competition_review.return_value = {'id': 3, 'review_status': 'approved', 'owner_id': 1}
+    app.ctx.storage.create_attachment.return_value = 42
+    app.ctx.storage.get_attachment.return_value = {
+        'id': 42,
+        'record_id': 3,
+        'filename': 'diploma.png',
+        'stored_name': 'stored.png',
+        'content_type': 'image/png',
+        'size': len(PNG_BYTES),
+    }
+    headers = get_auth_headers(role='editor')
+
+    _, response = upload_attachment(client, headers, 'diploma.png', PNG_BYTES)
+    assert response.status == 200
+    assert (tmp_path / 'files' / '3' / 'stored-name-unused').exists() is False  # имя генерится
+    app.ctx.storage.create_attachment.assert_called_once()
+    stored_name = app.ctx.storage.create_attachment.call_args[1]['stored_name']
+    assert (tmp_path / 'files' / '3' / stored_name).is_file()
+
+    (tmp_path / 'files' / '3' / 'stored.png').write_bytes(PNG_BYTES)
+    _, response = client.get('/attachment/42', headers=get_auth_headers())
+    assert response.status == 200
+    assert response.body == PNG_BYTES
+
+    app.ctx.storage.get_competition_review.return_value = None
+    app.ctx.storage.get_attachment.return_value = None
+
+
+def test_attachment_rejects_wrong_extension(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    app.ctx.storage.get_competition_review.return_value = {'id': 3, 'review_status': 'approved', 'owner_id': 1}
+    headers = get_auth_headers(role='editor')
+
+    _, response = upload_attachment(client, headers, 'notes.txt', b'hello')
+    assert response.status == 400
+    app.ctx.storage.get_competition_review.return_value = None
+
+
+def test_attachment_rejects_fake_signature(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    app.ctx.storage.get_competition_review.return_value = {'id': 3, 'review_status': 'approved', 'owner_id': 1}
+    headers = get_auth_headers(role='editor')
+
+    _, response = upload_attachment(client, headers, 'fake.png', b'%PDF-1.4 not a png')
+    assert response.status == 400
+    app.ctx.storage.get_competition_review.return_value = None
+
+
+def test_attachment_delete_removes_file(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    stored = tmp_path / 'files' / '3' / 'stored.png'
+    stored.parent.mkdir(parents=True)
+    stored.write_bytes(PNG_BYTES)
+    app.ctx.storage.get_attachment.return_value = {
+        'id': 42,
+        'record_id': 3,
+        'filename': 'diploma.png',
+        'stored_name': 'stored.png',
+        'content_type': 'image/png',
+        'size': len(PNG_BYTES),
+    }
+    headers = get_auth_headers()
+    _, response = client.post('/attachment/42/delete', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    assert response.status == 302
+    assert not stored.exists()
+    app.ctx.storage.get_attachment.return_value = None

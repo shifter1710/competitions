@@ -476,6 +476,9 @@
                         <th scope="col" data-column-key="status" data-sort-type="text" data-exportable="false">Статус</th>
                         {% endif %}
                         {% if can_write %}
+                        <th scope="col" data-column-key="attachments" data-sort-type="none" data-exportable="false">Вложения</th>
+                        {% endif %}
+                        {% if can_write %}
                         <th scope="col" data-column-key="actions" data-sort-type="none" data-exportable="false">Действия</th>
                         {% endif %}
                     </tr>
@@ -513,6 +516,30 @@
                             {% else %}
                             <span class="badge text-bg-light text-muted">подтверждена</span>
                             {% endif %}
+                        </td>
+                        {% endif %}
+                        {% if can_write %}
+                        <td data-column-key="attachments" data-exportable="false">
+                            {% for attachment in attachments_by_record.get(competition.record_id | int, []) %}
+                            <div class="d-flex align-items-center gap-1">
+                                <a href="/attachment/{{ attachment.id }}" class="link-nowrap" title="{{ attachment.filename }}">{{ attachment.filename | truncate(18) }}</a>
+                                {% if is_admin %}
+                                <button
+                                    class="btn btn-sm btn-outline-danger attachment-delete-button"
+                                    type="button"
+                                    data-attachment-id="{{ attachment.id }}"
+                                    data-filename="{{ attachment.filename }}"
+                                    title="Удалить вложение"
+                                >×</button>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                            <button
+                                class="btn btn-sm btn-outline-secondary attachment-add-button"
+                                type="button"
+                                data-record-id="{{ competition.record_id }}"
+                                title="Прикрепить файл (PDF, JPEG, PNG, до 5 МБ)"
+                            >📎</button>
                         </td>
                         {% endif %}
                         {% if can_write %}
@@ -579,5 +606,7 @@
 <div class="loader">
     <div class="loader__icon"></div>
 </div>
+
+<input class="attachment-file-input d-none" type="file" accept=".pdf,.png,.jpg,.jpeg">
 
 {% endblock content %}
