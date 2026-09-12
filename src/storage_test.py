@@ -397,6 +397,134 @@ def test_get_sport_names_unique_sorted(adapter):
     assert adapter.get_sport_names() == ['Бег', 'Лыжи']
 
 
+LEGACY_COMPETITIONS_DDL = '''
+    CREATE TABLE competitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id TEXT NOT NULL,
+        student_name TEXT NOT NULL,
+        student_sex TEXT NOT NULL,
+        institute TEXT NOT NULL,
+        "group" TEXT NOT NULL,
+        course INTEGER NOT NULL,
+        sport TEXT NOT NULL,
+        date TEXT NOT NULL,
+        level TEXT NOT NULL,
+        name TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    )
+'''
+
+
+def test_catalog_migration_populates_from_existing_records(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / 'legacy.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(LEGACY_COMPETITIONS_DDL)
+    connection.executemany(
+        'INSERT INTO competitions (student_id, student_name, student_sex, institute, "group",'
+        ' course, sport, date, level, name, position, created_at)'
+        " VALUES ('h', ?, 'М', ?, 'ПГС-101', 2, ?, '2026-01-01', 'внутривузовские', 'Кубок', 1, '2026-01-01')",
+        [
+            ('Первый', 'ИСИ', 'Бег'),
+            ('Второй', 'ИСИ', 'Лыжи'),
+            ('Третий', 'ФМА', 'Бег'),
+            ('Четвёртый', 'ФМА', ''),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    tables = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert 'catalog_values' in tables
+
+    # уникальные значения из записей попадают в справочники, пустые — нет
+    assert adapter.list_catalog('sport') == ['Бег', 'Лыжи']
+    assert adapter.list_catalog('institute') == ['ИСИ', 'ФМА']
+
+
+def test_catalog_populate_is_idempotent_and_keeps_hidden(tmp_path):
+    db_path = str(tmp_path / 'reopened.sqlite3')
+    adapter = SQLiteAdapter(db_path)
+    skier = make_competition('Лыжников', datetime(2026, 1, 1))
+    skier.sport = 'Лыжи'
+    adapter.save_competitions([skier, make_competition('Бегунов', datetime(2026, 2, 1))])
+
+    # повторная инициализация подхватывает значения из существующих записей
+    reopened = SQLiteAdapter(db_path)
+    assert reopened.list_catalog('sport') == ['Бег', 'Лыжи']
+
+    hidden_row = next(row for row in reopened.list_catalog_all('sport') if row['value'] == 'Лыжи')
+    reopened.hide_catalog_value(hidden_row['id'])
+
+    reopened_again = SQLiteAdapter(db_path)  # populate не дублирует и не «оживляет»
+    rows = reopened_again.list_catalog_all('sport')
+    assert sorted(row['value'] for row in rows) == ['Бег', 'Лыжи']
+    hidden_after = next(row for row in rows if row['value'] == 'Лыжи')
+    assert hidden_after['active'] == 0
+    assert reopened_again.list_catalog('sport') == ['Бег']
+
+
+def test_add_catalog_value_ignores_duplicates(adapter):
+    adapter.add_catalog_value('sport', 'Бег')
+    adapter.add_catalog_value('sport', 'Бег')  # дубликат — без ошибки
+    adapter.add_catalog_value('sport', '  Лыжи  ')  # обрезается пробелами
+    adapter.add_catalog_value('sport', '   ')  # пустое — игнор
+    adapter.add_catalog_value('institute', 'Бег')  # та же строка в другой категории допустима
+
+    sport_rows = adapter.list_catalog_all('sport')
+    assert sorted(row['value'] for row in sport_rows) == ['Бег', 'Лыжи']
+    assert adapter.list_catalog('institute') == ['Бег']
+
+
+def test_catalog_hide_unhide_filters_active_values(adapter):
+    adapter.add_catalog_value('sport', 'Бег')
+    adapter.add_catalog_value('sport', 'Лыжи')
+    skier_row = next(row for row in adapter.list_catalog_all('sport') if row['value'] == 'Лыжи')
+
+    adapter.hide_catalog_value(skier_row['id'])
+    assert adapter.list_catalog('sport') == ['Бег']  # скрытое не попадает в подсказки
+    all_rows = {row['value']: row['active'] for row in adapter.list_catalog_all('sport')}
+    assert all_rows == {'Бег': 1, 'Лыжи': 0}
+
+    adapter.unhide_catalog_value(skier_row['id'])
+    assert adapter.list_catalog('sport') == ['Бег', 'Лыжи']
+
+
+def test_count_records_using_by_category(adapter):
+    skier = make_competition('Лыжников', datetime(2026, 1, 1))
+    skier.sport = 'Лыжи'
+    skier.institute = 'ФМА'
+    adapter.save_competitions(
+        [
+            skier,
+            make_competition('Бегунов 1', datetime(2026, 2, 1)),
+            make_competition('Бегунов 2', datetime(2026, 3, 1)),
+        ]
+    )
+
+    assert adapter.count_records_using('sport', 'Бег') == 2
+    assert adapter.count_records_using('sport', 'Лыжи') == 1
+    assert adapter.count_records_using('institute', 'ИСИ') == 2
+    assert adapter.count_records_using('institute', 'ФМА') == 1
+    assert adapter.count_records_using('level', 'внутривузовские') == 3
+    assert adapter.count_records_using('sport', 'Плавание') == 0
+    assert adapter.count_records_using('unknown', 'Бег') == 0
+
+
+def test_get_and_delete_catalog_value(adapter):
+    adapter.add_catalog_value('institute', 'ИСИ')
+    row = adapter.get_catalog_value(adapter.list_catalog_all('institute')[0]['id'])
+    assert row == {'id': row['id'], 'category': 'institute', 'value': 'ИСИ', 'active': 1}
+    assert adapter.get_catalog_value(999) is None
+
+    adapter.delete_catalog_value(row['id'])
+    assert adapter.list_catalog_all('institute') == []
+    assert adapter.get_catalog_value(row['id']) is None
+
+
 def test_list_users_includes_name_aliases(adapter):
     adapter.create_user('anna', 'hash', 'athlete')
     user_id = adapter.get_user('anna')['id']

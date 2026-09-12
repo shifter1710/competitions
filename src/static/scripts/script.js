@@ -670,6 +670,11 @@ class Main {
             if (key === "date" || fieldType === "date") {
                 input.placeholder = "дд.мм.гггг";
             }
+            // Подсказки справочников: datalist лежит в разметке страницы,
+            // id совпадает с ключом поля (sport-options / institute-options).
+            if (key === "sport" || key === "institute") {
+                input.setAttribute("list", `${key}-options`);
+            }
             input.value = value ?? "";
         }
         input.dataset.editKey = key;

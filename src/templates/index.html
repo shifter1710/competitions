@@ -26,7 +26,7 @@
                 </div>
                 <div class="col-md-4">
                     <label class="form-label" for="institute">Институт</label>
-                    <input class="form-control" id="institute" name="institute" type="text" required>
+                    <input class="form-control" id="institute" name="institute" type="text" list="institute-options" required>
                 </div>
                 <div class="col-md-3">
                     <label class="form-label" for="group">Группа</label>
@@ -38,7 +38,7 @@
                 </div>
                 <div class="col-md-3">
                     <label class="form-label" for="sport">Вид спорта</label>
-                    <input class="form-control" id="sport" name="sport" type="text" required>
+                    <input class="form-control" id="sport" name="sport" type="text" list="sport-options" required>
                 </div>
                 <div class="col-md-3">
                     <label class="form-label" for="date">Дата</label>
@@ -121,6 +121,19 @@
 
 
 <div class="content-wrapper">
+    {# Подсказки справочников (docs/data-model-decisions.md): datalist живёт
+       внутри content-wrapper, чтобы обновляться вместе с таблицей; значения
+       только активные. #}
+    <datalist id="sport-options">
+        {% for value in sport_options %}
+        <option value="{{ value }}"></option>
+        {% endfor %}
+    </datalist>
+    <datalist id="institute-options">
+        {% for value in institute_options %}
+        <option value="{{ value }}"></option>
+        {% endfor %}
+    </datalist>
     {% if competitions %}
     <div class="table-card" data-table-view="index">
         <div class="table-responsive">

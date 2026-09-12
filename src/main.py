@@ -129,6 +129,11 @@ ATTACHMENT_SIGNATURES = {
 
 DEFAULT_LEVELS = ('внутривузовские', 'межвузовские')
 
+# Управляемые справочники значений: записи остаются свободным текстом,
+# справочник — только подсказки (docs/data-model-decisions.md,
+# «Справочники значений»). Уровни живут в своей таблице на той же странице.
+CATALOG_CATEGORIES: Sequence[str] = ('sport', 'institute')
+
 
 def seed_levels(storage: SQLiteAdapter):
     if not storage.get_level_names(include_inactive=True):
@@ -754,6 +759,8 @@ async def index(request: Request):
             'users': storage.list_users() if user_is_admin(request) else [],
             'user_roles': USER_ROLES,
             'levels': storage.get_level_names(),
+            'sport_options': storage.list_catalog('sport'),
+            'institute_options': storage.list_catalog('institute'),
             'has_unapproved': any(c.review_status != 'approved' for c in competitions),
             'attachments_by_record': build_attachments_by_record(storage.get_attachments()),
             'admin_levels': storage.list_levels() if user_is_admin(request) else [],
@@ -831,15 +838,117 @@ async def admin_levels_page(request: Request):
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
+    # Уровни переехали на страницу «Справочники»; старый URL остаётся
+    # рабочим, flash-параметры сохраняются в редиректе.
+    query = request.query_string
+    return redirect(f'/admin/catalogs?{query}' if query else '/admin/catalogs')
+
+
+def build_catalog_entries(storage: SQLiteAdapter, category: str) -> list[dict]:
+    """Значения справочника для страницы админки: каждое со счётчиком записей."""
+    return [
+        {**row, 'records_count': storage.count_records_using(category, row['value'])}
+        for row in storage.list_catalog_all(category)
+    ]
+
+
+@app.get('/admin/catalogs')
+async def admin_catalogs_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
     storage = get_storage(request.app)
     return await render(
-        template_name=jinja_env.get_template('admin_levels.html'),
+        template_name=jinja_env.get_template('admin_catalogs.html'),
         context={
             'request': request,
-            'admin_levels': storage.list_levels(),
+            'sport_values': build_catalog_entries(storage, 'sport'),
+            'institute_values': build_catalog_entries(storage, 'institute'),
+            'admin_levels': [
+                {**level, 'records_count': storage.count_records_using('level', level['name'])}
+                for level in storage.list_levels()
+            ],
             **get_flash_args(request),
         },
     )
+
+
+def resolve_catalog_value(request: Request, category: str, value_id: str):
+    """Общая проверка для действий над значением справочника: категория и id."""
+    if category not in CATALOG_CATEGORIES:
+        return None, text(body='Unknown catalog', status=404)
+    try:
+        numeric_value_id = int(value_id)
+    except ValueError:
+        return None, text(body='Invalid value id', status=400)
+    row = get_storage(request.app).get_catalog_value(numeric_value_id)
+    if row is None or row['category'] != category:
+        return None, build_redirect_with_message(error='Значение не найдено', url='/admin/catalogs')
+    return row, None
+
+
+@app.post('/admin/catalogs/<category>')
+async def create_catalog_value(request: Request, category: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    if category not in CATALOG_CATEGORIES:
+        return text(body='Unknown catalog', status=404)
+
+    value = get_form_value(request, 'value').strip()
+    if not value:
+        return build_redirect_with_message(error='Значение обязательно', url='/admin/catalogs')
+
+    get_storage(request.app).add_catalog_value(category, value)
+    return build_redirect_with_message(message='Значение добавлено', url='/admin/catalogs')
+
+
+@app.post('/admin/catalogs/<category>/<value_id>/hide')
+async def hide_catalog_value(request: Request, category: str, value_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    row, error = resolve_catalog_value(request, category, value_id)
+    if error is not None:
+        return error
+
+    get_storage(request.app).hide_catalog_value(row['id'])
+    return build_redirect_with_message(message='Значение скрыто из подсказок', url='/admin/catalogs')
+
+
+@app.post('/admin/catalogs/<category>/<value_id>/unhide')
+async def unhide_catalog_value(request: Request, category: str, value_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    row, error = resolve_catalog_value(request, category, value_id)
+    if error is not None:
+        return error
+
+    get_storage(request.app).unhide_catalog_value(row['id'])
+    return build_redirect_with_message(message='Значение снова видно в подсказках', url='/admin/catalogs')
+
+
+@app.post('/admin/catalogs/<category>/<value_id>/delete')
+async def delete_catalog_value(request: Request, category: str, value_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    row, error = resolve_catalog_value(request, category, value_id)
+    if error is not None:
+        return error
+
+    storage = get_storage(request.app)
+    records_count = storage.count_records_using(category, row['value'])
+    if records_count > 0:
+        # Значение висит на записях — историчность неприкосновенна, удалять нельзя.
+        return text(
+            body=f'Нельзя удалить значение «{row["value"]}»: на нём записей — {records_count}',
+            status=400,
+        )
+
+    storage.delete_catalog_value(row['id'])
+    return build_redirect_with_message(message='Значение удалено', url='/admin/catalogs')
 
 
 @app.get('/admin/users')
@@ -989,6 +1098,19 @@ def ensure_levels(storage: SQLiteAdapter, competitions: Iterable[Competition]):
             known.add(competition.level)
 
 
+def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competition]):
+    """Новое значение вида спорта/института из записи или импорта попадает в справочник.
+
+    Как с уровнями: справочник только собирает подсказки и ничего не
+    перезаписывает в записях (docs/data-model-decisions.md). Дубликаты
+    игнорируются на стороне storage.
+    """
+    for competition in competitions:
+        for category, value in (('sport', competition.sport), ('institute', competition.institute)):
+            if value:
+                storage.add_catalog_value(category, value)
+
+
 def split_import_competitions(
     competitions: Sequence[Competition],
     existing_competitions: Iterable[Competition],
@@ -1031,6 +1153,7 @@ async def upload(request: Request):
         return text(body=f'Invalid row data: {exc}', status=400)
 
     ensure_levels(storage, competitions)
+    ensure_catalog_values(storage, competitions)
     existing = await asyncio.to_thread(storage.get_competitions)
     new_competitions, skipped_duplicates = split_import_competitions(competitions, existing)
     if new_competitions:
@@ -1161,6 +1284,7 @@ async def add_competition(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
+    ensure_catalog_values(storage, [competition])
     review_status = 'pending' if user_is_athlete(request) else 'approved'
     storage.save_competitions(
         [competition],
@@ -1564,12 +1688,12 @@ async def create_level(request: Request):
 
     name = get_form_value(request, 'name').strip()
     if not name:
-        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/levels')
+        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/catalogs')
     if name in get_storage(request.app).get_level_names(include_inactive=True):
-        return build_redirect_with_message(error='Такой уровень уже существует', url='/admin/levels')
+        return build_redirect_with_message(error='Такой уровень уже существует', url='/admin/catalogs')
 
     get_storage(request.app).create_level(name)
-    return build_redirect_with_message(message='Уровень добавлен', url='/admin/levels')
+    return build_redirect_with_message(message='Уровень добавлен', url='/admin/catalogs')
 
 
 @app.post('/admin/levels/<level_id>')
@@ -1585,10 +1709,10 @@ async def rename_level(request: Request, level_id: str):
 
     name = get_form_value(request, 'name').strip()
     if not name:
-        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/levels')
+        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/catalogs')
 
     get_storage(request.app).rename_level(numeric_level_id, name)
-    return build_redirect_with_message(message='Уровень переименован', url='/admin/levels')
+    return build_redirect_with_message(message='Уровень переименован', url='/admin/catalogs')
 
 
 @app.post('/admin/levels/<level_id>/delete')
@@ -1603,7 +1727,7 @@ async def disable_level(request: Request, level_id: str):
         return text(body='Invalid level id', status=400)
 
     get_storage(request.app).disable_level(numeric_level_id)
-    return build_redirect_with_message(message='Уровень скрыт из списков', url='/admin/levels')
+    return build_redirect_with_message(message='Уровень скрыт из списков', url='/admin/catalogs')
 
 
 @app.post('/admin/users/<user_id>/alias')
