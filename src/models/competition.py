@@ -12,6 +12,11 @@ class Competition(Student):
     record_id: str | None = Field(default=None, alias='_id')
     sport: str = Field(alias='Вид спорта')
     date: datetime = Field(alias='Дата')
+    # Даты-диапазоны (решение 2026-09-13, docs/data-model-decisions.md
+    # «Даты-диапазоны: визуально одно, под капотом два»): date — НАЧАЛО
+    # (колонка не переименовывается), date_to — опциональный конец;
+    # NULL = однодневное.
+    date_to: datetime | None = Field(default=None, alias='Дата по')
     level: str = Field(alias='Уровень соревнований')
     name: str = Field(alias='Название соревнований')
     position: int = Field(alias='Место')

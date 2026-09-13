@@ -1434,3 +1434,105 @@ def test_add_catalog_value_still_ignores_exact_duplicate(adapter):
     adapter.add_catalog_value('sport', 'Бег')
 
     assert adapter.list_catalog('sport') == ['Бег']
+
+
+# Даты-диапазоны (решение 2026-09-13, docs/data-model-decisions.md
+# «Даты-диапазоны: визуально одно, под капотом два»).
+
+
+def make_range_competition(name: str, date: datetime, date_to: datetime | None) -> Competition:
+    competition = make_competition(name, date)
+    competition.date_to = date_to
+    return competition
+
+
+def test_migration_adds_date_to_to_existing_db(tmp_path):
+    db_path = tmp_path / 'legacy.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE competitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            student_name TEXT NOT NULL,
+            student_sex TEXT NOT NULL,
+            institute TEXT NOT NULL,
+            "group" TEXT NOT NULL,
+            course INTEGER NOT NULL,
+            sport TEXT NOT NULL,
+            date TEXT NOT NULL,
+            level TEXT NOT NULL,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            extra_data TEXT NOT NULL DEFAULT '{}'
+        )
+        '''
+    )
+    connection.execute(
+        'INSERT INTO competitions (student_id, student_name, student_sex, institute, '
+        '"group", course, sport, date, level, name, position, created_at) '
+        "VALUES ('id1', 'Легаси Лев', 'М', 'ИСИ', 'ПГС-101', 2, 'Бег', '2026-01-10T00:00:00', "
+        "'внутривузовские', 'Кубок', 1, '2026-01-11T00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
+    assert 'date_to' in columns
+    # Существующие записи — однодневные: date_to NULL, данные не тронуты.
+    record = adapter.get_competitions()[0]
+    assert record.date_to is None
+    assert record.student_name == 'Легаси Лев'
+
+
+def test_date_range_roundtrip(adapter):
+    adapter.save_competitions([make_range_competition('Диапазон Дима', datetime(2026, 6, 25), datetime(2026, 6, 27))])
+    record = adapter.get_competitions()[0]
+    assert record.date.date().isoformat() == '2026-06-25'
+    assert record.date_to.date().isoformat() == '2026-06-27'
+
+
+def test_period_filter_matches_date_from_or_date_to(adapter):
+    adapter.save_competitions(
+        [
+            # Внутри периода только дата НАЧАЛА
+            make_range_competition('Начало Николай', datetime(2026, 6, 25), datetime(2026, 7, 10)),
+            # Внутри периода только дата ОКОНЧАНИЯ
+            make_range_competition('Конец Константин', datetime(2026, 5, 1), datetime(2026, 6, 3)),
+            # Обе даты вне периода
+            make_range_competition('Мимо Михаил', datetime(2026, 1, 1), datetime(2026, 1, 5)),
+            # Однодневная внутри периода
+            make_competition('Один Олег', datetime(2026, 6, 20)),
+        ]
+    )
+
+    rows = adapter.get_grouped_report('sport', date_from='01.06.2026', date_to='30.06.2026')
+    metrics = {row.slice_value: row.count_participation for row in rows}
+    assert metrics == {'Бег': 3}
+
+
+def test_page_filter_period_includes_range_records(adapter):
+    adapter.save_competitions(
+        [
+            make_range_competition('Конец Константин', datetime(2026, 5, 1), datetime(2026, 6, 3)),
+            make_range_competition('Мимо Михаил', datetime(2026, 1, 1), datetime(2026, 1, 5)),
+        ]
+    )
+
+    page = adapter.get_competitions_page(date_from='01.06.2026', date_to='30.06.2026')
+    assert [record.student_name for record in page] == ['Конец Константин']
+    assert adapter.count_competitions_filtered(date_from='01.06.2026', date_to='30.06.2026') == 1
+
+
+def test_records_sorted_by_date_from(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('Поздний Пётр', datetime(2026, 9, 1)),
+            make_range_competition('Ранний Роман', datetime(2026, 3, 1), datetime(2026, 3, 5)),
+        ]
+    )
+
+    page = adapter.get_competitions_page()
+    assert [record.student_name for record in page] == ['Ранний Роман', 'Поздний Пётр']

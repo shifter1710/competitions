@@ -17,8 +17,14 @@ from src.auth import hash_password
 from src.conftest import make_report_fixture
 from src.conftest import make_report_unapproved_fixture
 from src.main import app
+from src.main import build_competition
+from src.main import competition_duplicate_key
+from src.main import competition_to_export_row
 from src.main import create_auth_cookie_value
+from src.main import format_date_range
 from src.main import normalize_position
+from src.main import parse_date_value
+from src.main import split_import_competitions
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
@@ -4416,3 +4422,189 @@ def test_admin_catalogs_institutes_are_collapsed_accordion(client: SanicTestClie
     assert not re.search(r'<details[^>]*\bopen\b', response.text), 'институты должны быть свёрнуты по умолчанию'
     assert 'ПГС-101' in response.text
     app.ctx.storage.list_catalog_tree.return_value = []
+
+
+# Даты-диапазоны (решение 2026-09-13, docs/data-model-decisions.md
+# «Даты-диапазоны: визуально одно, под капотом два»).
+
+
+def test_parse_date_value_single_day():
+    date, date_to = parse_date_value('25.06.2026')
+    assert date == datetime(2026, 6, 25)
+    assert date_to is None
+
+
+def test_parse_date_value_one_month_range():
+    date, date_to = parse_date_value('25-27.06.2026')
+    assert date == datetime(2026, 6, 25)
+    assert date_to == datetime(2026, 6, 27)
+
+
+def test_parse_date_value_one_year_range():
+    date, date_to = parse_date_value('30.01-01.02.2026')
+    assert date == datetime(2026, 1, 30)
+    assert date_to == datetime(2026, 2, 1)
+
+
+def test_parse_date_value_full_range():
+    date, date_to = parse_date_value('28.12.2025-02.01.2026')
+    assert date == datetime(2025, 12, 28)
+    assert date_to == datetime(2026, 1, 2)
+
+
+def test_parse_date_value_rejects_end_before_start():
+    with pytest.raises(ValueError):
+        parse_date_value('27-25.06.2026')
+
+
+def test_parse_date_value_rejects_invalid_date():
+    with pytest.raises(ValueError):
+        parse_date_value('32.06.2026')
+    with pytest.raises(ValueError):
+        parse_date_value('25-26.13.2026')
+
+
+def test_format_date_range_variants():
+    assert format_date_range(datetime(2026, 6, 25), None) == '25.06.2026'
+    assert format_date_range(datetime(2026, 6, 25), datetime(2026, 6, 27)) == '25-27.06.2026'
+    assert format_date_range(datetime(2026, 1, 30), datetime(2026, 2, 1)) == '30.01-01.02.2026'
+    assert format_date_range(datetime(2025, 12, 28), datetime(2026, 1, 2)) == '28.12.2025-02.01.2026'
+
+
+def test_manual_competition_accepts_range(client: SanicTestClient):
+    _, response = client.post(
+        '/competition',
+        headers=get_auth_headers(),
+        data={
+            **csrf_for(get_auth_headers()),
+            'student_name': 'Диапазон Дарья',
+            'student_sex': 'Ж',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Легкая атлетика',
+            'date': '25-27.06.2026',
+            'level': 'межвузовские',
+            'name': 'Летний кубок',
+            'position': '2',
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    competition = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert competition.date == datetime(2026, 6, 25)
+    assert competition.date_to == datetime(2026, 6, 27)
+
+
+def test_manual_competition_rejects_range_end_before_start(client: SanicTestClient):
+    _, response = client.post(
+        '/competition',
+        headers=get_auth_headers(),
+        data={
+            **csrf_for(get_auth_headers()),
+            'student_name': 'Диапазон Дарья',
+            'student_sex': 'Ж',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Легкая атлетика',
+            'date': '27-25.06.2026',
+            'level': 'межвузовские',
+            'name': 'Летний кубок',
+            'position': '2',
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 400
+
+
+def test_import_accepts_range_in_date_column(client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.find_catalog_canonical.return_value = None
+    storage.find_level_canonical.return_value = None
+    storage.find_catalog_row.return_value = None
+    storage.find_unique_group_institute.return_value = None
+    competition = build_competition(
+        {
+            'ФИО': 'Импорт Игорь',
+            'Пол': 'М',
+            'Институт': 'ИСИ',
+            'Группа': 'ПГС-101',
+            'Вид спорта': 'Бег',
+            'Дата': '28.12.2025-02.01.2026',
+            'Уровень соревнований': 'межвузовские',
+            'Название соревнований': 'Новогодний кубок',
+            'Место': '1',
+            'Курс': 2,
+        },
+        custom_fields=[],
+        storage=None,
+    )
+    assert competition.date == datetime(2025, 12, 28)
+    assert competition.date_to == datetime(2026, 1, 2)
+
+
+def test_export_range_roundtrips_through_import():
+    competition = Competition(
+        student_id='id-1',
+        student_name='Экспорт Елена',
+        student_sex='Ж',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 1, 30),
+        date_to=datetime(2026, 2, 1),
+        level='внутривузовские',
+        name='Зимний кубок',
+        position=1,
+    )
+    row = competition_to_export_row(competition, [])
+    # Компактная строка в существующей колонке «Дата» — без новой колонки.
+    assert 'Дата по' not in row
+    assert row['Дата'] == '30.01-01.02.2026'
+
+    buffer = BytesIO()
+    pd.DataFrame.from_records([row]).to_excel(buffer, index=False)
+    buffer.seek(0)
+    imported = build_competition(pd.read_excel(buffer).iloc[0].to_dict(), custom_fields=[])
+
+    assert competition_duplicate_key(imported) == competition_duplicate_key(competition)
+    assert imported.date == datetime(2026, 1, 30)
+    assert imported.date_to == datetime(2026, 2, 1)
+
+
+def test_duplicate_key_uses_start_date_only():
+    existing = Competition(
+        student_id='id-1',
+        student_name='Дубль Дмитрий',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 6, 25),
+        date_to=datetime(2026, 6, 27),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+    )
+    incoming = Competition(
+        student_id='id-2',
+        student_name='Дубль Дмитрий',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 6, 25),
+        level='внутривузовские',
+        name='Кубок',
+        position=3,
+    )
+
+    new_competitions, skipped = split_import_competitions([incoming], [existing])
+    assert new_competitions == []
+    assert skipped == 1

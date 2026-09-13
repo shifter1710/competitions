@@ -60,6 +60,7 @@ COMPETITION_SELECT_SQL = '''
         course,
         sport,
         date,
+        date_to,
         level,
         name,
         position,
@@ -82,6 +83,7 @@ COMPETITION_INSERT_SQL = '''
         course,
         sport,
         date,
+        date_to,
         level,
         name,
         position,
@@ -90,7 +92,7 @@ COMPETITION_INSERT_SQL = '''
         review_status,
         owner_id,
         review_comment
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
 
 
@@ -110,6 +112,7 @@ def competition_insert_records(
             item.course,
             item.sport,
             item.date.isoformat(),
+            item.date_to.isoformat() if item.date_to else None,
             item.level,
             item.name,
             item.position,
@@ -162,16 +165,7 @@ class SQLiteAdapter:
             )
 
             columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
-            if 'extra_data' not in columns:
-                self.connection.execute("ALTER TABLE competitions ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'")
-            if 'review_status' not in columns:
-                self.connection.execute(
-                    "ALTER TABLE competitions ADD COLUMN review_status TEXT NOT NULL DEFAULT 'approved'"
-                )
-            if 'owner_id' not in columns:
-                self.connection.execute('ALTER TABLE competitions ADD COLUMN owner_id INTEGER')
-            if 'review_comment' not in columns:
-                self.connection.execute("ALTER TABLE competitions ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
+            self._migrate_competitions_columns(columns)
 
             self.connection.execute(
                 '''
@@ -286,6 +280,24 @@ class SQLiteAdapter:
                 self.connection.execute('ALTER TABLE users ADD COLUMN last_seen_at TEXT')
             self.connection.commit()
 
+    def _migrate_competitions_columns(self, columns: set[str]) -> None:
+        """Порционная миграция легаси-таблицы записей: недостающие колонки
+        добавляются ALTER'ом, существующие данные не трогаются."""
+        if 'extra_data' not in columns:
+            self.connection.execute("ALTER TABLE competitions ADD COLUMN extra_data TEXT NOT NULL DEFAULT '{}'")
+        if 'review_status' not in columns:
+            self.connection.execute(
+                "ALTER TABLE competitions ADD COLUMN review_status TEXT NOT NULL DEFAULT 'approved'"
+            )
+        if 'owner_id' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN owner_id INTEGER')
+        if 'review_comment' not in columns:
+            self.connection.execute("ALTER TABLE competitions ADD COLUMN review_comment TEXT NOT NULL DEFAULT ''")
+        # Даты-диапазоны (решение 2026-09-13): date_to NULL = однодневное,
+        # существующие записи не трогаются — колонка рядом с date (НАЧАЛО).
+        if 'date_to' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN date_to TEXT')
+
     def _migrate_catalog_values_parent(self):
         """Перестроить легаси-каталог без parent_id (и с табличным UNIQUE).
 
@@ -382,6 +394,7 @@ class SQLiteAdapter:
                 'Курс': row['course'],
                 'Вид спорта': row['sport'],
                 'Дата': row['date'],
+                'Дата по': row['date_to'],
                 'Уровень соревнований': row['level'],
                 'Название соревнований': row['name'],
                 'Место': row['position'],
@@ -415,7 +428,7 @@ class SQLiteAdapter:
         with self._lock:
             scope_clauses, scope_params = self._competition_scope_clauses(owner_id, student_id_hashes)
             where_clause = f'WHERE {" AND ".join(scope_clauses)}\n' if scope_clauses else ''
-            query = f'{COMPETITION_SELECT_SQL}{where_clause}ORDER BY created_at ASC'
+            query = f'{COMPETITION_SELECT_SQL}{where_clause}ORDER BY date ASC, created_at ASC'
             rows = self.connection.execute(query, scope_params).fetchall()
             return [self._row_to_competition(row) for row in rows]
 
@@ -551,7 +564,7 @@ class SQLiteAdapter:
                 date_from=date_from,
                 date_to=date_to,
             )
-            query = f'{COMPETITION_SELECT_SQL}{where_clause}\nORDER BY created_at ASC'
+            query = f'{COMPETITION_SELECT_SQL}{where_clause}\nORDER BY date ASC, created_at ASC'
             query_params = list(params)
             if limit is not None:
                 query += '\nLIMIT ? OFFSET ?'
@@ -774,15 +787,23 @@ class SQLiteAdapter:
 
     @staticmethod
     def _date_range_clauses(date_from: str, date_to: str) -> tuple[list[str], list[object]]:
-        """Условия периода отчёта: границы парсятся форматом settings.date_format."""
+        """Условия периода отчёта: границы парсятся форматом settings.date_format.
+
+        Даты-диапазоны (решение владельца 2026-09-13, docs/data-model-
+        decisions.md): запись показывается, если ХОТЯ БЫ ОДНА из её дат
+        (date_from ИЛИ date_to) попала в диапазон фильтра. Записи без
+        date_to ведут себя как раньше — их единственная дата = date.
+        """
         clauses = []
         params: list[object] = []
         if date_from:
-            clauses.append('date >= ?')
-            params.append(datetime.strptime(date_from, settings.date_format).isoformat())
+            bound = datetime.strptime(date_from, settings.date_format).isoformat()
+            clauses.append('(date >= ? OR COALESCE(date_to, date) >= ?)')
+            params.extend([bound, bound])
         if date_to:
-            clauses.append('date <= ?')
-            params.append(datetime.strptime(date_to, settings.date_format).isoformat())
+            bound = datetime.strptime(date_to, settings.date_format).isoformat()
+            clauses.append('(date <= ? OR COALESCE(date_to, date) <= ?)')
+            params.extend([bound, bound])
         return clauses, params
 
     def _report_filter_clauses(
@@ -972,6 +993,7 @@ class SQLiteAdapter:
                     course = ?,
                     sport = ?,
                     date = ?,
+                    date_to = ?,
                     level = ?,
                     name = ?,
                     position = ?,
@@ -987,6 +1009,7 @@ class SQLiteAdapter:
                     competition.course,
                     competition.sport,
                     competition.date.isoformat(),
+                    competition.date_to.isoformat() if competition.date_to else None,
                     competition.level,
                     competition.name,
                     competition.position,
@@ -1025,7 +1048,7 @@ class SQLiteAdapter:
                 '''
                 SELECT
                     id, student_id, student_name, student_sex, institute, "group", course,
-                    sport, date, level, name, position, created_at, extra_data,
+                    sport, date, date_to, level, name, position, created_at, extra_data,
                     review_status, owner_id, review_comment
                 FROM competitions
                 WHERE date < ?
