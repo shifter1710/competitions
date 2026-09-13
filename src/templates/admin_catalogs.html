@@ -174,7 +174,7 @@
                         </form>
                     </div>
                 </details>
-                <div class="d-flex gap-2 align-items-center pt-1">
+                <div class="d-flex gap-2 align-items-center pt-1" {% if not institute.records_count and institute.groups %}title="Удаление доступно после удаления групп"{% endif %}>
                     {{ rename_form('institute', institute.id, institute.value) }}
                     {% if institute.active %}
                     <form action="/admin/catalogs/institute/{{ institute.id }}/hide" method="post">
@@ -192,8 +192,6 @@
                         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                         <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
                     </form>
-                    {% elif not institute.records_count and institute.groups %}
-                    <span class="text-muted small" title="Сначала удалите группы института">удаление — после групп</span>
                     {% endif %}
                 </div>
             </div>
