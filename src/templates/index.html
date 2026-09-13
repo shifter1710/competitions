@@ -2,6 +2,23 @@
 
 {% block content %}
 
+{# №24 (docs/feedback-live.md): привязанное link-поле рисует значение
+   целевой колонки гиперссылкой на ссылку ЭТОЙ записи (http/https); без
+   ссылки — обычный текст. Сортировка/инлайн в целевой колонке живут по
+   тексту ячейки и не меняются. #}
+{% macro bound_cell(value, link_key, extra_data) -%}
+{%- if link_key -%}
+{%- set href = extra_data.get(link_key, '') -%}
+{%- if href and href.startswith(('http://', 'https://')) -%}
+<a href="{{ href }}" class="link" rel="noopener noreferrer" target="_blank">{{ value }}</a>
+{%- else -%}{{ value }}{%- endif -%}
+{%- else -%}{{ value }}{%- endif -%}
+{%- endmacro %}
+{# Ключи link-полей, привязанных к колонкам: сами колонки этих полей
+   в таблице не рисуются (данные остаются в выгрузке xlsx). #}
+{% set bound_link_keys = link_bindings.values() | list %}
+
+
 {# Композиция главной — по прототипу 02: заголовок с описанием, карточка
    фильтров над таблицей, таблица в белой карточке, под ней счётчик
    «Показано N из M», селект «Показывать по» и пагинация. Фильтрация и
@@ -166,11 +183,10 @@
                         <th scope="col" data-column-key="position" data-sort-type="number">Место</th>
                         <th scope="col" data-column-key="course" data-sort-type="number">Курс</th>
                         {% for field in custom_fields if field.show_in_table %}
-                        {# data-field-type: тип кастомного поля читает script.js
-                           (getCustomFieldTypes) для инлайн-строки — поле ввода
-                           «дд.мм.гггг», число, ссылка и префикс custom__ при
-                           сохранении. #}
-                        <th scope="col" data-column-key="{{ field.key }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}">{{ field.label }}</th>
+                        {# Привязанное link-поле колонкой скрыто (d-none), но
+                           остаётся в DOM: script.js читает типы полей с th для
+                           инлайн-строки. #}
+                        <th scope="col" data-column-key="{{ field.key }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}" {% if field.key in bound_link_keys %}class="d-none"{% endif %}>{{ field.label }}</th>
                         {% endfor %}
                         {% if has_unapproved %}
                         <th scope="col" data-column-key="status" data-sort-type="text" data-exportable="false">Статус</th>
@@ -187,24 +203,28 @@
                     {% for competition in competitions %}
                     <tr>
                         <td data-column-key="index">{{ loop.index }}</td>
-                        <td data-column-key="student_name">{{ competition.student_name }}</td>
+                        <td data-column-key="student_name">{{ bound_cell(competition.student_name, link_bindings.get('student_name'), competition.extra_data) }}</td>
                         <td data-column-key="student_sex">{{ competition.student_sex }}</td>
-                        <td data-column-key="institute">{{ competition.institute }}</td>
-                        <td data-column-key="group">{{ competition.group }}</td>
-                        <td data-column-key="sport">{{ competition.sport }}</td>
+                        <td data-column-key="institute">{{ bound_cell(competition.institute, link_bindings.get('institute'), competition.extra_data) }}</td>
+                        <td data-column-key="group">{{ bound_cell(competition.group, link_bindings.get('group'), competition.extra_data) }}</td>
+                        <td data-column-key="sport">{{ bound_cell(competition.sport, link_bindings.get('sport'), competition.extra_data) }}</td>
                         <td data-column-key="date" data-sort-value="{{ competition.date.strftime('%Y-%m-%d') }}">{{ format_date_range(competition.date, competition.date_to) }}</td>
-                        <td data-column-key="level">{{ competition.level }}</td>
-                        <td class="competition" data-column-key="name">{{ competition.name }}</td>
+                        <td data-column-key="level">{{ bound_cell(competition.level, link_bindings.get('level'), competition.extra_data) }}</td>
+                        <td class="competition" data-column-key="name">{{ bound_cell(competition.name, link_bindings.get('name'), competition.extra_data) }}</td>
                         <td data-column-key="position">{{ competition.position }}</td>
                         <td data-column-key="course">{{ competition.course }}</td>
                         {% for field in custom_fields if field.show_in_table %}
-                        <td data-column-key="{{ field.key }}">
+                        <td data-column-key="{{ field.key }}" {% if field.key in bound_link_keys %}class="d-none"{% endif %}>
                             {%- set field_value = competition.extra_data.get(field.key, '') -%}
-                            {%- if field.field_type == 'url' and field_value
+                            {%- if field.key in bound_link_keys -%}
+                            {# Привязанное link-поле: колонка скрыта, данные
+                               остаются в выгрузке xlsx. #}
+                            {%- elif link_bindings.get(field.key) -%}
+                            {{ bound_cell(field_value, link_bindings.get(field.key), competition.extra_data) }}
+                            {%- elif field.field_type == 'url' and field_value
                                    and field_value.startswith(('http://', 'https://')) -%}
-                            {# №3 (docs/feedback-live.md): ссылка кликабельна только
-                               для http/https; прочие значения (например, legacy
-                               текст) — как обычный текст. Экранирование — авто. #}
+                            {# Непривязанное url-поле: ссылка кликабельна только
+                               для http/https; прочие значения — текст. #}
                             <a href="{{ field_value }}" class="link" rel="noopener noreferrer" target="_blank">{{ field_value }}</a>
                             {%- else -%}
                             {{ field_value }}

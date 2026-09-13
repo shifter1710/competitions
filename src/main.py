@@ -162,6 +162,18 @@ REPORT_SLICE_NUMERIC_KEYS = frozenset({'course', 'year'})
 # Старые ссылки/закладки с выбором колонок продолжают работать.
 LEGACY_REPORT_COLUMN_ALIASES = {'Количество участий': 'Участий'}
 FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date', 'url')
+
+# №24 (docs/feedback-live.md): колонки, к которым можно привязать link-поле —
+# базовые текстовые колонки таблицы. Сортировка/инлайн в целевой колонке
+# остаются по её тексту, ссылка только оборачивает текст в <a>.
+LINK_TARGETABLE_BASE_KEYS: Sequence[str] = (
+    'student_name',
+    'institute',
+    'group',
+    'sport',
+    'level',
+    'name',
+)
 USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE)
 MIN_PASSWORD_LENGTH = 6
 ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024
@@ -586,6 +598,58 @@ def get_base_field_settings(storage: SQLiteAdapter | None) -> dict[str, dict]:
         default_type = BASE_FIELD_SETTING_DEFAULTS[key][0]
         merged[key] = {'value_type': default_type, 'required': True}
     return merged
+
+
+def get_allowed_link_targets(
+    custom_fields: Sequence[CustomField],
+    *,
+    exclude_key: str | None = None,
+) -> dict[str, str]:
+    """№24: допустимые цели привязки link-поля — ключ → подпись колонки.
+
+    Базовые текстовые колонки таблицы + активные кастомные текстовые поля
+    (кроме самого link-поля).
+    """
+    targets = {key: BASE_FIELD_LABELS[key] for key in LINK_TARGETABLE_BASE_KEYS}
+    for field in custom_fields:
+        if field.field_type == 'text' and field.active and field.key != exclude_key:
+            targets[field.key] = field.label
+    return targets
+
+
+def build_link_bindings(custom_fields: Sequence[CustomField]) -> dict[str, str]:
+    """№24: карта «целевая колонка → ключ link-поля» для рендера таблицы.
+
+    Целевая колонка показывает значение своей ячейки как гиперссылку на
+    значение link-поля ЭТОЙ записи (если ссылка заполнена и это http/https).
+    """
+    bindings: dict[str, str] = {}
+    for field in custom_fields:
+        if field.field_type == 'url' and field.link_target and field.active:
+            bindings[field.link_target] = field.key
+    return bindings
+
+
+def parse_link_target_form(
+    request: Request,
+    *,
+    field_type: str,
+    custom_fields: Sequence[CustomField],
+    exclude_key: str | None = None,
+) -> str | None:
+    """Прочитать link_target из формы полей: NULL/пусто = не привязана.
+
+    Значение принимается только у url-полей и только из допустимого списка
+    целей — подделка разметки не уводит рендер в неизвестную колонку.
+    """
+    if field_type != 'url':
+        return None
+    raw_target = get_form_value(request, 'link_target').strip()
+    if not raw_target:
+        return None
+    if raw_target not in get_allowed_link_targets(custom_fields, exclude_key=exclude_key):
+        return None
+    return raw_target
 
 
 def parse_base_number_field(raw, *, label: str, setting: dict, empty_error: str, empty_value: int = 0):
@@ -1246,6 +1310,8 @@ async def index(request: Request):
             'request': request,
             'competitions': competitions,
             'custom_fields': custom_fields,
+            # №24: карта «целевая колонка → ключ link-поля» для рендера.
+            'link_bindings': build_link_bindings(custom_fields),
             'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
             'field_type_options': FIELD_TYPE_OPTIONS,
             'can_write': user_can_write(request),
@@ -1495,6 +1561,11 @@ async def admin_fields_page(request: Request):
             'request': request,
             'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
             'field_type_options': FIELD_TYPE_OPTIONS,
+            # №24: варианты привязки link-полей к колонкам таблицы.
+            'link_target_base_options': [(key, BASE_FIELD_LABELS[key]) for key in LINK_TARGETABLE_BASE_KEYS],
+            'link_target_custom_options': [
+                (field.key, field.label) for field in storage.get_custom_fields() if field.field_type == 'text'
+            ],
             'base_field_settings': get_base_field_settings(storage),
             'base_field_labels': BASE_FIELD_LABELS,
             'always_required_base_fields': ALWAYS_REQUIRED_BASE_FIELDS,
@@ -2503,6 +2574,9 @@ async def create_custom_field(request: Request):
             show_in_export=parse_checkbox(request, 'show_in_export'),
             show_in_template=parse_checkbox(request, 'show_in_template'),
             sort_order=int(get_form_value(request, 'sort_order') or 0),
+            link_target=parse_link_target_form(
+                request, field_type=field_type, custom_fields=storage.get_custom_fields()
+            ),
         )
     except Exception as exc:
         return build_redirect_with_message(error=f'Не удалось создать поле: {exc}', url='/admin/fields')
@@ -2533,6 +2607,17 @@ async def update_custom_field(request: Request, field_id: str):
         return build_redirect_with_message(error='Порядок должен быть числом', url='/admin/fields')
 
     storage = get_storage(request.app)
+    # №24: старое значение привязки нужно для audit-события при изменении.
+    old_field = next(
+        (field for field in storage.get_custom_fields(include_inactive=True) if field.field_id == numeric_field_id),
+        None,
+    )
+    new_link_target = parse_link_target_form(
+        request,
+        field_type=field_type,
+        custom_fields=storage.get_custom_fields(),
+        exclude_key=old_field.key if old_field else None,
+    )
     storage.update_custom_field(
         field_id=numeric_field_id,
         label=label,
@@ -2543,7 +2628,20 @@ async def update_custom_field(request: Request, field_id: str):
         show_in_template=parse_checkbox(request, 'show_in_template'),
         sort_order=sort_order,
         active=parse_checkbox(request, 'active'),
+        link_target=new_link_target,
     )
+    if old_field is not None and old_field.link_target != new_link_target:
+        log_audit_event(
+            request,
+            'field_settings_changed',
+            {
+                'fields': {
+                    old_field.key: {
+                        'link_target': {'old': old_field.link_target, 'new': new_link_target},
+                    }
+                }
+            },
+        )
     return build_redirect_with_message(message='Настройки поля сохранены', url='/admin/fields')
 
 

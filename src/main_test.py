@@ -5318,3 +5318,120 @@ def test_upload_keeps_filled_fields_and_counts_duplicates_after_autofill(client:
     app.ctx.storage.find_athlete_fields.side_effect = None
     app.ctx.storage.find_athlete_fields.return_value = {}
     app.ctx.storage.get_competitions.return_value = []
+
+
+# №24 (docs/feedback-live.md): привязка link-поля к другой колонке.
+def test_index_renders_bound_link_in_target_column(client: SanicTestClient):
+    """Целевая колонка — гиперссылка на link-поле ЭТОЙ записи; без ссылки —
+    текст; сама link-колонка скрыта (d-none)."""
+    with_link = Competition(
+        student_id='2',
+        student_name='Тестов Тест Тестович',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок «Весна»',
+        position=1,
+        extra_data={'comp_link': 'https://sport.example.com/race'},
+    )
+    without_link = Competition(
+        student_id='3',
+        student_name='Без Ссылки',
+        student_sex='Ж',
+        institute='ИСИ',
+        group='ПГС-102',
+        course=3,
+        sport='Бег',
+        date=datetime(2026, 3, 16),
+        level='внутривузовские',
+        name='Кубок «Осень»',
+        position=2,
+        extra_data={},
+    )
+    app.ctx.storage.get_competitions_page.return_value = [with_link, without_link]
+    app.ctx.storage.count_competitions_filtered.return_value = 2
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(
+            field_id=1,
+            key='comp_link',
+            label='Ссылка на соревнование',
+            field_type='url',
+            link_target='name',
+        ),
+    ]
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.get('/', headers=headers)
+    assert response.status == 200
+    body = response.text
+    expected = (
+        '<a href="https://sport.example.com/race" class="link" '
+        'rel="noopener noreferrer" target="_blank">Кубок «Весна»</a>'
+    )
+    assert expected in body
+    # Запись без ссылки — обычный текст целевой колонки.
+    assert '>Кубок «Осень»<' in body
+    # Скрытая link-колонка: остаётся в DOM (инлайн-строка читает типы), но d-none.
+    assert 'data-column-key="comp_link" data-field-type="url" data-sort-type="url" class="d-none"' in body
+    # Не дублируется: у записи со ссылкой отдельная колонка пуста и скрыта.
+    assert '<td data-column-key="comp_link" class="d-none">' in body
+
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions_page.return_value = []
+    app.ctx.storage.count_competitions_filtered.return_value = 0
+
+
+def test_update_custom_field_saves_link_target(client: SanicTestClient):
+    # Старое поле нужно маршруту для сравнения привязки (audit-событие).
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='comp_link', label='Ссылка', field_type='url'),
+    ]
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/fields/1',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'label': 'Ссылка на соревнование',
+            'field_type': 'url',
+            'sort_order': '0',
+            'link_target': 'name',
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    _, kwargs = app.ctx.storage.update_custom_field.call_args
+    assert kwargs['link_target'] == 'name'
+    # Изменение привязки — в audit (field_settings_changed).
+    audit_calls = [
+        call
+        for call in app.ctx.storage.add_audit_event.call_args_list
+        if call.kwargs.get('action') == 'field_settings_changed'
+    ]
+    assert audit_calls, 'ожидалось audit-событие field_settings_changed'
+    app.ctx.storage.get_custom_fields.return_value = []
+
+
+def test_update_custom_field_rejects_unknown_link_target(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/fields/1',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'label': 'Ссылка на соревнование',
+            'field_type': 'url',
+            'sort_order': '0',
+            'link_target': '../../evil',
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    _, kwargs = app.ctx.storage.update_custom_field.call_args
+    assert kwargs['link_target'] is None
