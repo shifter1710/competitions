@@ -137,6 +137,23 @@
                                         {% endfor %}
                                     </select>
                                 </div>
+                                {% if field.field_type == 'url' %}
+                                {# №24 (docs/feedback-live.md): привязка ссылки к
+                                   другой колонке — значение рисуется гиперссылкой
+                                   в выбранной колонке; пусто = отдельная колонка. #}
+                                <div class="col-md-2">
+                                    <label class="form-label">Отображать в колонке</label>
+                                    <select class="form-select" name="link_target">
+                                        <option value="">(не привязана)</option>
+                                        {% for target_key, target_label in link_target_base_options %}
+                                        <option value="{{ target_key }}"{% if target_key == field.link_target %} selected{% endif %}>{{ target_label }}</option>
+                                        {% endfor %}
+                                        {% for target_key, target_label in link_target_custom_options if target_key != field.key %}
+                                        <option value="{{ target_key }}"{% if target_key == field.link_target %} selected{% endif %}>{{ target_label }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                {% endif %}
                                 <div class="col-md-1">
                                     <label class="form-label">Порядок</label>
                                     <input class="form-control" name="sort_order" type="number" value="{{ field.sort_order }}">

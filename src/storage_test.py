@@ -1695,3 +1695,65 @@ def test_known_athlete_merges_profile_and_record(adapter):
     fields = adapter.find_athlete_fields('Смирнов Сергей')
     # Профиль приоритетнее, курс добирается из последней записи.
     assert fields == {'name': 'Смирнов Сергей', 'sex': 'М', 'institute': 'ИЭиТ', 'group': 'Э-201', 'course': '3'}
+
+
+# №24 (docs/feedback-live.md): настройка link_target у link-полей.
+def test_link_target_column_added_to_legacy_db(tmp_path):
+    """Идемпотентная миграция: у легаси-таблицы custom_fields без link_target
+    колонка добавляется, повторная инициализация не дублирует её."""
+    import sqlite3
+
+    db_path = tmp_path / 'legacy-fields.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE custom_fields (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL UNIQUE,
+            label TEXT NOT NULL,
+            field_type TEXT NOT NULL DEFAULT 'text',
+            required INTEGER NOT NULL DEFAULT 0,
+            show_in_table INTEGER NOT NULL DEFAULT 1,
+            show_in_export INTEGER NOT NULL DEFAULT 1,
+            show_in_template INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        '''
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(custom_fields)')}
+    assert 'link_target' in columns
+
+
+def test_link_target_saved_and_read(adapter):
+    adapter.create_custom_field(
+        key='comp_link',
+        label='Ссылка на соревнование',
+        field_type='url',
+        required=False,
+        show_in_table=True,
+        show_in_export=True,
+        show_in_template=True,
+        sort_order=0,
+        link_target='name',
+    )
+    field = adapter.get_custom_fields()[0]
+    assert field.link_target == 'name'
+
+    adapter.update_custom_field(
+        field_id=field.field_id,
+        label='Ссылка на соревнование',
+        field_type='url',
+        required=False,
+        show_in_table=True,
+        show_in_export=True,
+        show_in_template=True,
+        sort_order=0,
+        active=True,
+        link_target=None,
+    )
+    assert adapter.get_custom_fields()[0].link_target is None

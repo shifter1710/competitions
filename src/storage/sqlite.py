@@ -183,6 +183,7 @@ class SQLiteAdapter:
 
             columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
             self._migrate_competitions_columns(columns)
+            self._migrate_custom_fields_columns()
 
             self.connection.execute(
                 '''
@@ -196,7 +197,8 @@ class SQLiteAdapter:
                     show_in_export INTEGER NOT NULL DEFAULT 1,
                     show_in_template INTEGER NOT NULL DEFAULT 1,
                     sort_order INTEGER NOT NULL DEFAULT 0,
-                    active INTEGER NOT NULL DEFAULT 1
+                    active INTEGER NOT NULL DEFAULT 1,
+                    link_target TEXT
                 )
                 '''
             )
@@ -343,6 +345,18 @@ class SQLiteAdapter:
         # существующие записи не трогаются — колонка рядом с date (НАЧАЛО).
         if 'date_to' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN date_to TEXT')
+
+    def _migrate_custom_fields_columns(self):
+        """№24 (docs/feedback-live.md): колонка link_target у кастомных полей.
+
+        Идемпотентно: добавляется только если отсутствует; существующие
+        значения (NULL) означают «показывать отдельной колонкой» — данные
+        ссылок не трогаются.
+        """
+        columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(custom_fields)').fetchall()}
+        if columns and 'link_target' not in columns:
+            self.connection.execute('ALTER TABLE custom_fields ADD COLUMN link_target TEXT')
+            self.connection.commit()
 
     def _migrate_catalog_values_parent(self):
         """Перестроить легаси-каталог без parent_id (и с табличным UNIQUE).
@@ -576,6 +590,7 @@ class SQLiteAdapter:
             show_in_template=bool(row['show_in_template']),
             sort_order=row['sort_order'],
             active=bool(row['active']),
+            link_target=row['link_target'],
         )
 
     def get_competitions(
@@ -761,6 +776,7 @@ class SQLiteAdapter:
         show_in_export: bool,
         show_in_template: bool,
         sort_order: int,
+        link_target: str | None = None,
     ) -> None:
         with self._lock:
             self.connection.execute(
@@ -773,8 +789,9 @@ class SQLiteAdapter:
                     show_in_table,
                     show_in_export,
                     show_in_template,
-                    sort_order
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    sort_order,
+                    link_target
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     key,
@@ -785,6 +802,7 @@ class SQLiteAdapter:
                     int(show_in_export),
                     int(show_in_template),
                     sort_order,
+                    link_target,
                 ),
             )
             self.connection.commit()
@@ -800,6 +818,7 @@ class SQLiteAdapter:
         show_in_template: bool,
         sort_order: int,
         active: bool,
+        link_target: str | None = None,
     ) -> None:
         with self._lock:
             self.connection.execute(
@@ -813,7 +832,8 @@ class SQLiteAdapter:
                     show_in_export = ?,
                     show_in_template = ?,
                     sort_order = ?,
-                    active = ?
+                    active = ?,
+                    link_target = ?
                 WHERE id = ?
                 ''',
                 (
@@ -825,6 +845,7 @@ class SQLiteAdapter:
                     int(show_in_template),
                     sort_order,
                     int(active),
+                    link_target,
                     field_id,
                 ),
             )
