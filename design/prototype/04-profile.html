@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Профиль атлета — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a class="is-active" href="04-profile.html">Профиль</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>sokolova</strong><span class="user-chip__role">athlete</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Профиль атлета</h1>
+                    <p class="page-sub">Данные профиля подставляются в форму добавления записи (поля остаются редактируемыми). ФИО связывает кабинет с записями, заведёнными модераторами.</p>
+                </div>
+            </div>
+
+            <section class="card mb-4">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Основные данные</h2>
+                        <p class="card__sub">При смене фамилии старое ФИО сохранится в списке псевдонимов — история участий не потеряется.</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-6">
+                            <label class="label" for="p-name">ФИО<span class="req">*</span></label>
+                            <input class="input" id="p-name" type="text" value="Соколова Екатерина Дмитриевна">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="p-sex">Пол</label>
+                            <select class="select" id="p-sex">
+                                <option>М</option>
+                                <option selected>Ж</option>
+                            </select>
+                        </div>
+                        <div class="col-4">
+                            <label class="label" for="p-institute">Институт</label>
+                            <input class="input" id="p-institute" type="text" value="ИСИ" list="institute-options">
+                        </div>
+                        <div class="col-4">
+                            <label class="label" for="p-group">Группа</label>
+                            <input class="input" id="p-group" type="text" value="ГТб-42">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="p-course">Курс</label>
+                            <input class="input" id="p-course" type="number" min="1" step="1" value="4">
+                        </div>
+                        <div class="col-4" style="display: flex; align-items: flex-end; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Сохранить</button>
+                            <button class="btn btn--secondary" type="reset">Сбросить</button>
+                        </div>
+                    </form>
+
+                    <div class="note mt-4">
+                        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                        <span><strong>Найдены записи:</strong> по ФИО «Соколова Екатерина Дмитриевна» в базе 7 участий за 2024–2026 годы. После сохранения профиля они появятся в вашем кабинете вместе с новыми. Проверка своего ФИО не раскрывает данные других студентов.</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Мои соревнования</h2>
+                        <p class="card__sub">Добавляйте свои участия — после проверки ответственным они попадут в общий реестр. Записи «на проверке» видны пока только вам.</p>
+                    </div>
+                    <button class="btn btn--primary btn--sm" type="button">+ Добавить участие</button>
+                </div>
+                <div class="card__body">
+                    <div class="table-meta">
+                        <span>7 участий · 2 на проверке</span>
+                        <span>Показаны последние 4</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="table table--striped table--hover table--mid">
+                            <thead>
+                                <tr>
+                                    <th>Вид спорта</th>
+                                    <th>Дата</th>
+                                    <th>Уровень</th>
+                                    <th>Название соревнований</th>
+                                    <th>Группа</th>
+                                    <th class="th--num">Место</th>
+                                    <th>Статус</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Лыжные гонки</td>
+                                    <td class="nowrap">07.02.2026</td>
+                                    <td>региональные</td>
+                                    <td class="td-wrap">Омская лыжня-2026</td>
+                                    <td>ГТб-42</td>
+                                    <td class="td--num">5</td>
+                                    <td><span class="badge badge--warn"><span class="badge__dot"></span>на проверке</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                            <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Лёгкая атлетика</td>
+                                    <td class="nowrap">12.10.2025</td>
+                                    <td>внутривузовские</td>
+                                    <td class="td-wrap">Осенний кросс СибАДИ</td>
+                                    <td>ГТб-42</td>
+                                    <td class="td--num">3</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Лыжные гонки</td>
+                                    <td class="nowrap">15.02.2025</td>
+                                    <td>региональные</td>
+                                    <td class="td-wrap">Областные соревнования по лыжным гонкам</td>
+                                    <td>ГТб-32</td>
+                                    <td class="td--num">8</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Лёгкая атлетика</td>
+                                    <td class="nowrap">20.10.2024</td>
+                                    <td>внутривузовские</td>
+                                    <td class="td-wrap">Осенний кросс СибАДИ</td>
+                                    <td>ГТб-32</td>
+                                    <td class="td--num">6</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="note note--plain mt-3">
+                        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                        <span>Записи 2024–2025 годов показаны с группой и курсом на момент выступления — они не перезаписываются при смене группы в профиле.</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <datalist id="institute-options">
+        <option value="ИСИ"></option>
+        <option value="ИАиД"></option>
+        <option value="АДИ"></option>
+        <option value="ИТМ"></option>
+        <option value="ИЭУ"></option>
+    </datalist>
+</body>
+</html>

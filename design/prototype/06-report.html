@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Отчёт: количество участий — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a class="is-active" href="05-reports.html">Отчёты</a>
+                    <a href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Отчёт: количество участий</h1>
+                    <p class="page-sub">Период 01.09.2024 — 31.08.2026, все уровни, все места. Участия сгруппированы по данным записи.</p>
+                </div>
+                <a class="backlink" href="05-reports.html">К списку отчётов</a>
+            </div>
+
+            <div class="toolbar">
+                <span class="filter-chip">Период: <strong>01.09.2024 — 31.08.2026</strong><button class="filter-chip__x" type="button" title="Убрать условие">×</button></span>
+                <span class="filter-chip">Уровень: <strong>все</strong><button class="filter-chip__x" type="button" title="Убрать условие">×</button></span>
+                <span class="filter-chip">Место: <strong>все</strong><button class="filter-chip__x" type="button" title="Убрать условие">×</button></span>
+                <span class="toolbar__spacer"></span>
+                <a class="btn btn--ghost btn--sm" href="05-reports.html">Изменить условия</a>
+            </div>
+
+            <div class="table-meta">
+                <span>12 строк · 38 участий</span>
+                <span>Сортировка: по количеству участий</span>
+            </div>
+
+            <div class="table-wrap mb-4">
+                <table class="table table--striped table--hover table--mid">
+                    <thead>
+                        <tr>
+                            <th class="th--num">№</th>
+                            <th>ФИО</th>
+                            <th>Пол</th>
+                            <th>Институт</th>
+                            <th>Группа</th>
+                            <th class="th--num">Курс</th>
+                            <th class="th--num">Количество участий</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="td--num">1</td>
+                            <td>Иванов Дмитрий Сергеевич</td>
+                            <td>М</td>
+                            <td>ИСИ</td>
+                            <td>ПГСб-41</td>
+                            <td class="td--num">4</td>
+                            <td class="td--num"><strong>6</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">2</td>
+                            <td>Петрова Мария Олеговна</td>
+                            <td>Ж</td>
+                            <td>ИЭУ</td>
+                            <td>ЭУТб-31</td>
+                            <td class="td--num">3</td>
+                            <td class="td--num"><strong>5</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">3</td>
+                            <td>Соколова Екатерина Дмитриевна</td>
+                            <td>Ж</td>
+                            <td>ИСИ</td>
+                            <td>ГТб-42</td>
+                            <td class="td--num">4</td>
+                            <td class="td--num"><strong>4</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">4</td>
+                            <td>Кузнецова Анна Владимировна</td>
+                            <td>Ж</td>
+                            <td>ИАиД</td>
+                            <td>ДАб-21</td>
+                            <td class="td--num">2</td>
+                            <td class="td--num"><strong>4</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">5</td>
+                            <td>Смирнов Павел Андреевич</td>
+                            <td>М</td>
+                            <td>АДИ</td>
+                            <td>АДб-22</td>
+                            <td class="td--num">2</td>
+                            <td class="td--num"><strong>3</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">6</td>
+                            <td>Морозов Никита Романович</td>
+                            <td>М</td>
+                            <td>ИЭУ</td>
+                            <td>Мб-32</td>
+                            <td class="td--num">3</td>
+                            <td class="td--num"><strong>3</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">7</td>
+                            <td>Козлов Александр Петрович</td>
+                            <td>М</td>
+                            <td>ИСИ</td>
+                            <td>ПГСб-41</td>
+                            <td class="td--num">4</td>
+                            <td class="td--num"><strong>3</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">8</td>
+                            <td>Соколова Екатерина Дмитриевна</td>
+                            <td>Ж</td>
+                            <td>ИСИ</td>
+                            <td>ГТб-32</td>
+                            <td class="td--num">3</td>
+                            <td class="td--num"><strong>3</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">9</td>
+                            <td>Волков Артём Игоревич</td>
+                            <td>М</td>
+                            <td>ИТМ</td>
+                            <td>ТМб-12</td>
+                            <td class="td--num">1</td>
+                            <td class="td--num"><strong>2</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">10</td>
+                            <td>Орлов Максим Викторович</td>
+                            <td>М</td>
+                            <td>ИТМ</td>
+                            <td>ТМб-12</td>
+                            <td class="td--num">1</td>
+                            <td class="td--num"><strong>2</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">11</td>
+                            <td>Новикова Виктория Андреевна</td>
+                            <td>Ж</td>
+                            <td>АДИ</td>
+                            <td>АДб-22</td>
+                            <td class="td--num">2</td>
+                            <td class="td--num"><strong>2</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">12</td>
+                            <td>Лебедева Дарья Максимовна</td>
+                            <td>Ж</td>
+                            <td>ИАиД</td>
+                            <td>СГб-11</td>
+                            <td class="td--num">1</td>
+                            <td class="td--num"><strong>1</strong></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="note note--plain mb-5">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                <span>Строки 3 и 8 — один человек: участия 2024/25 учебного года записаны с группой ГТб-32 и 3-м курсом на тот момент, поэтому попадают в отдельную строку. Это осознанное поведение: отчёт показывает факты на дату. Объединить историю под текущие данные можно админским merge-инструментом.</span>
+            </div>
+
+            <section class="card">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Выгрузить в Excel</h2>
+                        <p class="card__sub">Отметьте колонки, которые попадут в файл выгрузки.</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <div class="toolbar" style="margin-bottom: 16px;">
+                        <label class="check"><input type="checkbox" checked><span>ФИО</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Пол</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Институт</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Группа</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Курс</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Количество участий</span></label>
+                        <span class="toolbar__spacer"></span>
+                        <button class="btn btn--primary" type="button">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7.5M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11"/></svg>
+                            Экспорт
+                        </button>
+                    </div>
+                    <div class="note note--plain">
+                        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                        <span>Файл формируется по текущим условиям отчёта. Сортировка строк в выгрузке — как на экране.</span>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+</body>
+</html>

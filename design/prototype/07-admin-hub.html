@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Администрирование — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a href="05-reports.html">Отчёты</a>
+                    <a class="is-active" href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Администрирование</h1>
+                    <p class="page-sub">Разделы управления: импорт, справочники, пользователи, журнал и обслуживание базы. Роль editor видит только импорт и таблицу.</p>
+                </div>
+            </div>
+
+            <div class="hub-grid mb-4">
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Импорт</h2>
+                    <p class="hub-card__desc">Загрузка Excel-файла со соревнованиями и пустой шаблон для заполнения.</p>
+                    <a class="btn btn--secondary" href="08-admin-import.html">Перейти</a>
+                </div>
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Кастомные поля</h2>
+                    <p class="hub-card__desc">Дополнительные колонки записей: типы, обязательность, видимость в таблице, выгрузке и шаблоне.</p>
+                    <a class="btn btn--secondary" href="09-admin-fields.html">Перейти</a>
+                </div>
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Справочники</h2>
+                    <p class="hub-card__desc">Значения видов спорта, институтов и уровней: подсказки для форм, добавление, скрытие и удаление.</p>
+                    <a class="btn btn--secondary" href="12-admin-catalogs.html">Перейти</a>
+                </div>
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Пользователи</h2>
+                    <p class="hub-card__desc">Пароли, включение/отключение, роли, счётчик записей и привязка ФИО-псевдонимов к аккаунтам.</p>
+                    <a class="btn btn--secondary" href="10-admin-users.html">Перейти</a>
+                </div>
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Объединение студентов</h2>
+                    <p class="hub-card__desc">Merge-инструмент: перенос записей со старого ФИО на новое с предпросмотром.</p>
+                    <a class="btn btn--secondary" href="11-admin-students.html">Перейти</a>
+                </div>
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Журнал безопасности</h2>
+                    <p class="hub-card__desc">Аудит-лог входов, правок, merge и административных действий. Только чтение.</p>
+                    <a class="btn btn--secondary" href="14-admin-audit.html">Перейти</a>
+                </div>
+                <div class="hub-card">
+                    <h2 class="hub-card__title">Обслуживание базы</h2>
+                    <p class="hub-card__desc">Выгрузка всей базы в один xlsx-файл и очистка записей/вложений с подтверждением.</p>
+                    <a class="btn btn--secondary" href="13-admin-maintenance.html">Перейти</a>
+                </div>
+            </div>
+
+            <div class="note note--plain">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                <span>Деструктивные действия (удаление записей и пользователей, очистка базы) доступны только роли admin и требуют явного подтверждения.</span>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

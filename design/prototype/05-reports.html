@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Отчёты — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a class="is-active" href="05-reports.html">Отчёты</a>
+                    <a href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Отчёты</h1>
+                    <p class="page-sub">Готовые выборки по реестру. Задайте условия фильтра и сформируйте отчёт — результат откроется отдельной страницей с выгрузкой в Excel.</p>
+                </div>
+            </div>
+
+            <section class="card mb-4">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Количество участий</h2>
+                        <p class="card__sub">Сколько раз каждый студент участвовал в соревнованиях за период. Группировка — по данным записи: ФИО, группа и курс на момент выступления.</p>
+                    </div>
+                    <span class="badge badge--info">основной отчёт</span>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-4">
+                            <label class="label" for="r-name">ФИО</label>
+                            <input class="input" id="r-name" type="text" placeholder="Все студенты">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-date-from">Дата (от)</label>
+                            <input class="input" id="r-date-from" type="text" placeholder="01.09.2025">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-date-to">Дата (до)</label>
+                            <input class="input" id="r-date-to" type="text" placeholder="31.08.2026">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-position">Место</label>
+                            <select class="select" id="r-position">
+                                <option>Все</option>
+                                <option>Победа</option>
+                                <option>Призовое место</option>
+                                <option>Не призовое место</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-level">Уровень</label>
+                            <select class="select" id="r-level">
+                                <option>Все</option>
+                                <option>внутривузовские</option>
+                                <option>межвузовские</option>
+                                <option>региональные</option>
+                                <option>всероссийские</option>
+                            </select>
+                        </div>
+                        <div class="col-12" style="display: flex; gap: 8px;">
+                            <a class="btn btn--primary" href="06-report.html">Сформировать отчёт</a>
+                            <button class="btn btn--secondary" type="reset">Сбросить</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <section class="card card--flat">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Выгрузка реестра (Excel)</h2>
+                        <p class="card__sub">Экспорт текущей таблицы записей с колонками из настроек вида. Без фильтров и группировок.</p>
+                    </div>
+                    <button class="btn btn--secondary" type="button">
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7.5M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11"/></svg>
+                        Выгрузить в Excel
+                    </button>
+                </div>
+            </section>
+
+            <div class="note note--plain mt-4">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                <span>Роли viewer, editor и admin имеют доступ к отчётам; роль athlete отчёты не видит. Кастомные поля записей доступны в фильтрах отчёта автоматически.</span>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

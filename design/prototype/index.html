@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>СибАДИ Competitions — дизайн-прототип</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <div class="app-header__side">
+                    <span class="user-chip">Дизайн-прототип · v0.1 · сентябрь 2026</span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <main class="cover">
+            <div class="cover__hero">
+                <div class="cover__kicker">Дизайн-прототип · статический HTML</div>
+                <h1 class="cover__title">СибАДИ Competitions</h1>
+                <p class="cover__lead">
+                    Все страницы приложения как отправная точка дизайна. Открывается двойным кликом по файлу —
+                    без сети, сборки и зависимостей. Направление: спокойный инженерный — графит, глубокий синий
+                    акцент, нейтральные поверхности. Две темы из одного набора токенов, переключатель — в шапке.
+                </p>
+                <div class="btn-row mt-4">
+                    <span class="badge badge--info">14 страниц</span>
+                    <span class="badge badge--info">светлая и тёмная темы</span>
+                    <span class="badge badge--info">системные шрифты, без CDN</span>
+                </div>
+            </div>
+
+            <section class="cover__section">
+                <h2 class="cover__section-title">Основные страницы</h2>
+                <div class="cover-grid">
+                    <a class="cover-card" href="01-login.html">
+                        <div class="cover-card__top"><span class="cover-card__num">01</span><span class="cover-card__title">Вход</span></div>
+                        <p class="cover-card__desc">Логин и пароль, одна карточка по центру. Переключатель темы доступен и здесь.</p>
+                        <div class="cover-card__tags"><span class="badge">форма</span></div>
+                    </a>
+                    <a class="cover-card" href="02-index-table.html">
+                        <div class="cover-card__top"><span class="cover-card__num">02</span><span class="cover-card__title">Реестр: таблица</span></div>
+                        <p class="cover-card__desc">Шапка, фильтры, «+ Пустая строка» с предзаполнением из профиля, 12 строк во всех трёх статусах.</p>
+                        <div class="cover-card__tags"><span class="badge badge--ok">подтверждена</span><span class="badge badge--warn">на проверке</span><span class="badge badge--danger">отклонена</span></div>
+                    </a>
+                    <a class="cover-card" href="03-inline-edit.html">
+                        <div class="cover-card__top"><span class="cover-card__num">03</span><span class="cover-card__title">Правка в строке</span></div>
+                        <p class="cover-card__desc">Существующая запись в режиме редактирования: поля формы внутри ячеек, вложения рядом.</p>
+                        <div class="cover-card__tags"><span class="badge">inline-edit</span></div>
+                    </a>
+                    <a class="cover-card" href="04-profile.html">
+                        <div class="cover-card__top"><span class="cover-card__num">04</span><span class="cover-card__title">Профиль атлета</span></div>
+                        <p class="cover-card__desc">Личный кабинет: форма профиля, подсказка «найдены записи», свои соревнования.</p>
+                        <div class="cover-card__tags"><span class="badge">кабинет athlete</span></div>
+                    </a>
+                    <a class="cover-card" href="05-reports.html">
+                        <div class="cover-card__top"><span class="cover-card__num">05</span><span class="cover-card__title">Отчёты</span></div>
+                        <p class="cover-card__desc">Список отчётов и форма фильтров: ФИО, период, место, уровень.</p>
+                        <div class="cover-card__tags"><span class="badge">фильтры</span></div>
+                    </a>
+                    <a class="cover-card" href="06-report.html">
+                        <div class="cover-card__top"><span class="cover-card__num">06</span><span class="cover-card__title">Отчёт: количества участий</span></div>
+                        <p class="cover-card__desc">Готовый результат с чипами условий и панелью выгрузки с чекбоксами колонок.</p>
+                        <div class="cover-card__tags"><span class="badge">экспорт</span></div>
+                    </a>
+                </div>
+            </section>
+
+            <section class="cover__section">
+                <h2 class="cover__section-title">Администрирование</h2>
+                <div class="cover-grid">
+                    <a class="cover-card" href="07-admin-hub.html">
+                        <div class="cover-card__top"><span class="cover-card__num">07</span><span class="cover-card__title">Админ-хаб</span></div>
+                        <p class="cover-card__desc">Разделы управления карточками: импорт, поля, справочники, пользователи, merge, аудит, обслуживание.</p>
+                        <div class="cover-card__tags"><span class="badge">7 разделов</span></div>
+                    </a>
+                    <a class="cover-card" href="08-admin-import.html">
+                        <div class="cover-card__top"><span class="cover-card__num">08</span><span class="cover-card__title">Импорт</span></div>
+                        <p class="cover-card__desc">Загрузка Excel, пустой шаблон и результат последнего импорта со счётчиками.</p>
+                        <div class="cover-card__tags"><span class="badge">xlsx</span></div>
+                    </a>
+                    <a class="cover-card" href="09-admin-fields.html">
+                        <div class="cover-card__top"><span class="cover-card__num">09</span><span class="cover-card__title">Кастомные поля</span></div>
+                        <p class="cover-card__desc">Типы, обязательность и видимость в таблице, выгрузке и шаблоне.</p>
+                        <div class="cover-card__tags"><span class="badge">text / number / date / url</span></div>
+                    </a>
+                    <a class="cover-card" href="10-admin-users.html">
+                        <div class="cover-card__top"><span class="cover-card__num">10</span><span class="cover-card__title">Пользователи</span></div>
+                        <p class="cover-card__desc">Поиск, фильтр роли, счётчик записей, генерация пароля и удаление с диалогом «введите логин».</p>
+                        <div class="cover-card__tags"><span class="badge badge--danger">диалог</span><span class="badge">пароли</span></div>
+                    </a>
+                    <a class="cover-card" href="11-admin-students.html">
+                        <div class="cover-card__top"><span class="cover-card__num">11</span><span class="cover-card__title">Объединение студентов</span></div>
+                        <p class="cover-card__desc">Merge: превью «Найдено записей: N» и чекбокс переписи отображаемых ФИО.</p>
+                        <div class="cover-card__tags"><span class="badge">merge</span></div>
+                    </a>
+                    <a class="cover-card" href="12-admin-catalogs.html">
+                        <div class="cover-card__top"><span class="cover-card__num">12</span><span class="cover-card__title">Справочники</span></div>
+                        <p class="cover-card__desc">Виды спорта, институты и уровни со счётчиками записей, скрытием и удалением.</p>
+                        <div class="cover-card__tags"><span class="badge">подсказки форм</span></div>
+                    </a>
+                    <a class="cover-card" href="13-admin-maintenance.html">
+                        <div class="cover-card__top"><span class="cover-card__num">13</span><span class="cover-card__title">Обслуживание базы</span></div>
+                        <p class="cover-card__desc">Выгрузка базы и двухшаговая очистка с подтверждающим словом «УДАЛИТЬ».</p>
+                        <div class="cover-card__tags"><span class="badge badge--danger">деструктивное</span></div>
+                    </a>
+                    <a class="cover-card" href="14-admin-audit.html">
+                        <div class="cover-card__top"><span class="cover-card__num">14</span><span class="cover-card__title">Журнал аудита</span></div>
+                        <p class="cover-card__desc">Время, пользователь, действие, детали — только чтение, новые сверху.</p>
+                        <div class="cover-card__tags"><span class="badge">append-only</span></div>
+                    </a>
+                </div>
+            </section>
+
+            <footer class="cover-footer">
+                Итерация: правка <span class="code">design/prototype/tokens.css</span> меняет палитру, отступы и обе темы
+                на всех страницах сразу. Как смотреть и карта файлов — в <span class="code">design/prototype/README.md</span>.
+                Прототип не использует код из <span class="code">src/</span> и не является продакшн-разметкой.
+            </footer>
+        </main>
+    </div>
+</body>
+</html>
