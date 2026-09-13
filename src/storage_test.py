@@ -133,6 +133,22 @@ def test_levels_seed_and_directory(adapter):
     assert 'межвузовские' in adapter.get_level_names(include_inactive=True)
 
 
+def test_hard_delete_level(adapter):
+    from src.main import DEFAULT_LEVELS, seed_levels
+
+    seed_levels(adapter)
+    adapter.create_level('пустой уровень')
+    empty_id = next(item['id'] for item in adapter.list_levels() if item['name'] == 'пустой уровень')
+    adapter.hard_delete_level(empty_id)
+    assert 'пустой уровень' not in adapter.get_level_names(include_inactive=True)
+
+    # Уровень с записями: счётчик > 0 — отказ решает роут; hard_delete_level
+    # сам по себе просто удаляет строку таблицы levels.
+    adapter.save_competitions([make_competition('Студент', datetime(2026, 1, 1))])
+    used_level = DEFAULT_LEVELS[0]
+    assert adapter.count_records_using('level', used_level) > 0
+
+
 def test_report_filters_by_custom_text_field(adapter):
     adapter.save_competitions(
         [
