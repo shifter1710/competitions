@@ -1621,3 +1621,75 @@ def test_get_competition_by_id(adapter):
     assert found is not None
     assert found.student_name == 'Поиск По Id'
     assert adapter.get_competition_by_id(999999) is None
+# --- №23доп (docs/feedback-live.md): резолвер атлета в хранилище ---
+
+
+def make_athlete_record(
+    name: str,
+    date: datetime,
+    *,
+    sex: str = 'М',
+    institute: str = 'ИСИ',
+    group: str = 'ПГС-101',
+    course: int = 2,
+) -> Competition:
+    record = make_competition(name, date)
+    record.student_sex = sex
+    record.institute = institute
+    record.group = group
+    record.course = course
+    return record
+
+
+def test_search_athletes_substring_case_insensitive(adapter):
+    adapter.save_competitions(
+        [
+            make_athlete_record('Иванов Иван', datetime(2026, 3, 1)),
+            make_athlete_record('Петров Пётр', datetime(2026, 3, 2), institute='ИМИ', group='СБ-202'),
+        ]
+    )
+    # lower() в SQLite не приводит кириллицу — сравнение в Python.
+    results = adapter.search_athletes('ИВА')
+    assert [entry['name'] for entry in results] == ['Иванов Иван']
+    assert results[0] == {'name': 'Иванов Иван', 'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '2'}
+
+
+def test_search_athletes_empty_query(adapter):
+    adapter.save_competitions([make_athlete_record('Иванов Иван', datetime(2026, 3, 1))])
+    assert adapter.search_athletes('') == []
+    assert adapter.search_athletes('   ') == []
+
+
+def test_search_athletes_limit_and_sort(adapter):
+    adapter.save_competitions([make_athlete_record(f'Атлет {number}', datetime(2026, 3, 1)) for number in range(12)])
+    results = adapter.search_athletes('Атлет')
+    assert len(results) == 8
+    names = [entry['name'] for entry in results]
+    assert names == sorted(names, key=lambda value: value.lower())
+
+
+def test_find_athlete_fields_takes_latest_record(adapter):
+    adapter.save_competitions(
+        [
+            make_athlete_record('Козлов Кирилл', datetime(2026, 1, 1), institute='ИСИ', group='ПГС-101'),
+            # Последняя запись — её институт/группа и попадают в ответ.
+            make_athlete_record('Козлов Кирилл', datetime(2026, 6, 1), institute='ИМИ', group='ТД-303'),
+        ]
+    )
+    fields = adapter.find_athlete_fields('козлов кирилл')
+    assert fields['institute'] == 'ИМИ'
+    assert fields['group'] == 'ТД-303'
+
+
+def test_known_athlete_merges_profile_and_record(adapter):
+    adapter.save_competitions(
+        [make_athlete_record('Смирнов Сергей', datetime(2026, 2, 1), sex='М', group='ПГС-101', course=3)]
+    )
+    # Профиль: пол/институт/группа заполнены, курс НЕ заполнен.
+    adapter.create_user('smirnov', 'x', 'athlete')
+    adapter.set_profile(
+        1, {'student_name': 'Смирнов Сергей', 'student_sex': 'М', 'institute': 'ИЭиТ', 'group': 'Э-201'}
+    )
+    fields = adapter.find_athlete_fields('Смирнов Сергей')
+    # Профиль приоритетнее, курс добирается из последней записи.
+    assert fields == {'name': 'Смирнов Сергей', 'sex': 'М', 'institute': 'ИЭиТ', 'group': 'Э-201', 'course': '3'}
