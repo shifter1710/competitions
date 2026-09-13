@@ -139,9 +139,16 @@ def client() -> SanicTestClient:
     fake_storage.count_attachments.return_value = 0
     fake_storage.delete_all_competitions.return_value = 0
     fake_storage.delete_all_attachments.return_value = 0
+    fake_storage.get_competitions_before.return_value = []
+    fake_storage.delete_competitions_before.return_value = 0
+    fake_storage.get_attachments_for_records.return_value = []
+    fake_storage.delete_attachments_for_records.return_value = 0
+    fake_storage.vacuum.return_value = None
     fake_storage.get_sport_names.return_value = []
     fake_storage.add_audit_event.return_value = None
     fake_storage.get_audit_events.return_value = []
+    fake_storage.count_audit_events.return_value = 0
+    fake_storage.list_audit_actions.return_value = []
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -2176,6 +2183,44 @@ def test_audit_page_available_for_admin_only(client: SanicTestClient):
     assert response.headers['location'] == '/login'
 
 
+def test_audit_page_filters_and_pagination(client: SanicTestClient):
+    app.ctx.storage.count_audit_events.return_value = 120
+    app.ctx.storage.get_audit_events.reset_mock()
+    app.ctx.storage.count_audit_events.reset_mock()
+    app.ctx.storage.get_audit_events.return_value = []
+    app.ctx.storage.list_audit_actions.return_value = ['db_wiped', 'login_success']
+
+    _, response = client.get(
+        '/admin/audit?page=2&user=admin&action=login_success&date_from=01.01.2026&date_to=31.01.2026',
+        headers=get_auth_headers(),
+    )
+
+    assert response.status == 200
+    assert 'Стр. 2 из 3' in response.text
+    assert 'page=1' in response.text  # стрелка назад с сохранением фильтров
+    assert 'page=3' in response.text  # стрелка вперёд
+    app.ctx.storage.count_audit_events.assert_called_once_with(
+        username='admin', action='login_success', date_from='2026-01-01', date_to='2026-01-31'
+    )
+    app.ctx.storage.get_audit_events.assert_called_once_with(
+        limit=50,
+        offset=50,
+        username='admin',
+        action='login_success',
+        date_from='2026-01-01',
+        date_to='2026-01-31',
+    )
+    assert 'login_success' in response.text  # выпадающий фильтр действий
+
+    app.ctx.storage.count_audit_events.return_value = 0
+    app.ctx.storage.list_audit_actions.return_value = []
+
+
+def test_audit_page_rejects_invalid_filter_date(client: SanicTestClient):
+    _, response = client.get('/admin/audit?date_from=31.31.2026', headers=get_auth_headers())
+    assert response.status == 400
+
+
 ADMIN_SECTION_PAGES = (
     '/admin/import',
     '/admin/fields',
@@ -2273,19 +2318,92 @@ def test_index_shows_import_link_for_moderators_only(client: SanicTestClient):
     assert 'href="/admin/import"' not in response.text
 
 
-def wipe_request(client, headers, scope, phrase='УДАЛИТЬ'):
+def wipe_request(
+    client,
+    headers,
+    scope=None,
+    mode='scope',
+    date_before=None,
+    with_attachments=None,
+    phrase='УДАЛИТЬ',
+    confirm='1',
+):
+    data = {**csrf_for(headers), 'mode': mode, 'confirm': confirm, 'confirm_phrase': phrase}
+    if scope is not None:
+        data['scope'] = scope
+    if date_before is not None:
+        data['date_before'] = date_before
+    if with_attachments is not None:
+        data['with_attachments'] = with_attachments
     return client.post(
         '/admin/maintenance/wipe',
         headers=headers,
-        data={**csrf_for(headers), 'scope': scope, 'confirm_phrase': phrase},
+        data=data,
         allow_redirects=False,
     )
+
+
+def make_wipe_record(record_id, name, month):
+    return Competition(
+        record_id=str(record_id),
+        student_id=f'hash-{record_id}',
+        student_name=name,
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2025, month, 1),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+    )
+
+
+def make_wipe_attachment(record_id, stored_name, filename='diploma.png'):
+    return {
+        'id': record_id * 10,
+        'record_id': record_id,
+        'filename': filename,
+        'stored_name': stored_name,
+        'content_type': 'image/png',
+        'size': len(PNG_BYTES),
+    }
+
+
+def wipe_events(action):
+    return [details for act, details in audit_calls() if act == action]
+
+
+def test_maintenance_page_shows_status_panel(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    monkeypatch.setattr(main_module.settings, 'database_path', str(tmp_path / 'competitions.sqlite3'))
+    (tmp_path / 'competitions.sqlite3').write_bytes(b'x' * 2048)
+    (tmp_path / 'competitions.sqlite3-wal').write_bytes(b'y' * 1024)
+    backups = tmp_path / 'backups'
+    backups.mkdir()
+    (backups / 'competitions-20260101-000000.sqlite3.gz').write_bytes(b'z' * 512)
+
+    _, response = client.get('/admin/maintenance', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'Диск:' in response.text  # полоса + подпись места на диске (№16б)
+    assert '2 КБ' in response.text  # файл БД
+    assert '1 КБ' in response.text  # WAL
+    assert '512 Б' in response.text  # вложения/бэкапы или сам бэкап
+    assert 'competitions-20260101-000000.sqlite3.gz' in response.text  # последний бэкап
+    assert 'Сделать бэкап сейчас' in response.text
+    assert '/admin/maintenance/backup' in response.text
+    assert 'Архивы очисток' in response.text
 
 
 def test_wipe_records_scope(client: SanicTestClient, tmp_path, monkeypatch):
     from src import main as main_module
 
     monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    app.ctx.storage.get_competitions.return_value = [make_wipe_record(1, 'Первый', 1)]
     app.ctx.storage.delete_all_competitions.reset_mock()
     app.ctx.storage.delete_all_attachments.reset_mock()
     app.ctx.storage.add_audit_event.reset_mock()
@@ -2297,7 +2415,18 @@ def test_wipe_records_scope(client: SanicTestClient, tmp_path, monkeypatch):
     assert response.headers['location'].startswith('/admin/maintenance?')
     app.ctx.storage.delete_all_competitions.assert_called_once()
     app.ctx.storage.delete_all_attachments.assert_not_called()
-    assert ('db_wiped', {'scope': 'records', 'records_deleted': 5, 'attachments_deleted': 0}) in audit_calls()
+    events = wipe_events('db_wiped')
+    assert events[0]['scope'] == 'records'
+    assert events[0]['records_deleted'] == 5
+    assert events[0]['attachments_deleted'] == 0
+    # архив удалённых записей: только xlsx, без zip (вложения не трогаются)
+    assert len(list((tmp_path / 'backups').glob('pre-wipe-*-records.xlsx'))) == 1
+    assert not list((tmp_path / 'backups').glob('pre-wipe-*.zip'))
+    archive_events = wipe_events('pre_wipe_archive_created')
+    assert archive_events[0]['scope'] == 'records'
+    assert archive_events[0]['archive_xlsx']
+    assert archive_events[0]['archive_zip'] is None
+    app.ctx.storage.get_competitions.return_value = []
 
 
 def test_wipe_attachments_scope_removes_files_only(client: SanicTestClient, tmp_path, monkeypatch):
@@ -2309,6 +2438,7 @@ def test_wipe_attachments_scope_removes_files_only(client: SanicTestClient, tmp_
     (files_dir / 'stored.png').write_bytes(PNG_BYTES)
     keep_me = tmp_path / 'competitions.sqlite3'
     keep_me.write_bytes(b'db')
+    app.ctx.storage.get_attachments.return_value = [make_wipe_attachment(3, 'stored.png')]
     app.ctx.storage.delete_all_competitions.reset_mock()
     app.ctx.storage.delete_all_attachments.reset_mock()
     app.ctx.storage.add_audit_event.reset_mock()
@@ -2321,30 +2451,186 @@ def test_wipe_attachments_scope_removes_files_only(client: SanicTestClient, tmp_
     app.ctx.storage.delete_all_competitions.assert_not_called()
     assert not (tmp_path / 'files').exists()
     assert keep_me.exists()
-    assert ('db_wiped', {'scope': 'attachments', 'records_deleted': 0, 'attachments_deleted': 2}) in audit_calls()
+    events = wipe_events('db_wiped')
+    assert events[0]['scope'] == 'attachments'
+    assert events[0]['records_deleted'] == 0
+    assert events[0]['attachments_deleted'] == 2
+    assert events[0]['freed_bytes'] >= len(PNG_BYTES)
+    # архив: только zip вложений, без xlsx (записи не удаляются)
+    assert not list((tmp_path / 'backups').glob('pre-wipe-*.xlsx'))
+    zip_archives = list((tmp_path / 'backups').glob('pre-wipe-*-attachments.zip'))
+    assert len(zip_archives) == 1
+    import zipfile as zipfile_module
+
+    with zipfile_module.ZipFile(zip_archives[0]) as archive:
+        assert archive.namelist() == ['3/diploma.png']
+    app.ctx.storage.get_attachments.return_value = []
 
 
-def test_wipe_records_attachments_scope(client: SanicTestClient, tmp_path, monkeypatch):
+def test_wipe_all_scope_creates_xlsx_and_zip_archives(client: SanicTestClient, tmp_path, monkeypatch):
     from src import main as main_module
 
     monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
-    (tmp_path / 'files').mkdir(parents=True)
+    record_dir = tmp_path / 'files' / '1'
+    record_dir.mkdir(parents=True)
+    (record_dir / 'stored.png').write_bytes(PNG_BYTES)
+    app.ctx.storage.get_competitions.return_value = [make_wipe_record(1, 'Первый', 1)]
+    app.ctx.storage.get_attachments.return_value = [make_wipe_attachment(1, 'stored.png')]
     app.ctx.storage.delete_all_competitions.reset_mock()
     app.ctx.storage.delete_all_attachments.reset_mock()
     app.ctx.storage.add_audit_event.reset_mock()
     app.ctx.storage.delete_all_competitions.return_value = 4
     app.ctx.storage.delete_all_attachments.return_value = 3
 
-    _, response = wipe_request(client, get_auth_headers(), 'records_attachments')
+    _, response = wipe_request(client, get_auth_headers(), 'all')
 
     assert response.status == 302
     app.ctx.storage.delete_all_competitions.assert_called_once()
     app.ctx.storage.delete_all_attachments.assert_called_once()
     assert not (tmp_path / 'files').exists()
-    assert (
-        'db_wiped',
-        {'scope': 'records_attachments', 'records_deleted': 4, 'attachments_deleted': 3},
-    ) in audit_calls()
+    events = wipe_events('db_wiped')
+    assert events[0]['scope'] == 'all'
+    assert events[0]['records_deleted'] == 4
+    assert events[0]['attachments_deleted'] == 3
+    backups = tmp_path / 'backups'
+    assert len(list(backups.glob('pre-wipe-*-all.xlsx'))) == 1
+    assert len(list(backups.glob('pre-wipe-*-all.zip'))) == 1
+    archive_events = wipe_events('pre_wipe_archive_created')
+    assert archive_events[0]['scope'] == 'all'
+    assert archive_events[0]['records'] == 1
+    assert archive_events[0]['attachments'] == 1
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.get_attachments.return_value = []
+
+
+def test_wipe_preview_returns_counts_without_confirm(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    record_dir = tmp_path / 'files' / '3'
+    record_dir.mkdir(parents=True)
+    (record_dir / 'stored.png').write_bytes(PNG_BYTES)
+    app.ctx.storage.get_attachments.return_value = [make_wipe_attachment(3, 'stored.png')]
+    app.ctx.storage.delete_all_attachments.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+
+    _, response = wipe_request(client, get_auth_headers(), 'attachments', confirm='')
+
+    assert response.status == 200
+    payload = response.json
+    assert payload['records'] == 0
+    assert payload['attachments'] == 1
+    assert payload['attachments_size_bytes'] == len(PNG_BYTES)
+    assert payload['attachments_size']
+    app.ctx.storage.delete_all_attachments.assert_not_called()
+    assert wipe_events('db_wiped') == []
+    app.ctx.storage.get_attachments.return_value = []
+
+
+def test_wipe_by_date_deletes_older_records_and_their_attachments(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    monkeypatch.setattr(main_module.settings, 'database_path', str(tmp_path / 'competitions.sqlite3'))
+    (tmp_path / 'competitions.sqlite3').write_bytes(b'db')
+    for record_id, stored in ((1, 'a.png'), (1, 'b.png'), (2, 'c.png')):
+        record_dir = tmp_path / 'files' / str(record_id)
+        record_dir.mkdir(parents=True, exist_ok=True)
+        (record_dir / stored).write_bytes(PNG_BYTES)
+    keep_dir = tmp_path / 'files' / '9'
+    keep_dir.mkdir(parents=True)
+    (keep_dir / 'keep.png').write_bytes(PNG_BYTES)
+
+    old_records = [make_wipe_record(1, 'Старый', 1), make_wipe_record(2, 'Старая', 2)]
+    app.ctx.storage.get_competitions_before.return_value = old_records
+    app.ctx.storage.get_attachments_for_records.return_value = [
+        make_wipe_attachment(1, 'a.png'),
+        make_wipe_attachment(1, 'b.png'),
+        make_wipe_attachment(2, 'c.png'),
+    ]
+    app.ctx.storage.delete_competitions_before.reset_mock()
+    app.ctx.storage.delete_attachments_for_records.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.delete_competitions_before.return_value = 2
+    app.ctx.storage.delete_attachments_for_records.return_value = 3
+
+    _, response = wipe_request(client, get_auth_headers(), mode='date', date_before='01.06.2025')
+
+    assert response.status == 302
+    app.ctx.storage.get_competitions_before.assert_called_once_with(datetime(2025, 6, 1))
+    app.ctx.storage.delete_competitions_before.assert_called_once_with(datetime(2025, 6, 1))
+    app.ctx.storage.delete_attachments_for_records.assert_called_once_with([1, 2])
+    # файлы вложений удалённых записей ушли, чужая запись осталась
+    assert not (tmp_path / 'files' / '1').exists()
+    assert not (tmp_path / 'files' / '2').exists()
+    assert (tmp_path / 'files' / '9' / 'keep.png').exists()
+    events = wipe_events('db_wiped')
+    assert events[0]['scope'] == 'date'
+    assert events[0]['records_deleted'] == 2
+    assert events[0]['attachments_deleted'] == 3
+    assert events[0]['date_before'] == '01.06.2025'
+    assert events[0]['with_attachments'] is True
+    assert events[0]['freed_bytes'] >= 3 * len(PNG_BYTES)
+    backups = tmp_path / 'backups'
+    assert len(list(backups.glob('pre-wipe-*-date.xlsx'))) == 1
+    assert len(list(backups.glob('pre-wipe-*-date.zip'))) == 1
+    app.ctx.storage.get_competitions_before.return_value = []
+    app.ctx.storage.get_attachments_for_records.return_value = []
+
+
+def test_wipe_by_date_keeps_attachments_when_checkbox_off(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    record_dir = tmp_path / 'files' / '1'
+    record_dir.mkdir(parents=True)
+    (record_dir / 'a.png').write_bytes(PNG_BYTES)
+    app.ctx.storage.get_competitions_before.return_value = [make_wipe_record(1, 'Старый', 1)]
+    app.ctx.storage.get_attachments_for_records.reset_mock()
+    app.ctx.storage.delete_attachments_for_records.reset_mock()
+    app.ctx.storage.delete_competitions_before.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.delete_competitions_before.return_value = 1
+
+    # скрытый маркер 0 без чекбокса 1 — галочка снята
+    _, response = wipe_request(client, get_auth_headers(), mode='date', date_before='01.06.2025', with_attachments='0')
+
+    assert response.status == 302
+    app.ctx.storage.get_attachments_for_records.assert_not_called()
+    app.ctx.storage.delete_attachments_for_records.assert_not_called()
+    assert (tmp_path / 'files' / '1' / 'a.png').exists()  # вложения не тронуты
+    assert len(list((tmp_path / 'backups').glob('pre-wipe-*-date.xlsx'))) == 1
+    assert not list((tmp_path / 'backups').glob('pre-wipe-*.zip'))
+    events = wipe_events('db_wiped')
+    assert events[0]['with_attachments'] is False
+    assert events[0]['attachments_deleted'] == 0
+    app.ctx.storage.get_competitions_before.return_value = []
+
+
+def test_wipe_by_date_preview_counts_affected(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    record_dir = tmp_path / 'files' / '2'
+    record_dir.mkdir(parents=True)
+    (record_dir / 'c.png').write_bytes(PNG_BYTES)
+    app.ctx.storage.get_competitions_before.return_value = [
+        make_wipe_record(1, 'Старый', 1),
+        make_wipe_record(2, 'Старая', 2),
+    ]
+    app.ctx.storage.get_attachments_for_records.return_value = [make_wipe_attachment(2, 'c.png')]
+    app.ctx.storage.delete_competitions_before.reset_mock()
+
+    _, response = wipe_request(client, get_auth_headers(), mode='date', date_before='01.06.2025', confirm='')
+
+    assert response.status == 200
+    payload = response.json
+    assert payload['records'] == 2
+    assert payload['attachments'] == 1
+    assert payload['attachments_size_bytes'] == len(PNG_BYTES)
+    app.ctx.storage.delete_competitions_before.assert_not_called()
+    app.ctx.storage.get_competitions_before.return_value = []
+    app.ctx.storage.get_attachments_for_records.return_value = []
 
 
 def test_wipe_rejects_wrong_confirm_phrase(client: SanicTestClient):
@@ -2354,8 +2640,14 @@ def test_wipe_rejects_wrong_confirm_phrase(client: SanicTestClient):
     app.ctx.storage.delete_all_competitions.assert_not_called()
 
 
-def test_wipe_rejects_unknown_scope(client: SanicTestClient):
+def test_wipe_rejects_unknown_scope_and_mode(client: SanicTestClient):
     _, response = wipe_request(client, get_auth_headers(), 'everything')
+    assert response.status == 400
+
+    _, response = wipe_request(client, get_auth_headers(), mode='date', date_before='июнь')
+    assert response.status == 400
+
+    _, response = wipe_request(client, get_auth_headers(), mode='yesterday')
     assert response.status == 400
 
 
@@ -2368,8 +2660,98 @@ def test_wipe_forbidden_for_non_admin(client: SanicTestClient):
     _, response = client.post(
         '/admin/maintenance/wipe',
         headers=viewer_headers,
-        data={**csrf_for(viewer_headers), 'scope': 'records', 'confirm_phrase': 'УДАЛИТЬ'},
+        data={**csrf_for(viewer_headers), 'mode': 'scope', 'scope': 'records', 'confirm_phrase': 'УДАЛИТЬ'},
     )
+    assert response.status == 403
+
+
+def make_tmp_database(db_path):
+    import sqlite3 as sqlite3_module
+
+    connection = sqlite3_module.connect(db_path)
+    connection.execute(
+        'CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, '
+        'user_id INTEGER, username TEXT NOT NULL, action TEXT NOT NULL, details TEXT NOT NULL DEFAULT \'\')'
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_manual_backup_creates_archive_and_audit_event(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    db_path = tmp_path / 'competitions.sqlite3'
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    monkeypatch.setattr(main_module.settings, 'database_path', str(db_path))
+    make_tmp_database(db_path)
+    record_dir = tmp_path / 'files' / '5'
+    record_dir.mkdir(parents=True)
+    (record_dir / 'stored.png').write_bytes(PNG_BYTES)
+    app.ctx.storage.add_audit_event.reset_mock()
+
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/maintenance/backup',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    assert response.headers['location'].startswith('/admin/maintenance?')
+    backups = tmp_path / 'backups'
+    db_archives = list(backups.glob('competitions-*.sqlite3.gz'))
+    assert len(db_archives) == 1
+    assert db_archives[0].stat().st_size > 0
+    files_archives = list(backups.glob('competitions-*-files.zip'))
+    assert len(files_archives) == 1  # вложения заархивированы тем же кодом, что и скриптом
+    events = [details for action, details in audit_calls() if action == 'backup_created']
+    assert len(events) == 1
+    assert events[0]['source'] == 'manual'
+    assert events[0]['archive'] == db_archives[0].name
+    assert events[0]['files_archive'] == files_archives[0].name
+
+
+def test_manual_backup_forbidden_for_editor(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
+    _, response = client.post('/admin/maintenance/backup', headers=headers, data=csrf_for(headers))
+    assert response.status == 403
+
+
+def test_download_backup_file(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    backups = tmp_path / 'backups'
+    backups.mkdir()
+    (backups / 'pre-wipe-20260101-000000-date.xlsx').write_bytes(b'xlsx-content')
+
+    _, response = client.get(
+        '/admin/maintenance/backups/pre-wipe-20260101-000000-date.xlsx', headers=get_auth_headers()
+    )
+    assert response.status == 200
+    assert response.body == b'xlsx-content'
+    assert response.headers['content-type'].startswith(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+def test_download_backup_rejects_traversal_and_missing(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+
+    _, response = client.get('/admin/maintenance/backups/..%2F..%2Fcompetitions.sqlite3', headers=get_auth_headers())
+    assert response.status in (400, 404)
+
+    _, response = client.get('/admin/maintenance/backups/no-such-file.zip', headers=get_auth_headers())
+    assert response.status == 404
+
+    _, response = client.get('/admin/maintenance/backups/.env', headers=get_auth_headers())
+    assert response.status in (400, 404)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.get('/admin/maintenance/backups/whatever.zip', headers=headers)
     assert response.status == 403
 
 

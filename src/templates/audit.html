@@ -2,12 +2,8 @@
 
 {% block admin_title %}Журнал безопасности{% endblock admin_title %}
 {% block admin_description %}
-    {% if audit_available %}
-        Последние {{ events | length }} событий (максимум 200, новые сверху).
-        Журнал только для чтения: записи не редактируются и не удаляются.
-    {% else %}
-        Аудит-журнал событий безопасности.
-    {% endif %}
+    События безопасности, новые сверху. Журнал только для чтения: записи не
+    редактируются и не удаляются. Фильтры: пользователь, действие, период.
 {% endblock admin_description %}
 
 {% block admin_content %}
@@ -16,8 +12,47 @@
 <div class="alert alert-warning" role="alert">Журнал недоступен</div>
 {% else %}
 
+<form action="/admin/audit" method="get" class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label" for="audit-filter-user">Пользователь</label>
+                <input class="form-control" id="audit-filter-user" name="user" type="text"
+                       value="{{ filters.user }}" placeholder="часть логина" autocomplete="off">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="audit-filter-action">Действие</label>
+                <select class="form-select" id="audit-filter-action" name="action">
+                    <option value="">все</option>
+                    {% for action in actions %}
+                        <option value="{{ action }}" {% if action == filters.action %}selected{% endif %}>{{ action }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="audit-filter-date-from">С даты</label>
+                <input class="form-control" id="audit-filter-date-from" name="date_from" type="text"
+                       value="{{ filters.date_from }}" placeholder="дд.мм.гггг" autocomplete="off">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="audit-filter-date-to">По дату</label>
+                <input class="form-control" id="audit-filter-date-to" name="date_to" type="text"
+                       value="{{ filters.date_to }}" placeholder="дд.мм.гггг" autocomplete="off">
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button class="btn btn-primary flex-grow-1" type="submit">Показать</button>
+                <a class="btn btn-outline-secondary" href="/admin/audit">Сброс</a>
+            </div>
+        </div>
+    </div>
+</form>
+
 <div class="card shadow-sm">
     <div class="card-body">
+        <div class="text-muted mb-2">
+            Всего событий по фильтру: {{ total }}; страница {{ page }} из {{ pages }}
+            (по {{ page_size }} на страницу).
+        </div>
         <div class="table-responsive">
             <table class="table table-striped table-hover align-middle">
                 <thead>
@@ -41,12 +76,27 @@
                     </tr>
                     {% else %}
                     <tr>
-                        <td class="text-muted" colspan="4">Событий пока нет</td>
+                        <td class="text-muted" colspan="4">Событий по фильтру не найдено</td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
+        {% if pages > 1 %}
+        <nav aria-label="Страницы журнала">
+            <ul class="pagination justify-content-center mb-0">
+                <li class="page-item {% if not prev_url %}disabled{% endif %}">
+                    {% if prev_url %}<a class="page-link" href="{{ prev_url }}" aria-label="Предыдущая">«</a>
+                    {% else %}<span class="page-link" aria-hidden="true">«</span>{% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">Стр. {{ page }} из {{ pages }}</span></li>
+                <li class="page-item {% if not next_url %}disabled{% endif %}">
+                    {% if next_url %}<a class="page-link" href="{{ next_url }}" aria-label="Следующая">»</a>
+                    {% else %}<span class="page-link" aria-hidden="true">»</span>{% endif %}
+                </li>
+            </ul>
+        </nav>
+        {% endif %}
     </div>
 </div>
 

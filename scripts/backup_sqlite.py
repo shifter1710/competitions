@@ -1,12 +1,18 @@
+"""Таймерный бэкап SQLite (deploy/systemd/competitions-backup.service).
+
+Вся логика — в src/backup.py: тот же код исполняет ручной бэкап
+с /admin/maintenance (замечание №10 из design/prototype/FEEDBACK.md).
+Скрипт при успехе пишет audit-событие backup_created с source: 'timer'
+(замечание №16а); отключается флагом --no-audit.
+"""
 import argparse
-import gzip
-import os
-import shutil
-import sqlite3
-import tempfile
-import zipfile
-from datetime import datetime
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.backup import run_backup  # noqa: E402
+from src.backup import write_backup_audit_event  # noqa: E402
 
 
 def parse_args():
@@ -15,78 +21,39 @@ def parse_args():
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--files-dir', default=None, help='attachment directory to archive alongside the database')
     parser.add_argument('--keep', type=int, default=14)
+    parser.add_argument(
+        '--no-audit',
+        action='store_true',
+        help='do not write a backup_created audit event (written by default)',
+    )
     return parser.parse_args()
-
-
-def verify_archive(archive_path: Path) -> None:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        restored_path = Path(tmp_dir) / 'verify.sqlite3'
-        with gzip.open(archive_path, 'rb') as source_file, restored_path.open('wb') as target_file:
-            shutil.copyfileobj(source_file, target_file)
-        connection = sqlite3.connect(restored_path)
-        try:
-            result = connection.execute('PRAGMA quick_check').fetchone()[0]
-        finally:
-            connection.close()
-    if result != 'ok':
-        archive_path.unlink(missing_ok=True)
-        raise RuntimeError(f'backup verification failed: {result}')
-
-
-def run_backup(db_path: Path, output_dir: Path, keep: int) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(output_dir, 0o700)
-
-    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-    temp_path = output_dir / f'competitions-{timestamp}.sqlite3'
-    archive_path = output_dir / f'competitions-{timestamp}.sqlite3.gz'
-
-    source = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
-    destination = sqlite3.connect(temp_path)
-    try:
-        source.backup(destination)
-    finally:
-        destination.close()
-        source.close()
-
-    try:
-        with temp_path.open('rb') as source_file, gzip.open(archive_path, 'wb') as gzip_file:
-            shutil.copyfileobj(source_file, gzip_file)
-        os.chmod(archive_path, 0o600)
-        verify_archive(archive_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    backups = sorted(output_dir.glob('competitions-*.sqlite3.gz'), reverse=True)
-    for backup in backups[keep:]:
-        backup.unlink()
-
-    return archive_path, timestamp
-
-
-def backup_files(files_dir: Path, output_dir: Path, timestamp: str, keep: int) -> Path | None:
-    if not files_dir.is_dir():
-        return None
-    archive_path = output_dir / f'competitions-{timestamp}-files.zip'
-    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for file_path in sorted(files_dir.rglob('*')):
-            if file_path.is_file():
-                archive.write(file_path, file_path.relative_to(files_dir))
-    os.chmod(archive_path, 0o600)
-    file_backups = sorted(output_dir.glob('competitions-*-files.zip'), reverse=True)
-    for backup in file_backups[keep:]:
-        backup.unlink()
-    return archive_path
 
 
 def main():
     args = parse_args()
-    archive, timestamp = run_backup(Path(args.db_path), Path(args.output_dir), args.keep)
-    print(archive)
-    if args.files_dir:
-        files_archive = backup_files(Path(args.files_dir), Path(args.output_dir), timestamp, args.keep)
-        if files_archive:
-            print(files_archive)
+    db_path = Path(args.db_path)
+    result = run_backup(
+        db_path,
+        Path(args.output_dir),
+        keep=args.keep,
+        files_dir=Path(args.files_dir) if args.files_dir else None,
+    )
+    print(result['archive'])
+    if result['files_archive']:
+        print(result['files_archive'])
+
+    if not args.no_audit:
+        written = write_backup_audit_event(
+            db_path,
+            {
+                'source': 'timer',
+                'archive': result['archive'].name,
+                'archive_size': result['archive'].stat().st_size,
+                'files_archive': result['files_archive'].name if result['files_archive'] else None,
+            },
+        )
+        if not written:
+            print('warning: backup created, but the audit event was not written', file=sys.stderr)
 
 
 if __name__ == '__main__':
