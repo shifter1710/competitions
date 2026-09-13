@@ -69,7 +69,7 @@
 
             <div class="note mb-4">
                 <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
-                <span>Правка атлета (включая «свою по ФИО» запись) отправляет запись на повторную проверку. Правка модератора — сразу подтверждает запись. Группа, институт и курс сохраняются как были на момент соревнования.</span>
+                <span>Правка атлета (включая «свою по ФИО» запись) отправляет запись на повторную проверку. Правка модератора — сразу подтверждает запись. Группа, институт и курс сохраняются как были на момент соревнования. Колонка «Действия» закреплена справа: кнопки «Сохранить/Отмена» видны без прокрутки; работают также Enter (сохранить) и Esc (отмена). Войти в правку можно двойным кликом по строке.</span>
             </div>
 
             <div class="table-meta">
@@ -78,7 +78,7 @@
             </div>
 
             <div class="table-wrap">
-                <table class="table table--striped table--hover table--wide">
+                <table class="table table--striped table--hover table--wide table--sticky-actions">
                     <thead>
                         <tr>
                             <th>№</th>
@@ -89,7 +89,7 @@
                             <th>Вид спорта</th>
                             <th>Дата</th>
                             <th>Уровень</th>
-                            <th>Название соревнований</th>
+                            <th class="th--wrap">Название соревнований</th>
                             <th class="th--num">Место</th>
                             <th class="th--num">Курс</th>
                             <th>Статус</th>
@@ -149,10 +149,53 @@
                                     <option selected>Ж</option>
                                 </select>
                             </td>
-                            <td><input class="input input--cell" type="text" value="ИЭУ" list="institute-options"></td>
-                            <td><input class="input input--cell" type="text" value="ЭУТб-31"></td>
+                            <td>
+                                <!-- Комбобокс, закрытый: справочник институтов -->
+                                <div class="combobox combobox--cell">
+                                    <div class="combobox__control">
+                                        <input class="input" type="text" value="ИЭУ" title="Институт: выбор из справочника или свой вариант">
+                                        <button class="combobox__toggle" type="button" aria-label="Показать варианты институтов" title="Показать варианты">
+                                            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6l4.5 4.5L12.5 6"/></svg>
+                                        </button>
+                                    </div>
+                                    <p class="combobox__hint">можно ввести своё</p>
+                                </div>
+                            </td>
+                            <td>
+                                <!-- Комбобокс группы: список раскрыт статично — подсказками
+                                     служат уникальные группы из существующих записей,
+                                     неподходящие по фильтру скрываются на лету -->
+                                <div class="combobox combobox--cell">
+                                    <div class="combobox__control">
+                                        <input class="input" type="text" value="ЭУТб-31" title="Группа: подсказки — группы из записей, можно ввести своё">
+                                        <button class="combobox__toggle" type="button" aria-label="Показать варианты групп" title="Показать варианты">
+                                            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6l4.5 4.5L12.5 6"/></svg>
+                                        </button>
+                                        <div class="combobox__menu" role="listbox" aria-label="Варианты групп">
+                                            <div class="combobox__menu-title">Группы из существующих записей</div>
+                                            <div class="combobox__opt is-match is-selected" role="option" aria-selected="true"><span>ЭУТб-31</span><span class="combobox__opt-tag">совпадение</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">АДб-22</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ГТб-42</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ДАб-21</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">Мб-32</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ПГСб-41</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">СГб-11</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ТМб-12</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__menu-hint">ещё 1 — ГТб-32 — тоже скрыта по фильтру · можно ввести своё</div>
+                                        </div>
+                                    </div>
+                                    <p class="combobox__hint">можно ввести своё</p>
+                                </div>
+                            </td>
                             <td><input class="input input--cell" type="text" value="Плавание" list="sport-options"></td>
-                            <td><input class="input input--cell" type="text" value="14.12.2025" placeholder="дд.мм.гггг"></td>
+                            <td>
+                                <div class="datefield datefield--cell">
+                                    <input class="input" type="text" value="14.12.2025" title="Введите цифры — точки поставятся сами; или выберите дату из календаря">
+                                    <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                    </button>
+                                </div>
+                            </td>
                             <td>
                                 <select class="select select--cell">
                                     <option>внутривузовские</option>
@@ -285,13 +328,6 @@
         <option value="Петрова Мария Олеговна"></option>
         <option value="Соколова Екатерина Дмитриевна"></option>
         <option value="Иванов Дмитрий Сергеевич"></option>
-    </datalist>
-    <datalist id="institute-options">
-        <option value="ИСИ"></option>
-        <option value="ИАиД"></option>
-        <option value="АДИ"></option>
-        <option value="ИТМ"></option>
-        <option value="ИЭУ"></option>
     </datalist>
     <datalist id="sport-options">
         <option value="Плавание"></option>

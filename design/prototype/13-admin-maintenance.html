@@ -62,10 +62,76 @@
             <div class="page-head">
                 <div>
                     <h1 class="page-title">Обслуживание базы</h1>
-                    <p class="page-sub">Выгрузка всей базы для архива и очистка записей/вложений с явным подтверждением.</p>
+                    <p class="page-sub">Состояние базы и резервные копии, выгрузка всех данных и очистка записей/вложений с явным подтверждением.</p>
                 </div>
                 <a class="backlink" href="07-admin-hub.html">В админку</a>
             </div>
+
+            <section class="card mb-5">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Состояние базы и бэкапы</h2>
+                        <p class="card__sub">Размеры обновляются при открытии страницы. Бэкапы создаются по таймеру, кнопкой и автоматически перед любой очисткой.</p>
+                    </div>
+                    <button class="btn btn--primary" type="button">
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2v7.8M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11"/></svg>
+                        Сделать бэкап сейчас
+                    </button>
+                </div>
+                <div class="card__body">
+                    <div class="stat-row mb-4">
+                        <div>
+                            <div class="stat__value">4,8 МБ</div>
+                            <div class="stat__label">база (competitions.sqlite3) · WAL — ещё 612 КБ</div>
+                        </div>
+                        <div>
+                            <div class="stat__value">1,2 ГБ</div>
+                            <div class="stat__label">вложения (data/files) · 23 файла</div>
+                        </div>
+                        <div>
+                            <div class="stat__value">96 МБ</div>
+                            <div class="stat__label">бэкапы (data/backups) · 3 файла</div>
+                        </div>
+                        <div>
+                            <div class="stat__value">04:10</div>
+                            <div class="stat__label">последний бэкап — сегодня, по таймеру</div>
+                        </div>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table class="table table--hover">
+                            <thead>
+                                <tr>
+                                    <th>Файл в data/backups</th>
+                                    <th class="th--num">Размер</th>
+                                    <th>Происхождение</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><span class="code">backup-2026-09-13-0410.zip</span></td>
+                                    <td class="td--num">34,0 МБ</td>
+                                    <td class="text-2">ежедневный, по таймеру</td>
+                                    <td><button class="btn btn--secondary btn--sm" type="button">Скачать</button></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="code">backup-2026-09-12-0410.zip</span></td>
+                                    <td class="td--num">33,8 МБ</td>
+                                    <td class="text-2">ежедневный, по таймеру</td>
+                                    <td><button class="btn btn--secondary btn--sm" type="button">Скачать</button></td>
+                                </tr>
+                                <tr>
+                                    <td><span class="code">pre-wipe-2026-08-14-1203.zip</span></td>
+                                    <td class="td--num">12,4 МБ</td>
+                                    <td class="text-2">архив перед очисткой по дате (записи до 01.07.2025 + их вложения)</td>
+                                    <td><button class="btn btn--secondary btn--sm" type="button">Скачать</button></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
 
             <section class="card mb-5">
                 <div class="card__header">
@@ -96,9 +162,13 @@
                     </div>
                 </div>
                 <div class="card__body">
+                    <div class="note note--ok mb-3">
+                        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.8 8.6l3.4 3.4 7-8.2"/></svg>
+                        <span>Перед любой очисткой будет создан архив удаляемого — xlsx с записями (все колонки, как в экспорте) и zip их вложений. Архив появится в списке бэкапов выше, и его можно скачать. Это страховка от «очистил и пожалел», отдельно от бэкапов по таймеру.</span>
+                    </div>
                     <div class="note note--warn mb-4">
                         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
-                        <span>Пользователи, кастомные поля, справочники и журнал аудита очистка не затрагивает. Перед очисткой рекомендуется выгрузить базу.</span>
+                        <span>Пользователи, кастомные поля, справочники и журнал аудита очистка не затрагивает. Очистка базы не заменяет выгрузку — архивируется только удаляемое.</span>
                     </div>
 
                     <div class="step">
@@ -108,19 +178,35 @@
                         </div>
                         <div class="step__body">
                             <h3 class="step__title">Выберите объём очистки</h3>
-                            <p class="step__desc">Что именно будет удалено:</p>
+                            <p class="step__desc">Пункты идут по возрастанию ущерба:</p>
 
                             <label class="radio-line">
                                 <input type="radio" name="wipe-scope" checked>
-                                <span><strong>Все записи соревнований</strong><br><span class="fs-xs text-3">вложения не трогаются</span></span>
-                            </label>
-                            <label class="radio-line">
-                                <input type="radio" name="wipe-scope">
-                                <span><strong>Записи + вложения</strong><br><span class="fs-xs text-3">записи, строки и файлы вложений</span></span>
-                            </label>
-                            <label class="radio-line">
-                                <input type="radio" name="wipe-scope">
                                 <span><strong>Только вложения</strong><br><span class="fs-xs text-3">строки и файлы вложений, записи остаются</span></span>
+                            </label>
+                            <label class="radio-line">
+                                <input type="radio" name="wipe-scope">
+                                <span><strong>Только записи</strong><br><span class="fs-xs text-3">записи соревнований, вложения не трогаются</span></span>
+                            </label>
+                            <label class="radio-line">
+                                <input type="radio" name="wipe-scope">
+                                <span><strong>Всё: записи + вложения</strong><br><span class="fs-xs text-3">записи, строки и файлы вложений</span></span>
+                            </label>
+                            <label class="radio-line">
+                                <input type="radio" name="wipe-scope">
+                                <span>
+                                    <strong>По дате: записи с датой соревнования до указанной</strong><br>
+                                    <span class="fs-xs text-3">критерий — дата соревнования, не дата создания записи</span>
+                                    <span style="display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px;">
+                                        <span class="datefield" style="width: 190px;">
+                                            <input class="input" type="text" value="01.07.2025" title="Введите цифры — точки поставятся сами; или выберите дату из календаря" style="font-family: var(--font-mono);">
+                                            <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                            </button>
+                                        </span>
+                                        <label class="check" style="font-size: var(--fs-sm);"><input type="checkbox" checked><span>вместе с их вложениями</span></label>
+                                    </span>
+                                </span>
                             </label>
                         </div>
                     </div>

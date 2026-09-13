@@ -62,13 +62,61 @@
             <div class="page-head">
                 <div>
                     <h1 class="page-title">Журнал безопасности</h1>
-                    <p class="page-sub">Последние события, новые сверху. Журнал только для чтения: записи не редактируются и не удаляются.</p>
+                    <p class="page-sub">Полная история событий, новые сверху. Журнал только для чтения: записи не редактируются и не удаляются. Фильтры и пагинация заменяют прежний лимит «последних 200».</p>
                 </div>
                 <a class="backlink" href="07-admin-hub.html">В админку</a>
             </div>
 
+            <section class="card mb-4">
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-3">
+                            <label class="label" for="a-user">Пользователь</label>
+                            <input class="input" id="a-user" type="text" placeholder="Логин, например admin">
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="a-action">Действие</label>
+                            <select class="select" id="a-action">
+                                <option selected>Все</option>
+                                <option>login_success</option>
+                                <option>login_failed</option>
+                                <option>record_approved</option>
+                                <option>record_rejected</option>
+                                <option>students_merged</option>
+                                <option>alias_added</option>
+                                <option>password_changed</option>
+                                <option>user_deleted</option>
+                                <option>db_wipe</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="a-date-from">Период с</label>
+                            <div class="datefield">
+                                <input class="input" id="a-date-from" type="text" placeholder="01.09.2026" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="a-date-to">по</label>
+                            <div class="datefield">
+                                <input class="input" id="a-date-to" type="text" placeholder="13.09.2026" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-2" style="display: flex; align-items: flex-end; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Применить</button>
+                            <button class="btn btn--secondary" type="reset">Сбросить</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
             <div class="table-meta">
-                <span>Последние 10 событий (максимум 200)</span>
+                <span>Всего <strong class="tabnum" style="color: var(--text);">847</strong> событий · новые сверху</span>
                 <span>Время — UTC</span>
             </div>
 
@@ -145,6 +193,31 @@
                         </tr>
                     </tbody>
                 </table>
+            </div>
+
+            <div class="table-foot">
+                <span class="table-foot__count">Показано <strong>10</strong> из <strong>847</strong> событий</span>
+                <label class="page-size">Показывать по:
+                    <select class="select">
+                        <option selected>10</option>
+                        <option>25</option>
+                        <option>50</option>
+                        <option>100</option>
+                    </select>
+                </label>
+                <nav class="pager" aria-label="Страницы журнала">
+                    <button class="pager__btn is-disabled" type="button" aria-label="Предыдущая страница" title="Предыдущая страница">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.8 3.5 5.3 8l4.5 4.5"/></svg>
+                    </button>
+                    <button class="pager__btn is-active" type="button">1</button>
+                    <button class="pager__btn" type="button">2</button>
+                    <button class="pager__btn" type="button">3</button>
+                    <span class="pager__gap">…</span>
+                    <button class="pager__btn" type="button">85</button>
+                    <button class="pager__btn" type="button" aria-label="Следующая страница" title="Следующая страница">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.2 3.5 10.7 8l-4.5 4.5"/></svg>
+                    </button>
+                </nav>
             </div>
 
             <div class="note note--plain mt-4">
