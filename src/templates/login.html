@@ -5,7 +5,10 @@
     <div class="col-12 col-md-6 col-lg-4">
         <div class="card shadow-sm">
             <div class="card-body">
-                <h3 class="card-title mb-4">Вход в систему</h3>
+                {# Композиция карточки входа — по прототипу 01: заголовок +
+                   строка описания, поля, кнопка во всю ширину. #}
+                <h3 class="card-title mb-1">Вход в систему</h3>
+                <div class="text-muted mb-4">Учёт участия студентов в спортивных соревнованиях</div>
 
                 {% if error_message %}
                 <div class="alert alert-danger" role="alert">

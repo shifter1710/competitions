@@ -157,6 +157,18 @@ ATTACHMENT_SIGNATURES = {
 
 DEFAULT_LEVELS = ('внутривузовские', 'межвузовские')
 
+# Композиция главной по прототипу 02: серверные фильтры и пагинация реестра.
+# per_page — из фиксированного набора; текущее поведение продукта показывало
+# весь список сразу, поэтому дефолт — максимум набора.
+INDEX_PER_PAGE_OPTIONS: Sequence[int] = (10, 25, 50, 100)
+INDEX_DEFAULT_PER_PAGE = 100
+INDEX_STATUS_FILTERS: Sequence[tuple[str, str]] = (
+    ('approved', 'подтверждена'),
+    ('pending', 'на проверке'),
+    ('rejected', 'отклонена'),
+)
+INDEX_STATUS_KEYS = {key for key, _ in INDEX_STATUS_FILTERS}
+
 # Управляемые справочники значений: записи остаются свободным текстом,
 # справочник — только подсказки (docs/data-model-decisions.md,
 # «Справочники значений»). Уровни живут в своей таблице на той же странице.
@@ -701,6 +713,77 @@ def collect_custom_filters(request: Request) -> tuple[list[tuple[str, str, str]]
     return filters, None
 
 
+def parse_index_filters(args: dict) -> tuple[dict[str, str], str | None]:
+    """Серверные фильтры главной (прототип 02) из GET-параметров.
+
+    ФИО — подстрока; институт/вид спорта/уровень — точное совпадение;
+    даты — дд.мм.гггг (тот же формат, что в фильтрах отчёта). Возвращает
+    сырые значения (для переотображения в форме) и текст ошибки при
+    некорректной дате. Статус обрабатывает маршрут — он ролевой.
+    """
+    filters: dict[str, str] = {}
+    for key in ('name', 'institute', 'sport', 'level'):
+        filters[key] = (get_param(args, key) or '').strip()
+    for key in ('date_from', 'date_to'):
+        raw_value = (get_param(args, key) or '').strip()
+        if raw_value:
+            try:
+                datetime.strptime(raw_value, settings.date_format)
+            except ValueError:
+                return {}, f'Некорректная дата в фильтре ({key}): {raw_value}'
+        filters[key] = raw_value
+    filters['status'] = ''
+    return filters, None
+
+
+def parse_index_page(args: dict) -> int:
+    """Номер страницы главной; пусто/нечисло — первая, меньше 1 — первая."""
+    try:
+        return max(1, int(get_param(args, 'page') or 1))
+    except ValueError:
+        return 1
+
+
+def parse_index_per_page(args: dict) -> int:
+    """Размер страницы главной; вне допустимого набора — дефолт."""
+    raw_value = get_param(args, 'per_page') or ''
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return INDEX_DEFAULT_PER_PAGE
+    return value if value in INDEX_PER_PAGE_OPTIONS else INDEX_DEFAULT_PER_PAGE
+
+
+def pager_items(current: int, total: int) -> list[dict]:
+    """Номера страниц пагинации с разрывами: края (первая/последняя) и
+    окно ±1 вокруг текущей, между непоследовательными номерами — «…»."""
+    if total <= 0:
+        return []
+    wanted = {1, total}
+    for offset in (-1, 0, 1):
+        candidate = current + offset
+        if 1 <= candidate <= total:
+            wanted.add(candidate)
+    items: list[dict] = []
+    previous: int | None = None
+    for number in sorted(wanted):
+        if previous is not None and number - previous > 1:
+            items.append({'gap': True})
+        items.append({'page': number})
+        previous = number
+    return items
+
+
+def build_index_query(filters: dict[str, str], per_page: int) -> str:
+    """GET-параметры главной без page: для ссылок пагинации (page добавит
+    шаблон/маршрут) и селекта «Показывать по» (он ставит per_page сам).
+    Пустые значения и дефолтный per_page в URL не попадают — ссылки чище."""
+    params = {key: value for key, value in filters.items() if value}
+    if per_page != INDEX_DEFAULT_PER_PAGE:
+        params['per_page'] = str(per_page)
+    return urlencode(params)
+
+
 def get_report_rows(request: Request, slice_key: str):
     """Строки отчёта для среза с фильтрами из запроса.
 
@@ -852,7 +935,53 @@ async def index(request: Request):
     custom_fields = storage.get_custom_fields()
     owner_filter = get_current_user_id(request) if user_is_athlete(request) else None
     profile_hashes = student_hashes_for_request(request)
-    competitions = storage.get_competitions(owner_id=owner_filter, student_id_hashes=profile_hashes)
+    args = dict(request.args)
+
+    # Серверная фильтрация реестра (прототип 02): GET-параметры рендерит,
+    # фильтры живут в URL — ссылки шарятся. Некорректная дата — явная ошибка.
+    index_filters, filter_error = parse_index_filters(args)
+    if filter_error is not None:
+        return text(body=filter_error, status=400)
+    if user_is_moderator(request):
+        raw_status = (get_param(args, 'status') or '').strip()
+        if raw_status in INDEX_STATUS_KEYS:
+            index_filters['status'] = raw_status
+
+    per_page = parse_index_per_page(args)
+    filter_kwargs = dict(
+        owner_id=owner_filter,
+        student_id_hashes=profile_hashes,
+        name=index_filters['name'],
+        institute=index_filters['institute'],
+        sport=index_filters['sport'],
+        level=index_filters['level'],
+        review_status=index_filters['status'],
+        date_from=index_filters['date_from'],
+        date_to=index_filters['date_to'],
+    )
+    total_count = storage.count_competitions_filtered(**filter_kwargs)
+    page_count = max(1, -(-total_count // per_page))
+    # Страница вне диапазона зажимается на последнюю (как в журнале аудита).
+    page = min(parse_index_page(args), page_count)
+    competitions = storage.get_competitions_page(
+        limit=per_page,
+        offset=(page - 1) * per_page,
+        **filter_kwargs,
+    )
+
+    def page_url(page_number: int) -> str:
+        query = build_index_query(index_filters, per_page)
+        separator = '&' if query else ''
+        return f'/?{query}{separator}page={page_number}'
+
+    pager = []
+    for item in pager_items(page, page_count):
+        if item.get('gap'):
+            pager.append({'gap': True})
+        else:
+            number = item['page']
+            pager.append({'label': number, 'url': page_url(number), 'active': number == page})
+
     return await render(
         template_name=jinja_env.get_template('index.html'),
         context={
@@ -872,12 +1001,33 @@ async def index(request: Request):
             'sport_options': storage.list_catalog('sport'),
             'institute_options': storage.list_catalog('institute'),
             'groups_by_institute': storage.get_group_options_by_institute(),
-            'has_unapproved': any(c.review_status != 'approved' for c in competitions),
+            # «Статус»-колонка видна, если у пользователя есть хоть одна
+            # неподтверждённая запись — независимо от страницы и фильтра.
+            'has_unapproved': storage.count_competitions_filtered(
+                owner_id=owner_filter,
+                student_id_hashes=profile_hashes,
+                unapproved_only=True,
+            )
+            > 0,
             'attachments_by_record': build_attachments_by_record(storage.get_attachments()),
             'admin_levels': storage.list_levels() if user_is_admin(request) else [],
             'current_username': (get_auth_user(request) or {}).get('username'),
-            'admin_message': get_param(dict(request.args), 'admin_message'),
-            'admin_error': get_param(dict(request.args), 'admin_error'),
+            'admin_message': get_param(args, 'admin_message'),
+            'admin_error': get_param(args, 'admin_error'),
+            # Композиция главной (прототип 02): фильтры, счётчик, пагинация.
+            'index_filters': index_filters,
+            'status_filter_options': INDEX_STATUS_FILTERS,
+            'index_filter_query': urlencode({key: value for key, value in index_filters.items() if value}),
+            'index_is_filtered': any(index_filters.values()),
+            'total_count': total_count,
+            'shown_count': len(competitions),
+            'page': page,
+            'page_count': page_count,
+            'per_page': per_page,
+            'per_page_options': INDEX_PER_PAGE_OPTIONS,
+            'pager_items': pager,
+            'prev_url': page_url(page - 1) if page > 1 else None,
+            'next_url': page_url(page + 1) if page < page_count else None,
         },
     )
 
@@ -2830,6 +2980,9 @@ async def get_report(request: Request):
 
     slice_key = parse_report_slice(dict(request.args))
     report_rows = get_report_rows(request, slice_key)
+    custom_fields = get_storage(request.app).get_custom_fields()
+    rows_count = len(report_rows)
+    total_participations = sum(int(row.count_participation) for row in report_rows)
     return await render(
         template_name=jinja_env.get_template('filtered.html'),
         context={
@@ -2838,6 +2991,12 @@ async def get_report(request: Request):
             'report_slice': slice_key,
             'report_slice_column': REPORT_SLICE_COLUMNS[slice_key][0],
             'report_slice_sort_type': 'number' if slice_key in REPORT_SLICE_NUMERIC_KEYS else 'text',
+            # Композиция отчёта (прототип 06): чипы условий и счётчик строк.
+            'report_chips': build_report_chips(dict(request.args), custom_fields),
+            'rows_count': rows_count,
+            'rows_count_label': ru_plural(rows_count, 'строка', 'строки', 'строк'),
+            'total_participations': total_participations,
+            'participations_label': ru_plural(total_participations, 'участие', 'участия', 'участий'),
         },
     )
 
@@ -2846,6 +3005,46 @@ def sanitize_spreadsheet_value(value):
     if isinstance(value, str) and value[:1] in {'=', '+', '-', '@'}:
         return f"'{value}"
     return value
+
+
+# Чипы применённых условий отчёта (прототип 06): активный фильтр — чип,
+# сброс одного условия — перезагрузка отчёта без его GET-параметра.
+REPORT_CHIP_LABELS: Sequence[tuple[str, str]] = (
+    ('name', 'ФИО'),
+    ('date_from', 'Дата (от)'),
+    ('date_to', 'Дата (до)'),
+    ('position', 'Место'),
+    ('level', 'Уровень'),
+    ('institute', 'Институт'),
+    ('group', 'Группа'),
+    ('sport', 'Вид спорта'),
+    ('group_by', 'Срез'),
+)
+REPORT_POSITION_CHIP_LABELS = {'<2': 'Победа', '<4': 'Призовое место', '>3': 'Не призовое место'}
+
+
+def build_report_chips(args: dict, custom_fields: Sequence[CustomField]) -> list[dict]:
+    """Чипы применённых условий отчёта для страницы /report.
+
+    Каждый активный GET-параметр — отдельный чип c data-remove-key; метки
+    позиций и среза — человекочитаемые. Кастомные поля — по ярлыку поля.
+    """
+    slice_labels = {item['key']: item['label'] for item in REPORT_SLICES}
+    chips: list[dict] = []
+    for key, label in REPORT_CHIP_LABELS:
+        raw_value = (get_param(args, key) or '').strip()
+        if not raw_value:
+            continue
+        if key == 'position':
+            raw_value = REPORT_POSITION_CHIP_LABELS.get(raw_value, raw_value)
+        if key == 'group_by':
+            raw_value = slice_labels.get(raw_value, raw_value)
+        chips.append({'label': label, 'value': raw_value, 'remove_key': key})
+    for field in custom_fields:
+        raw_value = (get_param(args, f'custom__{field.key}') or '').strip()
+        if raw_value:
+            chips.append({'label': field.label, 'value': raw_value, 'remove_key': f'custom__{field.key}'})
+    return chips
 
 
 def parse_report_export_columns(request: Request, slice_key: str) -> tuple[Sequence[str], str | None]:

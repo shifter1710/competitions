@@ -2,6 +2,17 @@
 
 {% block content %}
 
+{# Композиция главной — по прототипу 02: заголовок с описанием, карточка
+   фильтров над таблицей, таблица в белой карточке, под ней счётчик
+   «Показано N из M», селект «Показывать по» и пагинация. Фильтрация и
+   пагинация серверные — живут в GET-параметрах (шарые ссылки). #}
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Реестр соревнований</h1>
+        <p class="page-sub">Общая таблица участий. Правка — прямо в строке; записи атлетов попадают в реестр после проверки модератором.</p>
+    </div>
+</div>
+
 {# Замечание №1: отдельная форма «Добавить запись» убрана — ввод записей
    идёт только инлайн-строкой «+ Пустая строка» (с автоподстановкой из
    профиля атлета). Для атлета остаётся пояснение о проверке записей. #}
@@ -14,10 +25,86 @@
 </div>
 {% endif %}
 
+<div class="card shadow-sm mb-4 index-filter-card">
+    <div class="card-body">
+        <form class="row g-3 align-items-end" method="get" action="/">
+            <div class="col-12 col-md-3">
+                <label class="form-label" for="index-filter-name">ФИО</label>
+                <input class="form-control" id="index-filter-name" name="name" type="text"
+                       placeholder="Начните вводить…" autocomplete="off" value="{{ index_filters.name }}">
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="index-filter-institute">Институт</label>
+                <select class="form-select" id="index-filter-institute" name="institute">
+                    <option value="">Все</option>
+                    {% for value in institute_options %}
+                    <option value="{{ value }}"{% if index_filters.institute == value %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="index-filter-sport">Вид спорта</label>
+                <select class="form-select" id="index-filter-sport" name="sport">
+                    <option value="">Все</option>
+                    {% for value in sport_options %}
+                    <option value="{{ value }}"{% if index_filters.sport == value %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="index-filter-level">Уровень</label>
+                <select class="form-select" id="index-filter-level" name="level">
+                    <option value="">Все</option>
+                    {% for value in levels %}
+                    <option value="{{ value }}"{% if index_filters.level == value %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% if is_moderator %}
+            {# Статус — инструмент модератора; сервер параметр других ролей игнорирует. #}
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="index-filter-status">Статус</label>
+                <select class="form-select" id="index-filter-status" name="status">
+                    <option value="">Все</option>
+                    {% for value, label in status_filter_options %}
+                    <option value="{{ value }}"{% if index_filters.status == value %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endif %}
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="index-filter-date-from">Дата от</label>
+                <div class="input-group index-date-group">
+                    <input class="form-control" id="index-filter-date-from" name="date_from" type="text"
+                           inputmode="numeric" placeholder="дд.мм.гггг" autocomplete="off"
+                           title="Введите цифры — точки поставятся сами" value="{{ index_filters.date_from }}">
+                    <button class="btn btn-outline-secondary index-date-toggle" type="button"
+                            aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">📅</button>
+                </div>
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="index-filter-date-to">Дата до</label>
+                <div class="input-group index-date-group">
+                    <input class="form-control" id="index-filter-date-to" name="date_to" type="text"
+                           inputmode="numeric" placeholder="дд.мм.гггг" autocomplete="off"
+                           title="Введите цифры — точки поставятся сами" value="{{ index_filters.date_to }}">
+                    <button class="btn btn-outline-secondary index-date-toggle" type="button"
+                            aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">📅</button>
+                </div>
+            </div>
+            <div class="col-12 col-md-4 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">Применить</button>
+                <a class="btn btn-outline-secondary index-filter-reset" href="/">Сбросить</a>
+            </div>
+        </form>
+    </div>
+</div>
+
 <div class="buttons">
     {% if can_write %}
     <button type="button" class="add-empty-row-button btn btn-success">+ Пустая строка</button>
     {% endif %}
+    {# «Выгрузить в Excel» — весь реестр, от фильтров главной не зависит. #}
     {% if not is_athlete %}
     <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
     {% endif %}
@@ -56,7 +143,7 @@
         <option value="{{ value }}"></option>
         {% endfor %}
     </datalist>
-    {% if competitions %}
+    {% if total_count %}
     <div class="table-card" data-table-view="index">
         <div class="table-responsive">
             {# data-groups-by-institute — карта институт → группы (иерархия
@@ -217,7 +304,44 @@
     <div class="table-gestures-hint">Двойной клик по строке — редактирование; Enter — сохранить, Esc — отменить</div>
     {% endif %}
     {% else %}
-    <div class="empty-content">Нет данных</div>
+    <div class="empty-content">{% if index_is_filtered %}Записей с текущим фильтром не найдено{% else %}Нет данных{% endif %}</div>
+    {% endif %}
+    {# Футер живёт под таблицей и при пустом результате фильтра: счётчик
+       «Показано 0 из 0» честно показывает, что фильтр применился. #}
+    {% if total_count or index_is_filtered %}
+    <div class="table-foot">
+        <span class="table-foot__count">Показано <strong>{{ shown_count }}</strong> из <strong>{{ total_count }}</strong> записей</span>
+        <label class="page-size">Показывать по:
+            <select class="form-select form-select-sm per-page-select" data-query="{{ index_filter_query }}" aria-label="Записей на странице">
+                {% for option in per_page_options %}
+                <option value="{{ option }}"{% if option == per_page %} selected{% endif %}>{{ option }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        {% if page_count > 1 %}
+        <nav class="pager" aria-label="Страницы реестра">
+            {% if prev_url %}
+            <a class="pager__btn" href="{{ prev_url }}" aria-label="Предыдущая страница" title="Предыдущая страница">‹</a>
+            {% else %}
+            <span class="pager__btn is-disabled" aria-hidden="true">‹</span>
+            {% endif %}
+            {% for item in pager_items %}
+            {% if item.gap %}
+            <span class="pager__gap">…</span>
+            {% elif item.active %}
+            <span class="pager__btn is-active" aria-current="page">{{ item.label }}</span>
+            {% else %}
+            <a class="pager__btn" href="{{ item.url }}">{{ item.label }}</a>
+            {% endif %}
+            {% endfor %}
+            {% if next_url %}
+            <a class="pager__btn" href="{{ next_url }}" aria-label="Следующая страница" title="Следующая страница">›</a>
+            {% else %}
+            <span class="pager__btn is-disabled" aria-hidden="true">›</span>
+            {% endif %}
+        </nav>
+        {% endif %}
+    </div>
     {% endif %}
 </div>
 

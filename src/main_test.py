@@ -95,6 +95,9 @@ def fake_get_user(username: str) -> dict | None:
 def client() -> SanicTestClient:
     fake_storage = Mock()
     fake_storage.get_competitions.return_value = []
+    # Серверные фильтры/пагинация главной (прототип 02)
+    fake_storage.get_competitions_page.return_value = []
+    fake_storage.count_competitions_filtered.return_value = 0
     fake_storage.get_filtered.return_value = []
     fake_storage.get_custom_fields.return_value = []
     fake_storage.save_competitions.return_value = None
@@ -968,6 +971,344 @@ def test_report_available_for_viewer_with_slice(reports_client: SanicTestClient)
         ['2', '2024', '3', '1', '3'],
         ['3', '2025', '3', '1', '2'],
     ]
+
+
+def test_report_page_shows_row_counter(reports_client: SanicTestClient):
+    # Композиция отчёта (прототип 06): счётчик «N строк · M участий».
+    _, response = reports_client.get('/report', headers=get_auth_headers())
+
+    assert response.status == 200
+    # 5 строк-студентов, суммарно 8 участий в фикстуре.
+    assert '5 строк · 8 участий' in response.text
+
+    _, response = reports_client.get('/report?institute=' + quote('ИМИ'), headers=get_auth_headers())
+    assert response.status == 200
+    # Петров (2 участия) + Козлов в записи за ИМИ (1 участие) = 2 строки, 3 участия.
+    assert '2 строки · 3 участия' in response.text
+
+
+def test_report_page_shows_filter_chips(reports_client: SanicTestClient):
+    # Каждый активный фильтр — чип с крестиком-сбросом (data-remove-key);
+    # позиция и срез — человекочитаемые метки; кастомные поля — по ярлыку.
+    params = urlencode(
+        {
+            'name': 'Иванов',
+            'level': 'внутривузовские',
+            'position': '<2',
+            'group_by': 'sport',
+            'custom__trainer': 'Смит',
+        }
+    )
+    _, response = reports_client.get(f'/report?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'ФИО: <strong>Иванов</strong>' in response.text
+    assert 'Уровень: <strong>внутривузовские</strong>' in response.text
+    assert 'Место: <strong>Победа</strong>' in response.text
+    assert 'Срез: <strong>Вид спорта</strong>' in response.text
+    assert 'Тренер: <strong>Смит</strong>' in response.text
+    assert 'data-remove-key="name"' in response.text
+    assert 'data-remove-key="custom__trainer"' in response.text
+
+
+def test_report_page_without_filters_has_no_chips(reports_client: SanicTestClient):
+    _, response = reports_client.get('/report', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'filter-chip' not in response.text
+
+
+# --- Серверная фильтрация, пагинация и счётчик главной (прототип 02) ---
+# Реальный SQLite-адаптер: фильтры GET / — это SQL (storage), а не клиент.
+# Набор подобран так, чтобы каждый фильтр и границы страниц считались руками:
+# 12 подтверждённых + 2 «на проверке» + 1 «отклонена» = 15 для модератора.
+
+
+def make_index_record(
+    name: str,
+    *,
+    institute: str = 'ИСИ',
+    sport: str = 'Бег',
+    level: str = 'внутривузовские',
+    date: datetime = datetime(2024, 3, 1),
+) -> Competition:
+    return Competition(
+        student_id=f'id-{name}',
+        student_name=name,
+        student_sex='М',
+        institute=institute,
+        group='ГРП-101',
+        course=2,
+        sport=sport,
+        date=date,
+        level=level,
+        name='Кубок',
+        position=1,
+    )
+
+
+def seed_index_records(storage: SQLiteAdapter) -> None:
+    approved = [
+        make_index_record('Иванов Иван', date=datetime(2024, 3, 1)),
+        make_index_record('Иванов Иван', date=datetime(2024, 4, 1)),
+        make_index_record('Иванов Иван', date=datetime(2024, 5, 15)),
+        make_index_record('Иванов Иван', date=datetime(2024, 9, 10)),
+        make_index_record(
+            'Петрова Анна', institute='ИМИ', sport='Лыжи', level='межвузовские', date=datetime(2024, 11, 1)
+        ),
+        make_index_record(
+            'Петрова Анна', institute='ИМИ', sport='Лыжи', level='межвузовские', date=datetime(2024, 12, 1)
+        ),
+        make_index_record('Сидоров Сидор', date=datetime(2025, 1, 10)),
+        make_index_record('Сидоров Сидор', date=datetime(2025, 2, 20)),
+        make_index_record('Кузнецов Кирилл', institute='ИМИ', sport='Шахматы', date=datetime(2025, 3, 5)),
+        make_index_record(
+            'Иванов Иван', institute='ИМИ', sport='Лыжи', level='межвузовские', date=datetime(2025, 4, 1)
+        ),
+        make_index_record('Петрова Анна', sport='Бег', level='межвузовские', date=datetime(2025, 4, 15)),
+        make_index_record('Петрова Анна', sport='Бег', level='межвузовские', date=datetime(2025, 4, 25)),
+    ]
+    storage.save_competitions(approved)
+    storage.save_competitions(
+        [
+            make_index_record('Ждунов Ждун', date=datetime(2025, 5, 1)),
+            make_index_record('Ждунов Ждун', date=datetime(2025, 5, 2)),
+        ],
+        review_status='pending',
+        owner_id=9,
+    )
+    storage.save_competitions(
+        [make_index_record('Отклонов Отклон', institute='ИМИ', sport='Лыжи', date=datetime(2025, 5, 3))],
+        review_status='rejected',
+        owner_id=9,
+    )
+
+
+@pytest.fixture
+def index_client(client: SanicTestClient, tmp_path) -> SanicTestClient:
+    storage = SQLiteAdapter(str(tmp_path / 'index.sqlite3'))
+    seed_index_records(storage)
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+@pytest.fixture
+def athlete_index_client(index_client: SanicTestClient) -> SanicTestClient:
+    """Атлет sportik с двумя своими записями «на проверке» (owner_id — его id)."""
+    storage = app.ctx.storage
+    storage.create_user('sportik', hash_password('sportik-pass-123'), 'athlete')
+    athlete_id = storage.get_user('sportik')['id']
+    storage.save_competitions(
+        [
+            make_index_record('Атлетов Атлет', date=datetime(2025, 6, 1)),
+            make_index_record('Атлетов Атлет', date=datetime(2025, 6, 2)),
+        ],
+        review_status='pending',
+        owner_id=athlete_id,
+    )
+    return index_client
+
+
+def get_tbody_rows(html: str) -> list[str]:
+    body = re.search(r'<tbody>(.*?)</tbody>', html, re.S)
+    if body is None:
+        return []
+    return re.findall(r'<tr>(.*?)</tr>', body.group(1), re.S)
+
+
+def get_index_counter(html: str) -> tuple[int, int]:
+    match = re.search(r'Показано <strong>(\d+)</strong> из <strong>(\d+)</strong> записей', html)
+    assert match is not None, 'счётчик «Показано N из M» не найден'
+    return int(match.group(1)), int(match.group(2))
+
+
+def test_pager_items_edges_and_gaps():
+    # Чистая функция пагинации: края (первая/последняя) и окно ±1 вокруг
+    # текущей страницы, между непоследовательными номерами — разрыв «…».
+    from src.main import pager_items
+
+    assert pager_items(1, 0) == []
+    assert pager_items(1, 1) == [{'page': 1}]
+    assert pager_items(1, 2) == [{'page': 1}, {'page': 2}]
+    assert pager_items(1, 4) == [{'page': 1}, {'page': 2}, {'gap': True}, {'page': 4}]
+    assert pager_items(1, 9) == [{'page': 1}, {'page': 2}, {'gap': True}, {'page': 9}]
+    assert pager_items(5, 9) == [
+        {'page': 1},
+        {'gap': True},
+        {'page': 4},
+        {'page': 5},
+        {'page': 6},
+        {'gap': True},
+        {'page': 9},
+    ]
+    assert pager_items(9, 9) == [{'page': 1}, {'gap': True}, {'page': 8}, {'page': 9}]
+
+
+def test_index_shows_counter_and_all_records(index_client: SanicTestClient):
+    _, response = index_client.get('/', headers=get_auth_headers())
+
+    assert response.status == 200
+    shown, total = get_index_counter(response.text)
+    assert (shown, total) == (15, 15)
+    assert len(get_tbody_rows(response.text)) == 15
+    # Композиция прототипа 02: заголовок с описанием, карточка фильтров, футер.
+    assert 'Реестр соревнований' in response.text
+    assert 'index-filter-card' in response.text
+    assert 'Показывать по' in response.text
+
+
+def test_index_filter_by_name_substring(index_client: SanicTestClient):
+    _, response = index_client.get('/?' + urlencode({'name': 'Иванов'}), headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_index_counter(response.text) == (5, 5)
+    assert len(get_tbody_rows(response.text)) == 5
+
+
+def test_index_filter_by_catalog_exact_values(index_client: SanicTestClient):
+    params = urlencode({'institute': 'ИСИ', 'sport': 'Бег', 'level': 'межвузовские'})
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    # Петрова Анна, ИСИ, Бег, межвузовские — две записи апреля 2025
+    assert get_index_counter(response.text) == (2, 2)
+
+
+def test_index_filter_by_date_range(index_client: SanicTestClient):
+    params = urlencode({'date_from': '01.06.2024', 'date_to': '30.06.2024'})
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_index_counter(response.text) == (0, 0)
+    assert 'Записей с текущим фильтром не найдено' in response.text
+
+    params = urlencode({'date_from': '01.09.2024', 'date_to': '31.12.2024'})
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+    # Иванов 10.09.2024 + Петрова 01.11.2024 и 01.12.2024
+    assert get_index_counter(response.text) == (3, 3)
+
+
+def test_index_filter_rejects_invalid_date(index_client: SanicTestClient):
+    _, response = index_client.get('/?date_from=31.31.2024', headers=get_auth_headers())
+
+    assert response.status == 400
+    assert 'Некорректная дата' in response.text
+
+
+def test_index_status_filter_moderator_only(index_client: SanicTestClient):
+    _, response = index_client.get('/?status=pending', headers=get_auth_headers())
+    assert response.status == 200
+    assert get_index_counter(response.text) == (2, 2)
+
+    _, response = index_client.get('/?status=rejected', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (1, 1)
+
+    _, response = index_client.get('/?status=approved', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (12, 12)
+
+    # Незнакомое значение — фильтр не применяется (все 15).
+    _, response = index_client.get('/?status=unknown', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (15, 15)
+
+    # viewer не модератор: параметр статуса игнорируется, селекта «Статус» нет.
+    _, response = index_client.get('/?status=pending', headers=get_auth_headers(role='viewer'))
+    assert response.status == 200
+    assert get_index_counter(response.text) == (15, 15)
+    assert 'id="index-filter-status"' not in response.text
+
+
+def test_index_filters_kept_in_url_and_form(index_client: SanicTestClient):
+    params = {'status': 'approved', 'per_page': 10, 'page': 2}
+    _, response = index_client.get('/?' + urlencode(params), headers=get_auth_headers())
+
+    assert response.status == 200
+    # Поля формы переотображают применённые фильтры (ссылки шарятся).
+    assert '<option value="approved" selected>' in response.text
+    assert '<option value="10" selected>' in response.text
+    # Селект «Показывать по» держит фильтры без per_page (ставит сам).
+    assert f'data-query="{urlencode({"status": "approved"})}"' in response.text
+    # Ссылки пагинации несут фильтры и per_page дальше (Jinja экранирует &).
+    assert 'href="/?status=approved&amp;per_page=10&amp;page=1"' in response.text
+
+    # Фильтр по ФИО тоже возвращается в поле ввода.
+    _, response = index_client.get('/?' + urlencode({'name': 'Иванов'}), headers=get_auth_headers())
+    assert 'value="Иванов"' in response.text
+
+
+def test_index_per_page_default_shows_all(index_client: SanicTestClient):
+    _, response = index_client.get('/', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (15, 15)
+    # Дефолт — 100 (прежнее поведение показывало весь список): страница одна.
+    assert '<option value="100" selected>' in response.text
+    assert 'class="pager"' not in response.text
+
+
+def test_index_per_page_splits_and_paginates(index_client: SanicTestClient):
+    _, response = index_client.get('/?per_page=10', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (10, 15)
+    assert len(get_tbody_rows(response.text)) == 10
+    assert 'href="/?per_page=10&amp;page=2"' in response.text
+
+    _, response = index_client.get('/?per_page=10&page=2', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (5, 15)
+    assert len(get_tbody_rows(response.text)) == 5
+
+
+def test_index_per_page_invalid_falls_back_to_default(index_client: SanicTestClient):
+    _, response = index_client.get('/?per_page=7', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (15, 15)
+    assert '<option value="100" selected>' in response.text
+
+
+def test_index_page_out_of_range_clamps_to_last(index_client: SanicTestClient):
+    _, response = index_client.get('/?per_page=10&page=999', headers=get_auth_headers())
+    # Страница за пределами диапазона зажимается на последней (5 записей).
+    assert get_index_counter(response.text) == (5, 15)
+
+
+def test_index_page_invalid_number_falls_back_to_first(index_client: SanicTestClient):
+    _, response = index_client.get('/?per_page=10&page=abc', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (10, 15)
+
+
+def test_index_pager_two_pages_navigation(index_client: SanicTestClient):
+    _, response = index_client.get('/?per_page=10', headers=get_auth_headers())
+    # Первая из двух: «‹» неактивна, ссылка на вторую есть.
+    assert 'pager__btn is-disabled' in response.text
+    assert 'href="/?per_page=10&amp;page=2"' in response.text
+
+    _, response = index_client.get('/?per_page=10&page=2', headers=get_auth_headers())
+    # Вторая страница: 5 записей, активна кнопка «2», «›» неактивна.
+    assert get_index_counter(response.text) == (5, 15)
+    assert '<span class="pager__btn is-active" aria-current="page">2</span>' in response.text
+    assert 'href="/?per_page=10&amp;page=1"' in response.text
+
+
+def test_index_athlete_sees_own_records_and_ignores_status(athlete_index_client: SanicTestClient):
+    _, response = athlete_index_client.get('/', headers=athlete_headers())
+    assert response.status == 200
+    assert get_index_counter(response.text) == (2, 2)
+    # Селекта «Статус» у атлета нет; параметр статуса сервер игнорирует.
+    assert 'id="index-filter-status"' not in response.text
+
+    _, response = athlete_index_client.get('/?status=approved', headers=athlete_headers())
+    assert get_index_counter(response.text) == (2, 2)
+
+
+def test_index_athlete_filter_applies_to_own_records(athlete_index_client: SanicTestClient):
+    storage = app.ctx.storage
+    athlete_id = storage.get_user('sportik')['id']
+    storage.save_competitions(
+        [make_index_record('Атлетов Атлет', sport='Шахматы', date=datetime(2025, 7, 1))],
+        review_status='pending',
+        owner_id=athlete_id,
+    )
+
+    _, response = athlete_index_client.get('/?' + urlencode({'sport': 'Шахматы'}), headers=athlete_headers())
+    assert get_index_counter(response.text) == (1, 1)
 
 
 def test_export_report_slice_xlsx_rows(reports_client: SanicTestClient):
@@ -2175,22 +2516,22 @@ def test_hidden_catalog_value_not_in_datalist(client: SanicTestClient):
 def test_index_table_carries_group_hints_by_institute(client: SanicTestClient):
     # карта институт → группы отдаётся таблице в data-атрибуте: комбобокс
     # «Группа» фильтрует список выбранным институтом
-    app.ctx.storage.get_competitions.return_value = [
-        Competition(
-            record_id='1',
-            student_id='hash-1',
-            student_name='Иванов Иван Иванович',
-            student_sex='М',
-            institute='ИСИ',
-            group='ПГС-101',
-            course=2,
-            sport='Бег',
-            date=datetime(2026, 1, 1),
-            level='внутривузовские',
-            name='Кубок',
-            position=1,
-        )
-    ]
+    record = Competition(
+        record_id='1',
+        student_id='hash-1',
+        student_name='Иванов Иван Иванович',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 1, 1),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+    )
+    app.ctx.storage.get_competitions_page.return_value = [record]
+    app.ctx.storage.count_competitions_filtered.return_value = 1
     app.ctx.storage.get_group_options_by_institute.return_value = {'ИСИ': ['ПГС-101', 'ПГС-102']}
     try:
         _, response = client.get('/', headers=get_auth_headers(role='editor'))
@@ -2201,7 +2542,8 @@ def test_index_table_carries_group_hints_by_institute(client: SanicTestClient):
 
         assert json.dumps({'ИСИ': ['ПГС-101', 'ПГС-102']}) in response.text
     finally:
-        app.ctx.storage.get_competitions.return_value = []
+        app.ctx.storage.get_competitions_page.return_value = []
+        app.ctx.storage.count_competitions_filtered.return_value = 0
         app.ctx.storage.get_group_options_by_institute.return_value = {}
 
 
@@ -2568,11 +2910,18 @@ def test_athlete_create_goes_to_moderation(client: SanicTestClient):
 
 
 def test_athlete_sees_only_own_records(client: SanicTestClient):
-    app.ctx.storage.get_competitions.reset_mock()
     headers = athlete_headers()
     _, response = client.get('/', headers=headers)
     assert response.status == 200
-    assert app.ctx.storage.get_competitions.call_args[1] == {'owner_id': 1, 'student_id_hashes': []}
+    # Реестр читается через страницу с серверными фильтрами/пагинацией:
+    # видимость атлета (только свои записи) задаётся owner_id в обоих
+    # запросах — счётчик и выборку страницы.
+    page_kwargs = app.ctx.storage.get_competitions_page.call_args[1]
+    assert page_kwargs['owner_id'] == 1
+    assert page_kwargs['student_id_hashes'] == []
+    count_kwargs = app.ctx.storage.count_competitions_filtered.call_args[1]
+    assert count_kwargs['owner_id'] == 1
+    assert count_kwargs['student_id_hashes'] == []
 
 
 def test_athlete_cannot_update_foreign_record(client: SanicTestClient):
