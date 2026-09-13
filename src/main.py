@@ -39,7 +39,6 @@ from src.auth import verify_password
 from src.backup import run_backup
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
-from src.models.http.student_info import StudentInfo
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
 
@@ -108,14 +107,36 @@ BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
 
 REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
 INDEX_EXPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
-REPORT_EXPORT_COLUMNS: Sequence[str] = (
-    'ФИО',
-    'Пол',
-    'Институт',
-    'Группа',
-    'Курс',
-    'Количество участий',
+
+# Расширение отчётов (замечание №19, docs/data-model-decisions.md «Расширение
+# отчётов»): срез × метрики × фильтры. Группировка всегда по данным записи.
+REPORT_SLICES: Sequence[dict[str, str]] = (
+    {'key': 'student', 'label': 'Студент'},
+    {'key': 'group', 'label': 'Группа'},
+    {'key': 'institute', 'label': 'Институт'},
+    {'key': 'course', 'label': 'Курс'},
+    {'key': 'sport', 'label': 'Вид спорта'},
+    {'key': 'level', 'label': 'Уровень'},
+    {'key': 'year', 'label': 'Год'},
 )
+REPORT_SLICE_KEYS = {item['key'] for item in REPORT_SLICES}
+DEFAULT_REPORT_SLICE = 'student'
+REPORT_METRIC_COLUMNS: Sequence[str] = ('Участий', 'Побед', 'Призовых')
+# Колонки среза (без метрик) в HTML-таблице и выгрузке: для «студента» —
+# как раньше (ФИО/пол/институт/группа/курс), для остальных — название среза.
+REPORT_SLICE_COLUMNS: dict[str, tuple[str, ...]] = {
+    'student': ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс'),
+    'group': ('Группа',),
+    'institute': ('Институт',),
+    'course': ('Курс',),
+    'sport': ('Вид спорта',),
+    'level': ('Уровень соревнований',),
+    'year': ('Год',),
+}
+# Колонки с числовым значением среза (сортировка в HTML-таблице).
+REPORT_SLICE_NUMERIC_KEYS = frozenset({'course', 'year'})
+# Старые ссылки/закладки с выбором колонок продолжают работать.
+LEGACY_REPORT_COLUMN_ALIASES = {'Количество участий': 'Участий'}
 FIELD_TYPE_OPTIONS: Sequence[str] = ('text', 'number', 'date', 'url')
 USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE)
 MIN_PASSWORD_LENGTH = 6
@@ -621,6 +642,17 @@ def competition_to_export_row(
     return row
 
 
+def report_export_columns(slice_key: str = DEFAULT_REPORT_SLICE) -> list[str]:
+    """Колонки выгрузки для среза: название среза + Участий/Побед/Призовых."""
+    return [*REPORT_SLICE_COLUMNS[slice_key], *REPORT_METRIC_COLUMNS]
+
+
+def parse_report_slice(args: dict) -> str:
+    """Срез отчёта из GET-параметра group_by; отсутствие — «студент»."""
+    value = get_param(args, 'group_by')
+    return value if value else DEFAULT_REPORT_SLICE
+
+
 def validate_report_filters(args: dict) -> str | None:
     for key in ('date_from', 'date_to'):
         value = get_param(args, key)
@@ -633,6 +665,10 @@ def validate_report_filters(args: dict) -> str | None:
     position = get_param(args, 'position')
     if position and not re.fullmatch(r'[<>]\d+', position):
         return f'Некорректное значение места: {position}'
+
+    group_by = get_param(args, 'group_by')
+    if group_by and group_by not in REPORT_SLICE_KEYS:
+        return f'Неизвестный срез отчёта: {group_by}'
 
     return None
 
@@ -656,20 +692,30 @@ def collect_custom_filters(request: Request) -> tuple[list[tuple[str, str, str]]
     return filters, None
 
 
-def get_student_infos(request: Request) -> Iterable[StudentInfo] | None:
+def get_report_rows(request: Request, slice_key: str):
+    """Строки отчёта для среза с фильтрами из запроса.
+
+    Для «студента» — StudentInfo (профиль записи + метрики), для остальных
+    срезов — ReportSliceRow (значение поля записи + метрики).
+    """
     args = dict(request.args)
     storage = get_storage(request.app)
 
-    student_infos = storage.get_filtered(
+    filter_kwargs = dict(
         date_from=get_param(args, 'date_from'),
         date_to=get_param(args, 'date_to'),
         position=get_param(args, 'position'),
         level=get_param(args, 'level'),
         name=get_param(args, 'name'),
+        institute=get_param(args, 'institute') or '',
+        group=get_param(args, 'group') or '',
+        sport=get_param(args, 'sport') or '',
         custom_filters=collect_custom_filters(request)[0],
     )
 
-    return student_infos
+    if slice_key == DEFAULT_REPORT_SLICE:
+        return storage.get_filtered(**filter_kwargs)
+    return storage.get_grouped_report(slice_key, **filter_kwargs)
 
 
 # Присутствие пользователей (№17): last_seen обновляется не чаще раза в
@@ -832,13 +878,22 @@ async def reports_page(request: Request):
     if user_is_athlete(request):
         return text(body='Forbidden', status=403)
     storage = get_storage(request.app)
+    groups_by_institute = storage.get_group_options_by_institute()
     return await render(
         template_name=jinja_env.get_template('report.html'),
         context={
             'request': request,
             'custom_fields': storage.get_custom_fields(),
             'levels': storage.get_level_names(),
-            'report_export_columns': REPORT_EXPORT_COLUMNS,
+            'report_export_columns': report_export_columns(),
+            'report_slice_options': REPORT_SLICES,
+            'report_export_columns_by_slice': {
+                slice_key: report_export_columns(slice_key) for slice_key in REPORT_SLICE_KEYS
+            },
+            'institute_options': storage.list_catalog('institute'),
+            'sport_options': storage.list_catalog('sport'),
+            'groups_by_institute': groups_by_institute,
+            'group_options': sorted({group for groups in groups_by_institute.values() for group in groups}),
         },
     )
 
@@ -2630,18 +2685,23 @@ async def audit_page(request: Request):
 
 @app.get('/report')
 async def get_report(request: Request):
+    # Доступ как раньше: всем ролям, кроме athlete (личный кабинет вместо отчётов).
     if user_is_athlete(request):
         return text(body='Forbidden', status=403)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
 
-    student_infos = get_student_infos(request)
+    slice_key = parse_report_slice(dict(request.args))
+    report_rows = get_report_rows(request, slice_key)
     return await render(
         template_name=jinja_env.get_template('filtered.html'),
         context={
             'request': request,
-            'student_infos': student_infos,
+            'report_rows': report_rows,
+            'report_slice': slice_key,
+            'report_slice_column': REPORT_SLICE_COLUMNS[slice_key][0],
+            'report_slice_sort_type': 'number' if slice_key in REPORT_SLICE_NUMERIC_KEYS else 'text',
         },
     )
 
@@ -2652,31 +2712,54 @@ def sanitize_spreadsheet_value(value):
     return value
 
 
-def parse_report_export_columns(request: Request) -> tuple[Sequence[str], str | None]:
+def parse_report_export_columns(request: Request, slice_key: str) -> tuple[Sequence[str], str | None]:
     """Выбор колонок для выгрузки отчёта (GET-параметр ``columns``).
 
-    Формат — повторённые параметры и/или список через запятую. Порядок в
-    файле всегда канонический (как в HTML-отчёте), неизвестные имена
-    игнорируются. Без параметра — полный набор (обратная совместимость;
-    пустой ``?columns=`` парсер запроса отбрасывает так же, как отсутствие
-    параметра). Параметр есть, но валидных колонок не осталось — 400:
-    минимум одна колонка обязательна.
+    Формат — повторённые параметры и/или список через запятую. Набор колонок
+    зависит от среза (group_by): «название среза + Участий/Побед/Призовых»,
+    для «студента» — как раньше (ФИО/пол/институт/группа/курс + метрики).
+    Порядок в файле всегда канонический (как в HTML-отчёте), неизвестные
+    имена игнорируются, старое имя «Количество участий» — алиас «Участий».
+    Без параметра — полный набор (обратная совместимость; пустой ``?columns=``
+    парсер запроса отбрасывает так же, как отсутствие параметра). Параметр
+    есть, но валидных колонок не осталось — 400: минимум одна колонка
+    обязательна.
     """
+    available = report_export_columns(slice_key)
     raw_values = request.args.getlist('columns')
     if not raw_values:
-        return list(REPORT_EXPORT_COLUMNS), None
-    requested = {part.strip() for value in raw_values for part in value.split(',') if part.strip()}
-    columns = [column for column in REPORT_EXPORT_COLUMNS if column in requested]
+        return available, None
+    requested = {
+        LEGACY_REPORT_COLUMN_ALIASES.get(part.strip(), part.strip())
+        for value in raw_values
+        for part in value.split(',')
+        if part.strip()
+    }
+    columns = [column for column in available if column in requested]
     if not columns:
         return [], 'Не выбрано ни одной колонки для выгрузки'
     return columns, None
 
 
 def build_report_dataframe(
-    student_infos: Iterable[StudentInfo],
-    columns: Sequence[str] = REPORT_EXPORT_COLUMNS,
+    report_rows: Sequence,
+    columns: Sequence[str],
+    slice_key: str = DEFAULT_REPORT_SLICE,
 ) -> pd.DataFrame:
-    df = pd.DataFrame.from_records([info.model_dump(by_alias=True) for info in student_infos])
+    if slice_key == DEFAULT_REPORT_SLICE:
+        records = [info.model_dump(by_alias=True) for info in report_rows]
+    else:
+        slice_column = REPORT_SLICE_COLUMNS[slice_key][0]
+        records = [
+            {
+                slice_column: row.slice_value,
+                'Участий': row.count_participation,
+                'Побед': row.count_wins,
+                'Призовых': row.count_prizes,
+            }
+            for row in report_rows
+        ]
+    df = pd.DataFrame.from_records(records)
     df = df.reindex(columns=columns)
     for column in df.columns:
         if df[column].dtype == object:
@@ -2686,18 +2769,21 @@ def build_report_dataframe(
 
 @app.get('/export/report')
 async def export_report(request: Request):
-    # Доступ как у просмотра отчёта: всем, кроме athlete.
+    # Доступ как у просмотра отчёта: всем, кроме athlete. Наследует
+    # срез/метрики/фильтры применённого отчёта (GET-параметры).
     if user_is_athlete(request):
         return text(body='Forbidden', status=403)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
-    columns, columns_error = parse_report_export_columns(request)
+
+    slice_key = parse_report_slice(dict(request.args))
+    columns, columns_error = parse_report_export_columns(request, slice_key)
     if columns_error:
         return text(body=columns_error, status=400)
 
-    student_infos = get_student_infos(request)
-    df = await asyncio.to_thread(build_report_dataframe, student_infos, columns)
+    report_rows = get_report_rows(request, slice_key)
+    df = await asyncio.to_thread(build_report_dataframe, report_rows, columns, slice_key)
 
     now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
     filename = f'Отчет_{now_str}.xlsx'

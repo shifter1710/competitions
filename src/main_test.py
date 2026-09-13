@@ -1,4 +1,5 @@
 import hmac
+import re
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
@@ -11,6 +12,8 @@ import pytest
 from sanic_testing.testing import SanicTestClient
 
 from src.auth import hash_password
+from src.conftest import make_report_fixture
+from src.conftest import make_report_unapproved_fixture
 from src.main import app
 from src.main import create_auth_cookie_value
 from src.main import normalize_position
@@ -18,6 +21,7 @@ from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
+from src.storage.sqlite import SQLiteAdapter
 
 
 def get_xlsx_headers(content: bytes) -> list[str]:
@@ -624,6 +628,8 @@ def test_export_report_omits_dataframe_index_and_student_id(client: SanicTestCli
             group='A',
             course=1,
             count_participation=3,
+            count_wins=1,
+            count_prizes=2,
         )
     ]
 
@@ -636,7 +642,9 @@ def test_export_report_omits_dataframe_index_and_student_id(client: SanicTestCli
         'Институт',
         'Группа',
         'Курс',
-        'Количество участий',
+        'Участий',
+        'Побед',
+        'Призовых',
     ]
 
 
@@ -650,6 +658,8 @@ def make_report_infos() -> list[StudentInfo]:
             group='А-101',
             course=2,
             count_participation=5,
+            count_wins=2,
+            count_prizes=3,
         ),
         StudentInfo(
             student_id='2',
@@ -659,6 +669,8 @@ def make_report_infos() -> list[StudentInfo]:
             group='Б-202',
             course=1,
             count_participation=1,
+            count_wins=0,
+            count_prizes=0,
         ),
     ]
 
@@ -670,13 +682,31 @@ def test_export_report_returns_rows_in_report_order(client: SanicTestClient):
 
     assert response.status == 200
     assert get_xlsx_rows(response.body) == [
-        ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Количество участий'),
-        ('Иванов Иван', 'М', 'ИСИ', 'А-101', 2, 5),
-        ('Петров Пётр', 'Ж', 'ИМИ', 'Б-202', 1, 1),
+        ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Участий', 'Побед', 'Призовых'),
+        ('Иванов Иван', 'М', 'ИСИ', 'А-101', 2, 5, 2, 3),
+        ('Петров Пётр', 'Ж', 'ИМИ', 'Б-202', 1, 1, 0, 0),
     ]
 
 
 def test_export_report_with_column_subset(client: SanicTestClient):
+    app.ctx.storage.get_filtered.return_value = make_report_infos()
+
+    _, response = client.get(
+        '/export/report?' + urlencode({'columns': ['ФИО', 'Участий']}, doseq=True),
+        headers=get_auth_headers(),
+    )
+
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('ФИО', 'Участий'),
+        ('Иванов Иван', 5),
+        ('Петров Пётр', 1),
+    ]
+
+
+def test_export_report_accepts_legacy_column_name(client: SanicTestClient):
+    # Старые закладки с «Количество участий» продолжают работать: имя —
+    # алиас «Участий» (замечание №19, обратная совместимость).
     app.ctx.storage.get_filtered.return_value = make_report_infos()
 
     _, response = client.get(
@@ -686,7 +716,7 @@ def test_export_report_with_column_subset(client: SanicTestClient):
 
     assert response.status == 200
     assert get_xlsx_rows(response.body) == [
-        ('ФИО', 'Количество участий'),
+        ('ФИО', 'Участий'),
         ('Иванов Иван', 5),
         ('Петров Пётр', 1),
     ]
@@ -733,6 +763,9 @@ def test_export_report_applies_report_filters(client: SanicTestClient):
         'position': '<4',
         'level': None,
         'name': 'Иван',
+        'institute': '',
+        'group': '',
+        'sport': '',
         'custom_filters': [],
     }
 
@@ -751,8 +784,227 @@ def test_reports_page_shows_export_column_panel(client: SanicTestClient):
     assert response.status == 200
     assert 'report-export-form' in response.text
     assert 'action="/export/report"' in response.text
-    for column in ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Количество участий'):
+    for column in ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Участий', 'Побед', 'Призовых'):
         assert f'value="{column}"' in response.text
+
+
+def test_reports_page_shows_slice_and_catalog_filters(client: SanicTestClient):
+    # Срез и фильтры институт/группа/спорт — на странице фильтров отчёта;
+    # группы знают иерархию (институт → его группы), срезы — фиксированный
+    # набор из решения по замечанию №19.
+    _, response = client.get('/reports', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'Группировать по' in response.text
+    assert 'name="group_by"' in response.text
+    assert 'name="institute"' in response.text
+    assert 'name="group"' in response.text
+    assert 'name="sport"' in response.text
+    for option in ('student', 'group', 'institute', 'course', 'sport', 'level', 'year'):
+        assert f'value="{option}"' in response.text
+    assert 'data-groups-by-institute' in response.text
+    assert 'data-columns-by-slice' in response.text
+
+
+# --- Расширение отчётов (замечание №19) на реальном SQLite-адаптере. ---
+# Данные и ручной пересчёт метрик — src/conftest.py.
+
+
+@pytest.fixture
+def reports_client(client: SanicTestClient, tmp_path):
+    storage = SQLiteAdapter(str(tmp_path / 'reports.sqlite3'))
+    storage.save_competitions(make_report_fixture())
+    for review_status, record in make_report_unapproved_fixture():
+        storage.save_competitions([record], review_status=review_status, owner_id=9)
+    storage.create_custom_field('trainer', 'Тренер', 'text', False, True, True, True, 0)
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+def get_report_cells(html: str) -> list[list[str]]:
+    body = re.search(r'<tbody>(.*?)</tbody>', html, re.S)
+    if body is None:
+        return []
+    rows = re.findall(r'<tr>(.*?)</tr>', body.group(1), re.S)
+    return [
+        [re.sub(r'<[^>]+>', '', cell).strip() for cell in re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)] for row in rows
+    ]
+
+
+def test_report_page_student_slice_with_metrics(reports_client: SanicTestClient):
+    # Историчность: Козлов в двух институтах — две отдельные строки; метрики
+    # Побед/Призовых теперь есть и для среза «студент».
+    _, response = reports_client.get('/report', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_report_cells(response.text) == [
+        ['1', 'Козлов Кирилл', 'М', 'ИМИ', 'ТД-303', '2', '1', '0', '1'],
+        ['2', 'Козлов Кирилл', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
+        ['3', 'Сидоров Сидор', 'М', 'ИСИ', 'ПГС-102', '3', '1', '0', '0'],
+        ['4', 'Петров Пётр', 'Ж', 'ИМИ', 'СБ-202', '2', '2', '1', '2'],
+        ['5', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '3', '1', '2'],
+    ]
+    assert 'Участий' in response.text and 'Побед' in response.text and 'Призовых' in response.text
+
+
+@pytest.mark.parametrize(
+    'group_by,header,expected',
+    [
+        (
+            'group',
+            'Группа',
+            [
+                ['1', 'ПГС-102', '1', '0', '0'],
+                ['2', 'ТД-303', '1', '0', '1'],
+                ['3', 'СБ-202', '2', '1', '2'],
+                ['4', 'ПГС-101', '4', '2', '3'],
+            ],
+        ),
+        ('institute', 'Институт', [['1', 'ИМИ', '3', '1', '3'], ['2', 'ИСИ', '5', '2', '3']]),
+        ('course', 'Курс', [['1', '3', '1', '0', '0'], ['2', '2', '3', '1', '3'], ['3', '1', '4', '2', '3']]),
+        (
+            'sport',
+            'Вид спорта',
+            [['1', 'Шахматы', '1', '0', '0'], ['2', 'Лыжи', '2', '1', '1'], ['3', 'Бег', '5', '2', '5']],
+        ),
+        (
+            'level',
+            'Уровень соревнований',
+            [['1', 'межвузовские', '3', '0', '2'], ['2', 'внутривузовские', '5', '3', '4']],
+        ),
+        (
+            'year',
+            'Год',
+            [['1', '2023', '2', '1', '1'], ['2', '2024', '3', '1', '3'], ['3', '2025', '3', '1', '2']],
+        ),
+    ],
+)
+def test_report_page_slice_rows(reports_client: SanicTestClient, group_by, header, expected):
+    _, response = reports_client.get(f'/report?group_by={group_by}', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert f'>{header}</th>' in response.text
+    assert get_report_cells(response.text) == expected
+
+
+def test_report_page_filters_institute_group_sport(reports_client: SanicTestClient):
+    # Пара институт+группа по иерархии: остались Иванов и запись Козлова из
+    # ИСИ/ПГС-101 (его ИМИ-запись не попадает).
+    _, response = reports_client.get(
+        '/report?' + urlencode({'institute': 'ИСИ', 'group': 'ПГС-101'}),
+        headers=get_auth_headers(),
+    )
+    assert response.status == 200
+    assert get_report_cells(response.text) == [
+        ['1', 'Козлов Кирилл', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
+        ['2', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '3', '1', '2'],
+    ]
+
+    _, response = reports_client.get('/report?sport=' + quote('Шахматы'), headers=get_auth_headers())
+    assert response.status == 200
+    assert get_report_cells(response.text) == [
+        ['1', 'Сидоров Сидор', 'М', 'ИСИ', 'ПГС-102', '3', '1', '0', '0'],
+    ]
+
+    # Новый фильтр работает и на другом срезе: группы института ИМИ.
+    _, response = reports_client.get(
+        '/report?' + urlencode({'group_by': 'group', 'institute': 'ИМИ'}),
+        headers=get_auth_headers(),
+    )
+    assert response.status == 200
+    assert get_report_cells(response.text) == [
+        ['1', 'ТД-303', '1', '0', '1'],
+        ['2', 'СБ-202', '2', '1', '2'],
+    ]
+
+
+def test_report_page_custom_filter_applies_to_slice(reports_client: SanicTestClient):
+    _, response = reports_client.get(
+        '/report?' + urlencode({'group_by': 'group', 'custom__trainer': 'Смит'}),
+        headers=get_auth_headers(),
+    )
+    assert response.status == 200
+    assert get_report_cells(response.text) == [['1', 'ПГС-101', '1', '1', '1']]
+
+
+def test_report_url_is_reproducible(reports_client: SanicTestClient):
+    # Шаримость: прямой GET с срезом и фильтрами даёт те же данные тем же
+    # ответом, что и повторный заход по той же ссылке (закладка).
+    url = '/report?' + urlencode(
+        {'group_by': 'group', 'institute': 'ИСИ', 'date_from': '01.01.2023', 'date_to': '31.12.2025'}
+    )
+    _, first = reports_client.get(url, headers=get_auth_headers())
+    _, second = reports_client.get(url, headers=get_auth_headers())
+
+    assert first.status == second.status == 200
+    assert first.text == second.text
+    assert get_report_cells(first.text) == [
+        ['1', 'ПГС-102', '1', '0', '0'],
+        ['2', 'ПГС-101', '4', '2', '3'],
+    ]
+
+
+def test_report_rejects_unknown_slice(client: SanicTestClient):
+    _, response = client.get('/report?group_by=bogus', headers=get_auth_headers())
+    assert response.status == 400
+    assert 'Неизвестный срез' in response.text
+
+
+def test_report_available_for_viewer_with_slice(reports_client: SanicTestClient):
+    _, response = reports_client.get('/report?group_by=year', headers=get_auth_headers(role='viewer'))
+    assert response.status == 200
+    assert get_report_cells(response.text) == [
+        ['1', '2023', '2', '1', '1'],
+        ['2', '2024', '3', '1', '3'],
+        ['3', '2025', '3', '1', '2'],
+    ]
+
+
+def test_export_report_slice_xlsx_rows(reports_client: SanicTestClient):
+    _, response = reports_client.get('/export/report?group_by=group', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('Группа', 'Участий', 'Побед', 'Призовых'),
+        ('ПГС-102', 1, 0, 0),
+        ('ТД-303', 1, 0, 1),
+        ('СБ-202', 2, 1, 2),
+        ('ПГС-101', 4, 2, 3),
+    ]
+
+
+def test_export_report_slice_with_column_subset(reports_client: SanicTestClient):
+    _, response = reports_client.get(
+        '/export/report?group_by=sport&columns=' + quote('Побед,Вид спорта'),
+        headers=get_auth_headers(),
+    )
+
+    # порядок колонок канонический для среза, неизвестные игнорируются
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('Вид спорта', 'Побед'),
+        ('Шахматы', 0),
+        ('Лыжи', 1),
+        ('Бег', 2),
+    ]
+
+
+def test_export_report_slice_with_filters_and_year(reports_client: SanicTestClient):
+    _, response = reports_client.get(
+        '/export/report?' + urlencode({'group_by': 'year', 'institute': 'ИМИ', 'sport': 'Бег'}),
+        headers=get_auth_headers(),
+    )
+
+    assert response.status == 200
+    assert get_xlsx_rows(response.body) == [
+        ('Год', 'Участий', 'Побед', 'Призовых'),
+        (2024, 1, 0, 1),
+        (2025, 1, 0, 1),
+    ]
 
 
 def test_empty_template_includes_custom_fields(client: SanicTestClient):
@@ -2102,10 +2354,16 @@ def test_athlete_cannot_import_review_or_report(client: SanicTestClient):
     _, response = client.get('/report', headers=headers)
     assert response.status == 403
 
+    _, response = client.get('/report?group_by=group', headers=headers)
+    assert response.status == 403
+
     _, response = client.get('/export/index', headers=headers)
     assert response.status == 403
 
     _, response = client.get('/export/report', headers=headers)
+    assert response.status == 403
+
+    _, response = client.get('/export/report?group_by=institute', headers=headers)
     assert response.status == 403
 
 

@@ -9,6 +9,7 @@ from typing import Sequence
 
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
+from src.models.http.report_row import ReportSliceRow
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
 
@@ -16,6 +17,29 @@ from src.settings import settings
 # текстом, справочник — только подсказки (docs/data-model-decisions.md,
 # «Справочники значений»). Уровни живут в своей таблице и сюда не входят.
 CATALOG_CATEGORIES: tuple[str, ...] = ('sport', 'institute')
+
+# Срезы отчёта (замечание №19, docs/data-model-decisions.md «Расширение
+# отчётов»): группировка ВСЕГДА по данным записи — исторический факт на
+# момент соревнования, смена группы/института в профиле строки не склеивает.
+# Ключи синхронны с REPORT_SLICES в src/main.py. Выражения — колонки таблицы
+# competitions; «год» — первые 4 символа ISO-даты записи.
+REPORT_GROUPINGS: dict[str, tuple[str, ...]] = {
+    'student': ('student_id', 'student_name', 'student_sex', 'institute', '"group"', 'course'),
+    'group': ('"group"',),
+    'institute': ('institute',),
+    'course': ('course',),
+    'sport': ('sport',),
+    'level': ('level',),
+    'year': ('CAST(substr(date, 1, 4) AS INTEGER)',),
+}
+DEFAULT_REPORT_GROUPING = 'student'
+
+# Метрики считаются в SQL (SUM CASE по строкам внутри группы), не в питоне.
+REPORT_METRIC_SELECTS: tuple[str, ...] = (
+    'COUNT(*) AS count_participation',
+    'SUM(CASE WHEN position = 1 THEN 1 ELSE 0 END) AS count_wins',
+    'SUM(CASE WHEN position >= 1 AND position <= 3 THEN 1 ELSE 0 END) AS count_prizes',
+)
 
 
 class SQLiteAdapter:
@@ -473,86 +497,214 @@ class SQLiteAdapter:
 
     def get_filtered(
         self,
+        date_from: str = '',
+        date_to: str = '',
+        position: str = '',
+        level: str = '',
+        name: str = '',
+        custom_filters: Iterable[tuple[str, str, str]] = (),
+        *,
+        institute: str = '',
+        group: str = '',
+        sport: str = '',
+    ) -> list[StudentInfo]:
+        """Отчёт по срезу «студент»: группировка по данным записи + метрики."""
+        rows = self._fetch_report_rows(
+            DEFAULT_REPORT_GROUPING,
+            date_from=date_from,
+            date_to=date_to,
+            position=position,
+            level=level,
+            name=name,
+            institute=institute,
+            group=group,
+            sport=sport,
+            custom_filters=custom_filters,
+        )
+        return [
+            StudentInfo(
+                student_id=row['student_id'],
+                student_name=row['student_name'],
+                student_sex=row['student_sex'],
+                institute=row['institute'],
+                group=row['group'],
+                course=row['course'],
+                count_participation=row['count_participation'],
+                count_wins=row['count_wins'],
+                count_prizes=row['count_prizes'],
+            )
+            for row in rows
+        ]
+
+    def get_grouped_report(
+        self,
+        group_by: str,
+        *,
+        date_from: str = '',
+        date_to: str = '',
+        position: str = '',
+        level: str = '',
+        name: str = '',
+        institute: str = '',
+        group: str = '',
+        sport: str = '',
+        custom_filters: Iterable[tuple[str, str, str]] = (),
+    ) -> list[ReportSliceRow]:
+        """Отчёт по произвольному срезу: значение поля записи + метрики.
+
+        group_by — ключ REPORT_GROUPINGS, кроме 'student' (у него другая
+        форма строки, см. get_filtered). Фильтры те же, что у get_filtered.
+        """
+        if group_by == DEFAULT_REPORT_GROUPING:
+            raise ValueError('Срез «студент» обрабатывает get_filtered')
+        if group_by not in REPORT_GROUPINGS:
+            raise ValueError(f'Неизвестный срез отчёта: {group_by}')
+        rows = self._fetch_report_rows(
+            group_by,
+            date_from=date_from,
+            date_to=date_to,
+            position=position,
+            level=level,
+            name=name,
+            institute=institute,
+            group=group,
+            sport=sport,
+            custom_filters=custom_filters,
+        )
+        return [
+            ReportSliceRow(
+                slice_value=row['slice_value'],
+                count_participation=row['count_participation'],
+                count_wins=row['count_wins'],
+                count_prizes=row['count_prizes'],
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _date_range_clauses(date_from: str, date_to: str) -> tuple[list[str], list[object]]:
+        """Условия периода отчёта: границы парсятся форматом settings.date_format."""
+        clauses = []
+        params: list[object] = []
+        if date_from:
+            clauses.append('date >= ?')
+            params.append(datetime.strptime(date_from, settings.date_format).isoformat())
+        if date_to:
+            clauses.append('date <= ?')
+            params.append(datetime.strptime(date_to, settings.date_format).isoformat())
+        return clauses, params
+
+    def _report_filter_clauses(
+        self,
+        *,
         date_from: str,
         date_to: str,
         position: str,
         level: str,
         name: str,
-        custom_filters: Iterable[tuple[str, str, str]] = (),
-    ) -> list[StudentInfo]:
+        institute: str,
+        group: str,
+        sport: str,
+        custom_filters: Iterable[tuple[str, str, str]],
+    ) -> tuple[str, list[object]]:
+        """Общий WHERE всех фильтров отчёта: период, место, уровень, ФИО,
+        институт, группа, вид спорта, кастомные поля. Только approved."""
+        filters = ["review_status = 'approved'"]
+        params: list[object] = []
+
+        date_clauses, date_params = self._date_range_clauses(date_from, date_to)
+        filters.extend(date_clauses)
+        params.extend(date_params)
+
+        if position:
+            sign = position[0]
+            value = int(position[1:])
+            if sign == '>':
+                filters.append('position > ?')
+                params.append(value)
+            elif sign == '<':
+                filters.append('position < ?')
+                params.append(value)
+
+        if level:
+            filters.append('level = ?')
+            params.append(level)
+
+        if name:
+            filters.append('student_name LIKE ?')
+            params.append(f'%{name}%')
+
+        if institute:
+            filters.append('institute = ?')
+            params.append(institute)
+
+        if group:
+            filters.append('"group" = ?')
+            params.append(group)
+
+        if sport:
+            filters.append('sport = ?')
+            params.append(sport)
+
+        custom_clauses, custom_params = self._build_custom_filter_clauses(custom_filters)
+        filters.extend(custom_clauses)
+        params.extend(custom_params)
+
+        where_clause = f'WHERE {" AND ".join(filters)}' if filters else ''
+        return where_clause, params
+
+    def _fetch_report_rows(
+        self,
+        group_by: str,
+        *,
+        date_from: str,
+        date_to: str,
+        position: str,
+        level: str,
+        name: str,
+        institute: str,
+        group: str,
+        sport: str,
+        custom_filters: Iterable[tuple[str, str, str]],
+    ) -> list[sqlite3.Row]:
+        """Агрегирующий запрос отчёта: GROUP BY по данным записи + метрики.
+
+        Один WHERE для всех фильтров отчёта (см. _report_filter_clauses) и
+        метрики SUM CASE — SQL считает всё сам, питон по строкам не ходит.
+        """
         with self._lock:
-            filters = ["review_status = 'approved'"]
-            params: list[object] = []
-
-            if date_from:
-                date_from_dt = datetime.strptime(date_from, settings.date_format)
-                filters.append('date >= ?')
-                params.append(date_from_dt.isoformat())
-
-            if date_to:
-                date_to_dt = datetime.strptime(date_to, settings.date_format)
-                filters.append('date <= ?')
-                params.append(date_to_dt.isoformat())
-
-            if position:
-                sign = position[0]
-                value = int(position[1:])
-                if sign == '>':
-                    filters.append('position > ?')
-                    params.append(value)
-                elif sign == '<':
-                    filters.append('position < ?')
-                    params.append(value)
-
-            if level:
-                filters.append('level = ?')
-                params.append(level)
-
-            if name:
-                filters.append('student_name LIKE ?')
-                params.append(f'%{name}%')
-
-            custom_clauses, custom_params = self._build_custom_filter_clauses(custom_filters)
-            filters.extend(custom_clauses)
-            params.extend(custom_params)
-
-            where_clause = f'WHERE {" AND ".join(filters)}' if filters else ''
+            group_columns = REPORT_GROUPINGS[group_by]
+            where_clause, params = self._report_filter_clauses(
+                date_from=date_from,
+                date_to=date_to,
+                position=position,
+                level=level,
+                name=name,
+                institute=institute,
+                group=group,
+                sport=sport,
+                custom_filters=custom_filters,
+            )
+            if group_by == DEFAULT_REPORT_GROUPING:
+                select_columns = ',\n'.join(group_columns)
+                order_by = 'count_participation ASC, student_name ASC, institute ASC, "group" ASC, course ASC'
+            else:
+                select_columns = f'{group_columns[0]} AS slice_value'
+                order_by = 'count_participation ASC, slice_value ASC'
             rows = self.connection.execute(
                 f'''
                 SELECT
-                    student_id,
-                    student_name,
-                    student_sex,
-                    institute,
-                    "group",
-                    course,
-                    COUNT(*) AS count_participation
+                    {select_columns},
+                    {', '.join(REPORT_METRIC_SELECTS)}
                 FROM competitions
                 {where_clause}
                 GROUP BY
-                    student_id,
-                    student_name,
-                    student_sex,
-                    institute,
-                    "group",
-                    course
-                ORDER BY count_participation ASC
+                    {', '.join(group_columns)}
+                ORDER BY {order_by}
                 ''',
                 params,
             ).fetchall()
-
-            return [
-                StudentInfo(
-                    student_id=row['student_id'],
-                    student_name=row['student_name'],
-                    student_sex=row['student_sex'],
-                    institute=row['institute'],
-                    group=row['group'],
-                    course=row['course'],
-                    count_participation=row['count_participation'],
-                )
-                for row in rows
-            ]
+            return rows
 
     def save_competitions(
         self,

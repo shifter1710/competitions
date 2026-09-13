@@ -3,6 +3,8 @@ from datetime import datetime
 
 import pytest
 
+from src.conftest import make_report_fixture
+from src.conftest import make_report_unapproved_fixture
 from src.models.competition import Competition
 from src.storage.sqlite import SQLiteAdapter
 
@@ -159,6 +161,131 @@ def test_report_filters_by_custom_date_field(adapter):
     )
     infos = adapter.get_filtered('', '', '', '', '', custom_filters=[('application', 'date', '15.02.2026')])
     assert [info.student_name for info in infos] == ['Заявка поздняя']
+
+
+# --- Расширение отчётов (замечание №19): срезы × метрики × фильтры. ---
+# Фикстура и ожидаемые числа — src/conftest.py (метрики пересчитаны руками).
+
+
+def slice_rows(rows):
+    return [(row.slice_value, row.count_participation, row.count_wins, row.count_prizes) for row in rows]
+
+
+def save_report_fixture(adapter):
+    adapter.save_competitions(make_report_fixture())
+    for review_status, record in make_report_unapproved_fixture():
+        adapter.save_competitions([record], review_status=review_status, owner_id=9)
+    return adapter
+
+
+def test_report_student_slice_counts_metrics_in_sql(adapter):
+    # Метрики для среза «студент»: участия/победы/призовые считаются одним
+    # агрегирующим запросом; неподтверждённые записи не считаются.
+    # Порядок — существующий: участий по возрастанию, затем ФИО/институт.
+    save_report_fixture(adapter)
+    infos = adapter.get_filtered('', '', '', '', '')
+
+    assert [
+        (
+            info.student_name,
+            info.institute,
+            info.group,
+            info.course,
+            info.count_participation,
+            info.count_wins,
+            info.count_prizes,
+        )
+        for info in infos
+    ] == [
+        ('Козлов Кирилл', 'ИМИ', 'ТД-303', 2, 1, 0, 1),
+        ('Козлов Кирилл', 'ИСИ', 'ПГС-101', 1, 1, 1, 1),
+        ('Сидоров Сидор', 'ИСИ', 'ПГС-102', 3, 1, 0, 0),
+        ('Петров Пётр', 'ИМИ', 'СБ-202', 2, 2, 1, 2),
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 3, 1, 2),
+    ]
+
+
+def test_report_slices_group_by_record_data(adapter):
+    # Каждый срез — GROUP BY по полю записи; числа пересчитаны руками по
+    # фикстуре из src/conftest.py (участий по возрастанию, затем значение).
+    save_report_fixture(adapter)
+
+    assert slice_rows(adapter.get_grouped_report('group')) == [
+        ('ПГС-102', 1, 0, 0),
+        ('ТД-303', 1, 0, 1),
+        ('СБ-202', 2, 1, 2),
+        ('ПГС-101', 4, 2, 3),
+    ]
+
+    assert slice_rows(adapter.get_grouped_report('institute')) == [
+        ('ИМИ', 3, 1, 3),
+        ('ИСИ', 5, 2, 3),
+    ]
+
+    assert slice_rows(adapter.get_grouped_report('course')) == [
+        (3, 1, 0, 0),
+        (2, 3, 1, 3),
+        (1, 4, 2, 3),
+    ]
+
+    assert slice_rows(adapter.get_grouped_report('sport')) == [
+        ('Шахматы', 1, 0, 0),
+        ('Лыжи', 2, 1, 1),
+        ('Бег', 5, 2, 5),
+    ]
+
+    assert slice_rows(adapter.get_grouped_report('level')) == [
+        ('межвузовские', 3, 0, 2),
+        ('внутривузовские', 5, 3, 4),
+    ]
+
+    assert slice_rows(adapter.get_grouped_report('year')) == [
+        (2023, 2, 1, 1),
+        (2024, 3, 1, 3),
+        (2025, 3, 1, 2),
+    ]
+
+
+def test_report_slices_share_filters_with_student_slice(adapter):
+    # Фильтры институт/группа/вид спорта (новые) и период (существующий)
+    # применяются к любому срезу тем же WHERE.
+    save_report_fixture(adapter)
+
+    # институт+группа по иерархии: пара сузила срез «студент» до Иванова и
+    # записи Козлова из ИСИ/ПГС-101 (Козлов из ИМИ не попадает).
+    infos = adapter.get_filtered('', '', '', '', '', institute='ИСИ', group='ПГС-101')
+    assert [(info.student_name, info.count_participation) for info in infos] == [
+        ('Козлов Кирилл', 1),
+        ('Иванов Иван', 3),
+    ]
+
+    # вид спорта на срезе «институт»: ИСИ по Бегу — записи 1, 2, 7; ИМИ — 4, 8.
+    assert slice_rows(adapter.get_grouped_report('institute', sport='Бег')) == [
+        ('ИМИ', 2, 0, 2),
+        ('ИСИ', 3, 2, 3),
+    ]
+
+    # период на срезе «год»: 2024 год целиком.
+    assert slice_rows(adapter.get_grouped_report('year', date_from='01.01.2024', date_to='31.12.2024')) == [
+        (2024, 3, 1, 3)
+    ]
+
+    # группа без института: то же имя группы в другом институте не мешает.
+    assert slice_rows(adapter.get_grouped_report('group', group='ТД-303')) == [('ТД-303', 1, 0, 1)]
+
+
+def test_report_slice_supports_custom_filters(adapter):
+    save_report_fixture(adapter)
+    rows = adapter.get_grouped_report('group', custom_filters=[('trainer', 'text', 'Смит')])
+    assert slice_rows(rows) == [('ПГС-101', 1, 1, 1)]
+
+
+def test_get_grouped_report_rejects_unknown_and_student_slices(adapter):
+    save_report_fixture(adapter)
+    with pytest.raises(ValueError, match='Неизвестный срез'):
+        adapter.get_grouped_report('bogus')
+    with pytest.raises(ValueError, match='студент'):
+        adapter.get_grouped_report('student')
 
 
 def test_athlete_sees_admin_created_records_matching_profile(adapter):
