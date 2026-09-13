@@ -1,3 +1,617 @@
+/* ============================================================================
+   СибАДИ Competitions — основной стиль продукта
+   ----------------------------------------------------------------------------
+   Слои:
+   0. Дизайн-токены утверждённого прототипа (design/prototype/tokens.css, v0.2)
+      — палитры обеих тем, типографика, радиусы, тени, переходы.
+   1. Оверрайды Bootstrap 5.3: перевод компонентов на токены прототипа
+      (кнопки, поля, таблицы, бейджи, карточки, навбар, алерты, модалы).
+   2. Собственная раскладка продукта (инлайн-строка, комбобокс, sticky-колонка
+      «Действия», виджеты nice-select2/datepicker в тёмной теме).
+
+   Bootstrap остаётся основой; тёмная тема — [data-bs-theme="dark"] на <html>
+   (та же механика, что и раньше). Источник цветов — design/prototype/.
+   ========================================================================== */
+
+/* ----------------------------------------------------------------------------
+   0. Дизайн-токены прототипа
+   ------------------------------------------------------------------------- */
+
+:root {
+    /* Реймпы прототипа */
+    --g-50:  #F2F3F6;
+    --g-100: #ECEEF1;
+    --g-200: #DFE3E8;
+    --g-300: #C9CFD8;
+    --g-500: #8590A0;
+    --g-700: #4A5260;
+    --g-800: #333B47;
+    --g-900: #23272E;
+
+    --blue-100: #E7EEF7;
+    --blue-400: #7FA5D3;
+    --blue-600: #2F5E9E;
+    --blue-700: #264D85;
+
+    /* Типографика прототипа: осн. 15, вторичный 14, подписи/бейджи 13 */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+    --fs-xs: 13px;
+    --fs-sm: 14px;
+    --fs-md: 15px;
+    --fs-lg: 21px;
+
+    --r-sm: 4px;
+    --r-md: 8px;
+    --r-lg: 12px;
+
+    --tr-fast: 110ms ease;
+
+    /* Семантика светлой темы (tokens.css §4) */
+    --bg:            var(--g-50);
+    --surface:       #FFFFFF;
+    --surface-alt:   #FAFBFC;
+    --surface-hover: #EDF1F7;
+    --field-bg:      #FFFFFF;
+
+    --border:        var(--g-200);
+    --border-strong: var(--g-300);
+
+    --text:   var(--g-900);
+    --text-2: #565F6C;
+    --text-3: var(--g-500);
+
+    --header-bg:     var(--g-900);
+    --header-border: var(--g-800);
+    --header-text:   #E9EDF2;
+    --header-2:      #A3ACBA;
+
+    --table-head-bg:   #262C35;
+    --table-head-text: #EDF0F4;
+
+    --table-sticky-shadow: rgba(23, 28, 36, 0.16);
+
+    --accent:       var(--blue-600);
+    --accent-hover: var(--blue-700);
+    --accent-fg:    var(--blue-600);
+    --accent-soft:  var(--blue-100);
+
+    --danger:       #A83935;
+    --danger-hover: #96322E;
+    --danger-soft:  #F9E7E7;
+
+    --ok-fg:   #2E7D4F;
+    --ok-bg:   #E4F0E8;
+    --ok-br:   #C2DCCB;
+
+    --warn-fg: #8A5E10;
+    --warn-bg: #F8EFD9;
+    --warn-br: #E8D5A8;
+
+    --err-fg:  #A83935;
+    --err-bg:  #F9E7E7;
+    --err-br:  #EBC5C5;
+
+    --neutral-fg: var(--g-700);
+    --neutral-bg: var(--g-100);
+    --neutral-br: var(--g-300);
+
+    --info-fg: var(--blue-700);
+    --info-bg: var(--blue-100);
+    --info-br: #C6D9EC;
+
+    --focus-ring: 0 0 0 3px rgba(47, 94, 158, 0.28);
+
+    --shadow-1: 0 1px 2px rgba(23, 28, 36, 0.05), 0 1px 3px rgba(23, 28, 36, 0.06);
+    --shadow-2: 0 2px 6px rgba(23, 28, 36, 0.07), 0 10px 28px rgba(23, 28, 36, 0.10);
+}
+
+/* Тёмная ветка токенов прототипа (tokens.css §5) на механике продукта
+   ([data-bs-theme="dark"]) */
+[data-bs-theme="dark"] {
+    --bg:            #14171D;
+    --surface:       #1D222B;
+    --surface-alt:   #222834;
+    --surface-hover: #263140;
+    --field-bg:      #151920;
+
+    --border:        #333B48;
+    --border-strong: #455060;
+
+    --text:   #E3E7ED;
+    --text-2: #A6AEBD;
+    --text-3: #7B8593;
+
+    --header-bg:     #171B22;
+    --header-border: #2A313C;
+    --header-text:   #E3E7ED;
+    --header-2:      #8D97A6;
+
+    --table-head-bg:   #12151B;
+    --table-head-text: #E3E7ED;
+
+    --table-sticky-shadow: rgba(0, 0, 0, 0.45);
+
+    --accent:       #3D74B5;
+    --accent-hover: #4A84C7;
+    --accent-fg:    #8AB2E2;
+    --accent-soft:  #213046;
+
+    --danger:       #B14943;
+    --danger-hover: #C25B54;
+    --danger-soft:  #3A2523;
+
+    --ok-fg:   #86C9A3;
+    --ok-bg:   #1D3128;
+    --ok-br:   #2F4C3B;
+
+    --warn-fg: #D9B36A;
+    --warn-bg: #362E1D;
+    --warn-br: #57492B;
+
+    --err-fg:  #E39490;
+    --err-bg:  #3A2523;
+    --err-br:  #5A3835;
+
+    --neutral-fg: #B6BFCB;
+    --neutral-bg: #2A313C;
+    --neutral-br: #3D4653;
+
+    --info-fg: #8AB2E2;
+    --info-bg: #20304A;
+    --info-br: #2E4363;
+
+    --focus-ring: 0 0 0 3px rgba(120, 163, 214, 0.32);
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-2: 0 4px 14px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* ----------------------------------------------------------------------------
+   1. Оверрайды Bootstrap на токенах прототипа
+   ------------------------------------------------------------------------- */
+
+/* База: фон, текст, шрифт, шкала 15px */
+:root {
+    --bs-body-bg: var(--bg);
+    --bs-body-color: var(--text);
+    --bs-body-font-family: var(--font-sans);
+    --bs-body-font-size: var(--fs-md);
+    --bs-secondary-color: var(--text-2);
+    --bs-tertiary-color: var(--text-3);
+    --bs-secondary-bg: var(--surface-alt);
+    --bs-tertiary-bg: var(--surface-hover);
+    --bs-border-color: var(--border);
+    --bs-border-radius: var(--r-md);
+    --bs-border-radius-sm: var(--r-sm);
+    --bs-border-radius-lg: var(--r-lg);
+    --bs-primary: var(--accent);
+    --bs-primary-rgb: 47, 94, 158;
+    --bs-danger: var(--danger);
+    --bs-danger-rgb: 168, 57, 53;
+    --bs-link-color: var(--accent-fg);
+    --bs-link-hover-color: var(--accent-hover);
+    --bs-focus-ring-color: rgba(47, 94, 158, 0.28);
+}
+
+[data-bs-theme="dark"] {
+    --bs-primary-rgb: 61, 116, 181;
+    --bs-danger-rgb: 177, 73, 67;
+    --bs-focus-ring-color: rgba(120, 163, 214, 0.32);
+    --bs-emphasis-color: var(--text);
+}
+
+body {
+    font-family: var(--font-sans);
+    font-size: var(--fs-md);
+    line-height: 1.55;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    color: var(--text);
+}
+
+h1 { font-size: var(--fs-lg); }
+h2 { font-size: var(--fs-lg); }
+h3 { font-size: 17px; }
+
+/* Шапка продукта — графитовая, как .banner/.app-header прототипа */
+.navbar.bg-dark {
+    --bs-navbar-color: var(--header-2);
+    --bs-navbar-brand-color: var(--header-text);
+    --bs-navbar-brand-hover-color: #FFFFFF;
+    --bs-navbar-hover-color: var(--header-text);
+    --bs-navbar-active-color: var(--header-text);
+    --bs-navbar-toggler-border-color: rgba(255, 255, 255, 0.22);
+    background-color: var(--header-bg) !important;
+    border-bottom: 1px solid var(--header-border);
+    color: var(--header-text);
+}
+
+.navbar.bg-dark .nav-link {
+    color: var(--header-2);
+    font-weight: 500;
+    border-bottom: 2px solid transparent;
+    padding-bottom: calc(var(--bs-navbar-padding-y, 0.5rem) + 6px);
+    transition: color var(--tr-fast), border-color var(--tr-fast);
+}
+
+.navbar.bg-dark .nav-link:hover,
+.navbar.bg-dark .nav-link:focus {
+    color: var(--header-text);
+}
+
+.navbar.bg-dark .nav-link.active {
+    color: var(--header-text);
+    border-bottom-color: var(--blue-400);
+}
+
+.navbar.bg-dark .text-light {
+    color: var(--header-text) !important;
+}
+
+.navbar.bg-dark .btn-outline-light {
+    --bs-btn-color: var(--header-text);
+    --bs-btn-border-color: rgba(255, 255, 255, 0.22);
+    --bs-btn-hover-bg: rgba(255, 255, 255, 0.14);
+    --bs-btn-hover-border-color: rgba(255, 255, 255, 0.22);
+    --bs-btn-hover-color: #FFFFFF;
+    --bs-btn-active-bg: rgba(255, 255, 255, 0.14);
+}
+
+/* Кнопки: primary — глубокий синий прототипа, secondary — «белая с рамкой»,
+   success — спокойный зелёный, danger — спокойный красный */
+
+.btn {
+    font-size: var(--fs-md);
+    font-weight: 500;
+    border-radius: var(--r-md);
+}
+
+.btn-sm {
+    --bs-btn-border-radius: var(--r-sm);
+    font-size: var(--fs-sm);
+}
+
+.btn-primary {
+    --bs-btn-bg: var(--accent);
+    --bs-btn-border-color: var(--accent);
+    --bs-btn-hover-bg: var(--accent-hover);
+    --bs-btn-hover-border-color: var(--accent-hover);
+    --bs-btn-active-bg: var(--accent-hover);
+    --bs-btn-active-border-color: var(--accent-hover);
+    --bs-btn-disabled-bg: var(--accent);
+    --bs-btn-disabled-border-color: var(--accent);
+    --bs-btn-focus-shadow-rgb: 47, 94, 158;
+}
+
+[data-bs-theme="dark"] .btn-primary {
+    --bs-btn-focus-shadow-rgb: 120, 163, 214;
+}
+
+.btn-outline-primary {
+    --bs-btn-color: var(--accent-fg);
+    --bs-btn-border-color: var(--accent);
+    --bs-btn-hover-bg: var(--accent);
+    --bs-btn-hover-border-color: var(--accent);
+    --bs-btn-active-bg: var(--accent);
+    --bs-btn-active-border-color: var(--accent);
+}
+
+.btn-secondary {
+    --bs-btn-bg: var(--surface);
+    --bs-btn-border-color: var(--border-strong);
+    --bs-btn-color: var(--text);
+    --bs-btn-hover-bg: var(--surface-hover);
+    --bs-btn-hover-border-color: var(--border-strong);
+    --bs-btn-hover-color: var(--text);
+    --bs-btn-active-bg: var(--surface-hover);
+    --bs-btn-active-border-color: var(--border-strong);
+    --bs-btn-active-color: var(--text);
+    --bs-btn-disabled-bg: var(--surface);
+    --bs-btn-disabled-border-color: var(--border-strong);
+    --bs-btn-disabled-color: var(--text-3);
+}
+
+.btn-outline-secondary {
+    --bs-btn-color: var(--text-2);
+    --bs-btn-border-color: var(--border-strong);
+    --bs-btn-hover-bg: var(--surface-hover);
+    --bs-btn-hover-border-color: var(--border-strong);
+    --bs-btn-hover-color: var(--text);
+    --bs-btn-active-bg: var(--surface-hover);
+    --bs-btn-active-border-color: var(--border-strong);
+    --bs-btn-active-color: var(--text);
+}
+
+.btn-success {
+    --bs-btn-bg: var(--ok-fg);
+    --bs-btn-border-color: var(--ok-fg);
+    --bs-btn-hover-bg: #276B44;
+    --bs-btn-hover-border-color: #276B44;
+    --bs-btn-active-bg: #276B44;
+    --bs-btn-active-border-color: #276B44;
+    --bs-btn-disabled-bg: var(--ok-fg);
+    --bs-btn-disabled-border-color: var(--ok-fg);
+    --bs-btn-color: #FFFFFF;
+}
+
+[data-bs-theme="dark"] .btn-success {
+    --bs-btn-bg: #2F6B49;
+    --bs-btn-border-color: #2F6B49;
+    --bs-btn-hover-bg: #3A7D57;
+    --bs-btn-hover-border-color: #3A7D57;
+    --bs-btn-active-bg: #3A7D57;
+}
+
+.btn-outline-success {
+    --bs-btn-color: var(--ok-fg);
+    --bs-btn-border-color: var(--ok-fg);
+    --bs-btn-hover-bg: var(--ok-fg);
+    --bs-btn-hover-border-color: var(--ok-fg);
+    --bs-btn-active-bg: var(--ok-fg);
+    --bs-btn-active-border-color: var(--ok-fg);
+}
+
+.btn-danger {
+    --bs-btn-bg: var(--danger);
+    --bs-btn-border-color: var(--danger);
+    --bs-btn-hover-bg: var(--danger-hover);
+    --bs-btn-hover-border-color: var(--danger-hover);
+    --bs-btn-active-bg: var(--danger-hover);
+    --bs-btn-active-border-color: var(--danger-hover);
+    --bs-btn-disabled-bg: var(--danger);
+    --bs-btn-disabled-border-color: var(--danger);
+    --bs-btn-focus-shadow-rgb: 168, 57, 53;
+}
+
+.btn-outline-danger {
+    --bs-btn-color: var(--danger);
+    --bs-btn-border-color: var(--danger);
+    --bs-btn-hover-bg: var(--danger);
+    --bs-btn-hover-border-color: var(--danger);
+    --bs-btn-active-bg: var(--danger);
+    --bs-btn-active-border-color: var(--danger);
+}
+
+/* Поля форм: 15px, радиус 8, фокус — синий с мягким кольцом прототипа */
+.form-control,
+.form-select {
+    font-size: var(--fs-md);
+    color: var(--text);
+    background-color: var(--field-bg);
+    border-color: var(--border-strong);
+}
+
+.form-control::placeholder {
+    color: var(--text-3);
+}
+
+.form-control:hover,
+.form-select:hover {
+    border-color: var(--text-3);
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color: var(--accent);
+    box-shadow: var(--focus-ring);
+    background-color: var(--field-bg);
+    color: var(--text);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+    background-color: var(--surface-alt);
+    opacity: 0.55;
+}
+
+.form-label,
+.label {
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    color: var(--text-2);
+    margin-bottom: 6px;
+}
+
+.label {
+    font-style: normal;
+}
+
+.form-check-input:checked {
+    background-color: var(--accent);
+    border-color: var(--accent);
+}
+
+.form-check-input:focus {
+    border-color: var(--accent);
+    box-shadow: var(--focus-ring);
+}
+
+.input-group-text {
+    background-color: var(--surface-alt);
+    border-color: var(--border-strong);
+    color: var(--text-2);
+}
+
+/* Таблицы: голова — тёмно-графитовая с белым текстом, зебра и ховер —
+   токены прототипа, шрифт 14, заголовки 13 */
+.table {
+    --bs-table-bg: var(--surface);
+    --bs-table-color: var(--text);
+    --bs-table-border-color: var(--border);
+    --bs-table-striped-bg: var(--surface-alt);
+    --bs-table-striped-color: var(--text);
+    --bs-table-hover-bg: var(--surface-hover);
+    --bs-table-hover-color: var(--text);
+    font-size: var(--fs-sm);
+    line-height: 1.45;
+    margin-bottom: 0;
+}
+
+.table > :not(caption) > * > * {
+    padding: 0.5rem 0.75rem;
+}
+
+.table thead th {
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+.table-dark {
+    --bs-table-bg: var(--table-head-bg);
+    --bs-table-color: var(--table-head-text);
+    --bs-table-border-color: var(--border);
+    --bs-table-striped-bg: var(--table-head-bg);
+    --bs-table-hover-bg: var(--table-head-bg);
+}
+
+.table-dark th {
+    color: var(--table-head-text);
+}
+
+/* Бейджи статусов: мягкие двухцветные, как .badge--ok/--warn/--danger
+   прототипа. Bootstrap-классы text-bg-* зашивают цвет через !important,
+   поэтому оверрайды тоже с !important (main.css загружается последним). */
+.badge {
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    border-radius: 999px;
+    padding: 2px 9px;
+    line-height: 1.55;
+}
+
+.badge.text-bg-success {
+    color: var(--ok-fg) !important;
+    background-color: var(--ok-bg) !important;
+    border: 1px solid var(--ok-br);
+}
+
+.badge.text-bg-warning {
+    color: var(--warn-fg) !important;
+    background-color: var(--warn-bg) !important;
+    border: 1px solid var(--warn-br);
+}
+
+.badge.text-bg-danger {
+    color: var(--err-fg) !important;
+    background-color: var(--err-bg) !important;
+    border: 1px solid var(--err-br);
+}
+
+.badge.text-bg-primary {
+    color: var(--info-fg) !important;
+    background-color: var(--info-bg) !important;
+    border: 1px solid var(--info-br);
+}
+
+.badge.text-bg-secondary,
+.badge.text-bg-light {
+    color: var(--neutral-fg) !important;
+    background-color: var(--neutral-bg) !important;
+    border: 1px solid var(--neutral-br);
+}
+
+/* Статус «подтверждена» (badge text-bg-light text-muted на главной):
+   в прототипе это зелёный --ok. */
+.badge.text-bg-light.text-muted {
+    color: var(--ok-fg) !important;
+    background-color: var(--ok-bg) !important;
+    border: 1px solid var(--ok-br);
+}
+
+/* Карточки: радиус 12, рамка и лёгкая тень прототипа */
+.card {
+    --bs-card-bg: var(--surface);
+    --bs-card-border-color: var(--border);
+    --bs-card-border-radius: var(--r-lg);
+    --bs-card-cap-bg: var(--surface);
+    --bs-card-cap-border-color: var(--border);
+    --bs-card-color: var(--text);
+    box-shadow: var(--shadow-1);
+}
+
+.card-header {
+    font-weight: 600;
+}
+
+/* Алерты — как строки-подсказки .note прототипа */
+.alert {
+    border-radius: var(--r-md);
+    font-size: var(--fs-sm);
+}
+
+.alert-success {
+    color: var(--ok-fg);
+    background-color: var(--ok-bg);
+    border-color: var(--ok-br);
+    border-left: 3px solid var(--ok-br);
+}
+
+.alert-danger {
+    color: var(--err-fg);
+    background-color: var(--err-bg);
+    border-color: var(--err-br);
+    border-left: 3px solid var(--err-br);
+}
+
+/* Модалы: радиус 12, поверхности прототипа */
+.modal-content {
+    background-color: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2);
+}
+
+.modal-header,
+.modal-footer {
+    border-color: var(--border);
+}
+
+/* Выпадающие списки Bootstrap (dropdown-menu) */
+.dropdown-menu {
+    --bs-dropdown-bg: var(--surface);
+    --bs-dropdown-color: var(--text);
+    --bs-dropdown-border-color: var(--border-strong);
+    --bs-dropdown-link-color: var(--text);
+    --bs-dropdown-link-hover-bg: var(--surface-hover);
+    --bs-dropdown-link-hover-color: var(--text);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-2);
+}
+
+/* Пагинация и страницы-ссылки, если появляются */
+.page-link {
+    color: var(--accent-fg);
+    background-color: var(--surface);
+    border-color: var(--border-strong);
+}
+
+.page-item.active .page-link {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    color: #FFFFFF;
+}
+
+.text-muted {
+    color: var(--text-2) !important;
+}
+
+hr {
+    border-color: var(--border);
+    opacity: 1;
+}
+
+/* ----------------------------------------------------------------------------
+   2. Собственная раскладка продукта
+   ------------------------------------------------------------------------- */
+
 html {
     overflow-x: hidden;
     margin-right: calc(-1 * (100vw - 100%));
@@ -11,15 +625,6 @@ html {
     margin-bottom: 0;
 }
 
-.label {
-    display: block;
-    color: #6c757d;
-    font-weight: 500;
-    font-size: 13px;
-    font-style: italic;
-    margin-bottom: 1px;
-}
-
 .datetime {
     display: flex;
     gap: 12px;
@@ -27,24 +632,24 @@ html {
 
 .datetime input {
     padding: 0.375rem 0.75rem;
-    font-size: 1rem;
+    font-size: var(--fs-md);
     font-weight: 400;
     line-height: 1.5;
-    color: var(--bs-body-color);
-    background-color: var(--bs-body-bg);
+    color: var(--text);
+    background-color: var(--field-bg);
     background-clip: padding-box;
-    border: var(--bs-border-width) solid var(--bs-border-color);
-    border-radius: var(--bs-border-radius);
-    transition: border-color .15s ease-in-out, box-shadow .15s ease-in-out;
+    border: var(--bs-border-width) solid var(--border-strong);
+    border-radius: var(--r-md);
+    transition: border-color var(--tr-fast), box-shadow var(--tr-fast);
 }
 
 .nice-select.open,
 .datetime input:focus {
-    color: var(--bs-body-color);
-    background-color: var(--bs-body-bg);
-    border-color: #86b7fe;
+    color: var(--text);
+    background-color: var(--field-bg);
+    border-color: var(--accent);
     outline: 0;
-    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, .25);
+    box-shadow: var(--focus-ring);
 }
 
 select {
@@ -53,10 +658,70 @@ select {
 
 .nice-select {
     width: 100%;
+    font-size: var(--fs-md);
+    color: var(--text);
+    background-color: var(--field-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    height: calc(1.5em + 0.75rem + 2px);
+    line-height: 1.5;
 }
 
-.nice-select-dropdown {
+.nice-select:hover {
+    border-color: var(--text-3);
+}
+
+.nice-select .current {
+    color: var(--text);
+}
+
+/* Спецификация .nice-select .nice-select-dropdown — перекрывает белый фон
+   библиотеки (дефект «серый/белый селект в тёмной теме на /reports»). */
+.nice-select .nice-select-dropdown {
     width: 100%;
+    background-color: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-2);
+}
+
+.nice-select .list {
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.nice-select .option {
+    font-size: var(--fs-sm);
+    color: var(--text);
+}
+
+.nice-select .option:hover,
+.nice-select .option.focus,
+.nice-select .option.selected.focus {
+    background-color: var(--surface-hover);
+}
+
+.nice-select .option.selected {
+    color: var(--accent-fg);
+    font-weight: 600;
+}
+
+.nice-select .option.disabled {
+    color: var(--text-3);
+}
+
+.nice-select .nice-select-search {
+    background-color: var(--field-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    color: var(--text);
+    font-size: var(--fs-sm);
+}
+
+.nice-select .nice-select-search-box {
+    padding: 5px 8px;
+    margin: 6px;
+    border-radius: var(--r-sm);
 }
 
 .col-button {
@@ -91,18 +756,20 @@ select {
     margin: 24px 0 16px;
 }
 
+/* Таблица-карточка: радиус как у .table-wrap прототипа (12px) */
 .table-card {
-    border-radius: 20px;
+    border-radius: var(--r-lg);
 }
 
 .table-column-option {
     display: flex;
     align-items: center;
     gap: 10px;
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 12px;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
     padding: 10px 12px;
+    color: var(--text);
 }
 
 .table-header-cell {
@@ -139,10 +806,6 @@ select {
     overflow-x: auto;
 }
 
-.table {
-    border-radius: 20px;
-}
-
 .table .id {
     width: 300px;
     word-break: break-all;
@@ -150,10 +813,10 @@ select {
 
 .empty-content {
     width: fit-content;
-    color: #6c757d;
+    color: var(--text-2);
     font-weight: 600;
     font-style: italic;
-    font-size: 24px;
+    font-size: 21px;
     margin: 0 auto;
     padding-top: 16px;
 }
@@ -169,7 +832,7 @@ select {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgb(0, 0, 0, .5);
+    background: var(--table-sticky-shadow);
     z-index: 1;
     transition: all .15s ease-in-out;
 }
@@ -180,8 +843,8 @@ select {
 }
 
 .loader__icon {
-    border: 16px solid #f3f3f3;
-    border-top: 16px solid #3498db;
+    border: 16px solid var(--surface-alt);
+    border-top: 16px solid var(--accent);
     border-radius: 50%;
     width: 120px;
     height: 120px;
@@ -214,6 +877,13 @@ select {
     width: 100%;
     box-sizing: border-box;
     min-width: 90px;
+}
+
+/* Инпуты в ячейках таблицы — компактнее, как .input--cell прототипа */
+.interactive-table .row-editing .form-control,
+.interactive-table .row-editing .form-select {
+    font-size: var(--fs-sm);
+    padding: 0.25rem 0.5rem;
 }
 
 .interactive-table .row-editing .inline-save-button,
@@ -261,12 +931,12 @@ select {
     margin: 0;
     padding: 0.25rem 0;
     list-style: none;
-    font-size: 0.875rem;
-    color: var(--bs-body-color);
-    background-color: var(--bs-body-bg);
-    border: var(--bs-border-width) solid var(--bs-border-color);
-    border-radius: var(--bs-border-radius);
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .175);
+    font-size: var(--fs-sm);
+    color: var(--text);
+    background-color: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-2);
 }
 
 .combobox-option {
@@ -277,12 +947,12 @@ select {
 
 .combobox-option:hover,
 .combobox-option.combobox-option-active {
-    background-color: var(--bs-secondary-bg);
+    background-color: var(--surface-hover);
 }
 
 .combobox-empty {
     padding: 0.25rem 0.75rem;
-    color: var(--bs-secondary-color);
+    color: var(--text-3);
     white-space: nowrap;
 }
 
@@ -292,12 +962,12 @@ select {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background-color: var(--bs-secondary-color);
+    background-color: var(--text-3);
     vertical-align: middle;
 }
 
 .presence-dot-online {
-    background-color: var(--bs-success);
+    background-color: var(--ok-fg);
 }
 
 /* Закреплённая колонка «Действия» (замечания №5/№9): sticky right, чтобы
@@ -342,7 +1012,7 @@ select {
     right: 0;
     box-shadow:
         inset 0 0 0 9999px var(--bs-table-bg-state, var(--bs-table-bg-type, var(--bs-table-accent-bg))),
-        -8px 0 10px -6px rgba(0, 0, 0, .45);
+        -8px 0 10px -6px var(--table-sticky-shadow);
     z-index: 1;
 }
 
@@ -352,8 +1022,8 @@ select {
 
 /* Подсказка о жестах строки (замечания №5/№9): двойной клик, Enter/Esc. */
 .table-gestures-hint {
-    color: var(--bs-secondary-color);
-    font-size: 13px;
+    color: var(--text-3);
+    font-size: var(--fs-xs);
     margin-top: 8px;
 }
 
@@ -365,137 +1035,95 @@ select {
     gap: 8px;
 }
 
-/* Тёмная тема ([data-bs-theme="dark"] на <html>): Bootstrap 5.3 перекрашивает
-   свои компоненты сам, здесь — только собственные правила с захардкоженными
-   цветами и сторонние виджеты (datepicker, nice-select2), которые про
-   data-bs-theme не знают. Цвета берём из переменных Bootstrap, чтобы
-   держаться единой палитры. Экспорт xlsx и печать не завязаны на тему. */
-
-[data-bs-theme="dark"] .label,
-[data-bs-theme="dark"] .empty-content {
-    color: var(--bs-secondary-color);
-}
-
-[data-bs-theme="dark"] .table-column-option {
-    background: var(--bs-secondary-bg);
-    border-color: var(--bs-border-color);
-}
-
-/* Бейдж «подтверждена» (text-bg-light text-muted): .text-muted в собранном
-   Bootstrap идёт позже .text-bg-light и в тёмной теме красит текст бейджа
-   в светлый --bs-secondary-color — на светлом фоне бейджа он не читается. */
-[data-bs-theme="dark"] .badge.text-bg-light {
-    color: #000 !important;
-}
-
-/* nice-select2: белые фон/границы/наведение зашиты в библиотеке. */
-
-[data-bs-theme="dark"] .nice-select {
-    background-color: var(--bs-body-bg);
-    border-color: var(--bs-border-color);
-    color: var(--bs-body-color);
-}
-
-[data-bs-theme="dark"] .nice-select:hover {
-    border-color: var(--bs-secondary-color);
-}
-
-[data-bs-theme="dark"] .nice-select.open,
-[data-bs-theme="dark"] .nice-select:focus {
-    border-color: var(--bs-secondary-color);
-}
-
-[data-bs-theme="dark"] .nice-select .nice-select-dropdown {
-    background-color: var(--bs-body-bg);
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .5), 0 0 0 1px var(--bs-border-color-translucent);
-}
-
-[data-bs-theme="dark"] .nice-select .option:hover,
-[data-bs-theme="dark"] .nice-select .option.focus,
-[data-bs-theme="dark"] .nice-select .option.selected.focus {
-    background-color: var(--bs-secondary-bg);
-}
-
-[data-bs-theme="dark"] .nice-select .option.disabled {
-    color: var(--bs-tertiary-color);
-}
-
-[data-bs-theme="dark"] .nice-select .nice-select-search {
-    background-color: var(--bs-body-bg);
-    border-color: var(--bs-border-color);
-    color: var(--bs-body-color);
-}
+/* Тёмная тема ([data-bs-theme="dark"] на <html>): базовые поверхности и
+   компоненты уже переведены на токены прототипа выше, здесь — только
+   сторонние виджеты (datepicker), которые про data-bs-theme не знают. */
 
 /* datepicker (fengyuanchen): белые панели и светлые ховеры зашиты в
    библиотеке, в тёмной теме без оверрайдов календарь нечитаем. */
 
 [data-bs-theme="dark"] .datepicker-picker {
-    background-color: var(--bs-body-bg);
+    background-color: var(--surface);
+    color: var(--text);
 }
 
 [data-bs-theme="dark"] .datepicker-dropdown .datepicker-picker {
-    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .5), 0 0 0 1px var(--bs-border-color-translucent);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .5), 0 0 0 1px var(--border);
 }
 
 [data-bs-theme="dark"] .datepicker-footer,
 [data-bs-theme="dark"] .datepicker-title {
-    background-color: var(--bs-secondary-bg);
+    background-color: var(--surface-alt);
     box-shadow: none;
+    color: var(--text-2);
 }
 
 [data-bs-theme="dark"] .datepicker-controls .button {
-    background-color: var(--bs-body-bg);
-    border-color: var(--bs-border-color);
-    color: var(--bs-body-color);
+    background-color: var(--surface);
+    border-color: var(--border-strong);
+    color: var(--text);
 }
 
 [data-bs-theme="dark"] .datepicker-controls .button:hover {
-    border-color: var(--bs-secondary-color);
-    color: var(--bs-body-color);
+    border-color: var(--text-3);
+    color: var(--text);
 }
 
 [data-bs-theme="dark"] .datepicker-header .datepicker-controls .button:hover {
-    background-color: var(--bs-secondary-bg);
+    background-color: var(--surface-hover);
 }
 
 [data-bs-theme="dark"] .datepicker-header .datepicker-controls .button:active {
-    background-color: var(--bs-tertiary-bg);
+    background-color: var(--surface-alt);
+}
+
+[data-bs-theme="dark"] .datepicker-picker .datepicker-dow-item,
+[data-bs-theme="dark"] .datepicker-picker .datepicker-day-item,
+[data-bs-theme="dark"] .datepicker-picker .datepicker-month-item,
+[data-bs-theme="dark"] .datepicker-picker .datepicker-year-item {
+    color: var(--text);
 }
 
 [data-bs-theme="dark"] .datepicker-cell:not(.disabled):hover {
-    background-color: var(--bs-secondary-bg);
+    background-color: var(--surface-hover);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.focused:not(.selected) {
-    background-color: var(--bs-tertiary-bg);
+    background-color: var(--surface-alt);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.next:not(.disabled),
 [data-bs-theme="dark"] .datepicker-cell.prev:not(.disabled) {
-    color: var(--bs-secondary-color);
+    color: var(--text-3);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.highlighted:not(.selected):not(.range):not(.today) {
-    background-color: var(--bs-secondary-bg);
+    background-color: var(--surface-alt);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.highlighted:not(.selected):not(.range):not(.today):not(.disabled):hover {
-    background-color: var(--bs-tertiary-bg);
+    background-color: var(--surface-hover);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.highlighted:not(.selected):not(.range):not(.today).focused {
-    background-color: var(--bs-tertiary-bg);
+    background-color: var(--surface-hover);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.range {
-    background-color: var(--bs-secondary-bg);
-    color: var(--bs-body-color);
+    background-color: var(--accent-soft);
+    color: var(--text);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.range:not(.disabled):not(.focused):not(.today):hover {
-    background-color: var(--bs-tertiary-bg);
+    background-color: var(--surface-hover);
 }
 
 [data-bs-theme="dark"] .datepicker-cell.range.focused {
-    background-color: var(--bs-tertiary-bg);
+    background-color: var(--surface-hover);
+}
+
+[data-bs-theme="dark"] .datepicker-cell.selected,
+[data-bs-theme="dark"] .datepicker-cell.selected:hover {
+    background-color: var(--accent);
+    color: #FFFFFF;
 }
