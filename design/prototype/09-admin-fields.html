@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Кастомные поля — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a href="05-reports.html">Отчёты</a>
+                    <a class="is-active" href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Кастомные поля</h1>
+                    <p class="page-sub">Дополнительные колонки записей: типы, обязательность, видимость в таблице, выгрузке и шаблоне импорта.</p>
+                </div>
+                <a class="backlink" href="07-admin-hub.html">В админку</a>
+            </div>
+
+            <section class="card mb-4">
+                <div class="card__header">
+                    <h2 class="card__title">Новое поле</h2>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-3">
+                            <label class="label" for="nf-label">Название поля<span class="req">*</span></label>
+                            <input class="input" id="nf-label" type="text" placeholder="например, Тренер">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="nf-type">Тип</label>
+                            <select class="select" id="nf-type">
+                                <option>text</option>
+                                <option>number</option>
+                                <option>date</option>
+                                <option>url</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="nf-order">Порядок</label>
+                            <input class="input" id="nf-order" type="number" step="1" value="0">
+                        </div>
+                        <div class="col-3">
+                            <label class="label">Видимость</label>
+                            <div class="btn-row" style="gap: 14px;">
+                                <label class="check"><input type="checkbox"><span>Обязательное</span></label>
+                                <label class="check"><input type="checkbox" checked><span>В таблице</span></label>
+                            </div>
+                        </div>
+                        <div class="col-2" style="display: flex; align-items: flex-end; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Добавить поле</button>
+                        </div>
+                        <div class="col-12">
+                            <div class="btn-row" style="gap: 14px;">
+                                <label class="check"><input type="checkbox" checked><span>В Excel-выгрузке</span></label>
+                                <label class="check"><input type="checkbox" checked><span>В шаблоне импорта</span></label>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <div class="table-meta">
+                <span>Полей: 3 · активных: 3</span>
+            </div>
+
+            <div class="table-wrap mb-4">
+                <table class="table table--hover table--mid">
+                    <thead>
+                        <tr>
+                            <th>Поле</th>
+                            <th>Тип</th>
+                            <th class="th--num">Порядок</th>
+                            <th>Обязательное</th>
+                            <th>В таблице</th>
+                            <th>В Excel</th>
+                            <th>В шаблоне</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Протокол (ссылка)</strong></td>
+                            <td><span class="code">url</span></td>
+                            <td class="td--num">10</td>
+                            <td class="text-3">—</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Изменить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Отключить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>Разряд ЕВСК</strong></td>
+                            <td><span class="code">text</span></td>
+                            <td class="td--num">20</td>
+                            <td class="text-3">—</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Изменить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Отключить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>Номер зачётной книжки</strong></td>
+                            <td><span class="code">number</span></td>
+                            <td class="td--num">30</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td class="text-3">—</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td style="color: var(--ok-fg);">✓</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Изменить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Отключить</button>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="note note--plain">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                <span>Отключение скрывает поле из форм и таблицы, но данные в существующих записях сохраняются и остаются в выгрузке базы. Обязательное поле блокирует сохранение новой записи, если оно не заполнено.</span>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

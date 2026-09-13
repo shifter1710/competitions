@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Справочники — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a href="05-reports.html">Отчёты</a>
+                    <a class="is-active" href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Справочники значений</h1>
+                    <p class="page-sub">Подсказки для форм, а не контроль: записи остаются свободным текстом, значения в существующих записях не перезаписываются. Новые виды спорта и институты из записей и импорта добавляются автоматически.</p>
+                </div>
+                <a class="backlink" href="07-admin-hub.html">В админку</a>
+            </div>
+
+            <section class="card mb-4">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Виды спорта</h2>
+                        <p class="card__sub">Подсказка для поля «Вид спорта» в формах ввода. Значений: 10.</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid mb-4">
+                        <div class="col-4">
+                            <label class="label" for="sport-new">Новое значение</label>
+                            <input class="input" id="sport-new" type="text" placeholder="например, Спортивное ориентирование">
+                        </div>
+                        <div class="col-2" style="display: flex; align-items: flex-end;">
+                            <button class="btn btn--primary btn--block" type="button">Добавить</button>
+                        </div>
+                    </form>
+
+                    <div class="table-wrap">
+                        <table class="table table--hover table--mid">
+                            <thead>
+                                <tr>
+                                    <th>Значение</th>
+                                    <th class="th--num">Записей</th>
+                                    <th>Статус</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Лёгкая атлетика</td>
+                                    <td class="td--num">23</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Волейбол</td>
+                                    <td class="td--num">18</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Баскетбол</td>
+                                    <td class="td--num">15</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Настольный теннис</td>
+                                    <td class="td--num">11</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Плавание</td>
+                                    <td class="td--num">9</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Лыжные гонки</td>
+                                    <td class="td--num">8</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Шахматы</td>
+                                    <td class="td--num">7</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Мини-футбол</td>
+                                    <td class="td--num">6</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>Бадминтон</td>
+                                    <td class="td--num">4</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr class="is-muted">
+                                    <td>Спортивное ориентирование</td>
+                                    <td class="td--num">0</td>
+                                    <td><span class="badge">активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                            <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <p class="fs-xs text-3 mt-3">Удалить можно только значение, на котором не висит ни одной записи.</p>
+                </div>
+            </section>
+
+            <section class="card mb-4">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Институты</h2>
+                        <p class="card__sub">Подсказка для поля «Институт» в формах ввода. Значений: 6.</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid mb-4">
+                        <div class="col-4">
+                            <label class="label" for="inst-new">Новое значение</label>
+                            <input class="input" id="inst-new" type="text" placeholder="например, ИСГН">
+                        </div>
+                        <div class="col-2" style="display: flex; align-items: flex-end;">
+                            <button class="btn btn--primary btn--block" type="button">Добавить</button>
+                        </div>
+                    </form>
+
+                    <div class="table-wrap">
+                        <table class="table table--hover table--mid">
+                            <thead>
+                                <tr>
+                                    <th>Значение</th>
+                                    <th class="th--num">Записей</th>
+                                    <th>Статус</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>ИСИ</td>
+                                    <td class="td--num">34</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>АДИ</td>
+                                    <td class="td--num">27</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>ИАиД</td>
+                                    <td class="td--num">21</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>ИТМ</td>
+                                    <td class="td--num">19</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>ИЭУ</td>
+                                    <td class="td--num">16</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr class="is-muted">
+                                    <td>ИП</td>
+                                    <td class="td--num">0</td>
+                                    <td><span class="badge">скрыт</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Показать</button>
+                                            <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <p class="fs-xs text-3 mt-3">Скрытое значение не показывается в подсказках форм, но остаётся в записях и отчётах.</p>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Уровни</h2>
+                        <p class="card__sub">Список используется в формах и фильтрах. Новые уровни из импортируемых файлов добавляются автоматически. Значений: 5.</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid mb-4">
+                        <div class="col-4">
+                            <label class="label" for="lvl-new">Название уровня</label>
+                            <input class="input" id="lvl-new" type="text" placeholder="например, международные">
+                        </div>
+                        <div class="col-2" style="display: flex; align-items: flex-end;">
+                            <button class="btn btn--primary btn--block" type="button">Добавить</button>
+                        </div>
+                    </form>
+
+                    <div class="table-wrap">
+                        <table class="table table--hover table--mid">
+                            <thead>
+                                <tr>
+                                    <th>Уровень</th>
+                                    <th class="th--num">Записей</th>
+                                    <th>Статус</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>внутривузовские</td>
+                                    <td class="td--num">41</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>региональные</td>
+                                    <td class="td--num">14</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>межвузовские</td>
+                                    <td class="td--num">9</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td>всероссийские</td>
+                                    <td class="td--num">6</td>
+                                    <td><span class="badge badge--ok"><span class="badge__dot"></span>активен</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Скрыть</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr class="is-muted">
+                                    <td>городские</td>
+                                    <td class="td--num">0</td>
+                                    <td><span class="badge">скрыт</span></td>
+                                    <td>
+                                        <div class="btn-row">
+                                            <button class="btn btn--secondary btn--sm" type="button">Показать</button>
+                                            <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <p class="fs-xs text-3 mt-3">Уровни можно переименовать — название обновится в формах и фильтрах, записи не меняются.</p>
+                </div>
+            </section>
+        </main>
+    </div>
+</body>
+</html>

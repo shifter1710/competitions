@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Реестр соревнований — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a class="is-active" href="02-index-table.html">Таблица</a>
+                    <a href="05-reports.html">Отчёты</a>
+                    <a href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Реестр соревнований</h1>
+                    <p class="page-sub">Общая таблица участий. Правка — прямо в строке; записи атлетов попадают в реестр после проверки модератором.</p>
+                </div>
+            </div>
+
+            <section class="card mb-4">
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-3">
+                            <label class="label" for="f-name">ФИО</label>
+                            <input class="input" id="f-name" type="text" placeholder="Начните вводить…">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="f-institute">Институт</label>
+                            <select class="select" id="f-institute">
+                                <option>Все</option>
+                                <option>ИСИ</option>
+                                <option>ИАиД</option>
+                                <option>АДИ</option>
+                                <option>ИТМ</option>
+                                <option>ИЭУ</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="f-sport">Вид спорта</label>
+                            <select class="select" id="f-sport">
+                                <option>Все</option>
+                                <option>Лёгкая атлетика</option>
+                                <option>Волейбол</option>
+                                <option>Баскетбол</option>
+                                <option>Настольный теннис</option>
+                                <option>Плавание</option>
+                                <option>Лыжные гонки</option>
+                                <option>Шахматы</option>
+                                <option>Мини-футбол</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="f-level">Уровень</label>
+                            <select class="select" id="f-level">
+                                <option>Все</option>
+                                <option>внутривузовские</option>
+                                <option>межвузовские</option>
+                                <option>региональные</option>
+                                <option>всероссийские</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="f-status">Статус</label>
+                            <select class="select" id="f-status">
+                                <option>Все</option>
+                                <option>подтверждена</option>
+                                <option>на проверке</option>
+                                <option>отклонена</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="f-date-from">Дата от</label>
+                            <input class="input" id="f-date-from" type="text" placeholder="01.09.2025">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="f-date-to">Дата до</label>
+                            <input class="input" id="f-date-to" type="text" placeholder="31.08.2026">
+                        </div>
+                        <div class="col-4" style="display: flex; align-items: flex-end; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Применить</button>
+                            <button class="btn btn--secondary" type="reset">Сбросить</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <div class="toolbar">
+                <button class="btn btn--primary" type="button">+ Пустая строка</button>
+                <button class="btn btn--secondary" type="button">Выгрузить в Excel</button>
+                <a class="btn btn--secondary" href="08-admin-import.html">Импорт</a>
+                <button class="btn btn--secondary" type="button">Колонки и вид</button>
+                <button class="btn btn--ghost" type="button">Сбросить вид</button>
+            </div>
+
+            <div class="table-meta">
+                <span>Показано 12 из 118 записей</span>
+                <span>Сортировка: по дате, новые сверху</span>
+            </div>
+
+            <div class="table-wrap">
+                <table class="table table--striped table--hover table--wide">
+                    <thead>
+                        <tr>
+                            <th data-column-key="index">№</th>
+                            <th data-column-key="student_name">ФИО</th>
+                            <th data-column-key="student_sex">Пол</th>
+                            <th data-column-key="institute">Институт</th>
+                            <th data-column-key="group">Группа</th>
+                            <th data-column-key="sport">Вид спорта</th>
+                            <th data-column-key="date">Дата</th>
+                            <th data-column-key="level">Уровень</th>
+                            <th data-column-key="name">Название соревнований</th>
+                            <th class="th--num" data-column-key="position">Место</th>
+                            <th class="th--num" data-column-key="course">Курс</th>
+                            <th data-column-key="status">Статус</th>
+                            <th data-column-key="attachments">Вложения</th>
+                            <th data-column-key="actions">Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="tr--editing">
+                            <td class="td--num text-3">+</td>
+                            <td><input class="input input--cell" type="text" style="min-width: 200px;" value="Соколова Екатерина Дмитриевна" list="student-names" placeholder="ФИО"></td>
+                            <td>
+                                <select class="select select--cell">
+                                    <option>М</option>
+                                    <option selected>Ж</option>
+                                </select>
+                            </td>
+                            <td><input class="input input--cell" type="text" value="ИСИ" list="institute-options"></td>
+                            <td><input class="input input--cell" type="text" value="ГТб-42"></td>
+                            <td><input class="input input--cell" type="text" list="sport-options" placeholder="—"></td>
+                            <td><input class="input input--cell" type="text" placeholder="дд.мм.гггг"></td>
+                            <td>
+                                <select class="select select--cell">
+                                    <option selected>внутривузовские</option>
+                                    <option>межвузовские</option>
+                                    <option>региональные</option>
+                                    <option>всероссийские</option>
+                                </select>
+                            </td>
+                            <td><input class="input input--cell" type="text" style="min-width: 220px;" placeholder="Название соревнований"></td>
+                            <td class="td--num"><input class="input input--cell" type="number" min="0" step="1" style="width: 64px;"></td>
+                            <td class="td--num"><input class="input input--cell" type="number" min="1" step="1" value="4" style="width: 58px;"></td>
+                            <td><span class="badge badge--warn">будет: на проверке</span></td>
+                            <td>
+                                <button class="btn btn--secondary btn--sm" type="button" title="Прикрепить файл (PDF, JPEG, PNG, до 5 МБ)">
+                                    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 4.5 5.2 9.8a1.9 1.9 0 0 0 2.7 2.7l5.1-5.1a3.2 3.2 0 0 0-4.5-4.5L3.3 8.1a4.5 4.5 0 0 0 6.4 6.4"/></svg>
+                                    Прикрепить файл
+                                </button>
+                            </td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--primary btn--sm" type="button">Сохранить</button>
+                                    <button class="btn btn--secondary btn--sm" type="button">Отмена</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">1</td>
+                            <td>Иванов Дмитрий Сергеевич</td>
+                            <td>М</td>
+                            <td>ИСИ</td>
+                            <td>ПГСб-41</td>
+                            <td>Лёгкая атлетика</td>
+                            <td class="nowrap">12.10.2025</td>
+                            <td>внутривузовские</td>
+                            <td class="td-wrap">Осенний кросс СибАДИ</td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">4</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">2</td>
+                            <td>Кузнецова Анна Владимировна</td>
+                            <td>Ж</td>
+                            <td>ИАиД</td>
+                            <td>ДАб-21</td>
+                            <td>Волейбол</td>
+                            <td class="nowrap">08.11.2025</td>
+                            <td>региональные</td>
+                            <td class="td-wrap">Чемпионат Омской области по волейболу среди студентов</td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">2</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td>
+                                <span class="file-chip" title="протокол_0811.pdf">
+                                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 4.5 5.2 9.8a1.9 1.9 0 0 0 2.7 2.7l5.1-5.1a3.2 3.2 0 0 0-4.5-4.5L3.3 8.1a4.5 4.5 0 0 0 6.4 6.4"/></svg>
+                                    <a href="#">протокол_0811.pdf</a>
+                                    <button class="file-chip__x" type="button" title="Удалить вложение">×</button>
+                                </span>
+                            </td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">3</td>
+                            <td>Смирнов Павел Андреевич</td>
+                            <td>М</td>
+                            <td>АДИ</td>
+                            <td>АДб-22</td>
+                            <td>Настольный теннис</td>
+                            <td class="nowrap">22.11.2025</td>
+                            <td>внутривузовские</td>
+                            <td class="td-wrap">Турнир по настольному теннису СибАДИ</td>
+                            <td class="td--num">3</td>
+                            <td class="td--num">2</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">4</td>
+                            <td>Петрова Мария Олеговна</td>
+                            <td>Ж</td>
+                            <td>ИЭУ</td>
+                            <td>ЭУТб-31</td>
+                            <td>Плавание</td>
+                            <td class="nowrap">14.12.2025</td>
+                            <td>межвузовские</td>
+                            <td class="td-wrap">Кубок ректоров вузов Омска по плаванию</td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td>
+                                <span class="file-chip" title="грамота.pdf">
+                                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 4.5 5.2 9.8a1.9 1.9 0 0 0 2.7 2.7l5.1-5.1a3.2 3.2 0 0 0-4.5-4.5L3.3 8.1a4.5 4.5 0 0 0 6.4 6.4"/></svg>
+                                    <a href="#">грамота.pdf</a>
+                                    <button class="file-chip__x" type="button" title="Удалить вложение">×</button>
+                                </span>
+                            </td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">5</td>
+                            <td>Волков Артём Игоревич</td>
+                            <td>М</td>
+                            <td>ИТМ</td>
+                            <td>ТМб-12</td>
+                            <td>Шахматы</td>
+                            <td class="nowrap">25.01.2026</td>
+                            <td>внутривузовские</td>
+                            <td class="td-wrap">Первенство СибАДИ по шахматам</td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">1</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">6</td>
+                            <td>Соколова Екатерина Дмитриевна</td>
+                            <td>Ж</td>
+                            <td>ИСИ</td>
+                            <td>ГТб-42</td>
+                            <td>Лыжные гонки</td>
+                            <td class="nowrap">07.02.2026</td>
+                            <td>региональные</td>
+                            <td class="td-wrap">Омская лыжня-2026</td>
+                            <td class="td--num">5</td>
+                            <td class="td--num">4</td>
+                            <td><span class="badge badge--warn"><span class="badge__dot"></span>на проверке</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--primary btn--sm" type="button">✓ Подтвердить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">✗ Отклонить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">7</td>
+                            <td>Морозов Никита Романович</td>
+                            <td>М</td>
+                            <td>ИЭУ</td>
+                            <td>Мб-32</td>
+                            <td>Мини-футбол</td>
+                            <td class="nowrap">21.02.2026</td>
+                            <td>внутривузовские</td>
+                            <td class="td-wrap">Студенческая лига СибАДИ по мини-футболу. Финал</td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
+                            <td><span class="badge badge--warn"><span class="badge__dot"></span>на проверке</span></td>
+                            <td>
+                                <span class="file-chip" title="протокол_финал.pdf">
+                                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 4.5 5.2 9.8a1.9 1.9 0 0 0 2.7 2.7l5.1-5.1a3.2 3.2 0 0 0-4.5-4.5L3.3 8.1a4.5 4.5 0 0 0 6.4 6.4"/></svg>
+                                    <a href="#">протокол_финал.pdf</a>
+                                    <button class="file-chip__x" type="button" title="Удалить вложение">×</button>
+                                </span>
+                            </td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--primary btn--sm" type="button">✓ Подтвердить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">✗ Отклонить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">8</td>
+                            <td>Лебедева Дарья Максимовна</td>
+                            <td>Ж</td>
+                            <td>ИАиД</td>
+                            <td>СГб-11</td>
+                            <td>Баскетбол</td>
+                            <td class="nowrap">14.03.2026</td>
+                            <td>межвузовские</td>
+                            <td class="td-wrap">Универсиада вузов Омска. Баскетбол</td>
+                            <td class="td--num">3</td>
+                            <td class="td--num">1</td>
+                            <td><span class="badge badge--warn"><span class="badge__dot"></span>на проверке</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--primary btn--sm" type="button">✓ Подтвердить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">✗ Отклонить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">9</td>
+                            <td>Орлов Максим Викторович</td>
+                            <td>М</td>
+                            <td>ИТМ</td>
+                            <td>ТМб-12</td>
+                            <td>Лёгкая атлетика</td>
+                            <td class="nowrap">28.03.2026</td>
+                            <td>внутривузовские</td>
+                            <td class="td-wrap">День здоровья и спорта. Бег 3000 м</td>
+                            <td class="td--num">4</td>
+                            <td class="td--num">1</td>
+                            <td><span class="badge badge--danger" title="Комментарий модератора: приложите скан протокола или грамоту"><span class="badge__dot"></span>отклонена</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--primary btn--sm" type="button">✓ Подтвердить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">✗ Отклонить</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">10</td>
+                            <td>Новикова Виктория Андреевна</td>
+                            <td>Ж</td>
+                            <td>АДИ</td>
+                            <td>АДб-22</td>
+                            <td>Бадминтон</td>
+                            <td class="nowrap">11.04.2026</td>
+                            <td>внутривузовские</td>
+                            <td class="td-wrap">Весенний турнир по бадминтону</td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">2</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="td--num">11</td>
+                            <td>Козлов Александр Петрович</td>
+                            <td>М</td>
+                            <td>ИСИ</td>
+                            <td>ПГСб-41</td>
+                            <td>Волейбол</td>
+                            <td class="nowrap">18.04.2026</td>
+                            <td>всероссийские</td>
+                            <td class="td-wrap">Всероссийская студенческая волейбольная лига. Зона «Сибирь»</td>
+                            <td class="td--num">5</td>
+                            <td class="td--num">4</td>
+                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
+                            <td class="text-3">—</td>
+                            <td>
+                                <div class="btn-row">
+                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
+                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="note note--plain mt-4">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                <span>Первая строка — «+ Пустая строка»: поля ФИО, пол, институт, группа и курс предзаполнены из профиля атлета (поле формы всегда имеет приоритет). Запись атлета после сохранения получает статус «на проверке», запись модератора — «подтверждена». Смена группы или курса в профиле не перезаписывает существующие записи — они остаются историческим фактом.</span>
+            </div>
+        </main>
+    </div>
+
+    <datalist id="student-names">
+        <option value="Соколова Екатерина Дмитриевна"></option>
+        <option value="Иванов Дмитрий Сергеевич"></option>
+        <option value="Кузнецова Анна Владимировна"></option>
+        <option value="Петрова Мария Олеговна"></option>
+    </datalist>
+    <datalist id="institute-options">
+        <option value="ИСИ"></option>
+        <option value="ИАиД"></option>
+        <option value="АДИ"></option>
+        <option value="ИТМ"></option>
+        <option value="ИЭУ"></option>
+    </datalist>
+    <datalist id="sport-options">
+        <option value="Лёгкая атлетика"></option>
+        <option value="Волейбол"></option>
+        <option value="Баскетбол"></option>
+        <option value="Настольный теннис"></option>
+        <option value="Плавание"></option>
+        <option value="Лыжные гонки"></option>
+        <option value="Шахматы"></option>
+        <option value="Мини-футбол"></option>
+    </datalist>
+</body>
+</html>
