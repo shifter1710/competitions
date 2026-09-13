@@ -41,6 +41,57 @@ REPORT_METRIC_SELECTS: tuple[str, ...] = (
     'SUM(CASE WHEN position >= 1 AND position <= 3 THEN 1 ELSE 0 END) AS count_prizes',
 )
 
+# Вставка записей соревнований: общий SQL для одиночного сохранения и импорта.
+COMPETITION_INSERT_SQL = '''
+    INSERT INTO competitions (
+        student_id,
+        student_name,
+        student_sex,
+        institute,
+        "group",
+        course,
+        sport,
+        date,
+        level,
+        name,
+        position,
+        created_at,
+        extra_data,
+        review_status,
+        owner_id,
+        review_comment
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    '''
+
+
+def competition_insert_records(
+    competitions: Iterable[Competition],
+    review_status: str,
+    owner_id: int | None,
+) -> list[tuple]:
+    """Параметры для executemany по COMPETITION_INSERT_SQL."""
+    return [
+        (
+            item.student_id,
+            item.student_name,
+            item.student_sex,
+            item.institute,
+            item.group,
+            item.course,
+            item.sport,
+            item.date.isoformat(),
+            item.level,
+            item.name,
+            item.position,
+            item.created_at.isoformat(),
+            json.dumps(item.extra_data, ensure_ascii=False),
+            review_status,
+            owner_id,
+            '',
+        )
+        for item in competitions
+    ]
+
 
 class SQLiteAdapter:
     def __init__(self, database_path: str):
@@ -713,51 +764,105 @@ class SQLiteAdapter:
         owner_id: int | None = None,
     ):
         with self._lock:
-            records = [
-                (
-                    item.student_id,
-                    item.student_name,
-                    item.student_sex,
-                    item.institute,
-                    item.group,
-                    item.course,
-                    item.sport,
-                    item.date.isoformat(),
-                    item.level,
-                    item.name,
-                    item.position,
-                    item.created_at.isoformat(),
-                    json.dumps(item.extra_data, ensure_ascii=False),
-                    review_status,
-                    owner_id,
-                    '',
-                )
-                for item in competitions
-            ]
-            self.connection.executemany(
-                '''
-                INSERT INTO competitions (
-                    student_id,
-                    student_name,
-                    student_sex,
-                    institute,
-                    "group",
-                    course,
-                    sport,
-                    date,
-                    level,
-                    name,
-                    position,
-                    created_at,
-                    extra_data,
-                    review_status,
-                    owner_id,
-                    review_comment
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                records,
-            )
+            records = competition_insert_records(competitions, review_status, owner_id)
+            self.connection.executemany(COMPETITION_INSERT_SQL, records)
             self.connection.commit()
+
+    def import_competitions(
+        self,
+        competitions: Sequence[Competition],
+        new_competitions: Sequence[Competition],
+        *,
+        review_status: str = 'approved',
+        owner_id: int | None = None,
+    ) -> None:
+        """Импорт одной транзакцией с одним COMMIT (находка QA №1).
+
+        Раньше автопополнение справочников коммитилось на каждую строку
+        (до четырёх WAL+fsync на строку — ~0,2 с/строку, заморозка event
+        loop). Теперь уровни, справочники и вставка записей идут одной
+        транзакцией; сбой на любом шаге — откат всего импорта: либо все
+        строки, либо ничего (вместе со справочниками, без «полусостояний»).
+
+        `competitions` — все строки файла: справочники пополняются и из
+        строк-дублей (семантика бывших ensure_levels/ensure_catalog_values
+        из src/main.py); `new_competitions` — то, что реально вставляется.
+        """
+        with self._lock:
+            try:
+                self._ensure_import_levels(competitions)
+                self._ensure_import_catalogs(competitions)
+                if new_competitions:
+                    records = competition_insert_records(new_competitions, review_status, owner_id)
+                    self.connection.executemany(COMPETITION_INSERT_SQL, records)
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def _ensure_import_levels(self, competitions: Sequence[Competition]) -> None:
+        """Недостающие уровни из импорта — одной вставкой, без построчных коммитов."""
+        known = {row['name'] for row in self.connection.execute('SELECT name FROM levels').fetchall()}
+        missing = sorted({item.level for item in competitions if item.level not in known})
+        if missing:
+            self.connection.executemany(
+                'INSERT INTO levels (name, sort_order) VALUES (?, 0)',
+                [(name,) for name in missing],
+            )
+
+    def _ensure_import_catalogs(self, competitions: Sequence[Competition]) -> None:
+        """Автопополнение видов спорта/институтов и пар институт→группа.
+
+        Множествами и тремя executemany вместо вызова на каждую строку —
+        семантика та же, что у add_catalog_value/ensure_catalog_pair
+        (значения обрезаются, пустые пропускаются, дубликаты игнорируются,
+        группа кладётся под плоский институт).
+        """
+        sports: set[str] = set()
+        institutes: set[str] = set()
+        pairs: set[tuple[str, str]] = set()
+        for item in competitions:
+            sport = (item.sport or '').strip()
+            if sport:
+                sports.add(sport)
+            institute = (item.institute or '').strip()
+            if institute:
+                institutes.add(institute)
+            group = (item.group or '').strip()
+            if institute and group:
+                pairs.add((institute, group))
+        now = datetime.utcnow().isoformat()
+        flat_rows = [
+            *([('sport', value, now) for value in sorted(sports)]),
+            *([('institute', value, now) for value in sorted(institutes)]),
+        ]
+        if flat_rows:
+            self.connection.executemany(
+                'INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at) '
+                'VALUES (?, ?, NULL, 1, ?)',
+                flat_rows,
+            )
+        if not pairs:
+            return
+        pair_institutes = {institute for institute, _ in pairs}
+        placeholders = ', '.join('?' for _ in pair_institutes)
+        parent_rows = self.connection.execute(
+            'SELECT id, value FROM catalog_values '
+            f"WHERE category = 'institute' AND parent_id IS NULL AND value IN ({placeholders})",
+            tuple(sorted(pair_institutes)),
+        ).fetchall()
+        parent_ids = {row['value']: row['id'] for row in parent_rows}
+        group_rows = [
+            ('group', group, parent_ids[institute], now)
+            for institute, group in sorted(pairs)
+            if institute in parent_ids
+        ]
+        if group_rows:
+            self.connection.executemany(
+                'INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at) '
+                'VALUES (?, ?, ?, 1, ?)',
+                group_rows,
+            )
 
     def update_competition(self, record_id: str, competition: Competition):
         with self._lock:

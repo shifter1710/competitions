@@ -1,4 +1,5 @@
 import hashlib
+import sqlite3
 from datetime import datetime
 
 import pytest
@@ -1056,3 +1057,109 @@ def test_vacuum_shrinks_database_file_after_mass_delete(tmp_path):
     size_after_vacuum = file_size()
     assert size_after_vacuum < size_before_delete * 0.5  # место реально освобождено
     assert adapter.count_competitions() == 0
+
+
+def make_import_row(name: str, index: int, **overrides) -> Competition:
+    values = dict(
+        student_id=f'id-{name}',
+        student_name=name,
+        student_sex='М',
+        institute=f'ИПК-{index % 7}',
+        group=f'Г-{index % 40}',
+        course=1 + index % 4,
+        sport=f'Спорт-{index % 13}',
+        date=datetime(2026, 1 + index % 12, 1 + index % 28),
+        level='внутривузовские' if index % 3 else 'межвузовские',
+        name=f'Турнир {index % 17}',
+        position=1 + index % 10,
+    )
+    values.update(overrides)
+    return Competition(**values)
+
+
+def test_import_competitions_autofills_levels_and_catalogs(adapter):
+    rows = [make_import_row(f'Студентов Студент {index:05d}', index) for index in range(20)]
+    # Строка-дубль не вставляется, но её значения попадают в справочники —
+    # семантика бывших ensure_levels/ensure_catalog_values из src/main.py.
+    duplicate_row = make_import_row('Дублей Дублий Дублиевич', 3, sport='Уникальный спорт')
+    new_rows = rows[:10]
+
+    adapter.import_competitions([*rows, duplicate_row], new_rows, owner_id=7)
+
+    assert adapter.count_competitions() == len(new_rows)
+    saved = adapter.get_competitions()
+    assert {row.student_name for row in saved} == {row.student_name for row in new_rows}
+    owners = {row['owner_id'] for row in adapter.connection.execute('SELECT DISTINCT owner_id FROM competitions')}
+    assert owners == {7}
+
+    levels = set(adapter.get_level_names(include_inactive=True))
+    assert {'внутривузовские', 'межвузовские'} <= levels
+    sports = set(adapter.list_catalog('sport'))
+    assert {f'Спорт-{index % 13}' for index in range(20)} <= sports
+    assert 'Уникальный спорт' in sports  # значение из строки-дубля тоже в справочнике
+    institutes = set(adapter.list_catalog('institute'))
+    assert {f'ИПК-{index % 7}' for index in range(20)} <= institutes
+    # Пары институт→группа сложены иерархией: группа под своим институтом.
+    options = adapter.get_group_options_by_institute()
+    assert 'Г-3' in options['ИПК-3']
+
+
+def test_import_competitions_is_atomic_on_failure(adapter, monkeypatch):
+    rows = [make_import_row(f'Студентов Студент {index:05d}', index) for index in range(3)]
+
+    # sqlite3.Connection не позволяет подменить метод, поэтому оборачиваем
+    # соединение прокси на адаптере: записи соревнований падают посередине.
+    class MidBatchFailureConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def executemany(self, sql, records):
+            if 'INSERT INTO competitions' in sql:
+                # Часть строк уже вставлена, когда импорт падает.
+                self._connection.executemany(sql, list(records)[:-1])
+                raise sqlite3.IntegrityError('boom mid-batch')
+            return self._connection.executemany(sql, records)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(adapter, 'connection', MidBatchFailureConnection(adapter.connection))
+    with pytest.raises(sqlite3.IntegrityError):
+        adapter.import_competitions(rows, rows)
+    monkeypatch.undo()
+
+    # Либо все строки импорта, либо ничего: откатились и записи, и справочники.
+    assert adapter.count_competitions() == 0
+    assert 'Спорт-0' not in adapter.list_catalog('sport')
+    assert 'ИПК-0' not in adapter.list_catalog('institute')
+    assert 'внутривузовские' not in adapter.get_level_names(include_inactive=True)
+
+    # Адаптер жив: следующий импорт проходит целиком.
+    adapter.import_competitions(rows, rows)
+    assert adapter.count_competitions() == len(rows)
+
+
+def test_import_competitions_commits_once_for_500_rows(adapter, monkeypatch):
+    rows = [make_import_row(f'Студентов Студент {index:05d}', index) for index in range(500)]
+
+    class CountingCommitConnection:
+        def __init__(self, connection):
+            self._connection = connection
+            self.commits = 0
+
+        def commit(self):
+            self.commits += 1
+            return self._connection.commit()
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    counting = CountingCommitConnection(adapter.connection)
+    monkeypatch.setattr(adapter, 'connection', counting)
+
+    adapter.import_competitions(rows, rows)
+
+    # Ориентир производительности без хрупких таймингов: один импорт — один
+    # COMMIT (раньше справочники коммитились на каждую строку).
+    assert counting.commits == 1
+    assert adapter.count_competitions() == 500

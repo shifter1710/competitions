@@ -96,6 +96,7 @@ def client() -> SanicTestClient:
     fake_storage.get_filtered.return_value = []
     fake_storage.get_custom_fields.return_value = []
     fake_storage.save_competitions.return_value = None
+    fake_storage.import_competitions.return_value = None
     fake_storage.update_competition.return_value = None
     fake_storage.delete_competition.return_value = None
     fake_storage.create_custom_field.return_value = None
@@ -236,7 +237,7 @@ def test_upload_rejects_missing_columns(client: SanicTestClient):
 
 
 def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
-    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.import_competitions.reset_mock()
     df = pd.DataFrame(
         [
             {
@@ -274,13 +275,13 @@ def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
     assert response.status == 200
     assert 'Импортировано записей: 1' in response.text
     assert 'дублей' not in response.text
-    app.ctx.storage.save_competitions.assert_called_once()
-    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    app.ctx.storage.import_competitions.assert_called_once()
+    saved = app.ctx.storage.import_competitions.call_args[0][1][0]
     assert saved.date == datetime(2026, 3, 15)
 
 
 def test_upload_skips_duplicates(client: SanicTestClient):
-    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.import_competitions.reset_mock()
     app.ctx.storage.get_competitions.return_value = [
         Competition(
             student_id='1',
@@ -345,13 +346,14 @@ def test_upload_skips_duplicates(client: SanicTestClient):
     assert response.status == 200
     assert 'Импортировано записей: 1' in response.text
     assert 'Пропущено дублей: 1' in response.text
-    saved_rows = app.ctx.storage.save_competitions.call_args[0][0]
+    saved_rows = app.ctx.storage.import_competitions.call_args[0][1]
     assert len(saved_rows) == 1
     assert saved_rows[0].student_name == 'Новый Студент'
     app.ctx.storage.get_competitions.return_value = []
 
 
 def test_upload_error_mentions_row_number(client: SanicTestClient):
+    app.ctx.storage.import_competitions.reset_mock()
     df = pd.DataFrame(
         [
             {
@@ -400,6 +402,8 @@ def test_upload_error_mentions_row_number(client: SanicTestClient):
 
     assert response.status == 400
     assert 'строка 3' in response.text
+    # Атомарность импорта: невалидная строка — ничего не сохраняется вовсе.
+    app.ctx.storage.import_competitions.assert_not_called()
 
 
 def test_editor_can_create_manual_competition(client: SanicTestClient):
@@ -1636,7 +1640,10 @@ def test_template_date_column_is_typed(client: SanicTestClient):
 
 
 def test_import_auto_adds_unknown_level(client: SanicTestClient):
-    app.ctx.storage.create_level.reset_mock()
+    # Само автопополнение уровней теперь внутри одной транзакции импорта и
+    # проверяется на реальном адаптере (storage_test: autofills levels and
+    # catalogs); здесь — что роут отдаёт импорту все строки, включая новый уровень.
+    app.ctx.storage.import_competitions.reset_mock()
     df = pd.DataFrame(
         [
             {
@@ -1672,7 +1679,9 @@ def test_import_auto_adds_unknown_level(client: SanicTestClient):
     )
 
     assert response.status == 200
-    app.ctx.storage.create_level.assert_called_once_with('всероссийские')
+    parsed_rows, inserted_rows = app.ctx.storage.import_competitions.call_args[0]
+    assert [row.level for row in parsed_rows] == ['всероссийские']
+    assert [row.level for row in inserted_rows] == ['всероссийские']
 
 
 def test_admin_can_create_level(client: SanicTestClient):
@@ -1845,7 +1854,11 @@ def test_create_competition_auto_adds_catalog_values(client: SanicTestClient):
 
 
 def test_import_auto_adds_catalog_values(client: SanicTestClient):
-    app.ctx.storage.add_catalog_value.reset_mock()
+    # Справочники импорт пополняет батчем внутри storage.import_competitions
+    # (одна транзакция с записями); само пополнение проверено на реальном
+    # адаптере в storage_test (autofills levels and catalogs). Здесь — что
+    # все строки файла со значениями доходят до импорта.
+    app.ctx.storage.import_competitions.reset_mock()
     app.ctx.storage.get_competitions.return_value = []
     df = pd.DataFrame(
         [
@@ -1881,9 +1894,9 @@ def test_import_auto_adds_catalog_values(client: SanicTestClient):
         },
     )
     assert response.status == 200
-    added = {(call[0][0], call[0][1]) for call in app.ctx.storage.add_catalog_value.call_args_list}
-    assert ('sport', 'Шахматы') in added
-    assert ('institute', 'АДИ') in added
+    parsed_rows, inserted_rows = app.ctx.storage.import_competitions.call_args[0]
+    assert [(row.sport, row.institute) for row in inserted_rows] == [('Шахматы', 'АДИ')]
+    assert parsed_rows == inserted_rows
 
 
 def test_index_datalists_show_active_catalog_values(client: SanicTestClient):
@@ -2095,7 +2108,10 @@ def test_create_competition_auto_adds_catalog_pair(client: SanicTestClient):
 
 
 def test_import_auto_adds_catalog_pair(client: SanicTestClient):
-    app.ctx.storage.ensure_catalog_pair.reset_mock()
+    # Пара институт→группа из импорта попадает в иерархию справочника тем же
+    # батчем (проверено на реальном адаптере в storage_test); здесь — что
+    # строки с парой доходят до импорта целиком.
+    app.ctx.storage.import_competitions.reset_mock()
     app.ctx.storage.get_competitions.return_value = []
     df = pd.DataFrame(
         [
@@ -2131,7 +2147,8 @@ def test_import_auto_adds_catalog_pair(client: SanicTestClient):
         },
     )
     assert response.status == 200
-    app.ctx.storage.ensure_catalog_pair.assert_called_once_with('АДИ', 'ША-101')
+    inserted_rows = app.ctx.storage.import_competitions.call_args[0][1]
+    assert [(row.institute, row.group) for row in inserted_rows] == [('АДИ', 'ША-101')]
 
 
 def test_url_custom_field_validated(client: SanicTestClient):
