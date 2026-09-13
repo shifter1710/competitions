@@ -2,89 +2,14 @@
 
 {% block content %}
 
-{% if can_write %}
+{# Замечание №1: отдельная форма «Добавить запись» убрана — ввод записей
+   идёт только инлайн-строкой «+ Пустая строка» (с автоподстановкой из
+   профиля атлета). Для атлета остаётся пояснение о проверке записей. #}
+{% if can_write and is_athlete %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        {% if is_athlete %}
         <h3 class="title">Мои соревнования</h3>
-        <div class="text-muted">Добавляйте свои участия — после проверки ответственным они попадут в общий реестр. Записи «на проверке» видны пока только вам.</div>
-        {% endif %}
-        <form class="manual-form mt-4">
-            <h3 class="title">Добавить запись</h3>
-            <input name="record_id" type="hidden">
-            <div class="row g-3">
-                <div class="col-md-6">
-                    <label class="form-label" for="student_name">ФИО</label>
-                    <input class="form-control" id="student_name" name="student_name" type="text" required>
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label" for="student_sex">Пол</label>
-                    <select class="form-select" id="student_sex" name="student_sex" required>
-                        <option value="М">М</option>
-                        <option value="Ж">Ж</option>
-                    </select>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label" for="institute">Институт</label>
-                    <input class="form-control" id="institute" name="institute" type="text" list="institute-options" required>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label" for="group">Группа</label>
-                    <input class="form-control" id="group" name="group" type="text" required>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label" for="course">Курс</label>
-                    <input class="form-control" id="course" name="course" type="number" min="1" step="1" required>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label" for="sport">Вид спорта</label>
-                    <input class="form-control" id="sport" name="sport" type="text" list="sport-options" required>
-                </div>
-                <div class="col-md-3">
-                    <label class="form-label" for="date">Дата</label>
-                    <input class="form-control" id="date" name="date" type="text" placeholder="дд.мм.гггг" required>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label" for="level">Уровень соревнований</label>
-                    <select class="form-select" id="level" name="level" required>
-                        {% for level in levels %}
-                        <option value="{{ level }}">{{ level }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                <div class="col-md-4">
-                    <label class="form-label" for="name">Название соревнований</label>
-                    <input class="form-control" id="name" name="name" type="text" required>
-                </div>
-                <div class="col-md-2">
-                    <label class="form-label" for="position">Место</label>
-                    <input class="form-control" id="position" name="position" type="number" min="0" step="1" required>
-                </div>
-                {% for field in custom_fields %}
-                <div class="col-md-4">
-                    <label class="form-label" for="custom__{{ field.key }}">{{ field.label }}</label>
-                    <input
-                        class="form-control custom-field-input"
-                        id="custom__{{ field.key }}"
-                        name="custom__{{ field.key }}"
-                        type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'url' %}url{% else %}text{% endif %}"
-                        {% if field.field_type == 'number' %}step="1"{% endif %}
-                        {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
-                        {% if field.field_type == 'url' %}placeholder="https://"{% endif %}
-                        data-custom-field-key="{{ field.key }}"
-                        data-custom-field-type="{{ field.field_type }}"
-                        {% if field.required %}required{% endif %}
-                    >
-                </div>
-                {% endfor %}
-                <div class="col-md-2 d-flex align-items-end">
-                    <button class="btn btn-primary w-100 manual-form__button" type="submit">Добавить</button>
-                </div>
-                <div class="col-md-2 d-flex align-items-end">
-                    <button class="btn btn-outline-secondary w-100 manual-form__cancel-button" type="button">Сбросить</button>
-                </div>
-            </div>
-        </form>
+        <div class="text-muted">Добавляйте свои участия кнопкой «+ Пустая строка» — после проверки ответственным они попадут в общий реестр. Записи «на проверке» видны пока только вам.</div>
     </div>
 </div>
 {% endif %}
@@ -149,7 +74,11 @@
                         <th scope="col" data-column-key="position" data-sort-type="number">Место</th>
                         <th scope="col" data-column-key="course" data-sort-type="number">Курс</th>
                         {% for field in custom_fields if field.show_in_table %}
-                        <th scope="col" data-column-key="{{ field.key }}" data-sort-type="{{ field.field_type }}">{{ field.label }}</th>
+                        {# data-field-type: тип кастомного поля читает script.js
+                           (getCustomFieldTypes) для инлайн-строки — поле ввода
+                           «дд.мм.гггг», число, ссылка и префикс custom__ при
+                           сохранении. #}
+                        <th scope="col" data-column-key="{{ field.key }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}">{{ field.label }}</th>
                         {% endfor %}
                         {% if has_unapproved %}
                         <th scope="col" data-column-key="status" data-sort-type="text" data-exportable="false">Статус</th>
@@ -277,6 +206,11 @@
             </table>
         </div>
     </div>
+    {% if can_write %}
+    {# Подсказка о жестах строки (замечания №5/№9): колонка действий
+       закреплена, Enter/Esc работают в режиме правки. #}
+    <div class="table-gestures-hint">Двойной клик по строке — редактирование; Enter — сохранить, Esc — отменить</div>
+    {% endif %}
     {% else %}
     <div class="empty-content">Нет данных</div>
     {% endif %}

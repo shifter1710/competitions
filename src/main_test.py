@@ -1530,12 +1530,12 @@ def test_import_auto_adds_catalog_values(client: SanicTestClient):
 
 def test_index_datalists_show_active_catalog_values(client: SanicTestClient):
     # фикстура: list_catalog('sport') → ['Бег', 'Лыжи'], list_catalog('institute') → ['ИСИ']
+    # отдельная форма «Добавить запись» убрана (ввод — инлайн-строкой), datalist
+    # остаётся в разметке: script.js вешает его на поля инлайн-строки по id
     _, response = client.get('/', headers=get_auth_headers(role='editor'))
     assert response.status == 200
     assert '<datalist id="sport-options">' in response.text
     assert '<datalist id="institute-options">' in response.text
-    assert 'list="sport-options"' in response.text  # ручная форма ввода
-    assert 'list="institute-options"' in response.text
     assert '<option value="Бег"></option>' in response.text
     assert '<option value="Лыжи"></option>' in response.text
     assert '<option value="ИСИ"></option>' in response.text
