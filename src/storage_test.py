@@ -1621,6 +1621,8 @@ def test_get_competition_by_id(adapter):
     assert found is not None
     assert found.student_name == 'Поиск По Id'
     assert adapter.get_competition_by_id(999999) is None
+
+
 # --- №23доп (docs/feedback-live.md): резолвер атлета в хранилище ---
 
 
