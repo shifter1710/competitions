@@ -198,12 +198,236 @@ class InlineComboBox {
     }
 }
 
+// Резолвер атлета (№23доп, docs/feedback-live.md): тихий поиск по ФИО в
+// инлайн-строке главной. Ввод ≥2 символов — запрос /api/athletes/search
+// (троттлинг + отмена, ошибки сети тихие), выбор варианта подставляет
+// известные sex/institute/group/course в строку; поля остаются
+// редактируемыми — автоподстановка, не принуждение. Свободный ввод ФИО
+// без выбора — как раньше. Список живёт в <body> с position: fixed, как у
+// InlineComboBox: таблица в .table-responsive обрезала бы абсолют.
+// Вызовы только у ролей с правом записи: атлету чужие ФИО не раскрываются
+// (эндпоинт отвечает 403, его автоподстановка из профиля уже работает).
+class FioResolver {
+    constructor(input, onSelect) {
+        this.input = input;
+        this.onSelect = onSelect;
+        this.open = false;
+        this.highlightIndex = -1;
+        this.closeTimer = null;
+        this.throttleTimer = null;
+        this.abortController = null;
+        this.athletes = [];
+        this.dropdown = document.createElement("ul");
+        this.dropdown.className = "combobox-dropdown d-none";
+        document.body.appendChild(this.dropdown);
+        this.handleOutsideMousedown = (event) => {
+            if (
+                this.open &&
+                event.target !== this.input &&
+                !this.dropdown.contains(event.target)
+            ) {
+                this.close();
+            }
+        };
+        this.reposition = () => this.positionDropdown();
+        document.addEventListener("mousedown", this.handleOutsideMousedown);
+        input.addEventListener("input", () => this.scheduleSearch());
+        input.addEventListener("keydown", (event) => this.handleKeydown(event));
+        input.addEventListener("blur", () => {
+            this.closeTimer = setTimeout(() => this.close(), 120);
+        });
+        this.dropdown.addEventListener("mousedown", (event) => {
+            const option = event.target.closest(".combobox-option");
+            if (!option) {
+                return;
+            }
+            event.preventDefault(); // фокус остаётся в поле до выбора варианта
+            const athlete = this.athletes.find(
+                (item) => String(item.name) === option.dataset.name
+            );
+            if (athlete) {
+                this.select(athlete);
+            }
+        });
+    }
+
+    scheduleSearch() {
+        clearTimeout(this.throttleTimer);
+        const query = this.input.value.trim();
+        if (query.length < 2) {
+            this.abortRequest();
+            this.close();
+            return;
+        }
+        this.throttleTimer = setTimeout(() => this.search(query), 250);
+    }
+
+    abortRequest() {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
+    }
+
+    async search(query) {
+        this.abortRequest();
+        const controller = new AbortController();
+        this.abortController = controller;
+        try {
+            const response = await fetch(
+                `/api/athletes/search?q=${encodeURIComponent(query)}`,
+                {signal: controller.signal}
+            );
+            if (!response.ok) {
+                this.close();
+                return;
+            }
+            const athletes = await response.json();
+            if (controller.signal.aborted) {
+                return;
+            }
+            this.athletes = Array.isArray(athletes) ? athletes : [];
+            if (this.athletes.length) {
+                this.openDropdown();
+            } else {
+                this.close();
+            }
+        } catch (error) {
+            // Тихо: ошибка сети или отмена — поле ФИО остаётся свободным вводом.
+            if (!controller.signal.aborted) {
+                this.close();
+            }
+        }
+    }
+
+    isOpen() {
+        return this.open;
+    }
+
+    openDropdown() {
+        this.renderOptions();
+        this.open = true;
+        this.dropdown.classList.remove("d-none");
+        this.positionDropdown();
+        window.addEventListener("scroll", this.reposition, true);
+        window.addEventListener("resize", this.reposition);
+    }
+
+    close() {
+        this.open = false;
+        this.highlightIndex = -1;
+        this.dropdown.classList.add("d-none");
+        window.removeEventListener("scroll", this.reposition, true);
+        window.removeEventListener("resize", this.reposition);
+    }
+
+    renderOptions() {
+        this.highlightIndex = -1;
+        this.dropdown.replaceChildren(
+            ...this.athletes.map((athlete) => {
+                const item = document.createElement("li");
+                item.className = "combobox-option";
+                item.dataset.name = athlete.name;
+                item.textContent = athlete.name;
+                item.title = [
+                    athlete.sex,
+                    athlete.institute,
+                    athlete.group,
+                    athlete.course ? `курс ${athlete.course}` : ""
+                ].filter(Boolean).join(", ");
+                item.setAttribute("role", "option");
+                return item;
+            })
+        );
+    }
+
+    visibleOptions() {
+        return Array.from(this.dropdown.querySelectorAll(".combobox-option"));
+    }
+
+    updateHighlight() {
+        const options = this.visibleOptions();
+        options.forEach((item, index) => {
+            item.classList.toggle("combobox-option-active", index === this.highlightIndex);
+        });
+        const active = options[this.highlightIndex];
+        if (active) {
+            active.scrollIntoView({block: "nearest"});
+        }
+    }
+
+    positionDropdown() {
+        if (!this.open) {
+            return;
+        }
+        const rect = this.input.getBoundingClientRect();
+        this.dropdown.style.left = `${rect.left}px`;
+        this.dropdown.style.top = `${rect.bottom + 2}px`;
+        this.dropdown.style.minWidth = `${rect.width}px`;
+    }
+
+    handleKeydown(event) {
+        if (!this.open) {
+            return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            event.stopPropagation();
+            const options = this.visibleOptions();
+            if (!options.length) {
+                return;
+            }
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            this.highlightIndex = (this.highlightIndex + direction + options.length) % options.length;
+            this.updateHighlight();
+            return;
+        }
+        if (event.key === "Enter") {
+            // Открытый список перехватывает Enter: выбор подсвеченного или
+            // закрытие — сохранение строки не срабатывает.
+            event.preventDefault();
+            event.stopPropagation();
+            if (this.highlightIndex >= 0) {
+                const option = this.visibleOptions()[this.highlightIndex];
+                const athlete = this.athletes.find((item) => String(item.name) === option.dataset.name);
+                if (athlete) {
+                    this.select(athlete);
+                    return;
+                }
+            }
+            this.close();
+            return;
+        }
+        if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            this.close();
+        }
+    }
+
+    select(athlete) {
+        this.input.value = athlete.name;
+        this.close();
+        this.onSelect(athlete);
+    }
+
+    destroy() {
+        clearTimeout(this.closeTimer);
+        clearTimeout(this.throttleTimer);
+        this.abortRequest();
+        this.close();
+        document.removeEventListener("mousedown", this.handleOutsideMousedown);
+        this.dropdown.remove();
+    }
+}
+
 class Main {
     constructor() {
         this.currentReportUrl = null;
         this.draggedColumnKey = null;
         this.isAthlete = document.body.dataset.role === "athlete";
         this.activeComboBoxes = [];
+        this.activeFioResolvers = [];
         this.initializeDomReferences();
         this.createInstances();
         this.hangEvents();
@@ -1122,6 +1346,46 @@ class Main {
         this.activeComboBoxes = [];
     }
 
+    // Резолвер атлета (№23доп): навешивается на поле ФИО инлайн-строки у
+    // ролей с правом записи (атлету — нет: чужие ФИО не запрашиваем, его
+    // автоподстановка из собственного профиля уже работает).
+    attachFioResolver(row) {
+        if (this.isAthlete) {
+            return;
+        }
+        const input = row.querySelector('[data-edit-key="student_name"]');
+        if (!input || input.type !== "text") {
+            return;
+        }
+        this.activeFioResolvers.push(new FioResolver(input, (athlete) => {
+            this.applyAthleteDefaults(row, athlete);
+        }));
+    }
+
+    destroyFioResolvers() {
+        this.activeFioResolvers.forEach((resolver) => resolver.destroy());
+        this.activeFioResolvers = [];
+    }
+
+    // Выбор варианта подставляет известные поля в строку и оставляет их
+    // редактируемыми: автоподстановка, не принуждение (историчность —
+    // docs/data-model-decisions.md). Синтетический input обновляет список
+    // групп при подстановке института.
+    applyAthleteDefaults(row, athlete) {
+        const mapping = {sex: "student_sex", institute: "institute", group: "group", course: "course"};
+        Object.entries(mapping).forEach(([athleteKey, editKey]) => {
+            const value = athlete[athleteKey];
+            if (!value) {
+                return;
+            }
+            const input = row.querySelector(`[data-edit-key="${editKey}"]`);
+            if (input && String(input.value) !== String(value)) {
+                input.value = value;
+                input.dispatchEvent(new Event("input", {bubbles: true}));
+            }
+        });
+    }
+
     // Связка институт→группа (№15): смена института перезаполняет открытый
     // список групп; введённая группа сохраняется как есть.
     linkRowCombos(row) {
@@ -1310,6 +1574,7 @@ class Main {
 
         this.inlineDatePickers = this.attachRowDatePickers(row);
         this.linkRowCombos(row);
+        this.attachFioResolver(row);
         this.inlineKeydownHandler = (event) => {
             if (event.key === "Escape") {
                 event.preventDefault();
@@ -1366,6 +1631,7 @@ class Main {
         this.destroyRowDatePickers(this.inlineDatePickers);
         this.inlineDatePickers = null;
         this.destroyRowComboBoxes();
+        this.destroyFioResolvers();
         if (row.isConnected) {
             row.innerHTML = this.inlineEditBackup;
             row.classList.remove("row-editing");
@@ -1451,6 +1717,7 @@ class Main {
 
         this.newRowDatePickers = this.attachRowDatePickers(row);
         this.linkRowCombos(row);
+        this.attachFioResolver(row);
         this.newRowKeydownHandler = this.bindRowKeyboardNavigation(
             row,
             () => this.saveNewRowEdit(),
@@ -1504,6 +1771,7 @@ class Main {
         this.destroyRowDatePickers(this.newRowDatePickers);
         this.newRowDatePickers = null;
         this.destroyRowComboBoxes();
+        this.destroyFioResolvers();
         row.remove();
         this.newEditRow = null;
     }
@@ -1894,6 +2162,7 @@ class Main {
         this.destroyRowDatePickers(this.newRowDatePickers);
         this.newRowDatePickers = null;
         this.destroyRowComboBoxes();
+        this.destroyFioResolvers();
         if (!this.tableElement) {
             if (this.tableColumnsManager) {
                 this.tableColumnsManager.innerHTML = "";

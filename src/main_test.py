@@ -144,6 +144,9 @@ def client() -> SanicTestClient:
     fake_storage.find_level_canonical.return_value = None
     # №19а: автозаполнение института по группе по умолчанию выключено.
     fake_storage.find_unique_group_institute.return_value = None
+    # №23доп: резолвер атлета по умолчанию ничего не знает.
+    fake_storage.search_athletes.return_value = []
+    fake_storage.find_athlete_fields.return_value = {}
     fake_storage.get_group_options_by_institute.return_value = {}
     fake_storage.ensure_catalog_pair.return_value = None
     fake_storage.count_child_groups.return_value = 0
@@ -4649,3 +4652,196 @@ def test_duplicate_key_uses_start_date_only():
     new_competitions, skipped = split_import_competitions([incoming], [existing])
     assert new_competitions == []
     assert skipped == 1
+
+
+# --- №23доп (docs/feedback-live.md): резолвер атлета ---
+
+
+def get_athlete_headers() -> dict[str, str]:
+    cookie = create_auth_cookie_value(username='sportik', role='athlete')
+    return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+
+
+def test_athletes_search_returns_variants_for_moderator(client: SanicTestClient):
+    app.ctx.storage.search_athletes.return_value = [
+        {'name': 'Иванов Иван', 'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '1'}
+    ]
+    headers = get_auth_headers(role='editor')
+    _, response = client.get('/api/athletes/search?q=Ива', headers=headers)
+    assert response.status == 200
+    assert response.json == [{'name': 'Иванов Иван', 'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '1'}]
+    args = app.ctx.storage.search_athletes.call_args[0]
+    assert args[0] == 'Ива'
+    app.ctx.storage.search_athletes.return_value = []
+
+
+def test_athletes_search_empty_query_returns_empty_list(client: SanicTestClient):
+    _, response = client.get('/api/athletes/search?q=', headers=get_auth_headers(role='admin'))
+    assert response.status == 200
+    assert response.json == []
+
+
+def test_athletes_search_forbidden_for_athlete(client: SanicTestClient):
+    # Полный список ФИО атлету не раскрывается (docs/data-model-decisions.md):
+    # 403 и никаких обращений к хранилищу.
+    app.ctx.storage.search_athletes.reset_mock()
+    _, response = client.get('/api/athletes/search?q=Ива', headers=get_athlete_headers())
+    assert response.status == 403
+    app.ctx.storage.search_athletes.assert_not_called()
+
+
+def test_athletes_search_forbidden_for_viewer(client: SanicTestClient):
+    _, response = client.get('/api/athletes/search?q=Ива', headers=get_auth_headers(role='viewer'))
+    assert response.status == 403
+
+
+def test_upload_autofills_empty_fields_from_known_athlete(client: SanicTestClient):
+    # Строка импорта: ФИО известно, Пол/Институт/Группа/Курс пусты —
+    # резолвер подставляет непустые значения (№23доп).
+    app.ctx.storage.find_athlete_fields.side_effect = lambda name: (
+        {
+            'sex': 'Ж',
+            'institute': 'ИМИ',
+            'group': 'СБ-202',
+            'course': '2',
+        }
+        if name.strip().lower() == 'петрова петра'
+        else {}
+    )
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Петрова Петра',
+                'Пол': '',
+                'Институт': '',
+                'Группа': '',
+                'Вид спорта': 'Бег',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 2,
+                'Курс': '',
+            }
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    saved_rows = app.ctx.storage.import_competitions.call_args[0][0]
+    assert len(saved_rows) == 1
+    assert saved_rows[0].student_sex == 'Ж'
+    assert saved_rows[0].institute == 'ИМИ'
+    assert saved_rows[0].group == 'СБ-202'
+    assert saved_rows[0].course == 2
+    app.ctx.storage.find_athlete_fields.side_effect = None
+    app.ctx.storage.find_athlete_fields.return_value = {}
+
+
+def test_upload_keeps_filled_fields_and_counts_duplicates_after_autofill(client: SanicTestClient):
+    # Заполненные поля строки НЕ перезаписываются; дубль-ключ считается
+    # ПОСЛЕ автозаполнения: строка с пустыми полями, совпавшая по ключу
+    # с существующей записью после подстановки, пропускается как дубль.
+    app.ctx.storage.find_athlete_fields.side_effect = lambda name: (
+        {'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '2'}
+        if name.strip().lower() == 'иванов иван'
+        else {}
+    )
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Иванов Иван',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+        )
+    ]
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Иванов Иван',
+                'Пол': '',
+                'Институт': '',
+                'Группа': '',
+                'Вид спорта': 'Бег',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 3,
+                'Курс': '',
+            },
+            {
+                'ФИО': 'Петров Пётр',
+                'Пол': 'М',
+                'Институт': '',
+                'Группа': '',
+                'Вид спорта': 'Бег',
+                'Дата': '16.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 2,
+                'Курс': 1,
+            },
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    app.ctx.storage.find_athlete_fields.side_effect = lambda name: (
+        {'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '2'}
+        if name.strip().lower() == 'иванов иван'
+        else {'sex': 'Ж', 'institute': 'ИМИ', 'group': 'СБ-202', 'course': '9'}
+    )
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    assert 'Пропущено дублей: 1' in response.text
+    saved_rows = app.ctx.storage.import_competitions.call_args[0][0]
+    assert len(saved_rows) == 1
+    # Заполненные поля (Пол=М, Курс=1) резолвером с другим ответом (Ж, 9)
+    # не перезаписаны; пустые — заполнены.
+    row = saved_rows[0]
+    assert row.student_name == 'Петров Пётр'
+    assert row.student_sex == 'М'
+    assert row.course == 1
+    assert row.institute == 'ИМИ'
+    assert row.group == 'СБ-202'
+    app.ctx.storage.find_athlete_fields.side_effect = None
+    app.ctx.storage.find_athlete_fields.return_value = {}
+    app.ctx.storage.get_competitions.return_value = []

@@ -1453,6 +1453,102 @@ class SQLiteAdapter:
                 return row['name']
         return None
 
+    def search_athletes(self, query: str, limit: int = 8) -> list[dict]:
+        """№23доп (docs/feedback-live.md): варианты атлетов по подстроке ФИО.
+
+        Источник — объединение профилей (users.profile_data) и ПОСЛЕДНЕЙ
+        записи с таким ФИО. Сравнение регистра — в Python: lower() в SQLite
+        не приводит кириллицу (тот же подход, что в find_catalog_canonical).
+        Возвращает до `limit` вариантов, отсортированных по алфавиту; поля
+        пустые значения не включает.
+        """
+        query = query.strip().lower()
+        if not query:
+            return []
+        athletes = self._known_athletes()
+        matches = [entry for name, entry in athletes.items() if query in name.lower()]
+        matches.sort(key=lambda entry: entry['name'].lower())
+        return matches[:limit]
+
+    def find_athlete_fields(self, name: str) -> dict:
+        """№23доп: известные поля атлета по ТОЧНОМУ ФИО (без учёта регистра).
+
+        Тот же источник, что search_athletes. Пустых значений в ответе нет:
+        вызывающая сторона (автозаполнение импорта) подставляет только
+        непустые поля и не перезаписывает заполненные.
+        """
+        name = name.strip().lower()
+        if not name:
+            return {}
+        return self._known_athletes().get(name, {})
+
+    _ATHLETE_FIELD_MAP: tuple[tuple[str, str], ...] = (
+        ('student_sex', 'sex'),
+        ('institute', 'institute'),
+        ('group', 'group'),
+        ('course', 'course'),
+    )
+
+    @classmethod
+    def _athlete_entry_from_record(cls, row: sqlite3.Row) -> dict:
+        entry = {'name': row['student_name']}
+        for source_key, result_key in cls._ATHLETE_FIELD_MAP:
+            value = row[source_key]
+            if value is not None and str(value).strip():
+                entry[result_key] = str(value).strip()
+        return entry
+
+    @classmethod
+    def _athlete_entry_from_profile(cls, profile_data: str) -> dict | None:
+        try:
+            profile = json.loads(profile_data or '{}')
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(profile, dict):
+            return None
+        entry = {'name': str(profile.get('student_name') or '').strip()}
+        if not entry['name']:
+            return None
+        for source_key, result_key in cls._ATHLETE_FIELD_MAP:
+            value = profile.get(source_key)
+            if value is not None and str(value).strip():
+                entry[result_key] = str(value).strip()
+        return entry
+
+    def _known_athletes(self) -> dict[str, dict]:
+        """Атлеты по ФИО: профиль приоритетнее, пробелы добирает последняя запись.
+
+        Профили обходятся первыми (сознательно заполненные данные), затем
+        записи от последней к первой: первое встреченное непустое значение
+        записи — из последней записи. Ничего не перезаписывается: слияние
+        только дозаполняет пробелы (_merge_athlete_entry).
+        """
+        merged: dict[str, dict] = {}
+        with self._lock:
+            profile_rows = self.connection.execute('SELECT profile_data FROM users').fetchall()
+            # Последняя запись с таким ФИО: created_at DESC; id DESC —
+            # тай-брейк для записей одной секунды (импорт).
+            record_rows = self.connection.execute(
+                'SELECT student_name, student_sex, institute, "group", course '
+                'FROM competitions ORDER BY created_at DESC, id DESC'
+            ).fetchall()
+        for row in profile_rows:
+            entry = self._athlete_entry_from_profile(row['profile_data'])
+            if entry is not None:
+                self._merge_athlete_entry(merged, entry)
+        for row in record_rows:
+            self._merge_athlete_entry(merged, self._athlete_entry_from_record(row))
+        return merged
+
+    @staticmethod
+    def _merge_athlete_entry(merged: dict[str, dict], entry: dict) -> None:
+        """Дозаполнить вариант атлета первыми встреченными непустыми значениями."""
+        key = entry['name'].lower()
+        target = merged.setdefault(key, {'name': entry['name']})
+        for result_key in ('sex', 'institute', 'group', 'course'):
+            if result_key not in target and result_key in entry:
+                target[result_key] = entry[result_key]
+
     def add_catalog_value(self, category: str, value: str, parent_id: int | None = None) -> None:
         """Добавить значение в справочник; дубликат игнорируется без ошибки.
 

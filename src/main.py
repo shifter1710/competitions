@@ -1759,11 +1759,56 @@ async def export_index(request: Request):
     )
 
 
+def import_record_value_is_empty(value) -> bool:
+    """Пустая ячейка импорта: None/NaN или пробельная строка."""
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ''
+
+
+def autofill_record_from_known_athlete(
+    record: dict,
+    storage: SQLiteAdapter,
+    cache: dict[str, dict],
+) -> None:
+    """№23доп (docs/feedback-live.md): автозаполнение пустых полей строки импорта.
+
+    Для строки с пустыми Пол/Институт/Группа/Курс — данные известного атлета
+    (профиль или последняя запись, точное ФИО). Заполненные поля строки НЕ
+    перезаписываются: запись — исторический факт. Заполняется ДО
+    build_competition и подсчёта дублей: дубль-ключ считается после
+    автозаполнения, и пустой Курс проходит валидацию только после неё.
+    """
+    name = clean_str(record.get('ФИО', ''))
+    if not name:
+        return
+    key = name.lower()
+    if key not in cache:
+        cache[key] = storage.find_athlete_fields(name)
+    known = cache[key]
+    if not known:
+        return
+    for column, result_key in (
+        ('Пол', 'sex'),
+        ('Институт', 'institute'),
+        ('Группа', 'group'),
+    ):
+        if import_record_value_is_empty(record.get(column)) and known.get(result_key):
+            record[column] = known[result_key]
+    if import_record_value_is_empty(record.get('Курс')) and known.get('course'):
+        record['Курс'] = known['course']
+
+
 def build_import_competitions(df: pd.DataFrame, custom_fields, storage: SQLiteAdapter) -> list[Competition]:
     competitions = []
+    known_athletes: dict[str, dict] = {}
     for index, row in df.iterrows():
         record = row.to_dict()
         try:
+            autofill_record_from_known_athlete(record, storage, known_athletes)
             competitions.append(build_competition(record, custom_fields=custom_fields, storage=storage))
         except (TypeError, ValueError) as exc:
             raise ValueError(f'строка {index + 2}: {exc}') from exc
@@ -1919,6 +1964,22 @@ async def list_students(request: Request):
         return auth_error
     names = get_storage(request.app).get_student_names()
     return json_response(names)
+
+
+@app.get('/api/athletes/search')
+async def search_athletes(request: Request):
+    # №23доп (docs/feedback-live.md): резолвер атлета. Подсказки по ФИО
+    # раскрывают персональные данные других студентов — только admin/editor
+    # (docs/data-model-decisions.md); атлету и наблюдателю — 403. У атлета
+    # своя автоподстановка из собственного профиля (/api/profile).
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    query = str(request.args.get('q', '')).strip()
+    if not query:
+        return json_response([])
+    athletes = await asyncio.to_thread(get_storage(request.app).search_athletes, query)
+    return json_response(athletes)
 
 
 @app.get('/api/students/lookup')
