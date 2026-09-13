@@ -1,4 +1,22 @@
 <div class="content-wrapper">
+    {# Композиция отчёта (прототип 06): чипы применённых условий — каждый
+       активный фильтр с крестиком-сбросом (перезагрузка отчёта без этого
+       параметра), под ними счётчик строк. #}
+    {% if report_chips %}
+    <div class="report-chips-toolbar">
+        {% for chip in report_chips %}
+        <span class="filter-chip">{{ chip.label }}: <strong>{{ chip.value }}</strong><button
+            class="filter-chip__x"
+            type="button"
+            data-remove-key="{{ chip.remove_key }}"
+            title="Убрать условие"
+        >×</button></span>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <div class="table-meta">
+        <span>{{ rows_count }} {{ rows_count_label }} · {{ total_participations }} {{ participations_label }}</span>
+    </div>
     {% if report_rows %}
     <div class="table-card" data-table-view="report">
         <div class="table-responsive">

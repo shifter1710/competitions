@@ -2,8 +2,21 @@
 
 {% block content %}
 
-<form class="filter-form filter">
-    <h3 class="title">Формирование отчёта</h3>
+{# Композиция страницы отчётов — по прототипу 05: заголовок с описанием,
+   панель фильтров и панель выгрузки карточками; результат применения
+   фильтра подставляется в content-wrapper ниже. #}
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Отчёты</h1>
+        <p class="page-sub">Готовые выборки по реестру. Задайте условия фильтра и сформируйте отчёт — результат откроется под формой, с выгрузкой в Excel.</p>
+    </div>
+</div>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Количество участий</h3>
+        <div class="text-muted mb-3">Сколько раз кто участвовал, побеждал и занимал призовые места. Группировка — по данным записи: ФИО, группа и курс на момент выступления.</div>
+        <form class="filter-form filter">
     <div class="row align-items-md-bottom">
         <div class="col align-self-md-center filter__group-by-wrapper">
             <span class="label">Группировать по</span>
@@ -100,36 +113,43 @@
         </div>
     </div>
 </form>
-
-<form class="report-export-form" method="get" action="/export/report">
-    <h3 class="title">Выгрузить в Excel</h3>
-    <div class="row align-items-center">
-        {# Колонки зависят от среза (замечание №19): инлайн-скрипт ниже
-           перестраивает чекбоксы при смене «Группировать по». #}
-        <div class="col">
-            <div class="row align-items-center report-export-columns" id="report-export-columns"
-                 data-columns-by-slice='{{ report_export_columns_by_slice | tojson }}'>
-                {% for column in report_export_columns %}
-                <div class="col-auto">
-                    <label class="form-check report-export-form__column">
-                        <input
-                            class="form-check-input report-export-column"
-                            type="checkbox"
-                            name="columns"
-                            value="{{ column }}"
-                            checked
-                        >
-                        <span class="form-check-label">{{ column }}</span>
-                    </label>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        <div class="col-auto">
-            <button class="report-export-form__button btn btn-success" type="submit">Экспорт</button>
-        </div>
     </div>
-</form>
+</div>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Выгрузить в Excel</h3>
+        <div class="text-muted mb-3">Отметьте колонки, которые попадут в файл выгрузки. Файл формируется по применённым условиям отчёта.</div>
+        <form class="report-export-form" method="get" action="/export/report">
+            <div class="row align-items-center">
+                {# Колонки зависят от среза (замечание №19): инлайн-скрипт ниже
+                   перестраивает чекбоксы при смене «Группировать по». #}
+                <div class="col">
+                    <div class="row align-items-center report-export-columns" id="report-export-columns"
+                         data-columns-by-slice='{{ report_export_columns_by_slice | tojson }}'>
+                        {% for column in report_export_columns %}
+                        <div class="col-auto">
+                            <label class="form-check report-export-form__column">
+                                <input
+                                    class="form-check-input report-export-column"
+                                    type="checkbox"
+                                    name="columns"
+                                    value="{{ column }}"
+                                    checked
+                                >
+                                <span class="form-check-label">{{ column }}</span>
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <button class="report-export-form__button btn btn-success" type="submit">Экспорт</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
 
 <div class="content-wrapper">
     <div class="empty-content">Задайте условия фильтра и нажмите «Сформировать отчет»</div>

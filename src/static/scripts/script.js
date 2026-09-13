@@ -336,6 +336,7 @@ class Main {
             this.themeToggleButton.addEventListener("click", () => this.handleThemeToggle());
         }
         this.initUsersPage();
+        this.initIndexFilterCard();
         this.bindContentWrapperEvents();
     }
 
@@ -367,6 +368,72 @@ class Main {
             const matchesQuery = !query || (row.dataset.username || "").toLowerCase().includes(query);
             const matchesRole = !role || row.dataset.role === role;
             row.classList.toggle("d-none", !(matchesQuery && matchesRole));
+        });
+    }
+
+    // Карточка фильтров главной (прототип 02): применение и сброс —
+    // GET-навигация, фильтры живут в URL (шарость ссылок). «Показывать по»
+    // меняет per_page и сбрасывает на первую страницу. Карточка лежит вне
+    // content-wrapper и не переинициализируется при обновлении таблицы.
+    initIndexFilterCard() {
+        const filterCard = document.querySelector(".index-filter-card");
+        if (filterCard && filterCard.dataset.bound !== "true") {
+            filterCard.dataset.bound = "true";
+            const form = filterCard.querySelector("form");
+            if (form) {
+                form.addEventListener("submit", (event) => {
+                    event.preventDefault();
+                    const params = new URLSearchParams();
+                    new FormData(form).forEach((value, key) => {
+                        const text = String(value).trim();
+                        if (text) {
+                            params.append(key, text);
+                        }
+                    });
+                    const query = params.toString();
+                    window.location.href = query ? `/?${query}` : "/";
+                });
+            }
+            const resetLink = filterCard.querySelector(".index-filter-reset");
+            if (resetLink) {
+                resetLink.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    window.location.href = "/";
+                });
+            }
+            this.initHybridDateInputs(filterCard);
+        }
+        const perPageSelect = document.querySelector(".per-page-select");
+        if (perPageSelect && perPageSelect.dataset.bound !== "true") {
+            perPageSelect.dataset.bound = "true";
+            perPageSelect.addEventListener("change", () => {
+                const params = new URLSearchParams(perPageSelect.dataset.query || "");
+                params.set("per_page", perPageSelect.value);
+                window.location.href = `/?${params.toString()}`;
+            });
+        }
+    }
+
+    // Гибридные даты (замечание №13) вне инлайн-строки: поля «Дата от/до»
+    // карточки фильтров главной. Ручной ввод цифрами с авто-точками плюс
+    // datepicker по кнопке-календарю — как в строках таблицы.
+    initHybridDateInputs(root) {
+        root.querySelectorAll(".index-date-group").forEach((group) => {
+            const input = group.querySelector('input[type="text"]');
+            const toggleButton = group.querySelector(".index-date-toggle");
+            if (!input || input.dataset.dateBound === "true") {
+                return;
+            }
+            input.dataset.dateBound = "true";
+            input.addEventListener("input", (event) => this.handleManualDateInput(event));
+            input.addEventListener("blur", () => this.normalizeDateInput(input));
+            const picker = new Datepicker(input, {autohide: true, format: "dd.mm.yyyy"});
+            if (toggleButton) {
+                toggleButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    picker.show();
+                });
+            }
         });
     }
 
@@ -1488,6 +1555,12 @@ class Main {
     }
 
     handleContentWrapperClick(event) {
+        const chipRemove = event.target.closest(".filter-chip__x");
+        if (chipRemove) {
+            this.removeReportFilter(chipRemove.dataset.removeKey);
+            return;
+        }
+
         const attachmentAddButton = event.target.closest(".attachment-add-button");
         if (attachmentAddButton && this.attachmentFileInput) {
             this.attachmentFileInput.dataset.recordId = attachmentAddButton.dataset.recordId;
@@ -1652,11 +1725,23 @@ class Main {
         });
     }
 
+    // Сброс одного условия отчёта (прототип 06): крестик на чипе перечитывает
+    // отчёт без этого GET-параметра, остальные условия остаются.
+    removeReportFilter(removeKey) {
+        if (!removeKey) {
+            return;
+        }
+        const params = new URLSearchParams(
+            this.currentReportUrl ? this.currentReportUrl.split("?")[1] || "" : ""
+        );
+        params.delete(removeKey);
+        this.getReport(params.toString());
+    }
+
     getReport(params) {
         const url = "/report" + (params ? `?${params}` : "");
         this.setLoading(true);
-        fetch(url, { method: "GET" })
-            .then((response) => {
+        fetch(url, { method: "GET" })            .then((response) => {
                 if (!response.ok) {
                     throw new Error("Ошибка применения фильтра");
                 }
@@ -1736,8 +1821,12 @@ class Main {
     }
 
     refreshIndexContent() {
+        // Реестр живёт в URL (фильтры, page/per_page — прототип 02): после
+        // правок/создания/удаления перечитываем текущий адрес, а не «/»,
+        // чтобы применённые условия и страница не терялись.
         this.setLoading(true);
-        fetch("/", { method: "GET" })
+        const currentUrl = window.location.pathname + window.location.search;
+        fetch(currentUrl, {method: "GET"})
             .then((response) => response.text())
             .then((html) => {
                 const doc = new DOMParser().parseFromString(html, "text/html");
@@ -1770,6 +1859,10 @@ class Main {
     }
 
     initTableFeatures() {
+        // Футер таблицы («Показывать по») заменяется вместе с content-wrapper —
+        // переинициализация нужна после каждой перерисовки списка; карточка
+        // фильтров у себя внутри защищена повторной привязке флагом.
+        this.initIndexFilterCard();
         this.tableCard = document.querySelector(".table-card");
         this.tableElement = document.querySelector(".interactive-table");
         this.renderStudentNamesList();

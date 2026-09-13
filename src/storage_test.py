@@ -1295,3 +1295,75 @@ def test_import_competitions_commits_once_for_500_rows(adapter, monkeypatch):
     # COMMIT (раньше справочники коммитились на каждую строку).
     assert counting.commits == 1
     assert adapter.count_competitions() == 500
+
+
+# --- Серверные фильтры и пагинация главной (прототип 02) ---
+
+
+def seed_page_records(adapter: SQLiteAdapter) -> None:
+    records = [
+        make_competition('Иванов Иван', datetime(2024, 3, 1)),
+        make_competition('Петров Пётр', datetime(2024, 6, 1)),
+        make_competition('Сидоров Сидор', datetime(2025, 1, 1)),
+    ]
+    adapter.save_competitions(records)
+    adapter.save_competitions(
+        [make_competition('Ждунов Ждун', datetime(2025, 2, 1))],
+        review_status='pending',
+        owner_id=7,
+    )
+    adapter.save_competitions(
+        [make_competition('Отклонов Отклон', datetime(2025, 3, 1))],
+        review_status='rejected',
+        owner_id=7,
+    )
+
+
+def test_competitions_page_count_matches_rows(adapter):
+    seed_page_records(adapter)
+
+    total = adapter.count_competitions_filtered()
+    page = adapter.get_competitions_page(limit=2, offset=0)
+    assert total == 5
+    assert [item.student_name for item in page] == ['Иванов Иван', 'Петров Пётр']
+
+    second_page = adapter.get_competitions_page(limit=2, offset=2)
+    assert [item.student_name for item in second_page] == ['Сидоров Сидор', 'Ждунов Ждун']
+
+    # Страница за пределами — пустая, счётчик не меняется.
+    assert adapter.get_competitions_page(limit=2, offset=100) == []
+    assert adapter.count_competitions_filtered() == 5
+
+
+def test_competitions_page_filters_combine(adapter):
+    seed_page_records(adapter)
+
+    assert adapter.count_competitions_filtered(name='Иван') == 1
+    assert adapter.count_competitions_filtered(institute='ИСИ') == 5
+    assert adapter.count_competitions_filtered(review_status='pending') == 1
+    assert adapter.count_competitions_filtered(review_status='approved') == 3
+    assert adapter.count_competitions_filtered(date_from='01.01.2025', date_to='31.12.2025') == 3
+    # Комбинация: из записей 2025 года только подтверждённые.
+    assert (
+        adapter.count_competitions_filtered(date_from='01.01.2025', date_to='31.12.2025', review_status='approved') == 1
+    )
+
+    filtered = adapter.get_competitions_page(name='Сидоров')
+    assert [item.student_name for item in filtered] == ['Сидоров Сидор']
+
+
+def test_competitions_page_unapproved_only_counts_non_approved(adapter):
+    seed_page_records(adapter)
+
+    assert adapter.count_competitions_filtered(unapproved_only=True) == 2
+    assert adapter.count_competitions_filtered(unapproved_only=True, owner_id=7) == 2
+    assert adapter.count_competitions_filtered(unapproved_only=True, review_status='pending') == 1
+
+
+def test_competitions_page_owner_scope_matches_get_competitions(adapter):
+    seed_page_records(adapter)
+
+    scoped = list(adapter.get_competitions(owner_id=7))
+    page = adapter.get_competitions_page(owner_id=7)
+    assert {item.student_name for item in scoped} == {item.student_name for item in page}
+    assert adapter.count_competitions_filtered(owner_id=7) == len(scoped)

@@ -47,6 +47,30 @@ REPORT_METRIC_SELECTS: tuple[str, ...] = (
     'SUM(CASE WHEN position >= 1 AND position <= 3 THEN 1 ELSE 0 END) AS count_prizes',
 )
 
+# Выборка записи соревнований: общий SELECT для get_competitions и
+# get_competitions_page (серверные фильтры/пагинация главной, прототип 02).
+COMPETITION_SELECT_SQL = '''
+    SELECT
+        id,
+        student_id,
+        student_name,
+        student_sex,
+        institute,
+        "group",
+        course,
+        sport,
+        date,
+        level,
+        name,
+        position,
+        created_at,
+        extra_data,
+        review_status,
+        owner_id,
+        review_comment
+    FROM competitions
+    '''
+
 # Вставка записей соревнований: общий SQL для одиночного сохранения и импорта.
 COMPETITION_INSERT_SQL = '''
     INSERT INTO competitions (
@@ -389,40 +413,150 @@ class SQLiteAdapter:
         student_id_hashes: Sequence[str] = (),
     ) -> Iterable[Competition]:
         with self._lock:
-            query = '''
-                SELECT
-                    id,
-                    student_id,
-                    student_name,
-                    student_sex,
-                    institute,
-                    "group",
-                    course,
-                    sport,
-                    date,
-                    level,
-                    name,
-                    position,
-                    created_at,
-                    extra_data,
-                    review_status,
-                    owner_id,
-                    review_comment
-                FROM competitions
-                '''
-            if owner_id is not None:
-                if student_id_hashes:
-                    placeholders = ', '.join('?' for _ in student_id_hashes)
-                    query += f'WHERE (owner_id = ? OR student_id IN ({placeholders}))\n'
-                    params = (owner_id, *student_id_hashes)
-                else:
-                    query += 'WHERE owner_id = ?\n'
-                    params = (owner_id,)
-                query += 'ORDER BY created_at ASC'
-                rows = self.connection.execute(query, params).fetchall()
-            else:
-                query += 'ORDER BY created_at ASC'
-                rows = self.connection.execute(query).fetchall()
+            scope_clauses, scope_params = self._competition_scope_clauses(owner_id, student_id_hashes)
+            where_clause = f'WHERE {" AND ".join(scope_clauses)}\n' if scope_clauses else ''
+            query = f'{COMPETITION_SELECT_SQL}{where_clause}ORDER BY created_at ASC'
+            rows = self.connection.execute(query, scope_params).fetchall()
+            return [self._row_to_competition(row) for row in rows]
+
+    @staticmethod
+    def _competition_scope_clauses(
+        owner_id: int | None,
+        student_id_hashes: Sequence[str],
+    ) -> tuple[list[str], list[object]]:
+        """Видимость записей (кабинет атлета): свои по owner_id и/или по хешам
+        привязанных ФИО. Как в get_competitions: без owner_id ограничение
+        не применяется — модератор видит весь реестр."""
+        if owner_id is None:
+            return [], []
+        if student_id_hashes:
+            placeholders = ', '.join('?' for _ in student_id_hashes)
+            return [f'(owner_id = ? OR student_id IN ({placeholders}))'], [owner_id, *student_id_hashes]
+        return ['owner_id = ?'], [owner_id]
+
+    def _competition_filter_clauses(
+        self,
+        *,
+        owner_id: int | None,
+        student_id_hashes: Sequence[str] = (),
+        name: str = '',
+        institute: str = '',
+        sport: str = '',
+        level: str = '',
+        review_status: str = '',
+        unapproved_only: bool = False,
+        date_from: str = '',
+        date_to: str = '',
+    ) -> tuple[str, list[object]]:
+        """Общий WHERE серверных фильтров главной (прототип 02): видимость +
+        ФИО (подстрока), институт/вид спорта/уровень (точное совпадение),
+        статус проверки и период дат (дд.мм.гггг, как в фильтрах отчёта)."""
+        clauses, params = self._competition_scope_clauses(owner_id, student_id_hashes)
+
+        if name:
+            clauses.append('student_name LIKE ?')
+            params.append(f'%{name}%')
+        if institute:
+            clauses.append('institute = ?')
+            params.append(institute)
+        if sport:
+            clauses.append('sport = ?')
+            params.append(sport)
+        if level:
+            clauses.append('level = ?')
+            params.append(level)
+        if review_status:
+            clauses.append('review_status = ?')
+            params.append(review_status)
+        if unapproved_only:
+            # Статусы у всех записей, кроме подтверждённых (для колонки «Статус»).
+            clauses.append("review_status != 'approved'")
+
+        date_clauses, date_params = self._date_range_clauses(date_from, date_to)
+        clauses.extend(date_clauses)
+        params.extend(date_params)
+
+        where_clause = f'WHERE {" AND ".join(clauses)}' if clauses else ''
+        return where_clause, params
+
+    def count_competitions_filtered(
+        self,
+        *,
+        owner_id: int | None = None,
+        student_id_hashes: Sequence[str] = (),
+        name: str = '',
+        institute: str = '',
+        sport: str = '',
+        level: str = '',
+        review_status: str = '',
+        unapproved_only: bool = False,
+        date_from: str = '',
+        date_to: str = '',
+    ) -> int:
+        """Сколько записей видно пользователю с учётом серверных фильтров.
+
+        Счётчик «Показано N из M» главной: M — с фильтром, без пагинации.
+        unapproved_only — признак «есть не подтверждённые» (видимость колонки
+        «Статус» не должна зависеть от текущей страницы/фильтра).
+        """
+        with self._lock:
+            where_clause, params = self._competition_filter_clauses(
+                owner_id=owner_id,
+                student_id_hashes=student_id_hashes,
+                name=name,
+                institute=institute,
+                sport=sport,
+                level=level,
+                review_status=review_status,
+                unapproved_only=unapproved_only,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            row = self.connection.execute(
+                f'SELECT COUNT(*) FROM competitions {where_clause}',
+                params,
+            ).fetchone()
+            return int(row[0])
+
+    def get_competitions_page(
+        self,
+        *,
+        owner_id: int | None = None,
+        student_id_hashes: Sequence[str] = (),
+        name: str = '',
+        institute: str = '',
+        sport: str = '',
+        level: str = '',
+        review_status: str = '',
+        date_from: str = '',
+        date_to: str = '',
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Competition]:
+        """Страница реестра с серверной фильтрацией (прототип 02).
+
+        Те же фильтры, что у count_competitions_filtered; сортировка и
+        порядок как в get_competitions (created_at ASC). limit/offset —
+        пагинация главной, None возвращает всё (совпадение с get_competitions).
+        """
+        with self._lock:
+            where_clause, params = self._competition_filter_clauses(
+                owner_id=owner_id,
+                student_id_hashes=student_id_hashes,
+                name=name,
+                institute=institute,
+                sport=sport,
+                level=level,
+                review_status=review_status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            query = f'{COMPETITION_SELECT_SQL}{where_clause}\nORDER BY created_at ASC'
+            query_params = list(params)
+            if limit is not None:
+                query += '\nLIMIT ? OFFSET ?'
+                query_params.extend([limit, offset])
+            rows = self.connection.execute(query, query_params).fetchall()
             return [self._row_to_competition(row) for row in rows]
 
     def get_custom_fields(self, include_inactive: bool = False) -> list[CustomField]:
