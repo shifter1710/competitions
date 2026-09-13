@@ -49,6 +49,9 @@ class Main {
         this.tableCard = document.querySelector(".table-card");
         this.tableElement = document.querySelector(".interactive-table");
         this.themeToggleButton = document.querySelector(".theme-toggle-button");
+        this.usersSearchInput = document.querySelector(".users-search-input");
+        this.usersRoleFilter = document.querySelector(".users-role-filter");
+        this.usersTable = document.querySelector(".users-table");
         this.filterIsApplied = Boolean(this.tableCard && this.tableCard.dataset.tableView === "report");
     }
 
@@ -166,7 +169,182 @@ class Main {
             this.updateThemeToggleButton();
             this.themeToggleButton.addEventListener("click", () => this.handleThemeToggle());
         }
+        this.initUsersPage();
         this.bindContentWrapperEvents();
+    }
+
+    // Страница «Пользователи» (/admin/users): живой поиск по логину и фильтр
+    // по роли — чистый клиент над уже загруженной таблицей, без запросов к
+    // серверу. Модалы действий (пароль/ФИО/удаление) наполняются из
+    // data-атрибутов кнопки строки.
+    initUsersPage() {
+        if (!this.usersTable) {
+            return;
+        }
+        if (this.usersSearchInput) {
+            this.usersSearchInput.addEventListener("input", () => this.filterUsersRows());
+        }
+        if (this.usersRoleFilter) {
+            this.usersRoleFilter.addEventListener("change", () => this.filterUsersRows());
+        }
+        document.addEventListener("click", (event) => this.handleUsersPageClick(event));
+        const deleteConfirmInput = document.querySelector(".user-delete-confirm");
+        if (deleteConfirmInput) {
+            deleteConfirmInput.addEventListener("input", () => this.validateUserDeleteConfirm());
+        }
+    }
+
+    filterUsersRows() {
+        const query = String((this.usersSearchInput && this.usersSearchInput.value) || "").trim().toLowerCase();
+        const role = this.usersRoleFilter ? this.usersRoleFilter.value : "";
+        this.usersTable.querySelectorAll("tbody tr").forEach((row) => {
+            const matchesQuery = !query || (row.dataset.username || "").toLowerCase().includes(query);
+            const matchesRole = !role || row.dataset.role === role;
+            row.classList.toggle("d-none", !(matchesQuery && matchesRole));
+        });
+    }
+
+    handleUsersPageClick(event) {
+        const passwordButton = event.target.closest(".user-password-button");
+        if (passwordButton) {
+            this.prepareUserModal(".user-password-form", "/password", passwordButton);
+            return;
+        }
+        const aliasButton = event.target.closest(".user-alias-button");
+        if (aliasButton) {
+            this.prepareUserModal(".user-alias-form", "/alias", aliasButton);
+            return;
+        }
+        const deleteButton = event.target.closest(".user-delete-button");
+        if (deleteButton) {
+            this.prepareUserModal(".user-delete-form", "/delete", deleteButton);
+            const confirmInput = document.querySelector(".user-delete-confirm");
+            if (confirmInput) {
+                confirmInput.value = "";
+            }
+            this.validateUserDeleteConfirm();
+            return;
+        }
+        const generateButton = event.target.closest(".password-generate-button");
+        if (generateButton) {
+            const input = document.querySelector(generateButton.dataset.passwordInput);
+            if (input) {
+                input.value = this.generatePassword();
+                input.focus();
+            }
+            return;
+        }
+        const copyButton = event.target.closest(".password-copy-button");
+        if (copyButton) {
+            const input = document.querySelector(copyButton.dataset.passwordInput);
+            if (input && input.value) {
+                this.copyPasswordToClipboard(input.value, copyButton);
+            }
+        }
+    }
+
+    prepareUserModal(formSelector, actionSuffix, button) {
+        const form = document.querySelector(formSelector);
+        if (!form) {
+            return;
+        }
+        form.action = `/admin/users/${button.dataset.userId}${actionSuffix}`;
+        form.dataset.username = button.dataset.username || "";
+        form.querySelectorAll(".user-modal-username").forEach((element) => {
+            element.textContent = form.dataset.username;
+        });
+        const recordsElement = form.querySelector(".user-delete-modal-records-count");
+        if (recordsElement) {
+            recordsElement.textContent = button.dataset.recordsCount || "0";
+        }
+    }
+
+    // Кнопка «Удалить» в модале активна только при точном совпадении логина.
+    validateUserDeleteConfirm() {
+        const form = document.querySelector(".user-delete-form");
+        if (!form) {
+            return;
+        }
+        const confirmInput = form.querySelector(".user-delete-confirm");
+        const submitButton = form.querySelector(".user-delete-submit");
+        const hint = form.querySelector(".user-delete-confirm-hint");
+        if (!confirmInput || !submitButton) {
+            return;
+        }
+        const matches = confirmInput.value === form.dataset.username;
+        submitButton.disabled = !matches;
+        if (hint) {
+            hint.classList.toggle("d-none", !confirmInput.value || matches);
+        }
+    }
+
+    // Криптослучайный пароль: 16 символов из алфавита без двусмысленных
+    // (исключены 0, O, 1, l, I). Байты из «хвоста» диапазона отбрасываются,
+    // чтобы распределение символов было равномерным без смещения по модулю.
+    generatePassword(length = 16) {
+        const alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        if (!window.crypto || !crypto.getRandomValues) {
+            alert("Браузер не поддерживает безопасную генерацию паролей");
+            return "";
+        }
+        const maxValidByte = 256 - (256 % alphabet.length);
+        const bytes = new Uint8Array(length * 2);
+        let password = "";
+        while (password.length < length) {
+            crypto.getRandomValues(bytes);
+            for (const byte of bytes) {
+                if (byte >= maxValidByte) {
+                    continue;
+                }
+                password += alphabet[byte % alphabet.length];
+                if (password.length === length) {
+                    break;
+                }
+            }
+        }
+        return password;
+    }
+
+    // Копирование пароля: navigator.clipboard, при недоступности —
+    // fallback через скрытую textarea и execCommand.
+    copyPasswordToClipboard(value, button) {
+        const flashCopied = () => {
+            const originalLabel = button.textContent;
+            button.textContent = "Скопировано";
+            setTimeout(() => {
+                button.textContent = originalLabel;
+            }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard
+                .writeText(value)
+                .then(flashCopied)
+                .catch(() => this.copyViaExecCommand(value, flashCopied));
+            return;
+        }
+        this.copyViaExecCommand(value, flashCopied);
+    }
+
+    copyViaExecCommand(value, successCallback) {
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        let copied = false;
+        try {
+            copied = document.execCommand("copy");
+        } catch {
+            copied = false;
+        }
+        document.body.removeChild(textarea);
+        if (copied) {
+            successCallback();
+        } else {
+            alert("Не удалось скопировать пароль — скопируйте вручную");
+        }
     }
 
     // Тема живёт только на клиенте: атрибут data-bs-theme на <html> ставит

@@ -7,70 +7,64 @@
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <form action="/admin/users" class="row g-2 align-items-end mb-4" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <div class="col-md-3">
-                <label class="form-label" for="user-username">Логин</label>
-                <input class="form-control" id="user-username" name="username" type="text" required>
-            </div>
-            <div class="col-md-3">
-                <label class="form-label" for="user-password">Пароль</label>
-                <input class="form-control" id="user-password" name="password" type="password" minlength="6" required>
-            </div>
-            <div class="col-md-2">
-                <label class="form-label" for="user-role">Роль</label>
-                <select class="form-select" id="user-role" name="role">
+        <div class="d-flex flex-column flex-sm-row gap-2 justify-content-between align-items-sm-center mb-3">
+            <div class="d-flex flex-wrap gap-2">
+                <input aria-label="Поиск по логину" class="form-control users-search-input" placeholder="Поиск по логину…" type="search">
+                <select aria-label="Фильтр по роли" class="form-select users-role-filter">
+                    <option value="">Все роли</option>
                     {% for role in user_roles %}
                     <option value="{{ role }}">{{ role }}</option>
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-md-2">
-                <button class="btn btn-primary w-100" type="submit">Добавить</button>
-            </div>
-        </form>
+            <button class="btn btn-primary align-self-sm-start" data-bs-target="#user-create-modal" data-bs-toggle="modal" type="button">+ Добавить пользователя</button>
+        </div>
 
         {% if users %}
         <div class="table-responsive">
-            <table class="table table-sm align-middle">
+            <table class="table table-sm align-middle users-table">
                 <thead>
                     <tr>
                         <th>Логин</th>
                         <th>Роль</th>
-                        <th>Статус</th>
-                        <th>Действия</th>
+                        <th>Активность</th>
+                        <th>Записей</th>
+                        <th>Псевдонимы</th>
+                        <th class="text-end">Действия</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for user in users %}
-                    <tr>
+                    <tr data-role="{{ user.role }}" data-username="{{ user.username }}">
+                        <td>{{ user.username }}{% if user.username == current_username %} <span class="badge text-bg-secondary">вы</span>{% endif %}</td>
                         <td>
-                            {{ user.username }}{% if user.username == current_username %} <span class="badge text-bg-secondary">вы</span>{% endif %}
-                            {% if user.name_aliases %}
-                            <div class="text-muted small">Псевдонимы: {{ user.name_aliases | join(', ') }}</div>
+                            {% if user.role == 'admin' %}
+                            <span class="badge text-bg-danger">{{ user.role }}</span>
+                            {% elif user.role == 'editor' %}
+                            <span class="badge text-bg-primary">{{ user.role }}</span>
+                            {% elif user.role == 'athlete' %}
+                            <span class="badge text-bg-success">{{ user.role }}</span>
+                            {% else %}
+                            <span class="badge text-bg-secondary">{{ user.role }}</span>
                             {% endif %}
                         </td>
-                        <td>{{ user.role }}</td>
                         <td>{% if user.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">отключён</span>{% endif %}</td>
-                        <td>
-                            <form action="/admin/users/{{ user.id }}/password" class="d-flex gap-2" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                <input class="form-control form-control-sm" name="password" placeholder="Новый пароль" type="password" minlength="6" required>
-                                <button class="btn btn-sm btn-outline-primary" type="submit">Сменить пароль</button>
-                            </form>
-                            {% if user.username != current_username %}
-                            <form action="/admin/users/{{ user.id }}/active" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                <button class="btn btn-sm btn-outline-warning mt-1" type="submit">
-                                    {% if user.active %}Отключить{% else %}Включить{% endif %}
-                                </button>
-                            </form>
-                            {% endif %}
-                            <form action="/admin/users/{{ user.id }}/alias" class="d-flex gap-2 mt-1" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                <input class="form-control form-control-sm" name="name" placeholder="Привязать ФИО" type="text" list="student-names-list" required>
-                                <button class="btn btn-sm btn-outline-primary" type="submit">Привязать ФИО</button>
-                            </form>
+                        <td><span class="badge text-bg-light border">{{ user.records_count }}</span></td>
+                        <td class="small text-muted">{{ user.name_aliases | join(', ') if user.name_aliases else '—' }}</td>
+                        <td class="text-end">
+                            <div class="d-inline-flex flex-wrap gap-1 justify-content-end">
+                                <button class="btn btn-sm btn-outline-primary user-password-button" data-bs-target="#user-password-modal" data-bs-toggle="modal" data-user-id="{{ user.id }}" data-username="{{ user.username }}" type="button">Пароль</button>
+                                {% if user.username != current_username %}
+                                <form action="/admin/users/{{ user.id }}/active" class="d-inline" method="post">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <button class="btn btn-sm btn-outline-warning" type="submit" title="{% if user.active %}Отключить пользователя{% else %}Включить пользователя{% endif %}">{% if user.active %}Выкл{% else %}Вкл{% endif %}</button>
+                                </form>
+                                {% endif %}
+                                <button class="btn btn-sm btn-outline-secondary user-alias-button" data-bs-target="#user-alias-modal" data-bs-toggle="modal" data-user-id="{{ user.id }}" data-username="{{ user.username }}" type="button">ФИО</button>
+                                {% if user.username != current_username %}
+                                <button class="btn btn-sm btn-outline-danger user-delete-button" data-bs-target="#user-delete-modal" data-bs-toggle="modal" data-records-count="{{ user.records_count }}" data-user-id="{{ user.id }}" data-username="{{ user.username }}" type="button">Удалить</button>
+                                {% endif %}
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -80,6 +74,131 @@
         {% else %}
         <div class="text-muted">Пользователей пока нет.</div>
         {% endif %}
+    </div>
+</div>
+
+{# Модал создания пользователя: обычный POST /admin/users. Пароль в поле
+   type=text: сгенерированный нужно показать и скопировать; в базе — только
+   хеш, открытым текстом пароль нигде не хранится. #}
+<div aria-hidden="true" aria-labelledby="user-create-modal-title" class="modal fade" id="user-create-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <form action="/admin/users" class="modal-content" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="modal-header">
+                <h5 class="modal-title" id="user-create-modal-title">Новый пользователь</h5>
+                <button aria-label="Закрыть" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label" for="user-create-username">Логин</label>
+                    <input class="form-control" id="user-create-username" name="username" required type="text">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="user-create-role">Роль</label>
+                    <select class="form-select" id="user-create-role" name="role">
+                        {% for role in user_roles %}
+                        <option value="{{ role }}">{{ role }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-1">
+                    <label class="form-label" for="user-create-password">Пароль</label>
+                    <div class="input-group">
+                        <input aria-label="Пароль" class="form-control font-monospace" id="user-create-password" minlength="6" name="password" required type="text">
+                        <button class="btn btn-outline-secondary password-generate-button" data-password-input="#user-create-password" type="button">Сгенерировать</button>
+                        <button class="btn btn-outline-secondary password-copy-button" data-password-input="#user-create-password" type="button">Копировать</button>
+                    </div>
+                </div>
+                <div class="form-text">Покажите пароль пользователю один раз — нигде не хранится в открытом виде (в базе только хеш).</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
+                <button class="btn btn-primary" type="submit">Добавить</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Смена пароля: существующий POST /admin/users/<id>/password, action и логин
+   в заголовке подставляет JS из data-атрибутов кнопки в таблице. #}
+<div aria-hidden="true" aria-labelledby="user-password-modal-title" class="modal fade" id="user-password-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <form action="/admin/users" class="modal-content user-password-form" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="modal-header">
+                <h5 class="modal-title" id="user-password-modal-title">Смена пароля: <span class="user-modal-username"></span></h5>
+                <button aria-label="Закрыть" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-1">
+                    <label class="form-label" for="user-password-input">Новый пароль</label>
+                    <div class="input-group">
+                        <input aria-label="Новый пароль" class="form-control font-monospace" id="user-password-input" minlength="6" name="password" required type="text">
+                        <button class="btn btn-outline-secondary password-generate-button" data-password-input="#user-password-input" type="button">Сгенерировать</button>
+                        <button class="btn btn-outline-secondary password-copy-button" data-password-input="#user-password-input" type="button">Копировать</button>
+                    </div>
+                </div>
+                <div class="form-text">Покажите пароль пользователю один раз — нигде не хранится в открытом виде (в базе только хеш).</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
+                <button class="btn btn-primary" type="submit">Сменить пароль</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Привязка ФИО: существующий POST /admin/users/<id>/alias. #}
+<div aria-hidden="true" aria-labelledby="user-alias-modal-title" class="modal fade" id="user-alias-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <form action="/admin/users" class="modal-content user-alias-form" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="modal-header">
+                <h5 class="modal-title" id="user-alias-modal-title">Привязка ФИО: <span class="user-modal-username"></span></h5>
+                <button aria-label="Закрыть" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+            </div>
+            <div class="modal-body">
+                <label class="form-label" for="user-alias-input">ФИО как в записях</label>
+                <input class="form-control" id="user-alias-input" list="student-names-list" name="name" required type="text">
+                <div class="form-text">По хешу этого ФИО записи подтягиваются в кабинет атлета. Список псевдонимов только растёт.</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
+                <button class="btn btn-primary" type="submit">Привязать</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Удаление: записи — исторические факты, остаются с owner_id NULL; привязка
+   по ФИО пропадает вместе с псевдонимами. Подтверждение — ввод логина. #}
+<div aria-hidden="true" aria-labelledby="user-delete-modal-title" class="modal fade" id="user-delete-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <form action="/admin/users" class="modal-content user-delete-form" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="modal-header">
+                <h5 class="modal-title text-danger" id="user-delete-modal-title">Удалить пользователя <span class="user-modal-username"></span>?</h5>
+                <button aria-label="Закрыть" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">
+                    Записей соревнований, созданных от имени аккаунта:
+                    <strong class="user-delete-modal-records-count"></strong>.
+                </p>
+                <p class="mb-3 text-muted small">
+                    Записи останутся в базе, отчётах и выгрузках — но привязка к кабинету
+                    по ФИО пропадёт: псевдонимы ФИО удаляются вместе с аккаунтом.
+                    Действие необратимо.
+                </p>
+                <label class="form-label" for="user-delete-confirm">Введите логин «<span class="user-modal-username"></span>» для подтверждения</label>
+                <input aria-label="Логин для подтверждения" autocomplete="off" class="form-control user-delete-confirm" id="user-delete-confirm" name="confirm_username" type="text">
+                <div class="form-text user-delete-confirm-hint d-none text-danger">Логин не совпадает</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
+                <button class="btn btn-danger user-delete-submit" disabled type="submit">Удалить пользователя</button>
+            </div>
+        </form>
     </div>
 </div>
 
