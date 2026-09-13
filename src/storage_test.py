@@ -536,3 +536,62 @@ def test_list_users_includes_name_aliases(adapter):
     assert users[0]['role'] == 'athlete'
     assert users[0]['active'] == 1
     assert users[0]['name_aliases'] == ['Иванова Анна Петровна']
+
+
+# Удаление пользователя: записи — исторические факты, остаются с owner_id
+# NULL; аккаунт и его псевдонимы ФИО удаляются (docs/data-model-decisions.md).
+def test_delete_user_detaches_records_and_removes_account(adapter):
+    adapter.create_user('sportik', 'hash', 'athlete')
+    user_id = adapter.get_user('sportik')['id']
+    adapter.add_name_alias(user_id, 'Спортсменов Спорт Спортович')
+    adapter.save_competitions(
+        [
+            make_competition('Спортсменов Спорт Спортович', datetime(2026, 1, 1)),
+            make_competition('Спортсменов Спорт Спортович', datetime(2026, 2, 1)),
+        ],
+        owner_id=user_id,
+    )
+
+    assert adapter.count_records_by_owner(user_id) == 2
+
+    detached = adapter.delete_user(user_id)
+
+    assert detached == 2
+    assert adapter.get_user('sportik') is None
+    assert adapter.get_user_by_id(user_id) is None
+    assert adapter.get_name_aliases(user_id) == []
+    assert not any(user['username'] == 'sportik' for user in adapter.list_users())
+    # Записи живы, но отвязаны от владельца.
+    assert adapter.count_competitions() == 2
+    assert adapter.count_records_by_owner(user_id) == 0
+    owners = [row['owner_id'] for row in adapter.connection.execute('SELECT owner_id FROM competitions')]
+    assert owners == [None, None]
+
+
+def test_delete_user_keeps_other_owners_records(adapter):
+    adapter.create_user('sportik', 'hash', 'athlete')
+    adapter.create_user('operator', 'hash', 'editor')
+    sportik_id = adapter.get_user('sportik')['id']
+    operator_id = adapter.get_user('operator')['id']
+    adapter.save_competitions(
+        [make_competition('Спортсменов Спорт Спортович', datetime(2026, 1, 1))], owner_id=sportik_id
+    )
+    adapter.save_competitions([make_competition('Чужой Студент', datetime(2026, 2, 1))], owner_id=operator_id)
+
+    detached = adapter.delete_user(sportik_id)
+
+    assert detached == 1
+    assert adapter.get_user('operator') is not None
+    assert adapter.count_records_by_owner(operator_id) == 1
+    assert adapter.count_competitions() == 2
+
+
+def test_count_records_by_owner_zero_for_missing_user(adapter):
+    assert adapter.count_records_by_owner(9999) == 0
+
+
+def test_delete_user_without_records_returns_zero(adapter):
+    adapter.create_user('viewer1', 'hash', 'viewer')
+    user_id = adapter.get_user('viewer1')['id']
+    assert adapter.delete_user(user_id) == 0
+    assert adapter.get_user('viewer1') is None

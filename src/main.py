@@ -958,11 +958,12 @@ async def admin_users_page(request: Request):
     if auth_error is not None:
         return auth_error
     storage = get_storage(request.app)
+    users = [{**user, 'records_count': storage.count_records_by_owner(user['id'])} for user in storage.list_users()]
     return await render(
         template_name=jinja_env.get_template('admin_users.html'),
         context={
             'request': request,
-            'users': storage.list_users(),
+            'users': users,
             'user_roles': USER_ROLES,
             'current_username': (get_auth_user(request) or {}).get('username'),
             **get_flash_args(request),
@@ -1547,6 +1548,58 @@ async def toggle_user_active(request: Request, user_id: str):
 
     storage.set_user_active(numeric_user_id, not user['active'])
     return build_redirect_with_message(message='Статус пользователя изменён', url='/admin/users')
+
+
+def count_active_admins(storage: SQLiteAdapter) -> int:
+    return sum(1 for user in storage.list_users() if user['role'] == ADMIN_ROLE and user['active'])
+
+
+@app.post('/admin/users/<user_id>/delete')
+async def delete_user(request: Request, user_id: str):
+    # Удаление аккаунта: записи — исторические факты, остаются с owner_id NULL;
+    # псевдонимы и привязка кабинета исчезают вместе с аккаунтом. Подтверждение —
+    # ввод логина в поле (docs/data-model-decisions.md «Удаление пользователей»).
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_user_id = int(user_id)
+    except ValueError:
+        return text(body='Invalid user id', status=400)
+
+    storage = get_storage(request.app)
+    target_user = storage.get_user_by_id(numeric_user_id)
+    if target_user is None:
+        return build_redirect_with_message(error='Пользователь не найден', url='/admin/users')
+    if target_user['username'] == (get_auth_user(request) or {}).get('username'):
+        return build_redirect_with_message(error='Нельзя удалить собственную учётную запись', url='/admin/users')
+    if target_user['role'] == ADMIN_ROLE and target_user['active'] and count_active_admins(storage) <= 1:
+        return build_redirect_with_message(
+            error='Нельзя удалить последнего активного администратора', url='/admin/users'
+        )
+
+    confirm_username = get_form_value(request, 'confirm_username').strip()
+    if not confirm_username or confirm_username != target_user['username']:
+        return build_redirect_with_message(
+            error='Для подтверждения введите логин удаляемого пользователя',
+            url='/admin/users',
+        )
+
+    detached = storage.delete_user(numeric_user_id)
+    log_audit_event(
+        request,
+        'user_deleted',
+        {
+            'target_user_id': numeric_user_id,
+            'target_username': target_user['username'],
+            'records_detached': detached,
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Пользователь «{target_user["username"]}» удалён. Отвязано записей: {detached}',
+        url='/admin/users',
+    )
 
 
 def build_attachments_by_record(all_attachments: list[dict]) -> dict[int, list[dict]]:

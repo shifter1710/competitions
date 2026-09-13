@@ -652,6 +652,35 @@ class SQLiteAdapter:
             )
             self.connection.commit()
 
+    def count_records_by_owner(self, owner_id: int) -> int:
+        """Сколько записей соревнований привязано к аккаунту владельца."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM competitions WHERE owner_id = ?',
+                (owner_id,),
+            ).fetchone()
+            return row['total']
+
+    def delete_user(self, user_id: int) -> int:
+        """Удалить аккаунт, сохранив записи как исторические факты.
+
+        Записи не удаляются: owner_id обнуляется, строки остаются в таблице,
+        отчётах и выгрузках. Псевдонимы ФИО живут в строке пользователя
+        (users.name_aliases) и исчезают вместе с аккаунтом. Аудит-журнал не
+        трогается (append-only, события хранят username текстом). См.
+        docs/data-model-decisions.md «Удаление пользователей». Возвращает
+        число отвязанных записей.
+        """
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE competitions SET owner_id = NULL WHERE owner_id = ?',
+                (user_id,),
+            )
+            detached = cursor.rowcount
+            self.connection.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            self.connection.commit()
+            return detached
+
     def get_level_names(self, include_inactive: bool = False) -> list[str]:
         with self._lock:
             if include_inactive:

@@ -133,6 +133,8 @@ def client() -> SanicTestClient:
     fake_storage.create_user.return_value = None
     fake_storage.set_user_password.return_value = None
     fake_storage.set_user_active.return_value = None
+    fake_storage.count_records_by_owner.return_value = 0
+    fake_storage.delete_user.return_value = 0
     fake_storage.count_competitions.return_value = 0
     fake_storage.count_attachments.return_value = 0
     fake_storage.delete_all_competitions.return_value = 0
@@ -1041,6 +1043,143 @@ def test_admin_cannot_deactivate_self(client: SanicTestClient):
     assert 'admin_error' in response.headers['location']
     app.ctx.storage.set_user_active.assert_not_called()
     app.ctx.storage.get_user_by_id.return_value = None
+
+
+def delete_user_request(client, headers, user_id, confirm_username):
+    return client.post(
+        f'/admin/users/{user_id}/delete',
+        headers=headers,
+        data={**csrf_for(headers), 'confirm_username': confirm_username},
+        allow_redirects=False,
+    )
+
+
+def test_admin_cannot_delete_self(client: SanicTestClient):
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 7,
+        'username': settings.auth_admin_username,
+        'password_hash': 'x',
+        'role': 'admin',
+        'active': 1,
+    }
+    app.ctx.storage.delete_user.reset_mock()
+    headers = get_auth_headers()
+    _, response = delete_user_request(client, headers, 7, settings.auth_admin_username)
+
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.delete_user.assert_not_called()
+    app.ctx.storage.get_user_by_id.return_value = None
+
+
+def test_admin_cannot_delete_last_active_admin(client: SanicTestClient):
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 9,
+        'username': 'admin2',
+        'password_hash': 'x',
+        'role': 'admin',
+        'active': 1,
+    }
+    # Единственный активный админ — сама цель удаления.
+    app.ctx.storage.list_users.return_value = [{'id': 9, 'username': 'admin2', 'role': 'admin', 'active': 1}]
+    app.ctx.storage.delete_user.reset_mock()
+    headers = get_auth_headers()
+    _, response = delete_user_request(client, headers, 9, 'admin2')
+
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.delete_user.assert_not_called()
+
+    # Неактивного админа удалить можно: активных админов останется больше нуля.
+    app.ctx.storage.get_user_by_id.return_value['active'] = 0
+    _, response = delete_user_request(client, headers, 9, 'admin2')
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.delete_user.assert_called_once()
+
+    app.ctx.storage.get_user_by_id.return_value = None
+    app.ctx.storage.list_users.return_value = []
+
+
+def test_delete_user_rejects_wrong_confirm_username(client: SanicTestClient):
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 7,
+        'username': 'operator9',
+        'password_hash': 'x',
+        'role': 'editor',
+        'active': 1,
+    }
+    app.ctx.storage.list_users.return_value = [
+        {'id': 1, 'username': 'admin', 'role': 'admin', 'active': 1},
+        {'id': 7, 'username': 'operator9', 'role': 'editor', 'active': 1},
+    ]
+    app.ctx.storage.delete_user.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = delete_user_request(client, headers, 7, 'wrong-login')
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+    _, response = delete_user_request(client, headers, 7, '')
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+    app.ctx.storage.delete_user.assert_not_called()
+    app.ctx.storage.get_user_by_id.return_value = None
+    app.ctx.storage.list_users.return_value = []
+
+
+def test_admin_can_delete_user(client: SanicTestClient):
+    app.ctx.storage.get_user_by_id.return_value = {
+        'id': 7,
+        'username': 'operator9',
+        'password_hash': 'x',
+        'role': 'editor',
+        'active': 1,
+    }
+    app.ctx.storage.list_users.return_value = [
+        {'id': 1, 'username': 'admin', 'role': 'admin', 'active': 1},
+        {'id': 7, 'username': 'operator9', 'role': 'editor', 'active': 1},
+    ]
+    app.ctx.storage.delete_user.return_value = 3
+    app.ctx.storage.delete_user.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = delete_user_request(client, headers, 7, 'operator9')
+
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    assert 'admin_message' in response.headers['location']
+    app.ctx.storage.delete_user.assert_called_once_with(7)
+    assert (
+        'user_deleted',
+        {'target_user_id': 7, 'target_username': 'operator9', 'records_detached': 3},
+    ) in audit_calls()
+
+    app.ctx.storage.get_user_by_id.return_value = None
+    app.ctx.storage.list_users.return_value = []
+    app.ctx.storage.delete_user.return_value = 0
+
+
+def test_delete_user_rejects_non_numeric_id(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/users/abc/delete',
+        headers=headers,
+        data=csrf_for(headers),
+    )
+    assert response.status == 400
+
+
+def test_delete_user_forbidden_for_non_admin(client: SanicTestClient):
+    editor_headers = get_auth_headers(role='editor')
+    _, response = delete_user_request(client, editor_headers, 7, 'operator9')
+    assert response.status == 403
+
+    viewer_headers = get_auth_headers(role='viewer')
+    _, response = delete_user_request(client, viewer_headers, 7, 'operator9')
+    assert response.status == 403
 
 
 def test_editor_can_approve_pending_record(client: SanicTestClient):
