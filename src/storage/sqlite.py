@@ -1329,6 +1329,73 @@ class SQLiteAdapter:
             options.setdefault(row['institute'], []).append(row['group'])
         return options
 
+    def find_catalog_row(
+        self,
+        category: str,
+        value: str,
+        *,
+        parent_id: int | None = None,
+    ) -> dict | None:
+        """Запись справочника по значению без учёта регистра (№1.1).
+
+        Для группы (parent_id задан) поиск среди детей этого родителя:
+        уникальность группы — по паре (институт, группа). Возвращает первую
+        подходящую строку или None.
+        """
+        value = value.strip()
+        if not value:
+            return None
+        # Сравнение регистра — в Python: lower() в SQLite работает только
+        # с ASCII и не приводит кириллицу (ИСИ/иси).
+        with self._lock:
+            if parent_id is None:
+                rows = self.connection.execute(
+                    'SELECT id, category, value, parent_id, active FROM catalog_values '
+                    'WHERE category = ? AND parent_id IS NULL ORDER BY id ASC',
+                    (category,),
+                ).fetchall()
+            else:
+                rows = self.connection.execute(
+                    'SELECT id, category, value, parent_id, active FROM catalog_values '
+                    'WHERE category = ? AND parent_id = ? ORDER BY id ASC',
+                    (category, parent_id),
+                ).fetchall()
+        for row in rows:
+            if row['value'].lower() == value.lower():
+                return dict(row)
+        return None
+
+    def find_catalog_canonical(
+        self,
+        category: str,
+        value: str,
+        *,
+        parent_id: int | None = None,
+    ) -> str | None:
+        """Каноническое написание значения справочника без учёта регистра (№1.1)."""
+        row = self.find_catalog_row(category, value, parent_id=parent_id)
+        return row['value'] if row else None
+
+    def find_level_canonical(self, name: str) -> str | None:
+        """Каноническое написание уровня без учёта регистра (№1.1).
+
+        Уровень живёт в levels, а не в catalog_values — поэтому отдельный
+        поиск. Каноническое написание имеет приоритет над нижнекейсовой
+        нормализацией записи (см. apply_catalog_canonical_values).
+        """
+        name = name.strip()
+        if not name:
+            return None
+        # Сравнение регистра — в Python (lower() в SQLite не берёт кириллицу).
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT name FROM levels ORDER BY id ASC',
+            ).fetchall()
+        for row in rows:
+            if row['name'].lower() == name.lower():
+                return row['name']
+        return None
+
     def add_catalog_value(self, category: str, value: str, parent_id: int | None = None) -> None:
         """Добавить значение в справочник; дубликат игнорируется без ошибки.
 

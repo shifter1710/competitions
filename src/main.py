@@ -517,6 +517,18 @@ def validate_import_columns(df: pd.DataFrame):
         raise ValueError(f'Missing required columns: {", ".join(missing_columns)}')
 
 
+def clean_str(value) -> str:
+    """Значение ячейки импорта/формы как строка; NaN/None → пустая строка.
+
+    Замечание с живого импорта (docs/feedback-live.md «nan»): pandas
+    превращает пустые ячейки Excel в NaN, и str(NaN) давал текст «nan»
+    в Поле/Институте/Группе. Любая пустая ячейка теперь — пустое значение.
+    """
+    if value is None or isna(value):
+        return ''
+    return str(value).strip()
+
+
 def normalize_position(value) -> int:
     if isna(value) or value == '':
         return 0
@@ -621,8 +633,9 @@ def build_competition(
     *,
     custom_fields: Sequence[CustomField],
     manual_input: bool = False,
+    storage: SQLiteAdapter | None = None,
 ) -> Competition:
-    student_name = str(record['ФИО']).strip()
+    student_name = clean_str(record['ФИО'])
     if not student_name:
         raise ValueError('ФИО обязательно')
 
@@ -632,20 +645,55 @@ def build_competition(
     else:
         date = parse_import_date(date)
 
-    return Competition(
+    competition = Competition(
         student_id=hashlib.sha256(student_name.encode()).hexdigest(),
         student_name=student_name,
-        student_sex=str(record['Пол']).strip(),
-        institute=str(record['Институт']).strip(),
-        group=str(record['Группа']).strip(),
+        student_sex=clean_str(record['Пол']),
+        institute=clean_str(record['Институт']),
+        group=clean_str(record['Группа']),
         date=date,
-        sport=str(record['Вид спорта']).strip(),
-        level=str(record['Уровень соревнований']).strip().lower(),
-        name=str(record['Название соревнований']).strip(),
+        sport=clean_str(record['Вид спорта']),
+        level=clean_str(record['Уровень соревнований']).lower(),
+        name=clean_str(record['Название соревнований']),
         position=normalize_position(record['Место']),
         course=normalize_course(record['Курс']),
         extra_data=extract_custom_field_values(record, custom_fields),
     )
+    if storage is not None:
+        apply_catalog_canonical_values(storage, competition)
+    return competition
+
+
+def apply_catalog_canonical_values(storage: SQLiteAdapter, competition: Competition) -> None:
+    """№1.1 (docs/feedback-live.md): значения справочников — в каноническом регистре.
+
+    Если значение записи отличается от значения справочника ТОЛЬКО регистром,
+    в запись подставляется каноническое написание из справочника. Исторические
+    записи не трогаются — замена происходит только на пути создания записи
+    (ручной ввод, импорт). Уровень по-прежнему нормализуется в lower
+    (build_competition), а затем каноническое написание из levels имеет
+    приоритет — так записи согласованы со справочником.
+
+    Группа ищется внутри института: уникальность группы — по паре
+    (институт, группа), поэтому каноническое подставляется только когда
+    канонический институт найден в иерархии.
+    """
+    if competition.level:
+        canonical = storage.find_level_canonical(competition.level)
+        if canonical:
+            competition.level = canonical
+    for category in ('sport', 'institute'):
+        value = getattr(competition, category)
+        if value:
+            canonical = storage.find_catalog_canonical(category, value)
+            if canonical:
+                setattr(competition, category, canonical)
+    if competition.institute and competition.group:
+        institute = storage.find_catalog_row('institute', competition.institute)
+        if institute is not None:
+            canonical = storage.find_catalog_canonical('group', competition.group, parent_id=institute['id'])
+            if canonical:
+                competition.group = canonical
 
 
 def competition_to_export_row(
@@ -1170,6 +1218,14 @@ async def create_catalog_value(request: Request, category: str):
     if not value:
         return build_redirect_with_message(error='Значение обязательно', url='/admin/catalogs')
 
+    # №1.1: регистровый дубль — отказ с подсказкой канонического написания.
+    existing = get_storage(request.app).find_catalog_canonical(category, value)
+    if existing is not None and existing != value:
+        return build_redirect_with_message(
+            error=f'Значение «{value}» уже есть: «{existing}» (отличается только регистром)',
+            url='/admin/catalogs',
+        )
+
     get_storage(request.app).add_catalog_value(category, value)
     return build_redirect_with_message(message='Значение добавлено', url='/admin/catalogs')
 
@@ -1255,6 +1311,14 @@ async def create_catalog_group(request: Request, institute_id: str):
     value = get_form_value(request, 'value').strip()
     if not value:
         return build_redirect_with_message(error='Название группы обязательно', url='/admin/catalogs')
+
+    # №1.1: регистровый дубль внутри этого института — отказ с подсказкой.
+    existing = storage.find_catalog_canonical('group', value, parent_id=institute['id'])
+    if existing is not None and existing != value:
+        return build_redirect_with_message(
+            error=f'Группа «{value}» уже есть: «{existing}» (отличается только регистром)',
+            url='/admin/catalogs',
+        )
 
     storage.add_catalog_value(GROUP_CATEGORY, value, parent_id=institute['id'])
     return build_redirect_with_message(
@@ -1590,12 +1654,12 @@ async def export_index(request: Request):
     )
 
 
-def build_import_competitions(df: pd.DataFrame, custom_fields) -> list[Competition]:
+def build_import_competitions(df: pd.DataFrame, custom_fields, storage: SQLiteAdapter) -> list[Competition]:
     competitions = []
     for index, row in df.iterrows():
         record = row.to_dict()
         try:
-            competitions.append(build_competition(record, custom_fields=custom_fields))
+            competitions.append(build_competition(record, custom_fields=custom_fields, storage=storage))
         except (TypeError, ValueError) as exc:
             raise ValueError(f'строка {index + 2}: {exc}') from exc
     return competitions
@@ -1666,7 +1730,7 @@ async def upload(request: Request):
         return text(body=str(exc), status=400)
 
     try:
-        competitions = await asyncio.to_thread(build_import_competitions, df, custom_fields)
+        competitions = await asyncio.to_thread(build_import_competitions, df, custom_fields, storage)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
@@ -1805,7 +1869,7 @@ async def add_competition(request: Request):
             record[form_key] = profile_defaults[profile_key]
 
     try:
-        competition = build_competition(record, custom_fields=custom_fields, manual_input=True)
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
@@ -1851,7 +1915,7 @@ async def update_competition(request: Request, record_id: str):
     record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
 
     try:
-        competition = build_competition(record, custom_fields=custom_fields, manual_input=True)
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
@@ -2255,7 +2319,14 @@ async def create_level(request: Request):
     name = get_form_value(request, 'name').strip()
     if not name:
         return build_redirect_with_message(error='Название уровня обязательно', url='/admin/catalogs')
-    if name in get_storage(request.app).get_level_names(include_inactive=True):
+    # Уровень всегда хранится в нижнем регистре (так нормализуются импорт
+    # и записи) — ручное добавление приведено к тому же виду. Именно ручное
+    # добавление без нормализации было источником регистровых дублей (№1,
+    # docs/feedback-live.md).
+    name = name.lower()
+    existing_levels = get_storage(request.app).get_level_names(include_inactive=True)
+    # №1.1: дубль (в том числе регистровый — имя уже в lower) — отказ.
+    if any(item.lower() == name for item in existing_levels):
         return build_redirect_with_message(error='Такой уровень уже существует', url='/admin/catalogs')
 
     get_storage(request.app).create_level(name)

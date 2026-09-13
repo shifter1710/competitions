@@ -1367,3 +1367,43 @@ def test_competitions_page_owner_scope_matches_get_competitions(adapter):
     page = adapter.get_competitions_page(owner_id=7)
     assert {item.student_name for item in scoped} == {item.student_name for item in page}
     assert adapter.count_competitions_filtered(owner_id=7) == len(scoped)
+
+
+# --- №1.1: регистронезависимые справочники (канонические подстановки) ---
+
+
+def test_find_catalog_canonical_returns_existing_casing(adapter):
+    adapter.add_catalog_value('sport', 'Бег')
+    adapter.add_catalog_value('institute', 'ИСИ')
+
+    assert adapter.find_catalog_canonical('sport', 'бег') == 'Бег'
+    assert adapter.find_catalog_canonical('institute', 'иси') == 'ИСИ'
+    # Точное совпадение и отсутствие значения
+    assert adapter.find_catalog_canonical('sport', 'Бег') == 'Бег'
+    assert adapter.find_catalog_canonical('sport', 'Плавание') is None
+
+
+def test_find_catalog_canonical_group_scoped_to_institute(adapter):
+    adapter.add_catalog_value('institute', 'ИСИ')
+    adapter.add_catalog_value('institute', 'ИГНА')
+    institute_id = adapter.find_catalog_row('institute', 'ИСИ')['id']
+    other_id = adapter.find_catalog_row('institute', 'ИГНА')['id']
+    adapter.add_catalog_value('group', 'ПГС-101', parent_id=institute_id)
+
+    assert adapter.find_catalog_canonical('group', 'пгс-101', parent_id=institute_id) == 'ПГС-101'
+    # В другом институте такой группы нет
+    assert adapter.find_catalog_canonical('group', 'пгс-101', parent_id=other_id) is None
+
+
+def test_find_level_canonical_case_insensitive(adapter):
+    adapter.create_level('внутривузовские')
+
+    assert adapter.find_level_canonical('Внутривузовские') == 'внутривузовские'
+    assert adapter.find_level_canonical('межвузовские') is None
+
+
+def test_add_catalog_value_still_ignores_exact_duplicate(adapter):
+    adapter.add_catalog_value('sport', 'Бег')
+    adapter.add_catalog_value('sport', 'Бег')
+
+    assert adapter.list_catalog('sport') == ['Бег']
