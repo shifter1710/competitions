@@ -126,6 +126,23 @@ def competition_insert_records(
     ]
 
 
+# Дефолты настроек базовых полей (лёгкий реестр полей, решение 2026-09-13):
+# value_type + required, воспроизводящие сегодняшнее поведение валидации.
+# Синхронно с BASE_FIELD_SETTING_DEFAULTS в src/main.py.
+BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
+    'student_name': ('text', True),
+    'student_sex': ('text', False),
+    'institute': ('text', False),
+    'group': ('text', False),
+    'sport': ('text', False),
+    'date': ('text', True),
+    'level': ('text', False),
+    'name': ('text', False),
+    'position': ('number', False),
+    'course': ('number', True),
+}
+
+
 class SQLiteAdapter:
     def __init__(self, database_path: str):
         db_path = Path(database_path)
@@ -266,6 +283,35 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            # Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md
+            # «Реестр полей: лёгкая версия сейчас, полная запланирована»):
+            # настройки ТИПА и ОБЯЗАТЕЛЬНОСТИ базовых полей. Дефолты отражают
+            # сегодняшнее поведение; настройки опциональны построчно — при
+            # отсутствии строки действует дефолт (см. populate ниже).
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS field_settings (
+                    key TEXT PRIMARY KEY,
+                    value_type TEXT NOT NULL DEFAULT 'text',
+                    required INTEGER NOT NULL DEFAULT 0
+                )
+                '''
+            )
+            self._populate_field_settings_defaults()
+            # Очередь конфликтов импорта (решение 2026-09-13, docs/data-model-
+            # decisions.md «Конфликт-режим импорта: очередь на подтверждение»).
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS import_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    matched_record_id INTEGER,
+                    created_by INTEGER
+                )
+                '''
+            )
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
@@ -380,6 +426,118 @@ class SQLiteAdapter:
             ''',
             (datetime.utcnow().isoformat(),),
         )
+
+    def _populate_field_settings_defaults(self):
+        """Наполнить field_settings дефолтами, отражающими сегодняшнее поведение.
+
+        Идемпотентно: PRIMARY KEY + INSERT OR IGNORE — настройки, изменённые
+        админом, повторной инициализацией не сбрасываются. Дефолты (решение
+        2026-09-13): числовые — Место и Курс, обязательные — ФИО, Дата, Курс
+        (как в текущей валидации build_competition/normalize_*).
+        """
+        for key, (value_type, required) in BASE_FIELD_SETTING_DEFAULTS.items():
+            self.connection.execute(
+                'INSERT OR IGNORE INTO field_settings (key, value_type, required) VALUES (?, ?, ?)',
+                (key, value_type, int(required)),
+            )
+
+    def get_field_settings(self) -> dict[str, dict]:
+        """Настройки базовых полей: key -> {'value_type', 'required'}."""
+        with self._lock:
+            rows = self.connection.execute('SELECT key, value_type, required FROM field_settings').fetchall()
+            return {row['key']: {'value_type': row['value_type'], 'required': bool(row['required'])} for row in rows}
+
+    def update_field_settings(self, entries: dict[str, tuple[str, bool]]) -> None:
+        """Сохранить настройки базовых полей одной транзакцией.
+
+        entries: key -> (value_type, required). Строки upsert'ятся: у поля
+        без строки в таблице дефолт заменяется явной настройкой.
+        """
+        with self._lock:
+            for key, (value_type, required) in entries.items():
+                self.connection.execute(
+                    '''
+                    INSERT INTO field_settings (key, value_type, required)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value_type = excluded.value_type, required = excluded.required
+                    ''',
+                    (key, value_type, int(required)),
+                )
+            self.connection.commit()
+
+    def add_import_queue_entry(
+        self,
+        payload: dict,
+        *,
+        matched_record_id: int | None,
+        created_by: int | None,
+    ) -> int:
+        """Положить конфликтную строку импорта в очередь на подтверждение."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'INSERT INTO import_queue (created_at, payload_json, status, matched_record_id, created_by) '
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (
+                    datetime.utcnow().isoformat(),
+                    json.dumps(payload, ensure_ascii=False),
+                    matched_record_id,
+                    created_by,
+                ),
+            )
+            self.connection.commit()
+            return cursor.lastrowid
+
+    def list_import_queue(self, status: str = 'pending') -> list[dict]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, created_at, payload_json, status, matched_record_id, created_by '
+                'FROM import_queue WHERE status = ? ORDER BY id ASC',
+                (status,),
+            ).fetchall()
+            entries = []
+            for row in rows:
+                entry = dict(row)
+                entry['payload'] = json.loads(row['payload_json'])
+                entries.append(entry)
+            return entries
+
+    def get_import_queue_entry(self, entry_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, created_at, payload_json, status, matched_record_id, created_by '
+                'FROM import_queue WHERE id = ?',
+                (entry_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            entry = dict(row)
+            entry['payload'] = json.loads(row['payload_json'])
+            return entry
+
+    def set_import_queue_status(self, entry_id: int, status: str) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE import_queue SET status = ? WHERE id = ?',
+                (status, entry_id),
+            )
+            self.connection.commit()
+
+    def count_import_queue(self, status: str = 'pending') -> int:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM import_queue WHERE status = ?',
+                (status,),
+            ).fetchone()
+            return row['total']
+
+    def get_competition_by_id(self, record_id: int) -> Competition | None:
+        """Одна запись по id — правая сторона разбора конфликта импорта."""
+        with self._lock:
+            row = self.connection.execute(
+                f'{COMPETITION_SELECT_SQL}WHERE id = ?',
+                (record_id,),
+            ).fetchone()
+            return self._row_to_competition(row) if row else None
 
     @staticmethod
     def _row_to_competition(row: sqlite3.Row) -> Competition:

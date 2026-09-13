@@ -19,6 +19,9 @@
                 <h5 class="card-title">Импорт</h5>
                 <p class="card-text text-muted">Загрузка Excel-файла со соревнованиями и пустой шаблон для заполнения.</p>
                 <a class="btn btn-primary" href="/admin/import">Перейти</a>
+                {% if is_admin %}
+                <a class="btn btn-outline-secondary" href="/admin/import-queue">Очередь подтверждения</a>
+                {% endif %}
             </div>
         </div>
     </div>

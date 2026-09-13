@@ -1,0 +1,77 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Очередь импорта{% endblock admin_title %}
+{% block admin_description %}Строки импорта, похожие на существующие записи (совпадают ФИО и дата начала, но не вся запись). Ничего не вставлено, пока вы не примете решение.{% endblock admin_description %}
+
+{% block admin_content %}
+
+{% if queue_entries %}
+
+{% for entry in queue_entries %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-center mb-3">
+            <div>
+                <h3 class="title mb-1">Кандидат #{{ entry.id }}</h3>
+                <div class="text-muted">Из импорта от {{ entry.created_at[:16].replace('T', ' ') }}</div>
+            </div>
+            <div class="d-flex gap-2">
+                <form action="/admin/import-queue/{{ entry.id }}/accept" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <button class="btn btn-success" type="submit">Принять</button>
+                </form>
+                <form action="/admin/import-queue/{{ entry.id }}/skip" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <button class="btn btn-outline-danger" type="submit">Пропустить</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-lg-6">
+                <h5 class="mb-2">Строка-кандидат</h5>
+                <table class="table table-sm table-striped align-middle mb-0">
+                    <tbody>
+                        {% for label, value in entry.candidate %}
+                        <tr><th style="width: 40%">{{ label }}</th><td>{{ value }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="col-lg-6">
+                <h5 class="mb-2">Похожая существующая запись</h5>
+                {% if entry.matched %}
+                <table class="table table-sm table-striped align-middle mb-0">
+                    <tbody>
+                        <tr><th style="width: 40%">ФИО</th><td>{{ entry.matched.student_name }}</td></tr>
+                        <tr><th>Пол</th><td>{{ entry.matched.student_sex }}</td></tr>
+                        <tr><th>Институт</th><td>{{ entry.matched.institute }}</td></tr>
+                        <tr><th>Группа</th><td>{{ entry.matched.group }}</td></tr>
+                        <tr><th>Курс</th><td>{{ entry.matched.course }}</td></tr>
+                        <tr><th>Вид спорта</th><td>{{ entry.matched.sport }}</td></tr>
+                        <tr><th>Дата</th><td>{{ format_date_range(entry.matched.date, entry.matched.date_to) }}</td></tr>
+                        <tr><th>Уровень соревнований</th><td>{{ entry.matched.level }}</td></tr>
+                        <tr><th>Название соревнований</th><td>{{ entry.matched.name }}</td></tr>
+                        <tr><th>Место</th><td>{{ entry.matched.position }}</td></tr>
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="alert alert-secondary mb-0">
+                    Похожая запись из этого же файла (первая из похожих строк была вставлена при импорте).
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endfor %}
+
+{% else %}
+<div class="card shadow-sm">
+    <div class="card-body">
+        <div class="text-muted">Очередь пуста: похожих строк, ожидающих решения, нет.</div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock admin_content %}
