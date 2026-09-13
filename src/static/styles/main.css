@@ -214,6 +214,78 @@ select {
     margin: 0 2px;
 }
 
+/* Гибридное поле даты в инлайн-строке (замечание №13): ввод цифрами с
+   авто-точками + иконка-календарь, открывающая datepicker. */
+.interactive-table .row-editing .inline-date-group {
+    display: flex;
+    min-width: 128px;
+}
+
+.interactive-table .row-editing .inline-date-group .form-control {
+    min-width: 0;
+}
+
+.interactive-table .row-editing .inline-date-toggle {
+    flex: none;
+}
+
+/* Закреплённая колонка «Действия» (замечания №5/№9): sticky right, чтобы
+   «Редактировать/Удалить» и «Сохранить/Отмена» были всегда видны при
+   горизонтальной прокрутке. Фон ячеек уже непрозрачный (Bootstrap красит
+   их var(--bs-table-bg)), полосатость строк сохраняется тем же inset-
+   правилом Bootstrap; слева — тень «приподнятой» панели.
+   position: sticky на ячейках таблицы не работает при
+   border-collapse: collapse (Chromium/WebKit), поэтому interactive-table
+   переводится на separate с нулевым интервалом, а сетка бордюров
+   восстановлена вручную (право+низ на ячейках, лево/верх — по краям) —
+   визуально сетка остаётся прежней. */
+
+.interactive-table {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.interactive-table > :not(caption) > * {
+    border-width: 0;
+}
+
+.interactive-table > :not(caption) > * > * {
+    border-top-width: 0;
+    border-left-width: 0;
+    border-right-width: var(--bs-border-width);
+    border-bottom-width: var(--bs-border-width);
+}
+
+.interactive-table thead > tr > :first-child,
+.interactive-table tbody > tr > :first-child {
+    border-left-width: var(--bs-border-width);
+}
+
+.interactive-table thead > tr > th {
+    border-top-width: var(--bs-border-width);
+}
+
+.interactive-table th[data-column-key="actions"],
+.interactive-table td[data-column-key="actions"] {
+    position: sticky;
+    right: 0;
+    box-shadow:
+        inset 0 0 0 9999px var(--bs-table-bg-state, var(--bs-table-bg-type, var(--bs-table-accent-bg))),
+        -8px 0 10px -6px rgba(0, 0, 0, .45);
+    z-index: 1;
+}
+
+.interactive-table thead th[data-column-key="actions"] {
+    z-index: 2;
+}
+
+/* Подсказка о жестах строки (замечания №5/№9): двойной клик, Enter/Esc. */
+.table-gestures-hint {
+    color: var(--bs-secondary-color);
+    font-size: 13px;
+    margin-top: 8px;
+}
+
 .report-export-form {
     margin: 24px 0;
 }

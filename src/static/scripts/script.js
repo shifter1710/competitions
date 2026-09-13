@@ -7,17 +7,11 @@ class Main {
         this.createInstances();
         this.hangEvents();
         this.initTableFeatures();
-        this.applyProfileToManualForm();
     }
 
     initializeDomReferences() {
         this.contentWrapper = document.querySelector(".content-wrapper");
         this.importForm = document.querySelector(".import-form");
-        this.manualForm = document.querySelector(".manual-form");
-        this.manualFormButton = document.querySelector(".manual-form__button");
-        this.manualFormCancelButton = document.querySelector(".manual-form__cancel-button");
-        this.manualDateInput = document.querySelector('.manual-form [name="date"]');
-        this.customFieldInputs = Array.from(document.querySelectorAll(".custom-field-input"));
         this.profileForm = document.querySelector(".profile-form");
         this.profileFormStatus = document.querySelector(".profile-form__status");
         this.profileNameHint = document.querySelector(".profile-form__name-hint");
@@ -61,20 +55,6 @@ class Main {
                 format: "dd.mm.yyyy"
             });
         }
-        if (this.manualDateInput) {
-            this.manualDatePicker = new Datepicker(this.manualDateInput, {
-                autohide: true,
-                format: "dd.mm.yyyy"
-            });
-        }
-        this.customFieldInputs
-            .filter((input) => input.dataset.customFieldType === "date")
-            .forEach((input) => {
-                new Datepicker(input, {
-                    autohide: true,
-                    format: "dd.mm.yyyy"
-                });
-            });
         if (document.querySelector(".filter__level")) {
             this.levelSelect = NiceSelect.bind(document.querySelector(".filter__level"), {searchable: true, searchtext: "Найти"});
         }
@@ -98,22 +78,6 @@ class Main {
         if (this.importForm) {
             this.importForm.addEventListener("submit", (event) => this.handleSubmitImportForm(event));
         }
-        if (this.manualForm) {
-            this.manualForm.addEventListener("submit", (event) => this.handleSubmitManualForm(event));
-        }
-        if (this.manualFormCancelButton) {
-            this.manualFormCancelButton.addEventListener("click", () => this.resetManualForm());
-        }
-        if (this.manualDateInput) {
-            this.manualDateInput.addEventListener("input", (event) => this.handleManualDateInput(event));
-            this.manualDateInput.addEventListener("blur", () => this.normalizeDateInput(this.manualDateInput));
-        }
-        this.customFieldInputs
-            .filter((input) => input.dataset.customFieldType === "date")
-            .forEach((input) => {
-                input.addEventListener("input", (event) => this.handleManualDateInput(event));
-                input.addEventListener("blur", () => this.normalizeDateInput(input));
-            });
         if (this.fileInput) {
             this.fileInput.addEventListener("change", () => this.setDisabledImportButton(false));
         }
@@ -149,8 +113,9 @@ class Main {
             });
         } else if (this.isAthlete) {
             // На странице таблицы формы профиля нет, но профиль нужен для
-            // автоподстановки в новые записи (форма и инлайн-строка).
-            this.fetchProfile().then(() => this.applyProfileToManualForm());
+            // автоподстановки в инлайн-строку новой записи (замечание №1:
+            // отдельная форма ввода убрана, ввод — только «+ Пустая строка»).
+            this.fetchProfile();
         }
         if (this.profileFormCancelButton) {
             this.profileFormCancelButton.addEventListener("click", () => this.resetProfile());
@@ -372,6 +337,7 @@ class Main {
         }
         this.contentWrapper.dataset.bound = "true";
         this.contentWrapper.addEventListener("click", (event) => this.handleContentWrapperClick(event));
+        this.contentWrapper.addEventListener("dblclick", (event) => this.handleContentWrapperDblClick(event));
     }
 
     getCurrentView() {
@@ -479,12 +445,8 @@ class Main {
         this.importFile(formData);
     }
 
-    handleSubmitManualForm(event) {
-        event.preventDefault();
-        const formData = new FormData(this.manualForm);
-        this.createCompetition(formData);
-    }
-
+    // Автоформат даты при ручном вводе (замечание №13): только цифры,
+    // точки «дд.мм.гггг» проставляются сами — буквы и точки не набираются.
     handleManualDateInput(event) {
         const digits = event.target.value.replace(/\D/g, "").slice(0, 8);
         const parts = [];
@@ -512,17 +474,6 @@ class Main {
         const month = digits.slice(2, 4);
         const year = digits.slice(4, 8);
         input.value = [day, month, year].filter(Boolean).join(".");
-    }
-
-    resetManualForm() {
-        if (!this.manualForm) {
-            return;
-        }
-        this.manualForm.reset();
-        this.manualForm.querySelector('[name="record_id"]').value = "";
-        this.manualForm.querySelector(".title").textContent = "Добавить запись";
-        this.manualFormButton.textContent = "Добавить";
-        this.applyProfileToManualForm();
     }
 
     // Источник данных профиля — сервер (/api/profile). Профиль хранится
@@ -676,8 +627,9 @@ class Main {
     }
 
     // Автоподстановка из профиля (docs/data-model-decisions.md): профиль
-    // подставляет значения в новые записи атлета, пока поле не заполнено
-    // в форме; введённое вручную всегда приоритетнее.
+    // подставляет значения в новые записи атлета, пока поле не заполнено;
+    // введённое вручную всегда приоритетнее. Используется инлайн-строкой
+    // «+ Пустая строка».
     getProfileFieldDefaults() {
         if (!this.isAthlete) {
             return {};
@@ -691,18 +643,6 @@ class Main {
             }
         });
         return defaults;
-    }
-
-    applyProfileToManualForm() {
-        if (!this.isAthlete || !this.manualForm) {
-            return;
-        }
-        Object.entries(this.getProfileFieldDefaults()).forEach(([key, value]) => {
-            const input = this.manualForm.querySelector(`[name="${key}"]`);
-            if (input && !input.value) {
-                input.value = value;
-            }
-        });
     }
 
     // Формирует form-encoded тело для merge-запросов. CSRF-токен
@@ -835,10 +775,17 @@ class Main {
         }
     }
 
+    // Типы кастомных полей (замечание №1): раньше читались из инпутов
+    // удалённой формы ввода, теперь — из data-field-type заголовков колонок
+    // таблицы (index.html). Нужны инлайн-строке: тип поля ввода и префикс
+    // custom__<key> при сохранении.
     getCustomFieldTypes() {
         const types = {};
-        this.customFieldInputs.forEach((input) => {
-            types[input.dataset.customFieldKey] = input.dataset.customFieldType || "text";
+        if (!this.tableElement) {
+            return types;
+        }
+        this.tableElement.querySelectorAll("thead th[data-field-type]").forEach((header) => {
+            types[header.dataset.columnKey] = header.dataset.fieldType || "text";
         });
         return types;
     }
@@ -872,6 +819,7 @@ class Main {
             }
             if (key === "date" || fieldType === "date") {
                 input.placeholder = "дд.мм.гггг";
+                input.inputMode = "numeric";
             }
             // Подсказки справочников: datalist лежит в разметке страницы,
             // id совпадает с ключом поля (sport-options / institute-options).
@@ -882,7 +830,57 @@ class Main {
         }
         input.dataset.editKey = key;
         input.className = "form-control form-control-sm";
+        // Гибридный ввод даты (замечание №13): поле + иконка-календарь,
+        // открывающая datepicker; сам пикер и авто-точки вешаются
+        // attachRowDatePickers при сборке строки.
+        if (input.type === "text" && (key === "date" || fieldTypes[key] === "date")) {
+            const wrapper = document.createElement("div");
+            wrapper.className = "input-group inline-date-group";
+            const toggleButton = document.createElement("button");
+            toggleButton.type = "button";
+            toggleButton.className = "btn btn-outline-secondary btn-sm inline-date-toggle";
+            toggleButton.textContent = "📅";
+            toggleButton.title = "Выбрать дату из календаря";
+            toggleButton.setAttribute("aria-label", "Выбрать дату из календаря");
+            wrapper.append(input, toggleButton);
+            return wrapper;
+        }
         return input;
+    }
+
+    // Поля дат в инлайн-строке (замечание №13): ручной ввод цифрами с
+    // авто-точками (handleManualDateInput) + datepicker (fengyuanchen, тот
+    // же, что в фильтрах отчёта) с кнопкой-календарем. Выбор из календаря
+    // проставляет дату в формате дд.мм.гггг. Возвращает созданные пикеры —
+    // их нужно разрушить при отмене правки (иначе «висячие» слушатели).
+    attachRowDatePickers(row) {
+        const fieldTypes = this.getCustomFieldTypes();
+        const pickers = [];
+        row.querySelectorAll("[data-edit-key]").forEach((input) => {
+            const key = input.dataset.editKey;
+            if (key !== "date" && fieldTypes[key] !== "date") {
+                return;
+            }
+            input.addEventListener("input", (event) => this.handleManualDateInput(event));
+            input.addEventListener("blur", () => this.normalizeDateInput(input));
+            const picker = new Datepicker(input, {
+                autohide: true,
+                format: "dd.mm.yyyy"
+            });
+            const toggleButton = input.closest(".inline-date-group")?.querySelector(".inline-date-toggle");
+            if (toggleButton) {
+                toggleButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    picker.show();
+                });
+            }
+            pickers.push(picker);
+        });
+        return pickers;
+    }
+
+    destroyRowDatePickers(pickers) {
+        (pickers || []).forEach((picker) => picker.destroy());
     }
 
     startInlineEdit(button) {
@@ -941,13 +939,7 @@ class Main {
             cell.append(this.createInlineInput(key, value, fieldTypes));
         });
 
-        const dateInput = row.querySelector('[data-edit-key="date"]');
-        if (dateInput) {
-            this.inlineDatePicker = new Datepicker(dateInput, {
-                autohide: true,
-                format: "dd.mm.yyyy"
-            });
-        }
+        this.inlineDatePickers = this.attachRowDatePickers(row);
         this.inlineKeydownHandler = (event) => {
             if (event.key === "Escape") {
                 event.preventDefault();
@@ -1001,10 +993,8 @@ class Main {
             row.removeEventListener("keydown", this.inlineKeydownHandler);
             this.inlineKeydownHandler = null;
         }
-        if (this.inlineDatePicker) {
-            this.inlineDatePicker.destroy();
-            this.inlineDatePicker = null;
-        }
+        this.destroyRowDatePickers(this.inlineDatePickers);
+        this.inlineDatePickers = null;
         if (row.isConnected) {
             row.innerHTML = this.inlineEditBackup;
             row.classList.remove("row-editing");
@@ -1088,13 +1078,7 @@ class Main {
         tbody.prepend(row);
         this.newEditRow = row;
 
-        const dateInput = row.querySelector('[data-edit-key="date"]');
-        if (dateInput) {
-            this.newRowDatePicker = new Datepicker(dateInput, {
-                autohide: true,
-                format: "dd.mm.yyyy"
-            });
-        }
+        this.newRowDatePickers = this.attachRowDatePickers(row);
         this.newRowKeydownHandler = this.bindRowKeyboardNavigation(
             row,
             () => this.saveNewRowEdit(),
@@ -1145,10 +1129,8 @@ class Main {
             row.removeEventListener("keydown", this.newRowKeydownHandler);
             this.newRowKeydownHandler = null;
         }
-        if (this.newRowDatePicker) {
-            this.newRowDatePicker.destroy();
-            this.newRowDatePicker = null;
-        }
+        this.destroyRowDatePickers(this.newRowDatePickers);
+        this.newRowDatePickers = null;
         row.remove();
         this.newEditRow = null;
     }
@@ -1280,6 +1262,24 @@ class Main {
         }
     }
 
+    // Двойной клик по строке — вход в правку (замечание №9): кнопка
+    // «Редактировать» закреплена в колонке действий, жест остаётся
+    // ускорителем. Во время активной правки игнорируется — двойной клик
+    // в полях ввода выделяет слово и не должен перезапускать правку.
+    handleContentWrapperDblClick(event) {
+        if (this.hasActiveRowEdit()) {
+            return;
+        }
+        const row = event.target.closest("tr");
+        if (!row || row.classList.contains("row-editing") || row.classList.contains("row-new")) {
+            return;
+        }
+        const editButton = row.querySelector(".competition-edit-button");
+        if (editButton) {
+            this.startInlineEdit(editButton);
+        }
+    }
+
     prepareParamsForReport() {
         const params = new URLSearchParams();
         const formData = new FormData(this.reportForm);
@@ -1335,24 +1335,6 @@ class Main {
         });
     }
 
-    createCompetition(formData) {
-        const recordId = formData.get("record_id");
-        const url = recordId ? `/competition/${recordId}` : "/competition";
-        this.makeRequest({
-            url,
-            options: {
-                method: "POST",
-                body: formData,
-            },
-            onSuccess: () => {
-                alert(recordId ? "Запись успешно обновлена" : "Запись успешно добавлена");
-                this.resetManualForm();
-                this.refreshCurrentContent();
-            },
-            onError: (message) => alert(message || "Ошибка добавления записи")
-        });
-    }
-
     deleteCompetition(recordId, studentName) {
         const message = studentName
             ? `Удалить запись «${studentName}»?`
@@ -1368,10 +1350,9 @@ class Main {
             },
             onSuccess: () => {
                 alert("Запись удалена");
-                this.resetManualForm();
                 this.refreshCurrentContent();
             },
-            onError: (message) => alert(message || "Ошибка удаления записи")
+            onError: (message2) => alert(message2 || "Ошибка удаления записи")
         });
     }
 
@@ -1500,6 +1481,12 @@ class Main {
         this.inlineEditRecordId = null;
         this.inlineEditBackup = null;
         this.newEditRow = null;
+        // При замене контента правка сбрасывается вместе со строкой — пикеры
+        // надо разрушить явно, их слушатели на document переживают DOM.
+        this.destroyRowDatePickers(this.inlineDatePickers);
+        this.inlineDatePickers = null;
+        this.destroyRowDatePickers(this.newRowDatePickers);
+        this.newRowDatePickers = null;
         if (!this.tableElement) {
             if (this.tableColumnsManager) {
                 this.tableColumnsManager.innerHTML = "";
@@ -1593,7 +1580,11 @@ class Main {
         if (this.hasActiveRowEdit()) {
             return;
         }
-        if (!this.draggedColumnKey || this.draggedColumnKey === targetHeader.dataset.columnKey) {
+        // Колонка «Действия» закреплена (sticky right) и должна оставаться
+        // последней — иначе закреплённая ячейка перекроет соседнюю колонку.
+        if (!this.draggedColumnKey
+            || this.draggedColumnKey === targetHeader.dataset.columnKey
+            || targetHeader.dataset.columnKey === "actions") {
             return;
         }
         const order = Array.from(this.tableElement.querySelectorAll("thead th")).map((header) => header.dataset.columnKey);
