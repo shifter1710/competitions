@@ -1605,6 +1605,12 @@ class Main {
             ? this.currentReportUrl.split("?")[1] || ""
             : this.prepareParamsForReport();
         const params = new URLSearchParams(filterParams);
+        // Срез выгрузки — текущее значение селекта «Группировать по»
+        // (замечание №19): панель колонок экспорта всегда соответствует ему.
+        const reportSliceSelect = document.querySelector(".filter__group-by");
+        if (reportSliceSelect && reportSliceSelect.value) {
+            params.set("group_by", reportSliceSelect.value);
+        }
         selectedColumns.forEach((column) => params.append("columns", column));
         window.location.href = `/export/report?${params.toString()}`;
     }

@@ -5,6 +5,43 @@
 <form class="filter-form filter">
     <h3 class="title">Формирование отчёта</h3>
     <div class="row align-items-md-bottom">
+        <div class="col align-self-md-center filter__group-by-wrapper">
+            <span class="label">Группировать по</span>
+            <select class="form-select filter__group-by" name="group_by">
+                {% for option in report_slice_options %}
+                <option value="{{ option.key }}"{% if option.key == 'student' %} selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col align-self-md-center filter__institute-wrapper">
+            <span class="label">Институт</span>
+            <select class="form-select filter__institute" name="institute">
+                <option value="">Все</option>
+                {% for value in institute_options %}
+                <option value="{{ value }}">{{ value }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col align-self-md-center filter__group-wrapper">
+            <span class="label">Группа</span>
+            <select class="form-select filter__group" name="group"
+                    data-all-groups='{{ group_options | tojson }}'
+                    data-groups-by-institute='{{ groups_by_institute | tojson }}'>
+                <option value="">Все</option>
+                {% for value in group_options %}
+                <option value="{{ value }}">{{ value }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col align-self-md-center filter__sport-wrapper">
+            <span class="label">Вид спорта</span>
+            <select class="form-select filter__sport" name="sport">
+                <option value="">Все</option>
+                {% for value in sport_options %}
+                <option value="{{ value }}">{{ value }}</option>
+                {% endfor %}
+            </select>
+        </div>
         <div class="col">
             <span class="label">ФИО</span>
             <div class="input-group">
@@ -67,20 +104,27 @@
 <form class="report-export-form" method="get" action="/export/report">
     <h3 class="title">Выгрузить в Excel</h3>
     <div class="row align-items-center">
-        {% for column in report_export_columns %}
-        <div class="col-auto">
-            <label class="form-check report-export-form__column">
-                <input
-                    class="form-check-input report-export-column"
-                    type="checkbox"
-                    name="columns"
-                    value="{{ column }}"
-                    checked
-                >
-                <span class="form-check-label">{{ column }}</span>
-            </label>
+        {# Колонки зависят от среза (замечание №19): инлайн-скрипт ниже
+           перестраивает чекбоксы при смене «Группировать по». #}
+        <div class="col">
+            <div class="row align-items-center report-export-columns" id="report-export-columns"
+                 data-columns-by-slice='{{ report_export_columns_by_slice | tojson }}'>
+                {% for column in report_export_columns %}
+                <div class="col-auto">
+                    <label class="form-check report-export-form__column">
+                        <input
+                            class="form-check-input report-export-column"
+                            type="checkbox"
+                            name="columns"
+                            value="{{ column }}"
+                            checked
+                        >
+                        <span class="form-check-label">{{ column }}</span>
+                    </label>
+                </div>
+                {% endfor %}
+            </div>
         </div>
-        {% endfor %}
         <div class="col-auto">
             <button class="report-export-form__button btn btn-success" type="submit">Экспорт</button>
         </div>
@@ -90,5 +134,97 @@
 <div class="content-wrapper">
     <div class="empty-content">Задайте условия фильтра и нажмите «Сформировать отчет»</div>
 </div>
+
+<script>
+    // Логика новых контролов отчёта (замечание №19) живёт инлайн: script.js
+    // общий для всех страниц и не расширяется. Срез и фильтры уходят на
+    // сервер GET-параметрами той же формы — шаримость ссылок не меняется.
+    (function () {
+        var sliceSelect = document.querySelector(".filter__group-by");
+        var instituteSelect = document.querySelector(".filter__institute");
+        var groupSelect = document.querySelector(".filter__group");
+        var sportSelect = document.querySelector(".filter__sport");
+        var columnsBox = document.getElementById("report-export-columns");
+        var cleanButton = document.querySelector(".filter-form__clean-button");
+        if (!sliceSelect || !instituteSelect || !groupSelect || !columnsBox) {
+            return;
+        }
+
+        var columnsBySlice = {};
+        try {
+            columnsBySlice = JSON.parse(columnsBox.dataset.columnsBySlice || "{}");
+        } catch (error) {
+            columnsBySlice = {};
+        }
+        var groupsByInstitute = {};
+        try {
+            groupsByInstitute = JSON.parse(groupSelect.dataset.groupsByInstitute || "{}");
+        } catch (error) {
+            groupsByInstitute = {};
+        }
+        var allGroups = [];
+        try {
+            allGroups = JSON.parse(groupSelect.dataset.allGroups || "[]");
+        } catch (error) {
+            allGroups = [];
+        }
+
+        // Иерархия институт→группа (решение 2026-09-13): выбранный институт
+        // фильтрует список групп; без института доступны все группы.
+        function fillGroupOptions(institute) {
+            var groups = institute && groupsByInstitute[institute] ? groupsByInstitute[institute] : allGroups;
+            var selected = groupSelect.value;
+            var options = [new Option("Все", "")].concat(groups.map(function (value) {
+                return new Option(value, value);
+            }));
+            groupSelect.replaceChildren.apply(groupSelect, options);
+            if (selected && groups.indexOf(selected) !== -1) {
+                groupSelect.value = selected;
+            }
+        }
+
+        function renderExportColumns(sliceKey) {
+            var columns = columnsBySlice[sliceKey] || columnsBySlice.student || [];
+            var boxes = columns.map(function (column) {
+                var col = document.createElement("div");
+                col.className = "col-auto";
+                var label = document.createElement("label");
+                label.className = "form-check report-export-form__column";
+                var input = document.createElement("input");
+                input.className = "form-check-input report-export-column";
+                input.type = "checkbox";
+                input.name = "columns";
+                input.value = column;
+                input.checked = true;
+                var text = document.createElement("span");
+                text.className = "form-check-label";
+                text.textContent = column;
+                label.appendChild(input);
+                label.appendChild(text);
+                col.appendChild(label);
+                return col;
+            });
+            columnsBox.replaceChildren.apply(columnsBox, boxes);
+        }
+
+        instituteSelect.addEventListener("change", function () {
+            fillGroupOptions(instituteSelect.value);
+        });
+        sliceSelect.addEventListener("change", function () {
+            renderExportColumns(sliceSelect.value);
+        });
+        if (cleanButton) {
+            cleanButton.addEventListener("click", function () {
+                sliceSelect.value = "student";
+                instituteSelect.value = "";
+                if (sportSelect) {
+                    sportSelect.value = "";
+                }
+                fillGroupOptions("");
+                renderExportColumns("student");
+            });
+        }
+    })();
+</script>
 
 {% endblock content %}
