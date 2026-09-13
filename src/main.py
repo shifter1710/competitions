@@ -1307,14 +1307,6 @@ def competition_duplicate_key(competition: Competition) -> tuple:
     )
 
 
-def ensure_levels(storage: SQLiteAdapter, competitions: Iterable[Competition]):
-    known = set(storage.get_level_names(include_inactive=True))
-    for competition in competitions:
-        if competition.level not in known:
-            storage.create_level(competition.level)
-            known.add(competition.level)
-
-
 def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competition]):
     """Новое значение вида спорта/института из записи или импорта попадает в справочник.
 
@@ -1322,6 +1314,9 @@ def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competi
     перезаписывает в записях (docs/data-model-decisions.md). Дубликаты
     игнорируются на стороне storage. Пара институт→группа попадает в иерархию:
     группа кладётся под свой институт (уникальность (parent, value)).
+
+    Для одиночных записей (ручной ввод). Массовый импорт пишет справочники
+    батчем той же семантикой — SQLiteAdapter._ensure_import_catalogs.
     """
     for competition in competitions:
         for category, value in (('sport', competition.sport), ('institute', competition.institute)):
@@ -1372,12 +1367,18 @@ async def upload(request: Request):
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    ensure_levels(storage, competitions)
-    ensure_catalog_values(storage, competitions)
     existing = await asyncio.to_thread(storage.get_competitions)
     new_competitions, skipped_duplicates = split_import_competitions(competitions, existing)
-    if new_competitions:
-        storage.save_competitions(new_competitions, owner_id=get_current_user_id(request))
+
+    # Одна транзакция и один COMMIT на весь импорт, в отдельном потоке:
+    # построчные коммиты справочников (WAL+fsync ~4 раза на строку) и запись
+    # в event loop замораживали приложение на всё время импорта (QA №1).
+    await asyncio.to_thread(
+        storage.import_competitions,
+        competitions,
+        new_competitions,
+        owner_id=get_current_user_id(request),
+    )
 
     summary = f'Импортировано записей: {len(new_competitions)}'
     if skipped_duplicates:
