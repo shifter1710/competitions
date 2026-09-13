@@ -2057,7 +2057,48 @@ def test_admin_cannot_create_duplicate_level(client: SanicTestClient):
     assert 'admin_error' in response.headers['location']
 
 
-def test_admin_catalogs_page_available_for_admin_only(client: SanicTestClient):
+def level_hard_delete_mocks(level_id: int = 9, name: str = 'городские', records: int = 0):
+    app.ctx.storage.list_levels.return_value = [{'id': level_id, 'name': name, 'sort_order': 0, 'active': 1}]
+    app.ctx.storage.count_records_using.return_value = records
+    app.ctx.storage.hard_delete_level.reset_mock()
+
+
+def test_admin_hard_deletes_empty_level(client: SanicTestClient):
+    level_hard_delete_mocks()
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/levels/9/hard-delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.hard_delete_level.assert_called_once_with(9)
+    app.ctx.storage.list_levels.return_value = []
+
+
+def test_admin_hard_delete_rejects_level_with_records(client: SanicTestClient):
+    level_hard_delete_mocks(records=3)
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/levels/9/hard-delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.hard_delete_level.assert_not_called()
+    app.ctx.storage.list_levels.return_value = []
+    app.ctx.storage.count_records_using.return_value = 0
+
+
+def test_level_hard_delete_forbidden_for_non_admin(client: SanicTestClient):
+    level_hard_delete_mocks()
+    editor_headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/admin/levels/9/hard-delete',
+        headers=editor_headers,
+        data=csrf_for(editor_headers),
+    )
+    assert response.status == 403
+    app.ctx.storage.hard_delete_level.assert_not_called()
+    app.ctx.storage.list_levels.return_value = []
     headers = get_auth_headers()
     _, response = client.get('/admin/catalogs', headers=headers)
     assert response.status == 200

@@ -1247,6 +1247,13 @@ class SQLiteAdapter:
             )
             self.connection.commit()
 
+    def hard_delete_level(self, level_id: int) -> None:
+        """Физическое удаление уровня (№20): допустимо только для уровня
+        без записей — проверка на стороне роута."""
+        with self._lock:
+            self.connection.execute('DELETE FROM levels WHERE id = ?', (level_id,))
+            self.connection.commit()
+
     def disable_level(self, level_id: int) -> None:
         with self._lock:
             self.connection.execute(

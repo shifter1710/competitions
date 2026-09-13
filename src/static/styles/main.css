@@ -475,6 +475,19 @@ h3 { font-size: 17px; }
     color: var(--table-head-text);
 }
 
+/* Скрытые строки справочников (.table-secondary, №20): в тёмной теме
+   Bootstrap-овский светлый серый выбивается — перекладываем на тёмные
+   поверхности токенов. Светлая тема остаётся без изменений. */
+[data-bs-theme="dark"] .table-secondary {
+    --bs-table-bg: var(--surface-alt);
+    --bs-table-color: var(--text-2);
+    --bs-table-border-color: var(--border);
+    --bs-table-striped-bg: var(--surface-hover);
+    --bs-table-striped-color: var(--text-2);
+    --bs-table-hover-bg: var(--surface-hover);
+    --bs-table-hover-color: var(--text);
+}
+
 /* Бейджи статусов: мягкие двухцветные, как .badge--ok/--warn/--danger
    прототипа. Bootstrap-классы text-bg-* зашивают цвет через !important,
    поэтому оверрайды тоже с !important (main.css загружается последним). */

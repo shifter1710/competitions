@@ -2369,6 +2369,37 @@ async def disable_level(request: Request, level_id: str):
     return build_redirect_with_message(message='Уровень скрыт из списков', url='/admin/catalogs')
 
 
+@app.post('/admin/levels/<level_id>/hard-delete')
+async def hard_delete_level(request: Request, level_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_level_id = int(level_id)
+    except ValueError:
+        return text(body='Invalid level id', status=400)
+
+    storage = get_storage(request.app)
+    level = next((item for item in storage.list_levels() if item['id'] == numeric_level_id), None)
+    if level is None:
+        return build_redirect_with_message(error='Уровень не найден', url='/admin/catalogs')
+
+    records_count = storage.count_records_using('level', level['name'])
+    if records_count > 0:
+        return build_redirect_with_message(
+            error='У уровня есть записи — скройте или переименуйте', url='/admin/catalogs'
+        )
+
+    storage.hard_delete_level(numeric_level_id)
+    log_audit_event(
+        request,
+        'catalog_value_deleted',
+        {'category': 'level', 'value': level['name'], 'level_id': numeric_level_id},
+    )
+    return build_redirect_with_message(message='Уровень удалён', url='/admin/catalogs')
+
+
 @app.post('/admin/users/<user_id>/alias')
 async def add_user_alias(request: Request, user_id: str):
     auth_error = require_admin(request)

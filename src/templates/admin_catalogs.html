@@ -239,11 +239,18 @@
                         <td>{{ rename_form('level', level.id, level.name) }}</td>
                         <td>{{ level.records_count }}</td>
                         <td>{% if level.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
-                        <td>
+                        <td class="d-flex gap-2">
                             <form action="/admin/levels/{{ level.id }}/delete" method="post">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                                 <button class="btn btn-sm btn-outline-warning" type="submit">Скрыть</button>
                             </form>
+                            {% if level.records_count == 0 %}
+                            <form action="/admin/levels/{{ level.id }}/hard-delete" method="post"
+                                  onsubmit="return confirm('Удалить уровень «{{ level.name }}» безвозвратно?')">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
