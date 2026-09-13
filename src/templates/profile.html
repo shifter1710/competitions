@@ -2,15 +2,17 @@
 
 {% block content %}
 
+{# Заголовок по прототипу 04: .page-head над карточкой формы. #}
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Профиль атлета</h1>
+        <p class="page-sub">Данные профиля подставляются в форму добавления записи (поля остаются редактируемыми). ФИО связывает кабинет с записями, заведёнными модераторами.</p>
+    </div>
+</div>
+
 {% if is_athlete %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h3 class="title mb-1">Профиль</h3>
-        <div class="text-muted mb-3">
-            Данные профиля подставляются в форму добавления записи (поля остаются редактируемыми).
-            Пока данные хранятся только в этом браузере.
-        </div>
-
         <form class="profile-form row g-3">
             <div class="col-md-6">
                 <label class="form-label" for="profile-student-name">ФИО</label>
@@ -49,7 +51,6 @@
 {% else %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h3 class="title mb-1">Профиль</h3>
         <div class="text-muted">Профиль доступен только пользователям с ролью «athlete».</div>
     </div>
 </div>
