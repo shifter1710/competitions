@@ -177,6 +177,15 @@ def client() -> SanicTestClient:
     fake_storage.get_audit_events.return_value = []
     fake_storage.count_audit_events.return_value = 0
     fake_storage.list_audit_actions.return_value = []
+    # Лёгкий реестр полей + очередь конфликтов импорта (волна 3)
+    fake_storage.get_field_settings.return_value = {}
+    fake_storage.update_field_settings.return_value = None
+    fake_storage.count_import_queue.return_value = 0
+    fake_storage.list_import_queue.return_value = []
+    fake_storage.get_import_queue_entry.return_value = None
+    fake_storage.add_import_queue_entry.return_value = 1
+    fake_storage.set_import_queue_status.return_value = None
+    fake_storage.get_competition_by_id.return_value = None
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -4646,6 +4655,470 @@ def test_duplicate_key_uses_start_date_only():
         position=3,
     )
 
-    new_competitions, skipped = split_import_competitions([incoming], [existing])
+    new_competitions, skipped, conflicts = split_import_competitions([incoming], [existing])
     assert new_competitions == []
     assert skipped == 1
+    assert conflicts == []
+
+
+# --- Волна 3: лёгкий реестр полей (№2/№7) ---
+
+
+class FakeSettingsStorage:
+    """Минимальный storage для build_competition: только настройки полей
+    и «пустые» справочники канонизации."""
+
+    def __init__(self, field_settings=None):
+        self._field_settings = field_settings or {}
+
+    def get_field_settings(self):
+        return self._field_settings
+
+    def find_catalog_row(self, *args, **kwargs):
+        return None
+
+    def find_catalog_canonical(self, *args, **kwargs):
+        return None
+
+    def find_level_canonical(self, *args, **kwargs):
+        return None
+
+    def find_unique_group_institute(self, *args, **kwargs):
+        return None
+
+
+def make_import_record(**overrides):
+    record = {
+        'ФИО': 'Реестров Реестр Реестрович',
+        'Пол': 'М',
+        'Институт': 'ИСИ',
+        'Группа': 'ПГС-101',
+        'Вид спорта': 'Бег',
+        'Дата': '15.03.2026',
+        'Уровень соревнований': 'внутривузовские',
+        'Название соревнований': 'Кубок',
+        'Место': 1,
+        'Курс': 2,
+    }
+    record.update(overrides)
+    return record
+
+
+def test_field_settings_defaults_lock_name_and_date():
+    from src.main import get_base_field_settings
+
+    merged = get_base_field_settings(None)
+    assert merged['student_name'] == {'value_type': 'text', 'required': True}
+    assert merged['date'] == {'value_type': 'text', 'required': True}
+    assert merged['course'] == {'value_type': 'number', 'required': True}
+
+
+def test_field_settings_locked_fields_survive_bad_storage_rows():
+    from src.main import get_base_field_settings
+
+    storage = FakeSettingsStorage(
+        {
+            'student_name': {'value_type': 'number', 'required': False},
+            'date': {'value_type': 'number', 'required': False},
+        }
+    )
+    merged = get_base_field_settings(storage)
+    assert merged['student_name'] == {'value_type': 'text', 'required': True}
+    assert merged['date'] == {'value_type': 'text', 'required': True}
+
+
+def test_build_competition_text_course_graduate_case():
+    from src.main import BASE_FIELD_SETTING_DEFAULTS
+
+    settings = {
+        key: {'value_type': value_type, 'required': required}
+        for key, (value_type, required) in BASE_FIELD_SETTING_DEFAULTS.items()
+    }
+    settings['course'] = {'value_type': 'text', 'required': False}
+    storage = FakeSettingsStorage(settings)
+    competition = build_competition(
+        make_import_record(Курс='Выпускник 2025/26'),
+        custom_fields=[],
+        storage=storage,
+    )
+    assert competition.course == 'Выпускник 2025/26'
+
+
+def test_build_competition_number_course_rejects_graduate_case():
+    from src.main import BASE_FIELD_SETTING_DEFAULTS
+
+    settings = {
+        key: {'value_type': value_type, 'required': required}
+        for key, (value_type, required) in BASE_FIELD_SETTING_DEFAULTS.items()
+    }
+    settings['course'] = {'value_type': 'number', 'required': True}
+    storage = FakeSettingsStorage(settings)
+    with pytest.raises(ValueError):
+        build_competition(
+            make_import_record(Курс='Выпускник 2025/26'),
+            custom_fields=[],
+            storage=storage,
+        )
+
+
+def test_build_competition_required_text_field_rejects_empty():
+    from src.main import BASE_FIELD_SETTING_DEFAULTS
+
+    settings = {
+        key: {'value_type': value_type, 'required': required}
+        for key, (value_type, required) in BASE_FIELD_SETTING_DEFAULTS.items()
+    }
+    settings['group'] = {'value_type': 'text', 'required': True}
+    storage = FakeSettingsStorage(settings)
+    with pytest.raises(ValueError, match='Группа'):
+        build_competition(
+            make_import_record(Группа=''),
+            custom_fields=[],
+            storage=storage,
+        )
+
+
+def test_build_competition_name_and_date_always_required():
+    storage = FakeSettingsStorage(
+        {
+            'student_name': {'value_type': 'text', 'required': False},
+            'date': {'value_type': 'text', 'required': False},
+        }
+    )
+    with pytest.raises(ValueError, match='ФИО'):
+        build_competition(make_import_record(ФИО=''), custom_fields=[], storage=storage)
+    with pytest.raises(ValueError, match='Дата'):
+        build_competition(make_import_record(Дата=''), custom_fields=[], storage=storage)
+
+
+def test_save_base_field_settings_updates_and_audits(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.update_field_settings.reset_mock()
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/fields/base',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'type_course': 'text',
+            'required_course': 'on',
+            'type_position': 'number',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.update_field_settings.assert_called_once()
+    saved = app.ctx.storage.update_field_settings.call_args[0][0]
+    assert saved['course'] == ('text', True)
+    assert saved['position'] == ('number', False)
+    # Заблокированные поля игнорируют форму: обязательность не отключается.
+    assert saved['student_name'][1] is True
+    assert saved['date'][1] is True
+
+
+def test_base_field_settings_editor_forbidden(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
+    _, response = client.get('/admin/fields', headers=headers)
+    assert response.status == 403
+    _, response = client.post(
+        '/admin/fields/base',
+        headers=headers,
+        data=csrf_for(headers),
+    )
+    assert response.status == 403
+
+
+# --- Волна 3: очередь конфликтов импорта (№6/№8) ---
+
+
+def test_upload_similar_row_goes_to_queue(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            record_id='7',
+            student_id='1',
+            student_name='Похожий Павел',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+        )
+    ]
+    df = pd.DataFrame(
+        [
+            # Похожая строка: ФИО+дата совпадают, вид спорта другой → очередь.
+            {
+                'ФИО': 'Похожий Павел',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Лыжи',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 2,
+                'Курс': 2,
+            },
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 200
+    assert 'Импортировано записей: 0' in response.text
+    assert 'На подтверждение: 1' in response.text
+    assert app.ctx.storage.import_competitions.call_args[0][0] == []
+    app.ctx.storage.add_import_queue_entry.assert_called_once()
+    payload = app.ctx.storage.add_import_queue_entry.call_args[0][0]
+    assert payload['sport'] == 'Лыжи'
+    assert app.ctx.storage.add_import_queue_entry.call_args[1]['matched_record_id'] == 7
+
+
+def test_upload_exact_duplicate_still_skipped_as_before(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Дубль Дарья',
+            student_sex='Ж',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=1,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+        )
+    ]
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Дубль Дарья',
+                'Пол': 'Ж',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Бег',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 1,
+                'Курс': 1,
+            },
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 200
+    assert 'Пропущено дублей: 1' in response.text
+    assert 'На подтверждение' not in response.text
+    assert app.ctx.storage.import_competitions.call_args[0][0] == []
+    app.ctx.storage.add_import_queue_entry.assert_not_called()
+
+
+def test_import_queue_page_admin_only_and_renders(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    entry_payload = {
+        'student_id': 'hash-1',
+        'student_name': 'Похожий Павел',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': 2,
+        'sport': 'Лыжи',
+        'date': '2026-03-15T00:00:00',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 2,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2026-03-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    app.ctx.storage.list_import_queue.return_value = [
+        {
+            'id': 5,
+            'created_at': '2026-03-01T12:00:00',
+            'payload_json': json.dumps(entry_payload),
+            'payload': entry_payload,
+            'status': 'pending',
+            'matched_record_id': 1,
+            'created_by': 1,
+        }
+    ]
+    matched = Competition(
+        student_id='1',
+        student_name='Похожий Павел',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+    )
+    app.ctx.storage.get_competition_by_id.return_value = matched
+
+    headers = get_auth_headers(role='admin')
+    _, response = client.get('/admin/import-queue', headers=headers)
+    assert response.status == 200
+    assert 'Похожий Павел' in response.text
+    assert 'Лыжи' in response.text
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.get('/admin/import-queue', headers=headers)
+    assert response.status == 403
+    _, response = client.post(
+        '/admin/import-queue/5/accept',
+        headers=headers,
+        data=csrf_for(headers),
+    )
+    assert response.status == 403
+
+
+def test_import_queue_accept_inserts_record_and_audits(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    entry_payload = {
+        'student_id': 'hash-2',
+        'student_name': 'Принятый Пётр',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': 2,
+        'sport': 'Лыжи',
+        'date': '2026-03-15T00:00:00',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 2,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2026-03-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 9,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': json.dumps(entry_payload),
+        'payload': entry_payload,
+        'status': 'pending',
+        'matched_record_id': 3,
+        'created_by': 2,
+    }
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.set_import_queue_status.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/9/accept',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.save_competitions.assert_called_once()
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.student_name == 'Принятый Пётр'
+    assert saved.sport == 'Лыжи'
+    app.ctx.storage.set_import_queue_status.assert_called_once_with(9, 'accepted')
+    app.ctx.storage.add_audit_event.assert_called_once()
+    audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
+    assert audit_kwargs['action'] == 'import_conflict_resolved'
+    assert json.loads(audit_kwargs['details'])['decision'] == 'accepted'
+
+
+def test_import_queue_skip_marks_skipped_and_audits(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 11,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': '{}',
+        'payload': {},
+        'status': 'pending',
+        'matched_record_id': 4,
+        'created_by': 1,
+    }
+    app.ctx.storage.set_import_queue_status.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/11/skip',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.set_import_queue_status.assert_called_once_with(11, 'skipped')
+    assert app.ctx.storage.add_audit_event.call_args[1]['action'] == 'import_conflict_resolved'
+    assert json.loads(app.ctx.storage.add_audit_event.call_args[1]['details'])['decision'] == 'skipped'
+
+
+def test_split_import_similar_rows_within_file(client: SanicTestClient):
+    first = Competition(
+        student_id='1',
+        student_name='Файл Фёдор',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+    )
+    similar = first.model_copy(update={'sport': 'Лыжи', 'student_id': '2'})
+    new_competitions, skipped, conflicts = split_import_competitions([first, similar], [])
+    assert [comp.sport for comp in new_competitions] == ['Бег']
+    assert skipped == 0
+    assert len(conflicts) == 1
+    assert conflicts[0][0].sport == 'Лыжи'
+    assert conflicts[0][1] is None

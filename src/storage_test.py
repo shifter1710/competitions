@@ -1214,8 +1214,11 @@ def test_vacuum_shrinks_database_file_after_mass_delete(tmp_path):
         adapter.connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         return Path(db_path).stat().st_size
 
+    # 600 строк: объём данных должен доминировать над размером пустой схемы
+    # (таблицы растут — field_settings/import_queue и др., порог 0.5 иначе
+    # становится хрупким).
     adapter.save_competitions(
-        [make_competition(f'Спортсменов Номер {index}', datetime(2025, index % 12 + 1, 1)) for index in range(300)]
+        [make_competition(f'Спортсменов Номер {index}', datetime(2025, index % 12 + 1, 1)) for index in range(600)]
     )
     size_before_delete = file_size()
 
@@ -1552,3 +1555,69 @@ def test_records_sorted_by_date_from(adapter):
 
     page = adapter.get_competitions_page()
     assert [record.student_name for record in page] == ['Ранний Роман', 'Поздний Пётр']
+
+
+# --- Лёгкий реестр полей (волна 3, docs/data-model-decisions.md) ---
+
+
+def test_field_settings_defaults_reflect_current_behavior(adapter):
+    settings = adapter.get_field_settings()
+    assert settings['student_name'] == {'value_type': 'text', 'required': True}
+    assert settings['date'] == {'value_type': 'text', 'required': True}
+    assert settings['course'] == {'value_type': 'number', 'required': True}
+    assert settings['position'] == {'value_type': 'number', 'required': False}
+    for key in ('student_sex', 'institute', 'group', 'sport', 'level', 'name'):
+        assert settings[key] == {'value_type': 'text', 'required': False}
+
+
+def test_field_settings_defaults_idempotent(adapter):
+    adapter.update_field_settings({'course': ('text', False)})
+    # Повторная инициализация (как при обновлении легаси-БД) не сбрасывает.
+    adapter._populate_field_settings_defaults()
+    assert adapter.get_field_settings()['course'] == {'value_type': 'text', 'required': False}
+
+
+def test_text_course_stored_and_read_back(adapter):
+    adapter.update_field_settings({'course': ('text', False)})
+    adapter.save_competitions([make_competition('Текстовый Курс', datetime(2026, 5, 1))])
+    # Перезапишем курс текстом напрямую: колонка целочисленная, но SQLite
+    # хранит строку — реестр полей разрешает «Выпускник 2025/26».
+    adapter.connection.execute(
+        "UPDATE competitions SET course = 'Выпускник 2025/26' WHERE student_name = 'Текстовый Курс'"
+    )
+    adapter.connection.commit()
+    record = list(adapter.get_competitions())[0]
+    assert record.course == 'Выпускник 2025/26'
+
+
+# --- Очередь конфликтов импорта (волна 3, №6/№8) ---
+
+
+def test_import_queue_roundtrip(adapter):
+    entry_id = adapter.add_import_queue_entry(
+        {'student_name': 'Кандидат К', 'course': 2},
+        matched_record_id=42,
+        created_by=7,
+    )
+    entries = adapter.list_import_queue('pending')
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry['id'] == entry_id
+    assert entry['status'] == 'pending'
+    assert entry['matched_record_id'] == 42
+    assert entry['created_by'] == 7
+    assert entry['payload'] == {'student_name': 'Кандидат К', 'course': 2}
+    assert adapter.count_import_queue('pending') == 1
+
+    adapter.set_import_queue_status(entry_id, 'accepted')
+    assert adapter.list_import_queue('pending') == []
+    assert adapter.get_import_queue_entry(entry_id)['status'] == 'accepted'
+
+
+def test_get_competition_by_id(adapter):
+    adapter.save_competitions([make_competition('Поиск По Id', datetime(2026, 5, 1))])
+    record = list(adapter.get_competitions())[0]
+    found = adapter.get_competition_by_id(int(record.record_id))
+    assert found is not None
+    assert found.student_name == 'Поиск По Id'
+    assert adapter.get_competition_by_id(999999) is None

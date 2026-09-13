@@ -108,6 +108,30 @@ BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
 REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
 INDEX_EXPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
 
+# Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md
+# «Реестр полей: лёгкая версия сейчас, полная запланирована»): у каждого
+# базового поля настраиваются ТИП (text/number; link базовым недоступен)
+# и ОБЯЗАТЕЛЬНОСТЬ. Дефолты воспроизводят сегодняшнее поведение валидации
+# (числовые — Место и Курс; обязательные — ФИО, Дата, Курс). Синхронно
+# с BASE_FIELD_SETTING_DEFAULTS в src/storage/sqlite.py.
+BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
+    'student_name': ('text', True),
+    'student_sex': ('text', False),
+    'institute': ('text', False),
+    'group': ('text', False),
+    'sport': ('text', False),
+    'date': ('text', True),
+    'level': ('text', False),
+    'name': ('text', False),
+    'position': ('number', False),
+    'course': ('number', True),
+}
+BASE_FIELD_LABELS: dict[str, str] = {field['key']: field['label'] for field in BASE_FIELD_SPECS}
+# ФИО и Дата — ключ дедупликации и срезы отчётов: обязательность не
+# отключается (в UI задизейблена с пояснением), тип фиксированный.
+ALWAYS_REQUIRED_BASE_FIELDS: frozenset[str] = frozenset({'student_name', 'date'})
+BASE_FIELD_VALUE_TYPES: Sequence[str] = ('text', 'number')
+
 # Расширение отчётов (замечание №19, docs/data-model-decisions.md «Расширение
 # отчётов»): срез × метрики × фильтры. Группировка всегда по данным записи.
 REPORT_SLICES: Sequence[dict[str, str]] = (
@@ -541,6 +565,54 @@ def normalize_course(value) -> int:
     return int(value)
 
 
+def get_base_field_settings(storage: SQLiteAdapter | None) -> dict[str, dict]:
+    """Эффективные настройки базовых полей: дефолты + строки field_settings.
+
+    Настройки опциональны построчно: поле без строки в таблице действует
+    по дефолту (п.4 постановки). ФИО и Дата всегда обязательны — их
+    required принудительно True (ключ дедупликации и срезы отчётов).
+    """
+    merged = {
+        key: {'value_type': value_type, 'required': required}
+        for key, (value_type, required) in BASE_FIELD_SETTING_DEFAULTS.items()
+    }
+    if storage is not None:
+        for key, setting in storage.get_field_settings().items():
+            if key in merged and setting['value_type'] in BASE_FIELD_VALUE_TYPES:
+                merged[key] = {'value_type': setting['value_type'], 'required': bool(setting['required'])}
+    for key in ALWAYS_REQUIRED_BASE_FIELDS:
+        # ФИО и Дата: обязательность не отключается, тип фиксированный —
+        # даже если в таблице оказалась иная настройка.
+        default_type = BASE_FIELD_SETTING_DEFAULTS[key][0]
+        merged[key] = {'value_type': default_type, 'required': True}
+    return merged
+
+
+def parse_base_number_field(raw, *, label: str, setting: dict, empty_error: str, empty_value: int = 0):
+    """number-поле базового реестра: пустое при required — отказ, без
+    required — empty_value (как Место раньше давал 0)."""
+    value = clean_str(raw)
+    if not value:
+        if setting['required']:
+            raise ValueError(empty_error)
+        return empty_value
+    try:
+        # Excel-ячейки приходят числами (в т.ч. float) — как раньше,
+        # int() принимает и их; строка чистится.
+        return int(value) if isinstance(raw, str) else int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'Поле "{label}" должно быть числом') from None
+
+
+def parse_base_text_field(raw, *, label: str, setting: dict):
+    """text-поле базового реестра: строка без требования числа
+    (кейс «Курс: Выпускник 2025/26», замечания №2/№7)."""
+    value = clean_str(raw)
+    if not value and setting['required']:
+        raise ValueError(f'Поле "{label}" обязательно')
+    return value
+
+
 # Гибридный ввод дат-диапазонов (решение 2026-09-13, docs/data-model-decisions.md
 # «Даты-диапазоны: визуально одно, под капотом два»). Одно поле ввода/колонка
 # «Дата» разбирается на пару (date, date_to); формат решает парсер:
@@ -717,25 +789,58 @@ def build_competition(
     manual_input: bool = False,
     storage: SQLiteAdapter | None = None,
 ) -> Competition:
+    field_settings = get_base_field_settings(storage)
     student_name = clean_str(record['ФИО'])
     if not student_name:
         raise ValueError('ФИО обязательно')
 
     date, date_to = parse_date_value(record['Дата'], manual_input)
 
+    # required=1 у текстового базового поля — пустое значение = отказ
+    # (как ФИО/дата сейчас). Числовые Место/Курс — в parse_base_number_field.
+    level = parse_base_text_field(
+        record['Уровень соревнований'],
+        label=BASE_FIELD_LABELS['level'],
+        setting=field_settings['level'],
+    ).lower()
+
     competition = Competition(
         student_id=hashlib.sha256(student_name.encode()).hexdigest(),
         student_name=student_name,
-        student_sex=clean_str(record['Пол']),
-        institute=clean_str(record['Институт']),
-        group=clean_str(record['Группа']),
+        student_sex=parse_base_text_field(
+            record['Пол'], label=BASE_FIELD_LABELS['student_sex'], setting=field_settings['student_sex']
+        ),
+        institute=parse_base_text_field(
+            record['Институт'], label=BASE_FIELD_LABELS['institute'], setting=field_settings['institute']
+        ),
+        group=parse_base_text_field(
+            record['Группа'], label=BASE_FIELD_LABELS['group'], setting=field_settings['group']
+        ),
         date=date,
         date_to=date_to,
-        sport=clean_str(record['Вид спорта']),
-        level=clean_str(record['Уровень соревнований']).lower(),
-        name=clean_str(record['Название соревнований']),
-        position=normalize_position(record['Место']),
-        course=normalize_course(record['Курс']),
+        sport=parse_base_text_field(
+            record['Вид спорта'], label=BASE_FIELD_LABELS['sport'], setting=field_settings['sport']
+        ),
+        level=level,
+        name=parse_base_text_field(
+            record['Название соревнований'], label=BASE_FIELD_LABELS['name'], setting=field_settings['name']
+        ),
+        position=parse_base_number_field(
+            record['Место'],
+            label=BASE_FIELD_LABELS['position'],
+            setting=field_settings['position'],
+            empty_error='Поле "Место" обязательно',
+        ),
+        course=(
+            parse_base_text_field(record['Курс'], label=BASE_FIELD_LABELS['course'], setting=field_settings['course'])
+            if field_settings['course']['value_type'] != 'number'
+            else parse_base_number_field(
+                record['Курс'],
+                label=BASE_FIELD_LABELS['course'],
+                setting=field_settings['course'],
+                empty_error='Курс обязателен',
+            )
+        ),
         extra_data=extract_custom_field_values(record, custom_fields),
     )
     if storage is not None:
@@ -1231,13 +1336,151 @@ async def admin_import_page(request: Request):
     auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
+    storage = get_storage(request.app)
     return await render(
         template_name=jinja_env.get_template('admin_import.html'),
         context={
             'request': request,
+            'pending_queue_count': storage.count_import_queue('pending'),
+            'is_admin': user_is_admin(request),
             **get_flash_args(request),
         },
     )
+
+
+# Конфликт-режим импорта (№6/№8, docs/data-model-decisions.md «Конфликт-режим
+# импорта: очередь на подтверждение»): разбора строка-кандидат показывается
+# рядом с похожей существующей записью; решение — принять/пропустить.
+QUEUE_FIELD_ORDER: Sequence[str] = (
+    'student_name',
+    'student_sex',
+    'institute',
+    'group',
+    'course',
+    'sport',
+    'date',
+    'date_to',
+    'level',
+    'name',
+    'position',
+)
+
+
+def queue_candidate_view(payload: dict) -> list[tuple[str, str]]:
+    """Поля кандидата из очереди как пары (название, значение) для страницы."""
+    view = []
+    for key in QUEUE_FIELD_ORDER:
+        value = payload.get(key)
+        if key in ('date', 'date_to') and value:
+            try:
+                value = format_date_range(
+                    datetime.fromisoformat(payload['date']),
+                    datetime.fromisoformat(payload['date_to']) if payload.get('date_to') else None,
+                )
+            except (TypeError, ValueError):
+                pass
+        view.append((BASE_FIELD_LABELS.get(key, key), '' if value is None else str(value)))
+    return view
+
+
+def resolve_queue_entry(request: Request, entry_id: str):
+    """Общая проверка действия над записью очереди: id и статус pending."""
+    try:
+        numeric_id = int(entry_id)
+    except ValueError:
+        return None, text(body='Invalid queue entry id', status=400)
+    entry = get_storage(request.app).get_import_queue_entry(numeric_id)
+    if entry is None:
+        return None, text(body='Queue entry not found', status=404)
+    if entry['status'] != 'pending':
+        return None, text(body='Queue entry already resolved', status=409)
+    return entry, None
+
+
+@app.get('/admin/import-queue')
+async def admin_import_queue_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    entries = []
+    for entry in storage.list_import_queue('pending'):
+        matched = None
+        if entry['matched_record_id']:
+            matched = storage.get_competition_by_id(int(entry['matched_record_id']))
+        entries.append(
+            {
+                **entry,
+                'candidate': queue_candidate_view(entry['payload']),
+                'matched': matched,
+            }
+        )
+    return await render(
+        template_name=jinja_env.get_template('admin_import_queue.html'),
+        context={
+            'request': request,
+            'queue_entries': entries,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/import-queue/<entry_id>/accept')
+async def accept_import_queue_entry(request: Request, entry_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    entry, error = resolve_queue_entry(request, entry_id)
+    if error is not None:
+        return error
+    storage = get_storage(request.app)
+    competition = Competition.model_validate(entry['payload'])
+
+    # Строка вставляется только по явному решению админа; если пока она
+    # лежала в очереди, такая запись появилась другим путём — не дублируем.
+    duplicate_now = any(
+        competition_duplicate_key(comp) == competition_duplicate_key(competition) for comp in storage.get_competitions()
+    )
+    if duplicate_now:
+        storage.set_import_queue_status(entry['id'], 'skipped')
+        log_audit_event(
+            request,
+            'import_conflict_resolved',
+            {'decision': 'skipped', 'queue_id': entry['id'], 'reason': 'duplicate_already_exists'},
+        )
+        return redirect(to='/admin/import-queue?admin_message=Запись+уже+существует,+кандидат+пропущен')
+
+    ensure_catalog_values(storage, [competition])
+    storage.save_competitions([competition], review_status='approved', owner_id=entry['created_by'])
+    storage.set_import_queue_status(entry['id'], 'accepted')
+    log_audit_event(
+        request,
+        'import_conflict_resolved',
+        {
+            'decision': 'accepted',
+            'queue_id': entry['id'],
+            'matched_record_id': entry['matched_record_id'],
+        },
+    )
+    return redirect(to='/admin/import-queue?admin_message=Кандидат+принят+и+добавлен+в+реестр')
+
+
+@app.post('/admin/import-queue/<entry_id>/skip')
+async def skip_import_queue_entry(request: Request, entry_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    entry, error = resolve_queue_entry(request, entry_id)
+    if error is not None:
+        return error
+    storage = get_storage(request.app)
+    storage.set_import_queue_status(entry['id'], 'skipped')
+    log_audit_event(
+        request,
+        'import_conflict_resolved',
+        {'decision': 'skipped', 'queue_id': entry['id'], 'matched_record_id': entry['matched_record_id']},
+    )
+    return redirect(to='/admin/import-queue?admin_message=Кандидат+пропущен')
 
 
 @app.get('/admin/fields')
@@ -1252,9 +1495,54 @@ async def admin_fields_page(request: Request):
             'request': request,
             'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
             'field_type_options': FIELD_TYPE_OPTIONS,
+            'base_field_settings': get_base_field_settings(storage),
+            'base_field_labels': BASE_FIELD_LABELS,
+            'always_required_base_fields': ALWAYS_REQUIRED_BASE_FIELDS,
+            'base_field_value_types': BASE_FIELD_VALUE_TYPES,
             **get_flash_args(request),
         },
     )
+
+
+def parse_base_field_settings_form(request: Request) -> dict[str, tuple[str, bool]]:
+    """Собрать настройки базовых полей из формы /admin/fields/base.
+
+    Заблокированные поля (ФИО, Дата) игнорируют форму: обязательность
+    не отключается, тип фиксированный — защита от подделки разметки.
+    """
+    settings_form: dict[str, tuple[str, bool]] = {}
+    for key in BASE_FIELD_SETTING_DEFAULTS:
+        default_type, default_required = BASE_FIELD_SETTING_DEFAULTS[key]
+        if key in ALWAYS_REQUIRED_BASE_FIELDS:
+            settings_form[key] = (default_type, True)
+            continue
+        value_type = get_form_value(request, f'type_{key}')
+        if value_type not in BASE_FIELD_VALUE_TYPES:
+            value_type = default_type
+        settings_form[key] = (value_type, parse_checkbox(request, f'required_{key}'))
+    return settings_form
+
+
+@app.post('/admin/fields/base')
+async def update_base_field_settings(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    new_settings = parse_base_field_settings_form(request)
+    old_settings = get_base_field_settings(storage)
+    changed = {
+        key: {
+            'old': old_settings[key],
+            'new': {'value_type': value_type, 'required': required},
+        }
+        for key, (value_type, required) in new_settings.items()
+        if old_settings[key]['value_type'] != value_type or old_settings[key]['required'] != required
+    }
+    if changed:
+        storage.update_field_settings(new_settings)
+        log_audit_event(request, 'field_settings_changed', {'fields': changed})
+    return redirect(to='/admin/fields?admin_message=Настройки+базовых+полей+сохранены')
 
 
 @app.get('/admin/levels')
@@ -1798,21 +2086,56 @@ def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competi
             storage.ensure_catalog_pair(competition.institute, competition.group)
 
 
+def competition_partial_key(competition: Competition) -> tuple:
+    """Похожесть (№6/№8): ФИО + дата_начала. Совпадение пары при несовпадении
+    полного ключа дедупликации — кандидат в очередь подтверждения."""
+    return (competition.student_name, competition.date.date().isoformat())
+
+
 def split_import_competitions(
     competitions: Sequence[Competition],
     existing_competitions: Iterable[Competition],
-) -> tuple[list[Competition], int]:
-    seen_keys = {competition_duplicate_key(comp) for comp in existing_competitions}
+) -> tuple[list[Competition], int, list[tuple[Competition, int | None]]]:
+    """Разложить строки импорта на вставку / дубли / конфликты (№6/№8).
+
+    Точный дубль (ФИО+дата+вид спорта+название) — пропуск как раньше.
+    Похожая строка (совпадают ФИО+дата_начала, полный ключ другой) —
+    НЕ вставляется и попадает в очередь: (конфликт, matched_record_id)
+    похожей существующей записи. Конфликты между строками одного файла —
+    тоже в очередь: первая строка вставляется, похожая на неё вторая —
+    в очередь с matched_record_id=None (похожая запись появится после
+    вставки первой).
+    """
+    existing_by_full_key = {competition_duplicate_key(comp): comp for comp in existing_competitions}
+    existing_partial_keys = {competition_partial_key(comp) for comp in existing_competitions}
     new_competitions = []
+    conflicts: list[tuple[Competition, int | None]] = []
     skipped_duplicates = 0
+    seen_full_keys = set()
+    inserted_partial_keys = set()
     for competition in competitions:
-        key = competition_duplicate_key(competition)
-        if key in seen_keys:
+        full_key = competition_duplicate_key(competition)
+        if full_key in existing_by_full_key or full_key in seen_full_keys:
             skipped_duplicates += 1
             continue
-        seen_keys.add(key)
+        partial_key = competition_partial_key(competition)
+        if partial_key in existing_partial_keys or partial_key in inserted_partial_keys:
+            matched = None
+            if partial_key in existing_partial_keys:
+                matched = next(
+                    (
+                        int(comp.record_id)
+                        for comp in existing_competitions
+                        if competition_partial_key(comp) == partial_key and comp.record_id
+                    ),
+                    None,
+                )
+            conflicts.append((competition, matched))
+            continue
+        seen_full_keys.add(full_key)
+        inserted_partial_keys.add(partial_key)
         new_competitions.append(competition)
-    return new_competitions, skipped_duplicates
+    return new_competitions, skipped_duplicates, conflicts
 
 
 @app.post('/')
@@ -1840,7 +2163,7 @@ async def upload(request: Request):
         return text(body=f'Invalid row data: {exc}', status=400)
 
     existing = await asyncio.to_thread(storage.get_competitions)
-    new_competitions, skipped_duplicates = split_import_competitions(competitions, existing)
+    new_competitions, skipped_duplicates, conflicts = split_import_competitions(competitions, existing)
 
     # Одна транзакция и один COMMIT на весь импорт, в отдельном потоке:
     # построчные коммиты справочников (WAL+fsync ~4 раза на строку) и запись
@@ -1853,9 +2176,23 @@ async def upload(request: Request):
         owner_id=get_current_user_id(request),
     )
 
+    # Конфликт-режим импорта (решение 2026-09-13, docs/data-model-decisions.md
+    # «Конфликт-режим импорта: очередь на подтверждение»): похожие строки
+    # не вставляются молча и не отклоняют импорт — ждут явного решения админа.
+    created_by = get_current_user_id(request)
+    for conflict, matched_record_id in conflicts:
+        await asyncio.to_thread(
+            storage.add_import_queue_entry,
+            conflict.model_dump(mode='json', by_alias=False),
+            matched_record_id=matched_record_id,
+            created_by=created_by,
+        )
+
     summary = f'Импортировано записей: {len(new_competitions)}'
     if skipped_duplicates:
         summary += f'. Пропущено дублей: {skipped_duplicates}'
+    if conflicts:
+        summary += f'. На подтверждение: {len(conflicts)} — разобрать: /admin/import-queue'
     return text(body=summary)
 
 

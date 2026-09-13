@@ -5,6 +5,67 @@
 
 {% block admin_content %}
 
+{# Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md):
+   у базовых полей настраиваются тип (текст/число) и обязательность.
+   ФИО и Дата заблокированы — обязательность не отключается (ключ
+   дедупликации и срезы отчётов). #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Базовые поля</h3>
+        <div class="text-muted mb-3">Тип и обязательность основных колонок записей. ФИО и Дата всегда обязательны: по ним работает дедупликация импорта и срезы отчётов. Тип «текст» разрешает нечисловые значения (например, Курс «Выпускник 2025/26»).</div>
+        <form action="/admin/fields/base" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead>
+                        <tr>
+                            <th>Поле</th>
+                            <th>Тип</th>
+                            <th>Обязательное</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for key in base_field_labels %}
+                        {% set setting = base_field_settings[key] %}
+                        {% set locked = key in always_required_base_fields %}
+                        <tr>
+                            <td>{{ base_field_labels[key] }}{% if locked %} <span class="text-muted">(всегда обязательное)</span>{% endif %}</td>
+                            <td>
+                                {% if locked %}
+                                <input type="hidden" name="type_{{ key }}" value="{{ setting.value_type }}">
+                                <select class="form-select form-select-sm" disabled>
+                                    <option selected>{{ setting.value_type }}</option>
+                                </select>
+                                {% else %}
+                                <select class="form-select form-select-sm" name="type_{{ key }}">
+                                    {% for value_type in base_field_value_types %}
+                                    <option value="{{ value_type }}"{% if value_type == setting.value_type %} selected{% endif %}>{{ value_type }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="form-check">
+                                    <input class="form-check-input"
+                                           id="base-required-{{ key }}"
+                                           name="required_{{ key }}"
+                                           type="checkbox"
+                                           {% if setting.required %}checked{% endif %}
+                                           {% if locked %}disabled{% endif %}>
+                                    {% if locked %}<input type="hidden" name="required_{{ key }}" value="on">{% endif %}
+                                    <label class="form-check-label" for="base-required-{{ key }}">обязательное</label>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <button class="btn btn-primary" type="submit">Сохранить базовые поля</button>
+        </form>
+    </div>
+</div>
+
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <form action="/admin/fields" class="row g-3 mb-4" method="post">

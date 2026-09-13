@@ -23,6 +23,18 @@
                 </button>
             </div>
         </form>
+
+        {# Очередь конфликтов импорта (№6/№8): похожие строки ждут решения админа. #}
+        {% if is_admin %}
+        <div class="alert {% if pending_queue_count %}alert-warning{% else %}alert-secondary{% endif %} mt-3 mb-0">
+            {% if pending_queue_count %}
+            Похожих строк на подтверждении: {{ pending_queue_count }}.
+            <a href="/admin/import-queue">Разобрать очередь</a>
+            {% else %}
+            Очередь подтверждения пуста. Похожие строки импорта (совпадают ФИО и дата, но не вся запись) попадают сюда вместо молчаливой вставки.
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
 </div>
 
