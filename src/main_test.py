@@ -132,6 +132,10 @@ def client() -> SanicTestClient:
     }.get(category, [])
     fake_storage.list_catalog_all.return_value = []
     fake_storage.list_catalog_tree.return_value = []
+    # №1.1: канонизирующие подстановки по умолчанию выключены (None).
+    fake_storage.find_catalog_row.return_value = None
+    fake_storage.find_catalog_canonical.return_value = None
+    fake_storage.find_level_canonical.return_value = None
     fake_storage.get_group_options_by_institute.return_value = {}
     fake_storage.ensure_catalog_pair.return_value = None
     fake_storage.count_child_groups.return_value = 0
@@ -3998,3 +4002,279 @@ def test_old_admin_post_still_works_and_returns_to_section(client: SanicTestClie
     )
     assert response.status == 302
     assert response.headers['location'].startswith('/admin/fields')
+
+
+# --- Волна 0 живого фидбека: баг «nan», №1.1 регистронезависимость, №19б аккордеон ---
+
+
+def make_import_row(**overrides) -> dict:
+    row = {
+        'ФИО': 'Тестов Тест Тестович',
+        'Пол': 'М',
+        'Институт': 'ИСИ',
+        'Группа': 'ПГС-101',
+        'Вид спорта': 'Бег',
+        'Дата': '15.03.2026',
+        'Уровень соревнований': 'внутривузовские',
+        'Название соревнований': 'Кубок',
+        'Место': 1,
+        'Курс': 2,
+    }
+    row.update(overrides)
+    return row
+
+
+def upload_xlsx(client: SanicTestClient, rows: list[dict]):
+    df = pd.DataFrame(rows)
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_upload_empty_cells_become_empty_not_nan(client: SanicTestClient):
+    # Баг с живого импорта (docs/feedback-live.md «nan»): пустые ячейки Excel
+    # (pandas NaN) не должны превращаться в текст «nan» в значениях записи.
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = upload_xlsx(client, [make_import_row(**{'Пол': None, 'Институт': None, 'Группа': None})])
+
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.student_sex == ''
+    assert saved.institute == ''
+    assert saved.group == ''
+    assert saved.sport == 'Бег'
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_upload_empty_level_becomes_empty_not_nan(client: SanicTestClient):
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = upload_xlsx(client, [make_import_row(**{'Уровень соревнований': None})])
+
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.level == ''
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_upload_case_variants_get_canonical_catalog_values(client: SanicTestClient):
+    # №1.1: значение, отличающееся от справочника только регистром,
+    # заменяется каноническим написанием ещё на входе в запись.
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+
+    def fake_canonical(category, value, parent_id=None):
+        by_category = {
+            'institute': {'иси': 'ИСИ'},
+            'sport': {'бег': 'Бег'},
+            'group': {'пгс-101': 'ПГС-101'},
+        }
+        return by_category.get(category, {}).get(value.strip().lower())
+
+    app.ctx.storage.find_catalog_canonical.side_effect = fake_canonical
+    app.ctx.storage.find_catalog_row.return_value = {
+        'id': 1,
+        'category': 'institute',
+        'value': 'ИСИ',
+        'parent_id': None,
+        'active': 1,
+    }
+    app.ctx.storage.find_level_canonical.return_value = 'внутривузовские'
+
+    response = upload_xlsx(
+        client,
+        [
+            make_import_row(
+                **{
+                    'Институт': 'иси',
+                    'Группа': 'ПГС-101',
+                    'Вид спорта': 'БЕГ',
+                    'Уровень соревнований': 'Внутривузовские',
+                }
+            )
+        ],
+    )
+
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.institute == 'ИСИ'
+    assert saved.sport == 'Бег'
+    assert saved.group == 'ПГС-101'
+    assert saved.level == 'внутривузовские'
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.find_catalog_canonical.side_effect = None
+    app.ctx.storage.find_catalog_canonical.return_value = None
+    app.ctx.storage.find_catalog_row.return_value = None
+    app.ctx.storage.find_level_canonical.return_value = None
+
+
+def test_manual_competition_uses_canonical_catalog_values(client: SanicTestClient):
+    app.ctx.storage.save_competitions.reset_mock()
+
+    def fake_canonical(category, value, parent_id=None):
+        if category == 'institute' and value.lower() == 'иси':
+            return 'ИСИ'
+        return None
+
+    app.ctx.storage.find_catalog_canonical.side_effect = fake_canonical
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Новиков Новел Новикович',
+            'student_sex': 'М',
+            'institute': 'иси',
+            'group': 'ПГС-101',
+            'sport': 'Бег',
+            'date': '20.03.2026',
+            'level': 'внутривузовские',
+            'name': 'Кубок',
+            'position': '2',
+            'course': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.institute == 'ИСИ'
+    app.ctx.storage.find_catalog_canonical.side_effect = None
+    app.ctx.storage.find_catalog_canonical.return_value = None
+
+
+def test_admin_catalog_add_rejects_case_duplicate(client: SanicTestClient):
+    # №1.1: ручное добавление регистрового дубля — отказ с подсказкой.
+    app.ctx.storage.add_catalog_value.reset_mock()
+    app.ctx.storage.find_catalog_canonical.return_value = 'Бег'
+
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/catalogs/sport',
+        headers=headers,
+        data={**csrf_for(headers), 'value': 'бег'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    assert 'Бег' in unquote_plus(response.headers['location'])
+    app.ctx.storage.add_catalog_value.assert_not_called()
+    app.ctx.storage.find_catalog_canonical.return_value = None
+
+
+def test_admin_catalog_add_allows_exact_and_new_values(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/catalogs/sport',
+        headers=headers,
+        data={**csrf_for(headers), 'value': 'Плавание'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.add_catalog_value.assert_called_with('sport', 'Плавание')
+
+
+def test_admin_group_add_rejects_case_duplicate_within_institute(client: SanicTestClient):
+    app.ctx.storage.add_catalog_value.reset_mock()
+    app.ctx.storage.get_catalog_value.return_value = {
+        'id': 5,
+        'category': 'institute',
+        'value': 'ИСИ',
+        'parent_id': None,
+        'active': 1,
+    }
+    app.ctx.storage.find_catalog_canonical.return_value = 'ПГС-101'
+
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/catalogs/institute/5/group',
+        headers=headers,
+        data={**csrf_for(headers), 'value': 'пгс-101'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.add_catalog_value.assert_not_called()
+    app.ctx.storage.get_catalog_value.return_value = None
+    app.ctx.storage.find_catalog_canonical.return_value = None
+
+
+def test_admin_level_add_rejects_case_duplicate(client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/levels',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Внутривузовские'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    # Имя приведено к lower до проверки, поэтому «Внутривузовские» ловится
+    # как дубль «внутривузовские» (источник регистровых дублей устранён).
+    assert unquote_plus(response.headers['location']).startswith('/admin/catalogs?admin_error=')
+
+
+def test_admin_level_add_normalizes_to_lower(client: SanicTestClient):
+    # Уровень всегда хранится в lower (как из импорта); ручное добавление
+    # приведено к тому же виду — источник регистровых дублей устранён.
+    app.ctx.storage.create_level.reset_mock()
+    headers = get_auth_headers()
+    _, response = client.post(
+        '/admin/levels',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'ГОРОДСКИЕ'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.create_level.assert_called_with('городские')
+
+
+def test_admin_catalogs_institutes_are_collapsed_accordion(client: SanicTestClient):
+    # №19б: институты — <details>/<summary> без JS, по умолчанию свёрнуто.
+    app.ctx.storage.list_catalog_tree.return_value = [
+        {
+            'id': 1,
+            'category': 'institute',
+            'value': 'ИСИ',
+            'parent_id': None,
+            'active': 1,
+            'records_count': 3,
+            'groups': [
+                {
+                    'id': 2,
+                    'category': 'group',
+                    'value': 'ПГС-101',
+                    'parent_id': 1,
+                    'active': 1,
+                    'records_count': 2,
+                }
+            ],
+        }
+    ]
+    headers = get_auth_headers()
+    _, response = client.get('/admin/catalogs', headers=headers)
+    assert response.status == 200
+    assert '<details class="catalog-institute' in response.text
+    assert '<summary>' in response.text
+    assert not re.search(r'<details[^>]*\bopen\b', response.text), 'институты должны быть свёрнуты по умолчанию'
+    assert 'ПГС-101' in response.text
+    app.ctx.storage.list_catalog_tree.return_value = []

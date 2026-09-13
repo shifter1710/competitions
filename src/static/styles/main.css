@@ -1298,3 +1298,44 @@ span.pager__btn:hover {
     background-color: var(--accent);
     color: #FFFFFF;
 }
+
+/* ----------------------------------------------------------------------------
+   Аккордеон институтов на /admin/catalogs (№19б): <details>/<summary> без JS.
+   Цвета — токены прототипа, поэтому работает в обеих темах.
+   ------------------------------------------------------------------------- */
+
+.catalog-institute {
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background-color: var(--surface);
+}
+
+.catalog-institute > summary {
+    cursor: pointer;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--r-md);
+    color: var(--text);
+    list-style-position: inside;
+}
+
+.catalog-institute > summary::marker,
+.catalog-institute > summary::-webkit-details-marker {
+    color: var(--g-500);
+}
+
+.catalog-institute > summary:hover {
+    background-color: var(--surface-hover);
+}
+
+.catalog-institute > summary .badge {
+    vertical-align: baseline;
+}
+
+.catalog-institute-body {
+    padding: 0.25rem 0.75rem 0.75rem;
+    border-top: 1px solid var(--border);
+}
+
+.catalog-institute.is-inactive {
+    background-color: var(--surface-alt);
+}
