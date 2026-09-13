@@ -72,7 +72,114 @@
 {% endmacro %}
 
 {{ value_catalog_section('Виды спорта', 'Подсказка для поля «Вид спорта» в формах ввода.', sport_values, 'sport', 'sport-catalog') }}
-{{ value_catalog_section('Институты', 'Подсказка для поля «Институт» в формах ввода.', institute_values, 'institute', 'institute-catalog') }}
+
+{# Иерархия справочника (№15): институты содержат группы. У каждой группы
+   счётчик записей по паре институт+группа; удаление — только без записей
+   (и институт — только без групп). См. docs/data-model-decisions.md. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Институты и группы</h5>
+        <div class="text-muted mb-3">Каждая группа принадлежит институту. Пара институт→группа из новых записей и импорта попадает в справочник автоматически.</div>
+
+        <form action="/admin/catalogs/institute" class="row g-2 align-items-end mb-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="institute-catalog-value">Новый институт</label>
+                <input class="form-control" id="institute-catalog-value" name="value" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">Добавить</button>
+            </div>
+        </form>
+
+        {% if institute_tree %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>Институт / группа</th>
+                        <th>Записей</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for institute in institute_tree %}
+                    <tr {% if not institute.active %}class="table-secondary"{% endif %}>
+                        <td><strong>{{ institute.value }}</strong></td>
+                        <td>{{ institute.records_count }}</td>
+                        <td>{% if institute.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
+                        <td class="d-flex gap-2">
+                            {% if institute.active %}
+                            <form action="/admin/catalogs/institute/{{ institute.id }}/hide" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-warning" type="submit">Скрыть</button>
+                            </form>
+                            {% else %}
+                            <form action="/admin/catalogs/institute/{{ institute.id }}/unhide" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-success" type="submit">Показать</button>
+                            </form>
+                            {% endif %}
+                            {% if not institute.records_count and not institute.groups %}
+                            <form action="/admin/catalogs/institute/{{ institute.id }}/delete" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                            {% elif not institute.records_count and institute.groups %}
+                            <span class="text-muted small" title="Сначала удалите группы института">удаление — после групп</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% for group in institute.groups %}
+                    <tr {% if not group.active %}class="table-secondary"{% endif %}>
+                        <td class="ps-4">— {{ group.value }}</td>
+                        <td>{{ group.records_count }}</td>
+                        <td>{% if group.active %}<span class="badge text-bg-success">активна</span>{% else %}<span class="badge text-bg-secondary">скрыта</span>{% endif %}</td>
+                        <td class="d-flex gap-2">
+                            {% if group.active %}
+                            <form action="/admin/catalogs/group/{{ group.id }}/hide" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-warning" type="submit">Скрыть</button>
+                            </form>
+                            {% else %}
+                            <form action="/admin/catalogs/group/{{ group.id }}/unhide" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-success" type="submit">Показать</button>
+                            </form>
+                            {% endif %}
+                            {% if not group.records_count %}
+                            <form action="/admin/catalogs/group/{{ group.id }}/delete" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    <tr>
+                        <td colspan="4">
+                            <form action="/admin/catalogs/institute/{{ institute.id }}/group" class="row g-2 align-items-center" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <div class="col-md-4">
+                                    <input aria-label="Новая группа" class="form-control form-control-sm" name="value" placeholder="Новая группа в «{{ institute.value }}»" type="text" required>
+                                </div>
+                                <div class="col-md-2">
+                                    <button class="btn btn-sm btn-outline-primary" type="submit">+ Группа</button>
+                                </div>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="text-muted">Удалить можно только значение, на котором не висит ни одной записи (у группы — по паре с институтом); скрытое не показывается в подсказках форм, но остаётся в записях и отчётах.</div>
+        {% else %}
+        <div class="text-muted">Институтов пока нет — они появятся автоматически из новых записей и импорта.</div>
+        {% endif %}
+    </div>
+</div>
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">

@@ -59,7 +59,12 @@
     {% if competitions %}
     <div class="table-card" data-table-view="index">
         <div class="table-responsive">
-            <table class="table table-striped table-bordered interactive-table" data-levels='{{ levels | tojson }}'>
+            {# data-groups-by-institute — карта институт → группы (иерархия
+               справочника, №15/№4): комбобокс «Группа» в инлайн-строке
+               фильтрует список выбранным институтом. Только активные. #}
+            <table class="table table-striped table-bordered interactive-table"
+                   data-levels='{{ levels | tojson }}'
+                   data-groups-by-institute='{{ groups_by_institute | tojson }}'>
                 <thead class="table-dark">
                     <tr>
                         <th scope="col" data-column-key="index" data-sort-type="number">№</th>

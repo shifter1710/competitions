@@ -121,12 +121,18 @@ def client() -> SanicTestClient:
         'institute': ['ИСИ'],
     }.get(category, [])
     fake_storage.list_catalog_all.return_value = []
+    fake_storage.list_catalog_tree.return_value = []
+    fake_storage.get_group_options_by_institute.return_value = {}
+    fake_storage.ensure_catalog_pair.return_value = None
+    fake_storage.count_child_groups.return_value = 0
     fake_storage.add_catalog_value.return_value = None
     fake_storage.get_catalog_value.return_value = None
     fake_storage.hide_catalog_value.return_value = None
     fake_storage.unhide_catalog_value.return_value = None
     fake_storage.delete_catalog_value.return_value = None
     fake_storage.count_records_using.return_value = 0
+    fake_storage.touch_user_seen.return_value = False
+    fake_storage.set_user_last_login.return_value = None
     fake_storage.get_user.side_effect = fake_get_user
     fake_storage.get_user_by_id.return_value = None
     fake_storage.list_users.return_value = []
@@ -819,6 +825,92 @@ def test_login_sets_auth_cookie(client: SanicTestClient):
     assert settings.auth_cookie_name in response.headers.get('set-cookie', '')
 
 
+# --- Присутствие пользователей: last_login_at / last_seen_at (№17) ---
+
+
+def test_login_records_last_login(client: SanicTestClient):
+    app.ctx.storage.set_user_last_login.reset_mock()
+    _, response = client.post(
+        '/login',
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    # фикстура отдаёт админу id = 1
+    app.ctx.storage.set_user_last_login.assert_called_once_with(1)
+
+
+def test_authenticated_requests_touch_last_seen_with_throttle(client: SanicTestClient):
+    from src.main import reset_presence_tracking
+
+    reset_presence_tracking()
+    app.ctx.storage.touch_user_seen.reset_mock()
+    headers = get_auth_headers()
+
+    client.get('/', headers=headers)
+    client.get('/', headers=headers)
+    # два запроса подряд — один UPDATE благодаря троттлингу (окно 60 с)
+    app.ctx.storage.touch_user_seen.assert_called_once_with(1)
+
+    # без сессии активность не фиксируется
+    app.ctx.storage.touch_user_seen.reset_mock()
+    reset_presence_tracking()
+    client.get('/login')
+    app.ctx.storage.touch_user_seen.assert_not_called()
+
+
+def test_admin_users_page_shows_presence(client: SanicTestClient):
+    from datetime import timedelta
+    from datetime import timezone
+
+    now = datetime.now(timezone.utc)
+    app.ctx.storage.list_users.return_value = [
+        {
+            'id': 1,
+            'username': 'admin',
+            'role': 'admin',
+            'active': 1,
+            'name_aliases': [],
+            'last_login_at': now.isoformat(),
+            'last_seen_at': now.isoformat(),
+        },
+        {
+            'id': 2,
+            'username': 'stale',
+            'role': 'viewer',
+            'active': 1,
+            'name_aliases': [],
+            'last_login_at': (now - timedelta(hours=2)).isoformat(),
+            'last_seen_at': (now - timedelta(minutes=30)).isoformat(),
+        },
+        {
+            'id': 3,
+            'username': 'ghost',
+            'role': 'viewer',
+            'active': 0,
+            'name_aliases': [],
+            'last_login_at': None,
+            'last_seen_at': None,
+        },
+    ]
+    try:
+        _, response = client.get('/admin/users', headers=get_auth_headers())
+        assert response.status == 200
+        # онлайн: зелёная точка
+        assert 'presence-dot-online' in response.text
+        assert 'онлайн' in response.text
+        # был(а): 30 минут назад / —
+        assert 'был(а): 30 минут назад' in response.text
+        assert 'был(а): —' in response.text
+        assert 'Последний вход:' in response.text
+    finally:
+        app.ctx.storage.list_users.return_value = []
+
+
 def test_competition_created_at_default_factory():
     first = Competition(
         student_id='1',
@@ -1417,7 +1509,14 @@ def test_admin_can_add_catalog_value(client: SanicTestClient):
 
 def test_catalog_value_actions_forbidden_for_non_admin(client: SanicTestClient):
     editor_headers = get_auth_headers(role='editor')
-    for path in ('/admin/catalogs/sport', '/admin/catalogs/sport/5/hide', '/admin/catalogs/sport/5/delete'):
+    for path in (
+        '/admin/catalogs/sport',
+        '/admin/catalogs/sport/5/hide',
+        '/admin/catalogs/sport/5/delete',
+        '/admin/catalogs/group/5/hide',
+        '/admin/catalogs/group/5/delete',
+        '/admin/catalogs/institute/7/group',
+    ):
         _, response = client.post(path, headers=editor_headers, data=csrf_for(editor_headers))
         assert response.status == 403, path
 
@@ -1561,6 +1660,226 @@ def test_hidden_catalog_value_not_in_datalist(client: SanicTestClient):
         assert '<option value="Лыжи"></option>' not in response.text
     finally:
         app.ctx.storage.list_catalog.side_effect = original_side_effect
+
+
+# --- Иерархия справочника: институты содержат группы (№15/№4) ---
+
+
+def test_index_table_carries_group_hints_by_institute(client: SanicTestClient):
+    # карта институт → группы отдаётся таблице в data-атрибуте: комбобокс
+    # «Группа» фильтрует список выбранным институтом
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            record_id='1',
+            student_id='hash-1',
+            student_name='Иванов Иван Иванович',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 1, 1),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+        )
+    ]
+    app.ctx.storage.get_group_options_by_institute.return_value = {'ИСИ': ['ПГС-101', 'ПГС-102']}
+    try:
+        _, response = client.get('/', headers=get_auth_headers(role='editor'))
+        assert response.status == 200
+        assert 'data-groups-by-institute' in response.text
+        # tojson экранирует кириллицу в \u-последовательности — сверяем точный JSON
+        import json
+
+        assert json.dumps({'ИСИ': ['ПГС-101', 'ПГС-102']}) in response.text
+    finally:
+        app.ctx.storage.get_competitions.return_value = []
+        app.ctx.storage.get_group_options_by_institute.return_value = {}
+
+
+def test_admin_catalogs_page_shows_institute_hierarchy(client: SanicTestClient):
+    app.ctx.storage.list_catalog_tree.return_value = [
+        {
+            'id': 1,
+            'category': 'institute',
+            'value': 'ИСИ',
+            'parent_id': None,
+            'active': 1,
+            'records_count': 3,
+            'groups': [
+                {'id': 11, 'category': 'group', 'value': 'ПГС-101', 'parent_id': 1, 'active': 1, 'records_count': 2},
+                {'id': 12, 'category': 'group', 'value': 'ПГС-102', 'parent_id': 1, 'active': 0, 'records_count': 0},
+            ],
+        }
+    ]
+    try:
+        _, response = client.get('/admin/catalogs', headers=get_auth_headers())
+        assert response.status == 200
+        assert 'Институты и группы' in response.text
+        assert 'ПГС-101' in response.text
+        assert 'action="/admin/catalogs/institute/1/group"' in response.text
+        assert 'action="/admin/catalogs/group/11/hide"' in response.text
+        assert 'action="/admin/catalogs/group/12/unhide"' in response.text
+        # удаление — только у группы без записей
+        assert 'action="/admin/catalogs/group/12/delete"' in response.text
+        assert 'action="/admin/catalogs/group/11/delete"' not in response.text
+    finally:
+        app.ctx.storage.list_catalog_tree.return_value = []
+
+
+def test_admin_can_add_group_to_institute(client: SanicTestClient):
+    app.ctx.storage.get_catalog_value.return_value = {
+        'id': 7,
+        'category': 'institute',
+        'value': 'ИСИ',
+        'parent_id': None,
+        'active': 1,
+    }
+    app.ctx.storage.add_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = client.post(
+        '/admin/catalogs/institute/7/group',
+        headers=headers,
+        data={**csrf_for(headers), 'value': 'ПГС-101'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.add_catalog_value.assert_called_once_with('group', 'ПГС-101', parent_id=7)
+
+    _, response = client.post(
+        '/admin/catalogs/institute/7/group',
+        headers=headers,
+        data={**csrf_for(headers), 'value': '   '},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.get_catalog_value.return_value = None
+
+
+def test_group_delete_uses_pair_record_count(client: SanicTestClient):
+    app.ctx.storage.get_catalog_value.side_effect = lambda value_id: {
+        7: {'id': 7, 'category': 'institute', 'value': 'ИСИ', 'parent_id': None, 'active': 1},
+        6: {'id': 6, 'category': 'group', 'value': 'ПГС-101', 'parent_id': 7, 'active': 1},
+    }.get(value_id)
+    app.ctx.storage.count_records_using.reset_mock()
+    app.ctx.storage.count_records_using.return_value = 2
+    app.ctx.storage.delete_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = client.post('/admin/catalogs/group/6/delete', headers=headers, data=csrf_for(headers))
+    assert response.status == 400
+    app.ctx.storage.delete_catalog_value.assert_not_called()
+    # счётчик — по паре институт+группа, а не по одному названию группы
+    app.ctx.storage.count_records_using.assert_called_once_with('group', 'ПГС-101', parent_value='ИСИ')
+
+    app.ctx.storage.count_records_using.return_value = 0
+    _, response = client.post(
+        '/admin/catalogs/group/6/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    app.ctx.storage.delete_catalog_value.assert_called_once_with(6)
+
+    app.ctx.storage.get_catalog_value.side_effect = None
+    app.ctx.storage.get_catalog_value.return_value = None
+    app.ctx.storage.count_records_using.return_value = 0
+
+
+def test_institute_delete_blocked_until_groups_removed(client: SanicTestClient):
+    app.ctx.storage.get_catalog_value.return_value = {
+        'id': 7,
+        'category': 'institute',
+        'value': 'ИСИ',
+        'parent_id': None,
+        'active': 1,
+    }
+    app.ctx.storage.count_records_using.return_value = 0
+    app.ctx.storage.count_child_groups.return_value = 2
+    app.ctx.storage.delete_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = client.post('/admin/catalogs/institute/7/delete', headers=headers, data=csrf_for(headers))
+    assert response.status == 400
+    assert 'сначала удалите' in response.text
+    app.ctx.storage.delete_catalog_value.assert_not_called()
+
+    app.ctx.storage.count_child_groups.return_value = 0
+    _, response = client.post(
+        '/admin/catalogs/institute/7/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    app.ctx.storage.delete_catalog_value.assert_called_once_with(7)
+
+    app.ctx.storage.get_catalog_value.return_value = None
+    app.ctx.storage.count_child_groups.return_value = 0
+
+
+def test_create_competition_auto_adds_catalog_pair(client: SanicTestClient):
+    app.ctx.storage.ensure_catalog_pair.reset_mock()
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ФМА',
+            'group': 'ПГС-101',
+            'course': '2',
+            'sport': 'Плавание',
+            'date': '10.04.2026',
+            'level': 'межвузовские',
+            'name': 'Кубок',
+            'position': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.ensure_catalog_pair.assert_called_once_with('ФМА', 'ПГС-101')
+
+
+def test_import_auto_adds_catalog_pair(client: SanicTestClient):
+    app.ctx.storage.ensure_catalog_pair.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Шахматистов Шах Шахович',
+                'Пол': 'М',
+                'Институт': 'АДИ',
+                'Группа': 'ША-101',
+                'Вид спорта': 'Шахматы',
+                'Дата': '01.02.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Турнир',
+                'Место': 2,
+                'Курс': 1,
+            }
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+    )
+    assert response.status == 200
+    app.ctx.storage.ensure_catalog_pair.assert_called_once_with('АДИ', 'ША-101')
 
 
 def test_url_custom_field_validated(client: SanicTestClient):

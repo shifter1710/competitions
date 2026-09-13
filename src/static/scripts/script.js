@@ -1,8 +1,209 @@
+// Комбобокс инлайн-строки (№4): input + кнопка-стрелка + выпадающий список.
+// Ввод с клавиатуры фильтрует список по подстроке, значение можно ввести
+// свободно — подсказка, не валидация. Список живёт в <body> с position:
+// fixed: таблица лежит в .table-responsive (overflow: auto), абсолютное
+// позиционирование внутри ячейки обрезалось бы контейнером.
+class InlineComboBox {
+    constructor(input, toggleButton, getOptions) {
+        this.input = input;
+        this.toggleButton = toggleButton;
+        this.getOptions = getOptions;
+        this.open = false;
+        this.highlightIndex = -1;
+        this.closeTimer = null;
+        this.dropdown = document.createElement("ul");
+        this.dropdown.className = "combobox-dropdown d-none";
+        document.body.appendChild(this.dropdown);
+        this.handleOutsideMousedown = (event) => {
+            if (
+                this.open &&
+                event.target !== this.input &&
+                !this.toggleButton.contains(event.target) &&
+                !this.dropdown.contains(event.target)
+            ) {
+                this.close();
+            }
+        };
+        this.reposition = () => this.positionDropdown();
+        document.addEventListener("mousedown", this.handleOutsideMousedown);
+        input.addEventListener("input", (event) => {
+            // Синтетический input после выбора из списка не должен открывать
+            // список заново — он нужен только связке институт→группа.
+            if (!event.isTrusted) {
+                return;
+            }
+            this.openDropdown();
+        });
+        input.addEventListener("keydown", (event) => this.handleKeydown(event));
+        input.addEventListener("blur", () => {
+            this.closeTimer = setTimeout(() => this.close(), 120);
+        });
+        toggleButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            clearTimeout(this.closeTimer);
+            if (this.open) {
+                this.close();
+            } else {
+                this.openDropdown();
+            }
+            this.input.focus();
+        });
+        this.dropdown.addEventListener("mousedown", (event) => {
+            const option = event.target.closest(".combobox-option");
+            if (!option) {
+                return;
+            }
+            event.preventDefault(); // фокус остаётся в поле до выбора значения
+            this.select(option.dataset.value);
+        });
+    }
+
+    isOpen() {
+        return this.open;
+    }
+
+    openDropdown() {
+        this.renderOptions();
+        this.open = true;
+        this.dropdown.classList.remove("d-none");
+        this.positionDropdown();
+        window.addEventListener("scroll", this.reposition, true);
+        window.addEventListener("resize", this.reposition);
+    }
+
+    close() {
+        this.open = false;
+        this.highlightIndex = -1;
+        this.dropdown.classList.add("d-none");
+        window.removeEventListener("scroll", this.reposition, true);
+        window.removeEventListener("resize", this.reposition);
+    }
+
+    refresh() {
+        if (!this.open) {
+            return;
+        }
+        this.renderOptions();
+        this.positionDropdown();
+    }
+
+    filteredOptions() {
+        const query = this.input.value.trim().toLowerCase();
+        const options = this.getOptions() || [];
+        if (!query) {
+            return options;
+        }
+        return options.filter((option) => option.toLowerCase().includes(query));
+    }
+
+    renderOptions() {
+        const options = this.filteredOptions();
+        if (!options.length) {
+            const empty = document.createElement("li");
+            empty.className = "combobox-empty";
+            empty.textContent = "Нет совпадений — можно ввести своё значение";
+            this.dropdown.replaceChildren(empty);
+            this.highlightIndex = -1;
+            return;
+        }
+        this.highlightIndex = Math.min(this.highlightIndex, options.length - 1);
+        this.dropdown.replaceChildren(
+            ...options.map((value) => {
+                const item = document.createElement("li");
+                item.className = "combobox-option";
+                item.dataset.value = value;
+                item.textContent = value;
+                item.setAttribute("role", "option");
+                return item;
+            })
+        );
+        this.updateHighlight();
+    }
+
+    visibleOptions() {
+        return Array.from(this.dropdown.querySelectorAll(".combobox-option"));
+    }
+
+    updateHighlight() {
+        const options = this.visibleOptions();
+        options.forEach((item, index) => {
+            item.classList.toggle("combobox-option-active", index === this.highlightIndex);
+        });
+        const active = options[this.highlightIndex];
+        if (active) {
+            active.scrollIntoView({block: "nearest"});
+        }
+    }
+
+    positionDropdown() {
+        if (!this.open) {
+            return;
+        }
+        const rect = this.input.getBoundingClientRect();
+        this.dropdown.style.left = `${rect.left}px`;
+        this.dropdown.style.top = `${rect.bottom + 2}px`;
+        this.dropdown.style.minWidth = `${rect.width}px`;
+    }
+
+    handleKeydown(event) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!this.open) {
+                this.openDropdown();
+                return;
+            }
+            const options = this.visibleOptions();
+            if (!options.length) {
+                return;
+            }
+            const direction = event.key === "ArrowDown" ? 1 : -1;
+            this.highlightIndex = (this.highlightIndex + direction + options.length) % options.length;
+            this.updateHighlight();
+            return;
+        }
+        if (event.key === "Enter" && this.open) {
+            // Открытый список перехватывает Enter: выбор подсвеченного (или
+            // просто закрытие) — сохранение строки не срабатывает.
+            event.preventDefault();
+            event.stopPropagation();
+            if (this.highlightIndex >= 0) {
+                this.select(this.visibleOptions()[this.highlightIndex].dataset.value);
+            } else {
+                this.close();
+            }
+            return;
+        }
+        if (event.key === "Escape" && this.open) {
+            // Escape сначала закрывает список; повторный — отменяет правку.
+            event.preventDefault();
+            event.stopPropagation();
+            this.close();
+        }
+    }
+
+    select(value) {
+        this.input.value = value;
+        this.close();
+        // Выбор из списка — тоже изменение значения: связка институт→группа
+        // слушает input и перезаполнит список групп.
+        this.input.dispatchEvent(new Event("input", {bubbles: true}));
+    }
+
+    destroy() {
+        clearTimeout(this.closeTimer);
+        this.close();
+        document.removeEventListener("mousedown", this.handleOutsideMousedown);
+        this.dropdown.remove();
+    }
+}
+
 class Main {
     constructor() {
         this.currentReportUrl = null;
         this.draggedColumnKey = null;
         this.isAthlete = document.body.dataset.role === "athlete";
+        this.activeComboBoxes = [];
         this.initializeDomReferences();
         this.createInstances();
         this.hangEvents();
@@ -790,6 +991,73 @@ class Main {
         return types;
     }
 
+    // Источники данных комбобоксов (№4/№15): институты — активный datalist
+    // страницы, группы — карта институт → группы на таблице (только активные).
+    getInstituteOptions() {
+        const datalist = document.querySelector("#institute-options");
+        if (!datalist) {
+            return [];
+        }
+        return Array.from(datalist.querySelectorAll("option"))
+            .map((option) => option.value)
+            .filter(Boolean);
+    }
+
+    getGroupOptionsByInstitute() {
+        try {
+            return JSON.parse(this.tableElement?.dataset.groupsByInstitute || "{}");
+        } catch {
+            return {};
+        }
+    }
+
+    getAllGroupOptions() {
+        const map = this.getGroupOptionsByInstitute();
+        return Array.from(new Set(Object.values(map).flat()))
+            .sort((first, second) => first.localeCompare(second, "ru"));
+    }
+
+    getGroupOptionsForInstitute(instituteValue) {
+        const map = this.getGroupOptionsByInstitute();
+        const key = String(instituteValue || "").trim();
+        if (key && Object.prototype.hasOwnProperty.call(map, key)) {
+            return map[key].slice();
+        }
+        // Институт пуст или ещё не из справочника — подсказываем все группы
+        // (свободный ввод остаётся, значение в поле не стирается).
+        return this.getAllGroupOptions();
+    }
+
+    getComboboxOptions(key, input) {
+        if (key === "institute") {
+            return this.getInstituteOptions();
+        }
+        const row = input.closest("tr");
+        const instituteInput = row ? row.querySelector('[data-edit-key="institute"]') : null;
+        return this.getGroupOptionsForInstitute(instituteInput ? instituteInput.value : "");
+    }
+
+    destroyRowComboBoxes() {
+        this.activeComboBoxes.forEach((combo) => combo.destroy());
+        this.activeComboBoxes = [];
+    }
+
+    // Связка институт→группа (№15): смена института перезаполняет открытый
+    // список групп; введённая группа сохраняется как есть.
+    linkRowCombos(row) {
+        const instituteInput = row.querySelector('[data-edit-key="institute"]');
+        const groupInput = row.querySelector('[data-edit-key="group"]');
+        if (!instituteInput || !groupInput) {
+            return;
+        }
+        instituteInput.addEventListener("input", () => {
+            const combo = this.activeComboBoxes.find((item) => item.input === groupInput);
+            if (combo) {
+                combo.refresh();
+            }
+        });
+    }
+
     createInlineInput(key, value, fieldTypes) {
         let input;
         if (key === "student_sex" || key === "level") {
@@ -822,14 +1090,32 @@ class Main {
                 input.inputMode = "numeric";
             }
             // Подсказки справочников: datalist лежит в разметке страницы,
-            // id совпадает с ключом поля (sport-options / institute-options).
-            if (key === "sport" || key === "institute") {
-                input.setAttribute("list", `${key}-options`);
+            // id совпадает с ключом поля. Институт и группа — комбобоксы
+            // (№4): список групп фильтруется выбранным институтом (№15).
+            if (key === "sport") {
+                input.setAttribute("list", "sport-options");
             }
             input.value = value ?? "";
         }
         input.dataset.editKey = key;
         input.className = "form-control form-control-sm";
+        // Комбобокс (№4): поле + кнопка-стрелка + выпадающий список с
+        // фильтрацией по подстроке; свободный ввод не ограничен.
+        if (input.type === "text" && (key === "institute" || key === "group")) {
+            const wrapper = document.createElement("div");
+            wrapper.className = "input-group inline-combobox-group";
+            const toggleButton = document.createElement("button");
+            toggleButton.type = "button";
+            toggleButton.className = "btn btn-outline-secondary btn-sm combobox-toggle";
+            toggleButton.textContent = "▾";
+            toggleButton.title = "Показать список";
+            toggleButton.setAttribute("aria-label", "Показать список");
+            wrapper.append(input, toggleButton);
+            this.activeComboBoxes.push(
+                new InlineComboBox(input, toggleButton, () => this.getComboboxOptions(key, input))
+            );
+            return wrapper;
+        }
         // Гибридный ввод даты (замечание №13): поле + иконка-календарь,
         // открывающая datepicker; сам пикер и авто-точки вешаются
         // attachRowDatePickers при сборке строки.
@@ -940,6 +1226,7 @@ class Main {
         });
 
         this.inlineDatePickers = this.attachRowDatePickers(row);
+        this.linkRowCombos(row);
         this.inlineKeydownHandler = (event) => {
             if (event.key === "Escape") {
                 event.preventDefault();
@@ -995,6 +1282,7 @@ class Main {
         }
         this.destroyRowDatePickers(this.inlineDatePickers);
         this.inlineDatePickers = null;
+        this.destroyRowComboBoxes();
         if (row.isConnected) {
             row.innerHTML = this.inlineEditBackup;
             row.classList.remove("row-editing");
@@ -1079,6 +1367,7 @@ class Main {
         this.newEditRow = row;
 
         this.newRowDatePickers = this.attachRowDatePickers(row);
+        this.linkRowCombos(row);
         this.newRowKeydownHandler = this.bindRowKeyboardNavigation(
             row,
             () => this.saveNewRowEdit(),
@@ -1131,6 +1420,7 @@ class Main {
         }
         this.destroyRowDatePickers(this.newRowDatePickers);
         this.newRowDatePickers = null;
+        this.destroyRowComboBoxes();
         row.remove();
         this.newEditRow = null;
     }
@@ -1482,11 +1772,13 @@ class Main {
         this.inlineEditBackup = null;
         this.newEditRow = null;
         // При замене контента правка сбрасывается вместе со строкой — пикеры
-        // надо разрушить явно, их слушатели на document переживают DOM.
+        // и комбобоксы надо разрушить явно: их слушатели на document/body
+        // переживают заменённый DOM.
         this.destroyRowDatePickers(this.inlineDatePickers);
         this.inlineDatePickers = null;
         this.destroyRowDatePickers(this.newRowDatePickers);
         this.newRowDatePickers = null;
+        this.destroyRowComboBoxes();
         if (!this.tableElement) {
             if (this.tableColumnsManager) {
                 this.tableColumnsManager.innerHTML = "";

@@ -2,6 +2,7 @@ import json
 import sqlite3
 import threading
 from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 from typing import Sequence
@@ -107,19 +108,41 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            # Иерархия справочника (docs/data-model-decisions.md, «Справочники:
+            # институты содержат группы»): записи категории group получают
+            # parent_id на запись категории institute. Табличного UNIQUE нет —
+            # одноимённые группы разных институтов сосуществуют; уникальность
+            # держат частичные индексы ниже (плоские и дочерние раздельно:
+            # в SQLite NULL в UNIQUE-колонке не равен NULL).
             self.connection.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS catalog_values (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     category TEXT NOT NULL,
                     value TEXT NOT NULL,
+                    parent_id INTEGER REFERENCES catalog_values(id),
                     active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    UNIQUE (category, value)
+                    created_at TEXT NOT NULL
                 )
                 '''
             )
+            self._migrate_catalog_values_parent()
+            self.connection.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_values_flat
+                ON catalog_values (category, value)
+                WHERE parent_id IS NULL
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_values_child
+                ON catalog_values (category, parent_id, value)
+                WHERE parent_id IS NOT NULL
+                '''
+            )
             self._populate_catalog_values()
+            self._populate_catalog_hierarchy_pairs()
             self.connection.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS users (
@@ -151,14 +174,53 @@ class SQLiteAdapter:
                 self.connection.execute("ALTER TABLE users ADD COLUMN profile_data TEXT NOT NULL DEFAULT '{}'")
             if 'name_aliases' not in user_columns:
                 self.connection.execute("ALTER TABLE users ADD COLUMN name_aliases TEXT NOT NULL DEFAULT '[]'")
+            # Присутствие пользователей (№17): успешный вход + активность.
+            if 'last_login_at' not in user_columns:
+                self.connection.execute('ALTER TABLE users ADD COLUMN last_login_at TEXT')
+            if 'last_seen_at' not in user_columns:
+                self.connection.execute('ALTER TABLE users ADD COLUMN last_seen_at TEXT')
             self.connection.commit()
+
+    def _migrate_catalog_values_parent(self):
+        """Перестроить легаси-каталог без parent_id (и с табличным UNIQUE).
+
+        Табличный UNIQUE (category, value) не даёт одноимённым группам разных
+        институтов сосуществовать, поэтому таблица пересоздаётся: данные
+        копируются как есть (плоские значения с parent_id NULL), старая
+        удаляется. Идемпотентно: новая схема определяется по колонке parent_id.
+        """
+        columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(catalog_values)').fetchall()}
+        if not columns or 'parent_id' in columns:
+            return
+        self.connection.execute('ALTER TABLE catalog_values RENAME TO catalog_values_legacy')
+        self.connection.execute(
+            '''
+            CREATE TABLE catalog_values (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                value TEXT NOT NULL,
+                parent_id INTEGER REFERENCES catalog_values(id),
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            '''
+        )
+        self.connection.execute(
+            '''
+            INSERT INTO catalog_values (id, category, value, parent_id, active, created_at)
+            SELECT id, category, value, NULL, active, created_at
+            FROM catalog_values_legacy
+            '''
+        )
+        self.connection.execute('DROP TABLE catalog_values_legacy')
 
     def _populate_catalog_values(self):
         """Наполнить справочники уникальными значениями из существующих записей.
 
-        Идемпотентно: благодаря UNIQUE (category, value) повторная инициализация
-        не дублирует строки и не трогает скрытые. Пустые значения пропускаются.
-        В вырожденных легаси-базах без колонок sport/institute populate молчит.
+        Идемпотентно: благодаря уникальному индексу плоских значений повторная
+        инициализация не дублирует строки и не трогает скрытые. Пустые значения
+        пропускаются. В вырожденных легаси-базах без колонок sport/institute
+        populate молчит.
         """
         columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
         if not set(CATALOG_CATEGORIES) <= columns:
@@ -174,6 +236,33 @@ class SQLiteAdapter:
                 ''',
                 (created_at,),
             )
+
+    def _populate_catalog_hierarchy_pairs(self):
+        """Наполнить иерархию парами институт→группа из существующих записей.
+
+        Запускается после populate одиночных значений, поэтому институты из
+        записей уже существуют. Идемпотентно: уникальность (parent, value)
+        держит дочерний частичный индекс, скрытые группы не «оживляются».
+        Пары с пустым институтом или группой не создаются (без родителя
+        иерархическая запись не имеет смысла). В легаси-базах без колонок
+        institute/group populate молчит.
+        """
+        columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
+        if not {'institute', 'group'} <= columns:
+            return
+        self.connection.execute(
+            '''
+            INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at)
+            SELECT 'group', competitions."group", institutes.id, 1, ?
+            FROM competitions
+            JOIN catalog_values institutes
+                ON institutes.category = 'institute'
+                AND institutes.parent_id IS NULL
+                AND institutes.value = competitions.institute
+            WHERE TRIM(competitions.institute) != '' AND TRIM(competitions."group") != ''
+            ''',
+            (datetime.utcnow().isoformat(),),
+        )
 
     @staticmethod
     def _row_to_competition(row: sqlite3.Row) -> Competition:
@@ -684,7 +773,8 @@ class SQLiteAdapter:
     def list_users(self) -> list[dict]:
         with self._lock:
             rows = self.connection.execute(
-                'SELECT id, username, role, active, name_aliases FROM users ORDER BY username ASC'
+                'SELECT id, username, role, active, name_aliases, last_login_at, last_seen_at '
+                'FROM users ORDER BY username ASC'
             ).fetchall()
             users = []
             for row in rows:
@@ -720,6 +810,37 @@ class SQLiteAdapter:
                 (int(active), user_id),
             )
             self.connection.commit()
+
+    def set_user_last_login(self, user_id: int, when: datetime | None = None) -> None:
+        """Зафиксировать успешный вход (№17): last_login_at и last_seen_at.
+
+        Вход — тоже активность, поэтому last_seen обновляется вместе с входом;
+        история входов остаётся и в аудите (login_success).
+        """
+        with self._lock:
+            timestamp = (when or datetime.utcnow()).isoformat()
+            self.connection.execute(
+                'UPDATE users SET last_login_at = ?, last_seen_at = ? WHERE id = ?',
+                (timestamp, timestamp, user_id),
+            )
+            self.connection.commit()
+
+    def touch_user_seen(self, user_id: int, throttle_seconds: int = 60) -> bool:
+        """Обновить last_seen_at, если он старше throttle_seconds (№17).
+
+        Троттлинг в самом UPDATE — без отдельного чтения: условие WHERE не
+        пропустит запись чаще раза в окно, поэтому «два запроса подряд» дают
+        один UPDATE. Возвращает, была ли строка обновлена.
+        """
+        now = datetime.utcnow()
+        cutoff = (now - timedelta(seconds=throttle_seconds)).isoformat()
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE users SET last_seen_at = ? ' 'WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)',
+                (now.isoformat(), user_id, cutoff),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
 
     def count_records_by_owner(self, owner_id: int) -> int:
         """Сколько записей соревнований привязано к аккаунту владельца."""
@@ -804,28 +925,114 @@ class SQLiteAdapter:
         """Все значения справочника (для админки): активные сверху, по алфавиту."""
         with self._lock:
             rows = self.connection.execute(
-                'SELECT id, category, value, active FROM catalog_values '
+                'SELECT id, category, value, parent_id, active FROM catalog_values '
                 'WHERE category = ? ORDER BY active DESC, value ASC',
                 (category,),
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def add_catalog_value(self, category: str, value: str) -> None:
-        """Добавить значение в справочник; дубликат игнорируется без ошибки."""
+    def list_catalog_tree(self) -> list[dict]:
+        """Институты с их группами для страницы «Справочники».
+
+        Каждый институт — запись list_catalog_all('institute') с counters
+        records_count (все записи с этим институтом) и списком groups
+        (записи категории group с parent_id на институт, у каждой свой
+        records_count — по паре институт+группа).
+        """
+        with self._lock:
+            institutes = self.list_catalog_all('institute')
+            group_rows = self.connection.execute(
+                'SELECT id, category, value, parent_id, active FROM catalog_values '
+                "WHERE category = 'group' ORDER BY active DESC, value ASC"
+            ).fetchall()
+        groups_by_parent: dict[int, list[dict]] = {}
+        for row in group_rows:
+            groups_by_parent.setdefault(row['parent_id'], []).append(dict(row))
+        tree = []
+        for institute in institutes:
+            groups = groups_by_parent.get(institute['id'], [])
+            for group in groups:
+                group['records_count'] = self.count_records_using(
+                    'group', group['value'], parent_value=institute['value']
+                )
+            tree.append(
+                {
+                    **institute,
+                    'records_count': self.count_records_using('institute', institute['value']),
+                    'groups': groups,
+                }
+            )
+        return tree
+
+    def get_group_options_by_institute(self) -> dict[str, list[str]]:
+        """Активные группы по институтам для подсказок форм: институт → группы.
+
+        Скрытые группы (active = 0) в подсказки не попадают; институт
+        присутствует в карте, даже если скрыт сам, — его группы остаются
+        подсказкой при точно введённом названии института.
+        """
+        with self._lock:
+            rows = self.connection.execute(
+                '''
+                SELECT institutes.value AS institute, groups.value AS "group"
+                FROM catalog_values AS groups
+                JOIN catalog_values AS institutes ON institutes.id = groups.parent_id
+                WHERE groups.category = 'group' AND groups.active = 1
+                ORDER BY institutes.value ASC, groups.value ASC
+                '''
+            ).fetchall()
+        options: dict[str, list[str]] = {}
+        for row in rows:
+            options.setdefault(row['institute'], []).append(row['group'])
+        return options
+
+    def add_catalog_value(self, category: str, value: str, parent_id: int | None = None) -> None:
+        """Добавить значение в справочник; дубликат игнорируется без ошибки.
+
+        Для групп parent_id указывает на запись института; уникальность пары
+        (parent, value) держит дочерний частичный индекс.
+        """
         value = value.strip()
         if not value:
             return
         with self._lock:
             self.connection.execute(
-                'INSERT OR IGNORE INTO catalog_values (category, value, active, created_at) VALUES (?, ?, 1, ?)',
-                (category, value, datetime.utcnow().isoformat()),
+                'INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at) '
+                'VALUES (?, ?, ?, 1, ?)',
+                (category, value, parent_id, datetime.utcnow().isoformat()),
+            )
+            self.connection.commit()
+
+    def ensure_catalog_pair(self, institute: str, group: str) -> None:
+        """Пара институт→группа из записи/импорта попадает в иерархию справочника.
+
+        Институт обязан существовать (создаётся при отсутствии), группа кладётся
+        с parent_id на него; повторная пара игнорируется. Плоские (без
+        родителя) значения не трогаются — см. docs/data-model-decisions.md.
+        """
+        institute = institute.strip()
+        group = group.strip()
+        if not institute or not group:
+            return
+        with self._lock:
+            self.add_catalog_value('institute', institute)
+            parent = self.connection.execute(
+                'SELECT id FROM catalog_values ' "WHERE category = 'institute' AND value = ? AND parent_id IS NULL",
+                (institute,),
+            ).fetchone()
+            if parent is None:
+                return
+            self.connection.execute(
+                'INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at) '
+                "VALUES ('group', ?, ?, 1, ?)",
+                (group, parent['id'], datetime.utcnow().isoformat()),
             )
             self.connection.commit()
 
     def get_catalog_value(self, value_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, category, value, active FROM catalog_values WHERE id = ?',
+                'SELECT id, category, value, parent_id, active FROM catalog_values WHERE id = ?',
                 (value_id,),
             ).fetchone()
             return dict(row) if row else None
@@ -845,16 +1052,38 @@ class SQLiteAdapter:
             self.connection.execute('DELETE FROM catalog_values WHERE id = ?', (value_id,))
             self.connection.commit()
 
-    def count_records_using(self, category: str, value: str) -> int:
-        """Сколько записей соревнований содержат это значение справочника."""
+    def count_records_using(self, category: str, value: str, parent_value: str | None = None) -> int:
+        """Сколько записей соревнований содержат это значение справочника.
+
+        Для группы parent_value — её институт: считаются записи с парой
+        институт+группа (одна и та же группа в разных институтах — разные
+        записи справочника). Без parent_value считается плоское вхождение.
+        """
         # 'level' не входит в CATALOG_CATEGORIES, но таблица уровней своя —
         # для счётчика на странице справочников колонка записей та же.
-        if category not in (*CATALOG_CATEGORIES, 'level'):
+        if category not in (*CATALOG_CATEGORIES, 'level', 'group'):
             return 0
         with self._lock:
+            if category == 'group' and parent_value:
+                row = self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions ' 'WHERE "group" = ? AND institute = ?',
+                    (value, parent_value),
+                ).fetchone()
+            else:
+                # "group" — ключевое слово SQL, колонка только в кавычках
+                column = '"group"' if category == 'group' else category
+                row = self.connection.execute(
+                    f'SELECT COUNT(*) AS total FROM competitions WHERE {column} = ?',
+                    (value,),
+                ).fetchone()
+            return row['total']
+
+    def count_child_groups(self, institute_row_id: int) -> int:
+        """Сколько групп справочника прикреплено к институту (включая скрытые)."""
+        with self._lock:
             row = self.connection.execute(
-                f'SELECT COUNT(*) AS total FROM competitions WHERE {category} = ?',
-                (value,),
+                'SELECT COUNT(*) AS total FROM catalog_values ' "WHERE category = 'group' AND parent_id = ?",
+                (institute_row_id,),
             ).fetchone()
             return row['total']
 
