@@ -751,6 +751,33 @@ def test_ensure_catalog_pair_builds_hierarchy(adapter):
     assert [row['value'] for row in group_rows] == ['ПГС-101', 'ПГС-102']
 
 
+def test_find_unique_group_institute(adapter):
+    # №19a: институт по группе подставляется только при однозначном имени.
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-102')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-101')  # одноимённая группа другого института
+    adapter.ensure_catalog_pair('АДИ', 'ША-777')
+
+    # Однозначная группа (регистр не важен) — канонический институт.
+    assert adapter.find_unique_group_institute('пгс-102') == 'ИСИ'
+    assert adapter.find_unique_group_institute('ША-777') == 'АДИ'
+    # Одно имя в разных институтах — неоднозначно, None.
+    assert adapter.find_unique_group_institute('ПГС-101') is None
+    # Неизвестная и пустая группа — None.
+    assert adapter.find_unique_group_institute('НЕТ-ТАКОЙ') is None
+    assert adapter.find_unique_group_institute('') is None
+    assert adapter.find_unique_group_institute('   ') is None
+
+
+def test_find_unique_group_institute_ignores_hidden(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-201')
+    isi = next(inst for inst in adapter.list_catalog_tree() if inst['value'] == 'ИСИ')
+    hidden_group = next(group for group in isi['groups'] if group['value'] == 'ПГС-101')
+    adapter.hide_catalog_value(hidden_group['id'])
+    assert adapter.find_unique_group_institute('ПГС-101') is None
+
+
 def test_group_options_by_institute_respect_hidden(adapter):
     adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
     adapter.ensure_catalog_pair('ФМА', 'ПГС-201')
