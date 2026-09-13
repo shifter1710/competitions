@@ -82,11 +82,21 @@
                         </div>
                         <div class="col-2">
                             <label class="label" for="r-date-from">Дата (от)</label>
-                            <input class="input" id="r-date-from" type="text" placeholder="01.09.2025">
+                            <div class="datefield">
+                                <input class="input" id="r-date-from" type="text" placeholder="01.09.2025" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
                         </div>
                         <div class="col-2">
                             <label class="label" for="r-date-to">Дата (до)</label>
-                            <input class="input" id="r-date-to" type="text" placeholder="31.08.2026">
+                            <div class="datefield">
+                                <input class="input" id="r-date-to" type="text" placeholder="31.08.2026" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
                         </div>
                         <div class="col-2">
                             <label class="label" for="r-position">Место</label>
@@ -106,6 +116,9 @@
                                 <option>региональные</option>
                                 <option>всероссийские</option>
                             </select>
+                        </div>
+                        <div class="col-12">
+                            <p class="field__hint" style="margin: 0;">Даты: введите цифры — точки поставятся сами, или выберите день из календаря (иконка справа от поля).</p>
                         </div>
                         <div class="col-12" style="display: flex; gap: 8px;">
                             <a class="btn btn--primary" href="06-report.html">Сформировать отчёт</a>

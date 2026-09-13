@@ -43,7 +43,7 @@
             <div class="app-header__inner">
                 <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
                 <div class="app-header__side">
-                    <span class="user-chip">Дизайн-прототип · v0.1 · сентябрь 2026</span>
+                    <span class="user-chip">Дизайн-прототип · v0.2 · сентябрь 2026</span>
                     <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
                         <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
                         <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
@@ -54,7 +54,7 @@
 
         <main class="cover">
             <div class="cover__hero">
-                <div class="cover__kicker">Дизайн-прототип · статический HTML</div>
+                <div class="cover__kicker">Дизайн-прототип · статический HTML · итерация 2</div>
                 <h1 class="cover__title">СибАДИ Competitions</h1>
                 <p class="cover__lead">
                     Все страницы приложения как отправная точка дизайна. Открывается двойным кликом по файлу —
@@ -65,6 +65,10 @@
                     <span class="badge badge--info">14 страниц</span>
                     <span class="badge badge--info">светлая и тёмная темы</span>
                     <span class="badge badge--info">системные шрифты, без CDN</span>
+                </div>
+                <div class="note note--plain mt-4">
+                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                    <span>Итерация 2 — по замечаниям владельца (см. <span class="code">FEEDBACK.md</span>): крупнее шрифты, заголовки таблиц не обрезаются и не выделяются, колонка «Действия» закреплена справа, внизу таблиц — счётчик «Показано N из M», размер страницы и пагинация; институт и группа — комбобоксы с фильтрацией («можно ввести своё»), поля дат — с календарём и автопостановкой точек; обслуживание базы — панель состояния, бэкапы и очистка по возрастанию ущерба с архивом перед удалением; журнал аудита — с фильтрами и пагинацией. Всё работает в обеих темах.</span>
                 </div>
             </div>
 
@@ -78,22 +82,22 @@
                     </a>
                     <a class="cover-card" href="02-index-table.html">
                         <div class="cover-card__top"><span class="cover-card__num">02</span><span class="cover-card__title">Реестр: таблица</span></div>
-                        <p class="cover-card__desc">Шапка, фильтры, «+ Пустая строка» с предзаполнением из профиля, 12 строк во всех трёх статусах.</p>
+                        <p class="cover-card__desc">Шапка, фильтры с датами-календарём, «+ Пустая строка» с предзаполнением, 10 записей, закреплённая колонка действий, счётчик и пагинация внизу.</p>
                         <div class="cover-card__tags"><span class="badge badge--ok">подтверждена</span><span class="badge badge--warn">на проверке</span><span class="badge badge--danger">отклонена</span></div>
                     </a>
                     <a class="cover-card" href="03-inline-edit.html">
                         <div class="cover-card__top"><span class="cover-card__num">03</span><span class="cover-card__title">Правка в строке</span></div>
-                        <p class="cover-card__desc">Существующая запись в режиме редактирования: поля формы внутри ячеек, вложения рядом.</p>
-                        <div class="cover-card__tags"><span class="badge">inline-edit</span></div>
+                        <p class="cover-card__desc">Запись в режиме редактирования: поля в ячейках, комбобоксы института и группы, дата с календарём, «Сохранить/Отмена» закреплены справа.</p>
+                        <div class="cover-card__tags"><span class="badge">inline-edit</span><span class="badge">комбобокс</span></div>
                     </a>
                     <a class="cover-card" href="04-profile.html">
                         <div class="cover-card__top"><span class="cover-card__num">04</span><span class="cover-card__title">Профиль атлета</span></div>
-                        <p class="cover-card__desc">Личный кабинет: форма профиля, подсказка «найдены записи», свои соревнования.</p>
+                        <p class="cover-card__desc">Личный кабинет: форма профиля с комбобоксами института и группы, подсказка «найдены записи», свои соревнования.</p>
                         <div class="cover-card__tags"><span class="badge">кабинет athlete</span></div>
                     </a>
                     <a class="cover-card" href="05-reports.html">
                         <div class="cover-card__top"><span class="cover-card__num">05</span><span class="cover-card__title">Отчёты</span></div>
-                        <p class="cover-card__desc">Список отчётов и форма фильтров: ФИО, период, место, уровень.</p>
+                        <p class="cover-card__desc">Список отчётов и форма фильтров: ФИО, период (даты с календарём), место, уровень.</p>
                         <div class="cover-card__tags"><span class="badge">фильтры</span></div>
                     </a>
                     <a class="cover-card" href="06-report.html">
@@ -139,13 +143,13 @@
                     </a>
                     <a class="cover-card" href="13-admin-maintenance.html">
                         <div class="cover-card__top"><span class="cover-card__num">13</span><span class="cover-card__title">Обслуживание базы</span></div>
-                        <p class="cover-card__desc">Выгрузка базы и двухшаговая очистка с подтверждающим словом «УДАЛИТЬ».</p>
-                        <div class="cover-card__tags"><span class="badge badge--danger">деструктивное</span></div>
+                        <p class="cover-card__desc">Панель состояния и бэкапы («сделать бэкап сейчас»), выгрузка базы, очистка по возрастанию ущерба и по дате — с архивом удаляемого перед выполнением.</p>
+                        <div class="cover-card__tags"><span class="badge badge--danger">деструктивное</span><span class="badge">бэкапы</span></div>
                     </a>
                     <a class="cover-card" href="14-admin-audit.html">
                         <div class="cover-card__top"><span class="cover-card__num">14</span><span class="cover-card__title">Журнал аудита</span></div>
-                        <p class="cover-card__desc">Время, пользователь, действие, детали — только чтение, новые сверху.</p>
-                        <div class="cover-card__tags"><span class="badge">append-only</span></div>
+                        <p class="cover-card__desc">Время, пользователь, действие, детали; фильтры (пользователь/действие/период) и пагинация вместо лимита 200.</p>
+                        <div class="cover-card__tags"><span class="badge">append-only</span><span class="badge">пагинация</span></div>
                     </a>
                 </div>
             </section>

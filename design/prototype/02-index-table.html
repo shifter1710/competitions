@@ -119,11 +119,46 @@
                         </div>
                         <div class="col-2">
                             <label class="label" for="f-date-from">Дата от</label>
-                            <input class="input" id="f-date-from" type="text" placeholder="01.09.2025">
+                            <div class="datefield">
+                                <input class="input" id="f-date-from" type="text" placeholder="01.09.2025" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                                <!-- Календарь раскрыт статично: дата выбирается кликом,
+                                     ручной ввод цифрами остаётся равноправным -->
+                                <div class="calendar" role="group" aria-label="Календарь: сентябрь 2025">
+                                    <div class="calendar__head">
+                                        <button class="icon-btn icon-btn--light" type="button" style="width: 26px; height: 26px;" aria-label="Предыдущий месяц">
+                                            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.8 3.5 5.3 8l4.5 4.5"/></svg>
+                                        </button>
+                                        <span class="calendar__title">Сентябрь 2025</span>
+                                        <button class="icon-btn icon-btn--light" type="button" style="width: 26px; height: 26px;" aria-label="Следующий месяц">
+                                            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.2 3.5 10.7 8l-4.5 4.5"/></svg>
+                                        </button>
+                                    </div>
+                                    <div class="calendar__grid">
+                                        <span class="calendar__dow">пн</span><span class="calendar__dow">вт</span><span class="calendar__dow">ср</span><span class="calendar__dow">чт</span><span class="calendar__dow">пт</span><span class="calendar__dow">сб</span><span class="calendar__dow">вс</span>
+                                        <button class="calendar__day is-selected" type="button" title="Выбрано: 01.09.2025">1</button>
+                                        <button class="calendar__day" type="button">2</button><button class="calendar__day" type="button">3</button><button class="calendar__day" type="button">4</button><button class="calendar__day" type="button">5</button><button class="calendar__day" type="button">6</button><button class="calendar__day" type="button">7</button>
+                                        <button class="calendar__day" type="button">8</button><button class="calendar__day" type="button">9</button><button class="calendar__day" type="button">10</button><button class="calendar__day" type="button">11</button><button class="calendar__day" type="button">12</button><button class="calendar__day" type="button">13</button><button class="calendar__day" type="button">14</button>
+                                        <button class="calendar__day" type="button">15</button><button class="calendar__day" type="button">16</button><button class="calendar__day" type="button">17</button><button class="calendar__day" type="button">18</button><button class="calendar__day" type="button">19</button><button class="calendar__day" type="button">20</button><button class="calendar__day" type="button">21</button>
+                                        <button class="calendar__day" type="button">22</button><button class="calendar__day" type="button">23</button><button class="calendar__day" type="button">24</button><button class="calendar__day" type="button">25</button><button class="calendar__day" type="button">26</button><button class="calendar__day" type="button">27</button><button class="calendar__day" type="button">28</button>
+                                        <button class="calendar__day" type="button">29</button><button class="calendar__day" type="button">30</button>
+                                        <button class="calendar__day is-out" type="button" title="Октябрь 2025">1</button><button class="calendar__day is-out" type="button" title="Октябрь 2025">2</button><button class="calendar__day is-out" type="button" title="Октябрь 2025">3</button><button class="calendar__day is-out" type="button" title="Октябрь 2025">4</button><button class="calendar__day is-out" type="button" title="Октябрь 2025">5</button>
+                                    </div>
+                                    <div class="calendar__foot">Введите цифры — точки поставятся сами</div>
+                                </div>
+                            </div>
+                            <p class="field__hint">Введите цифры — точки поставятся сами</p>
                         </div>
                         <div class="col-2">
                             <label class="label" for="f-date-to">Дата до</label>
-                            <input class="input" id="f-date-to" type="text" placeholder="31.08.2026">
+                            <div class="datefield">
+                                <input class="input" id="f-date-to" type="text" placeholder="31.08.2026" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
                         </div>
                         <div class="col-4" style="display: flex; align-items: flex-end; gap: 8px;">
                             <button class="btn btn--primary" type="button">Применить</button>
@@ -142,12 +177,12 @@
             </div>
 
             <div class="table-meta">
-                <span>Показано 12 из 118 записей</span>
+                <span>Фильтр сезона 01.09.2025 — 31.08.2026: найдено <strong class="tabnum" style="color: var(--text);">87</strong> из 118 записей</span>
                 <span>Сортировка: по дате, новые сверху</span>
             </div>
 
             <div class="table-wrap">
-                <table class="table table--striped table--hover table--wide">
+                <table class="table table--striped table--hover table--wide table--sticky-actions">
                     <thead>
                         <tr>
                             <th data-column-key="index">№</th>
@@ -158,7 +193,7 @@
                             <th data-column-key="sport">Вид спорта</th>
                             <th data-column-key="date">Дата</th>
                             <th data-column-key="level">Уровень</th>
-                            <th data-column-key="name">Название соревнований</th>
+                            <th class="th--wrap" data-column-key="name">Название соревнований</th>
                             <th class="th--num" data-column-key="position">Место</th>
                             <th class="th--num" data-column-key="course">Курс</th>
                             <th data-column-key="status">Статус</th>
@@ -176,10 +211,50 @@
                                     <option selected>Ж</option>
                                 </select>
                             </td>
-                            <td><input class="input input--cell" type="text" value="ИСИ" list="institute-options"></td>
-                            <td><input class="input input--cell" type="text" value="ГТб-42"></td>
+                            <td>
+                                <!-- Комбобокс: ввод + выбор из справочника; список раскрыт
+                                     статично, чтобы показать фильтрацию на лету -->
+                                <div class="combobox combobox--cell">
+                                    <div class="combobox__control">
+                                        <input class="input" type="text" value="ИС" title="Институт: выбор из справочника или свой вариант">
+                                        <button class="combobox__toggle" type="button" aria-label="Показать варианты институтов" title="Показать варианты">
+                                            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6l4.5 4.5L12.5 6"/></svg>
+                                        </button>
+                                        <div class="combobox__menu" role="listbox" aria-label="Варианты институтов">
+                                            <div class="combobox__menu-title">Справочник институтов</div>
+                                            <div class="combobox__opt is-match is-selected" role="option" aria-selected="true"><span>ИСИ</span><span class="combobox__opt-tag">совпадение</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ИАиД</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">АДИ</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ИТМ</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__opt is-filtered" role="option" aria-disabled="true"><span class="combobox__opt-value">ИЭУ</span><span class="combobox__opt-tag">скрыто по фильтру</span></div>
+                                            <div class="combobox__menu-hint">можно ввести своё — список только подсказка</div>
+                                        </div>
+                                    </div>
+                                    <p class="combobox__hint">можно ввести своё</p>
+                                </div>
+                            </td>
+                            <td>
+                                <!-- Тот же комбобокс, закрытый: подсказки — уникальные
+                                     группы из существующих записей -->
+                                <div class="combobox combobox--cell">
+                                    <div class="combobox__control">
+                                        <input class="input" type="text" value="ГТб-42" title="Группа: подсказки — группы из записей, можно ввести своё">
+                                        <button class="combobox__toggle" type="button" aria-label="Показать варианты групп" title="Показать варианты">
+                                            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6l4.5 4.5L12.5 6"/></svg>
+                                        </button>
+                                    </div>
+                                    <p class="combobox__hint">можно ввести своё</p>
+                                </div>
+                            </td>
                             <td><input class="input input--cell" type="text" list="sport-options" placeholder="—"></td>
-                            <td><input class="input input--cell" type="text" placeholder="дд.мм.гггг"></td>
+                            <td>
+                                <div class="datefield datefield--cell">
+                                    <input class="input" type="text" placeholder="дд.мм.гггг" title="Введите цифры — точки поставятся сами; или выберите дату из календаря">
+                                    <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                    </button>
+                                </div>
+                            </td>
                             <td>
                                 <select class="select select--cell">
                                     <option selected>внутривузовские</option>
@@ -441,34 +516,43 @@
                                 </div>
                             </td>
                         </tr>
-                        <tr>
-                            <td class="td--num">11</td>
-                            <td>Козлов Александр Петрович</td>
-                            <td>М</td>
-                            <td>ИСИ</td>
-                            <td>ПГСб-41</td>
-                            <td>Волейбол</td>
-                            <td class="nowrap">18.04.2026</td>
-                            <td>всероссийские</td>
-                            <td class="td-wrap">Всероссийская студенческая волейбольная лига. Зона «Сибирь»</td>
-                            <td class="td--num">5</td>
-                            <td class="td--num">4</td>
-                            <td><span class="badge badge--ok"><span class="badge__dot"></span>подтверждена</span></td>
-                            <td class="text-3">—</td>
-                            <td>
-                                <div class="btn-row">
-                                    <button class="btn btn--secondary btn--sm" type="button">Редактировать</button>
-                                    <button class="btn btn--danger-outline btn--sm" type="button">Удалить</button>
-                                </div>
-                            </td>
-                        </tr>
                     </tbody>
                 </table>
             </div>
 
+            <div class="table-foot">
+                <span class="table-foot__count">Показано <strong>10</strong> из <strong>87</strong> записей</span>
+                <label class="page-size">Показывать по:
+                    <select class="select">
+                        <option selected>10</option>
+                        <option>25</option>
+                        <option>50</option>
+                        <option>100</option>
+                    </select>
+                </label>
+                <nav class="pager" aria-label="Страницы реестра">
+                    <button class="pager__btn is-disabled" type="button" aria-label="Предыдущая страница" title="Предыдущая страница">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.8 3.5 5.3 8l4.5 4.5"/></svg>
+                    </button>
+                    <button class="pager__btn is-active" type="button">1</button>
+                    <button class="pager__btn" type="button">2</button>
+                    <button class="pager__btn" type="button">3</button>
+                    <span class="pager__gap">…</span>
+                    <button class="pager__btn" type="button">9</button>
+                    <button class="pager__btn" type="button" aria-label="Следующая страница" title="Следующая страница">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.2 3.5 10.7 8l-4.5 4.5"/></svg>
+                    </button>
+                </nav>
+            </div>
+
             <div class="note note--plain mt-4">
                 <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
-                <span>Первая строка — «+ Пустая строка»: поля ФИО, пол, институт, группа и курс предзаполнены из профиля атлета (поле формы всегда имеет приоритет). Запись атлета после сохранения получает статус «на проверке», запись модератора — «подтверждена». Смена группы или курса в профиле не перезаписывает существующие записи — они остаются историческим фактом.</span>
+                <span>Первая строка — «+ Пустая строка»: поля ФИО, пол, институт, группа и курс предзаполнены из профиля атлета (поле формы всегда имеет приоритет). Она не входит в счётчик «Показано» — считаются только существующие записи. Запись атлета после сохранения получает статус «на проверке», запись модератора — «подтверждена». Смена группы или курса в профиле не перезаписывает существующие записи — они остаются историческим фактом.</span>
+            </div>
+
+            <div class="note note--plain mt-2">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/><path d="M5.2 9.4h1.2v1.3H5.2zM8.4 9.4h1.2v1.3H8.4z"/></svg>
+                <span>Редактирование — двойной клик по строке или кнопка «Редактировать» (колонка «Действия» закреплена справа и видна всегда); сохранение — <strong>Enter</strong>, отмена — <strong>Esc</strong>. Даты: введите цифры — точки поставятся сами, или выберите из календаря.</span>
             </div>
         </main>
     </div>
@@ -478,13 +562,6 @@
         <option value="Иванов Дмитрий Сергеевич"></option>
         <option value="Кузнецова Анна Владимировна"></option>
         <option value="Петрова Мария Олеговна"></option>
-    </datalist>
-    <datalist id="institute-options">
-        <option value="ИСИ"></option>
-        <option value="ИАиД"></option>
-        <option value="АДИ"></option>
-        <option value="ИТМ"></option>
-        <option value="ИЭУ"></option>
     </datalist>
     <datalist id="sport-options">
         <option value="Лёгкая атлетика"></option>
