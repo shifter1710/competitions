@@ -2,12 +2,15 @@
 
 {% block content %}
 
-<div class="d-flex flex-column flex-sm-row justify-content-between gap-2 align-items-sm-center mb-4">
+{# Заголовок страницы — .page-head прототипа (07–14): h1.page-title +
+   p.page-sub, справа — возврат в хаб. Тексты задают дочерние шаблоны
+   блоками admin_title/admin_description. #}
+<div class="page-head">
     <div>
-        <h3 class="title mb-1">{% block admin_title %}{% endblock admin_title %}</h3>
-        <div class="text-muted">{% block admin_description %}{% endblock admin_description %}</div>
+        <h1 class="page-title">{% block admin_title %}{% endblock admin_title %}</h1>
+        <p class="page-sub">{% block admin_description %}{% endblock admin_description %}</p>
     </div>
-    <a class="btn btn-outline-secondary align-self-sm-start" href="/admin">← В админку</a>
+    <a class="btn btn-outline-secondary" href="/admin">← В админку</a>
 </div>
 
 {% block admin_content %}
