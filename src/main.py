@@ -694,6 +694,27 @@ def apply_catalog_canonical_values(storage: SQLiteAdapter, competition: Competit
             canonical = storage.find_catalog_canonical('group', competition.group, parent_id=institute['id'])
             if canonical:
                 competition.group = canonical
+    elif competition.group and not competition.institute:
+        autofill_institute_from_group(storage, competition)
+
+
+def autofill_institute_from_group(storage: SQLiteAdapter, competition: Competition) -> None:
+    """№19а (docs/feedback-live.md): автозаполнение института по группе.
+
+    Если имя группы принадлежит ровно одному институту иерархии справочников,
+    подставляется канонический институт (и каноническое написание группы).
+    Неизвестная группа или одно имя в разных институтах — институт остаётся
+    пустым: свободный ввод не ломаем.
+    """
+    institute_value = storage.find_unique_group_institute(competition.group)
+    if not institute_value:
+        return
+    competition.institute = institute_value
+    institute = storage.find_catalog_row('institute', institute_value)
+    if institute is not None:
+        canonical = storage.find_catalog_canonical('group', competition.group, parent_id=institute['id'])
+        if canonical:
+            competition.group = canonical
 
 
 def competition_to_export_row(

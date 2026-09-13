@@ -136,6 +136,8 @@ def client() -> SanicTestClient:
     fake_storage.find_catalog_row.return_value = None
     fake_storage.find_catalog_canonical.return_value = None
     fake_storage.find_level_canonical.return_value = None
+    # №19а: автозаполнение института по группе по умолчанию выключено.
+    fake_storage.find_unique_group_institute.return_value = None
     fake_storage.get_group_options_by_institute.return_value = {}
     fake_storage.ensure_catalog_pair.return_value = None
     fake_storage.count_child_groups.return_value = 0
@@ -4158,6 +4160,142 @@ def test_manual_competition_uses_canonical_catalog_values(client: SanicTestClien
     assert saved.institute == 'ИСИ'
     app.ctx.storage.find_catalog_canonical.side_effect = None
     app.ctx.storage.find_catalog_canonical.return_value = None
+
+
+def test_import_autofills_institute_from_unique_group(client: SanicTestClient):
+    # №19a: группа известна, институт пуст, группа принадлежит ровно одному
+    # институту — институт подставляется каноническим значением.
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.find_unique_group_institute.return_value = 'ИСИ'
+    app.ctx.storage.find_catalog_row.return_value = {
+        'id': 1,
+        'category': 'institute',
+        'value': 'ИСИ',
+        'parent_id': None,
+        'active': 1,
+    }
+    app.ctx.storage.find_catalog_canonical.return_value = 'ПГС-101-и'
+
+    response = upload_xlsx(
+        client,
+        [make_import_row(**{'Институт': '', 'Группа': 'пгс-101-и'})],
+    )
+
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.institute == 'ИСИ'
+    assert saved.group == 'ПГС-101-и'
+    app.ctx.storage.find_unique_group_institute.return_value = None
+    app.ctx.storage.find_catalog_row.return_value = None
+    app.ctx.storage.find_catalog_canonical.return_value = None
+
+
+def test_import_ambiguous_group_leaves_institute_empty(client: SanicTestClient):
+    # №19a: одно имя группы в разных институтах — институт не подставляется.
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.find_unique_group_institute.return_value = None
+
+    response = upload_xlsx(
+        client,
+        [make_import_row(**{'Институт': '', 'Группа': 'ПГС-101'})],
+    )
+
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.institute == ''
+    assert saved.group == 'ПГС-101'
+    app.ctx.storage.find_unique_group_institute.return_value = None
+
+
+def test_import_empty_group_keeps_institute_empty(client: SanicTestClient):
+    # №19a: группа не указана — автозаполнение не запускается.
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+
+    response = upload_xlsx(
+        client,
+        [make_import_row(**{'Институт': '', 'Группа': ''})],
+    )
+
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.institute == ''
+    app.ctx.storage.find_unique_group_institute.return_value = None
+
+
+def test_manual_competition_autofills_institute_from_unique_group(client: SanicTestClient):
+    # №19a: ручной ввод — тот же путь build_competition.
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.find_unique_group_institute.return_value = 'ИСИ'
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/competition',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Абрамов Артём Абрамович',
+            'student_sex': 'М',
+            'institute': '',
+            'group': 'ПГС-101',
+            'sport': 'Бег',
+            'date': '20.03.2026',
+            'level': 'внутривузовские',
+            'name': 'Кубок',
+            'position': '2',
+            'course': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.institute == 'ИСИ'
+    app.ctx.storage.find_unique_group_institute.return_value = None
+
+
+def test_index_renders_url_custom_field_as_link(client: SanicTestClient):
+    # №3: url-кастомное поле в таблице — гиперссылка target=_blank;
+    # значение с посторонней схемой — обычный текст.
+    record = Competition(
+        student_id='2',
+        student_name='Тестов Тест Тестович',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+        extra_data={
+            'link': 'https://sport.example.com/race',
+            'bad': 'javascript:alert(1)',
+        },
+    )
+    app.ctx.storage.get_competitions_page.return_value = [record]
+    app.ctx.storage.count_competitions_filtered.return_value = 1
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='link', label='Ссылка на соревнование', field_type='url'),
+        CustomField(field_id=2, key='bad', label='Плохая ссылка', field_type='url'),
+    ]
+
+    headers = get_auth_headers(role='editor')
+    _, response = client.get('/', headers=headers)
+    assert response.status == 200
+    body = response.text
+    expected = (
+        '<a href="https://sport.example.com/race" class="link" '
+        'rel="noopener noreferrer" target="_blank">https://sport.example.com/race</a>'
+    )
+    assert expected in body
+    assert 'javascript:alert(1)' in body
+    assert '<a href="javascript:' not in body
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions_page.return_value = []
+    app.ctx.storage.count_competitions_filtered.return_value = 0
 
 
 def test_admin_catalog_add_rejects_case_duplicate(client: SanicTestClient):

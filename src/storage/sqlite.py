@@ -1376,6 +1376,33 @@ class SQLiteAdapter:
         row = self.find_catalog_row(category, value, parent_id=parent_id)
         return row['value'] if row else None
 
+    def find_unique_group_institute(self, group: str) -> str | None:
+        """Институт для группы №19а (docs/feedback-live.md).
+
+        Если имя группы (без учёта регистра) встречается ровно у одного
+        института в иерархии справочников — возвращается каноническое имя
+        института. Неизвестная группа или одно имя в разных институтах —
+        None (институт остаётся пустым, свободный ввод не ломаем).
+        Скрытые группы (active = 0) не участвуют.
+        """
+        group = group.strip()
+        if not group:
+            return None
+        with self._lock:
+            rows = self.connection.execute(
+                '''
+                SELECT institutes.value AS institute, groups.value AS "group"
+                FROM catalog_values AS groups
+                JOIN catalog_values AS institutes ON institutes.id = groups.parent_id
+                WHERE groups.category = 'group' AND groups.active = 1
+                ORDER BY institutes.value ASC, groups.value ASC
+                '''
+            ).fetchall()
+        matches = {row['institute'] for row in rows if row['group'].lower() == group.lower()}
+        if len(matches) == 1:
+            return matches.pop()
+        return None
+
     def find_level_canonical(self, name: str) -> str | None:
         """Каноническое написание уровня без учёта регистра (№1.1).
 

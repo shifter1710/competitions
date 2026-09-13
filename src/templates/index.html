@@ -200,8 +200,12 @@
                         {% for field in custom_fields if field.show_in_table %}
                         <td data-column-key="{{ field.key }}">
                             {%- set field_value = competition.extra_data.get(field.key, '') -%}
-                            {%- if field.field_type == 'url' and field_value -%}
-                            <a href="{{ field_value }}" rel="noopener noreferrer" target="_blank">{{ field_value }}</a>
+                            {%- if field.field_type == 'url' and field_value
+                                   and field_value.startswith(('http://', 'https://')) -%}
+                            {# №3 (docs/feedback-live.md): ссылка кликабельна только
+                               для http/https; прочие значения (например, legacy
+                               текст) — как обычный текст. Экранирование — авто. #}
+                            <a href="{{ field_value }}" class="link" rel="noopener noreferrer" target="_blank">{{ field_value }}</a>
                             {%- else -%}
                             {{ field_value }}
                             {%- endif -%}
