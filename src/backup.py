@@ -4,7 +4,6 @@
 работают через один и тот же ``run_backup`` — код не дублируется
 (решение по замечанию №10 из design/prototype/FEEDBACK.md).
 """
-
 import gzip
 import json
 import logging
