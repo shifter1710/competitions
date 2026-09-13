@@ -715,8 +715,16 @@ class Main {
 
     // Автоформат даты при ручном вводе (замечание №13): только цифры,
     // точки «дд.мм.гггг» проставляются сами — буквы и точки не набираются.
+    // Даты-диапазоны (№4): в поле «Дата» строки можно набрать «25-27.06.2026»,
+    // «30.01-01.02.2026» или полный «25.06.2026-27.06.2026» — при наличии
+    // дефиса авто-точки выключаются, пропускаем цифры, точки и дефис как есть.
     handleManualDateInput(event) {
-        const digits = event.target.value.replace(/\D/g, "").slice(0, 8);
+        const input = event.target;
+        if (input.dataset.editKey === "date" && input.value.includes("-")) {
+            input.value = input.value.replace(/[^\d.-]/g, "");
+            return;
+        }
+        const digits = input.value.replace(/\D/g, "").slice(0, 8);
         const parts = [];
 
         if (digits.length > 0) {
@@ -729,10 +737,15 @@ class Main {
             parts.push(digits.slice(4, 8));
         }
 
-        event.target.value = parts.join(".");
+        input.value = parts.join(".");
     }
 
     normalizeDateInput(input) {
+        // Диапазон («25-27.06.2026» и т.п.) не нормализуем — его форму
+        // проверяет сервер.
+        if (input.dataset.editKey === "date" && input.value.includes("-")) {
+            return;
+        }
         const digits = input.value.replace(/\D/g, "").slice(0, 8);
         if (digits.length <= 4) {
             return;
@@ -1155,6 +1168,9 @@ class Main {
             if (key === "date" || fieldType === "date") {
                 input.placeholder = "дд.мм.гггг";
                 input.inputMode = "numeric";
+                if (key === "date") {
+                    input.title = "Диапазон: 25-27.06.2026 или 25.06.2026-27.06.2026";
+                }
             }
             // Подсказки справочников: datalist лежит в разметке страницы,
             // id совпадает с ключом поля. Институт и группа — комбобоксы
@@ -2006,8 +2022,13 @@ class Main {
         const body = this.tableElement.querySelector("tbody");
         const rows = Array.from(body.querySelectorAll("tr"));
         rows.sort((first, second) => {
-            const firstValue = first.querySelector(`[data-column-key="${columnKey}"]`)?.textContent.trim() || "";
-            const secondValue = second.querySelector(`[data-column-key="${columnKey}"]`)?.textContent.trim() || "";
+            // data-sort-value (если задан) — машинное значение ячейки:
+            // «Дата» отображается компактным диапазоном («25-27.06.2026»),
+            // сортируется по ISO-дате начала.
+            const firstCell = first.querySelector(`[data-column-key="${columnKey}"]`);
+            const secondCell = second.querySelector(`[data-column-key="${columnKey}"]`);
+            const firstValue = firstCell?.dataset.sortValue || firstCell?.textContent.trim() || "";
+            const secondValue = secondCell?.dataset.sortValue || secondCell?.textContent.trim() || "";
             return this.compareValues(firstValue, secondValue, sortType, currentDirection);
         });
         rows.forEach((row) => body.appendChild(row));

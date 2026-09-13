@@ -541,21 +541,103 @@ def normalize_course(value) -> int:
     return int(value)
 
 
-def parse_manual_date(value: str) -> datetime:
-    if not value:
-        raise ValueError('Дата обязательна')
-    return datetime.strptime(value, settings.date_format)
+# Гибридный ввод дат-диапазонов (решение 2026-09-13, docs/data-model-decisions.md
+# «Даты-диапазоны: визуально одно, под капотом два»). Одно поле ввода/колонка
+# «Дата» разбирается на пару (date, date_to); формат решает парсер:
+DATE_RANGE_SINGLE = re.compile(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$')
+# «25-27.06.2026» — границы в одном месяце
+DATE_RANGE_ONE_MONTH = re.compile(r'^(\d{1,2})-(\d{1,2})\.(\d{1,2})\.(\d{4})$')
+# «30.01-01.02.2026» — разные месяцы одного года
+DATE_RANGE_ONE_YEAR = re.compile(r'^(\d{1,2})\.(\d{1,2})-(\d{1,2})\.(\d{1,2})\.(\d{4})$')
+# «28.12.2025-02.01.2026» — полный формат (любые даты, включая разные годы)
+DATE_RANGE_FULL = re.compile(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})-(\d{1,2})\.(\d{1,2})\.(\d{4})$')
 
 
-def parse_import_date(value):
+def _range_date(day: str, month: str, year: str, label: str) -> datetime:
+    try:
+        return datetime(int(year), int(month), int(day))
+    except ValueError:
+        raise ValueError(f'Некорректная дата ({label})') from None
+
+
+def _match_date_range(raw: str) -> tuple[datetime, datetime | None] | None:
+    """Распознать формат диапазона (или однодневной даты). None — не узнано."""
+    match = DATE_RANGE_FULL.match(raw)
+    if match:
+        return (
+            _range_date(match.group(1), match.group(2), match.group(3), 'дата начала'),
+            _range_date(match.group(4), match.group(5), match.group(6), 'дата окончания'),
+        )
+    match = DATE_RANGE_ONE_YEAR.match(raw)
+    if match:
+        year = match.group(5)
+        return (
+            _range_date(match.group(1), match.group(2), year, 'дата начала'),
+            _range_date(match.group(3), match.group(4), year, 'дата окончания'),
+        )
+    match = DATE_RANGE_ONE_MONTH.match(raw)
+    if match:
+        month, year = match.group(3), match.group(4)
+        return (
+            _range_date(match.group(1), month, year, 'дата начала'),
+            _range_date(match.group(2), month, year, 'дата окончания'),
+        )
+    match = DATE_RANGE_SINGLE.match(raw)
+    if match:
+        return _range_date(*match.groups(), 'дата'), None
+    return None
+
+
+def parse_date_value(value, manual_input: bool = False) -> tuple[datetime, datetime | None]:
+    """Разобрать поле «Дата» в пару (date, date_to).
+
+    Поддерживаются однодневное «25.06.2026», компактные диапазоны
+    «25-27.06.2026» и «30.01-01.02.2026» и полный «25.06.2026-27.06.2026»
+    — один парсер для ручного ввода и колонки «Дата» импорта. Excel-ячейка
+    с типом дата приходит объектом datetime (однодневная, импорт). date_to
+    раньше date — отказ (маршрут отдаёт 400).
+    """
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value.strip():
+        return value, None
+
+    raw = str(value or '').strip()
+    if not raw:
+        raise ValueError('Дата обязательна')
+
+    parsed = _match_date_range(raw)
+    if parsed is None:
+        if manual_input:
+            # Ручной ввод жёстче: только форматы дд.мм.гггг выше.
+            raise ValueError(f'Некорректная дата: {raw}')
+        # Легаси-прочтение импорта: текстовая ISO-ячейка Excel.
         try:
-            return datetime.strptime(value.strip(), settings.date_format)
+            return datetime.fromisoformat(raw), None
         except ValueError:
-            pass
-    return value
+            raise ValueError(f'Некорректная дата: {raw}') from None
+
+    date, date_to = parsed
+    if date_to is not None and date_to < date:
+        raise ValueError('Дата окончания не может быть раньше даты начала')
+    return date, date_to
+
+
+def format_date_range(date_from: datetime, date_to: datetime | None) -> str:
+    """Компактное отображение диапазона (решение 2026-09-13): совпадающие
+    месяц/год — «25-27.06.2026», совпадающий год — «30.01-01.02.2026»,
+    разные годы — полный «28.12.2025-02.01.2026»; однодневное — «25.06.2026».
+    Используется в таблице, экспорте (колонка «Дата» остаётся реимпортируемой)
+    и предзаполнении инлайн-правки."""
+    if not date_to or date_to <= date_from:
+        return date_from.strftime('%d.%m.%Y')
+    if (date_from.year, date_from.month) == (date_to.year, date_to.month):
+        return f'{date_from.day:02d}-{date_to.day:02d}.{date_from.month:02d}.{date_from.year}'
+    if date_from.year == date_to.year:
+        return f'{date_from.day:02d}.{date_from.month:02d}-' f'{date_to.day:02d}.{date_to.month:02d}.{date_from.year}'
+    return f'{date_from.strftime("%d.%m.%Y")}-{date_to.strftime("%d.%m.%Y")}'
+
+
+# Компактное отображение дат-диапазонов в шаблонах (таблица реестра).
+jinja_env.globals['format_date_range'] = format_date_range
 
 
 def normalize_custom_field_key(label: str) -> str:
@@ -639,11 +721,7 @@ def build_competition(
     if not student_name:
         raise ValueError('ФИО обязательно')
 
-    date = record['Дата']
-    if manual_input:
-        date = parse_manual_date(str(date).strip())
-    else:
-        date = parse_import_date(date)
+    date, date_to = parse_date_value(record['Дата'], manual_input)
 
     competition = Competition(
         student_id=hashlib.sha256(student_name.encode()).hexdigest(),
@@ -652,6 +730,7 @@ def build_competition(
         institute=clean_str(record['Институт']),
         group=clean_str(record['Группа']),
         date=date,
+        date_to=date_to,
         sport=clean_str(record['Вид спорта']),
         level=clean_str(record['Уровень соревнований']).lower(),
         name=clean_str(record['Название соревнований']),
@@ -727,6 +806,11 @@ def competition_to_export_row(
     row.pop('extra_data', None)
     row.pop('Статус проверки', None)
     row.pop('Комментарий проверки', None)
+    # Даты-диапазоны: экспорт компактной строкой в существующей колонке
+    # «Дата» — шаблон импорта не ломается, выгрузку можно импортировать
+    # обратно (парсер диапазона работает на той же колонке).
+    row['Дата'] = format_date_range(competition.date, competition.date_to)
+    row.pop('Дата по', None)
     for field in export_custom_fields:
         row[field.label] = competition.extra_data.get(field.key, '')
     return row

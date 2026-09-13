@@ -192,7 +192,7 @@
                         <td data-column-key="institute">{{ competition.institute }}</td>
                         <td data-column-key="group">{{ competition.group }}</td>
                         <td data-column-key="sport">{{ competition.sport }}</td>
-                        <td data-column-key="date">{{ competition.date.strftime('%d.%m.%Y') }}</td>
+                        <td data-column-key="date" data-sort-value="{{ competition.date.strftime('%Y-%m-%d') }}">{{ format_date_range(competition.date, competition.date_to) }}</td>
                         <td data-column-key="level">{{ competition.level }}</td>
                         <td class="competition" data-column-key="name">{{ competition.name }}</td>
                         <td data-column-key="position">{{ competition.position }}</td>
@@ -259,7 +259,10 @@
                                 data-group="{{ competition.group }}"
                                 data-course="{{ competition.course }}"
                                 data-sport="{{ competition.sport }}"
-                                data-date="{{ competition.date.strftime('%d.%m.%Y') }}"
+                                {# Гибридный ввод диапазона: предзаполняется
+                                   компактной строкой («25-27.06.2026») —
+                                   парсер на сервере читает её же. #}
+                                data-date="{{ format_date_range(competition.date, competition.date_to) }}"
                                 data-level="{{ competition.level }}"
                                 data-name="{{ competition.name }}"
                                 data-position="{{ competition.position }}"
