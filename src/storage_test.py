@@ -595,3 +595,138 @@ def test_delete_user_without_records_returns_zero(adapter):
     user_id = adapter.get_user('viewer1')['id']
     assert adapter.delete_user(user_id) == 0
     assert adapter.get_user('viewer1') is None
+
+
+def test_date_wipe_selects_by_competition_date(adapter):
+    # Критерий — дата соревнования, не дата создания записи: записи с разными
+    # датами соревнований должны отбираться по ней (docs/data-model-decisions.md).
+    adapter.save_competitions(
+        [
+            make_competition('Старый декабрьский', datetime(2024, 12, 31)),
+            make_competition('Новый июньский', datetime(2025, 6, 1)),
+            make_competition('Граничный день', datetime(2025, 6, 1)),
+        ]
+    )
+    cutoff = datetime(2025, 1, 1)
+
+    assert adapter.count_competitions(date_before=cutoff) == 1
+    assert [comp.student_name for comp in adapter.get_competitions_before(cutoff)] == ['Старый декабрьский']
+
+    assert adapter.delete_competitions_before(cutoff) == 1
+    assert [comp.student_name for comp in adapter.get_competitions()] == [
+        'Новый июньский',
+        'Граничный день',
+    ]
+    assert adapter.count_competitions() == 2
+
+
+def test_date_wipe_boundary_is_strictly_before(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('День назад', datetime(2025, 5, 31)),
+            make_competition('Сама дата', datetime(2025, 6, 1)),
+        ]
+    )
+    # «ДО 01.06.2025» — строго раньше: сама граница не удаляется
+    assert adapter.delete_competitions_before(datetime(2025, 6, 1)) == 1
+    assert [comp.student_name for comp in adapter.get_competitions()] == ['Сама дата']
+
+
+def test_attachments_for_records_select_and_delete(adapter):
+    adapter.save_competitions([make_competition('Первый', datetime(2026, 1, 1))])
+    adapter.create_attachment(
+        record_id=1,
+        filename='a.png',
+        stored_name='a.png',
+        content_type='image/png',
+        size=10,
+        uploaded_by=None,
+    )
+    adapter.create_attachment(
+        record_id=2,
+        filename='b.png',
+        stored_name='b.png',
+        content_type='image/png',
+        size=20,
+        uploaded_by=None,
+    )
+    adapter.create_attachment(
+        record_id=1,
+        filename='c.png',
+        stored_name='c.png',
+        content_type='image/png',
+        size=30,
+        uploaded_by=None,
+    )
+
+    mine = adapter.get_attachments_for_records([1])
+    assert [attachment['stored_name'] for attachment in mine] == ['a.png', 'c.png']
+    assert adapter.get_attachments_for_records([]) == []
+    assert adapter.get_attachments_for_records([999]) == []
+
+    assert adapter.delete_attachments_for_records([1]) == 2
+    assert adapter.count_attachments() == 1
+    assert adapter.delete_attachments_for_records([]) == 0
+
+
+def insert_audit_event(adapter, created_at, username, action):
+    adapter.connection.execute(
+        'INSERT INTO audit_log (created_at, user_id, username, action, details) VALUES (?, ?, ?, ?, ?)',
+        (created_at, None, username, action, ''),
+    )
+    adapter.connection.commit()
+
+
+def test_audit_filters_and_pagination(adapter):
+    insert_audit_event(adapter, '2026-01-05T10:00:00.000000', 'anna', 'login_success')
+    insert_audit_event(adapter, '2026-02-10T10:00:00.000000', 'bob', 'db_wiped')
+    insert_audit_event(adapter, '2026-03-15T10:00:00.000000', 'anna', 'db_wiped')
+
+    assert adapter.count_audit_events() == 3
+    assert adapter.count_audit_events(username='anna') == 2
+    assert adapter.count_audit_events(action='db_wiped') == 2
+    assert adapter.count_audit_events(username='anna', action='db_wiped') == 1
+    assert adapter.count_audit_events(date_from='2026-02-01') == 2
+    assert adapter.count_audit_events(date_to='2026-01-31') == 1
+    assert adapter.count_audit_events(date_to='2026-02-28') == 2  # верхняя граница: январь+февраль
+    assert adapter.count_audit_events(date_from='2026-01-01', date_to='2026-03-31') == 3
+    assert adapter.count_audit_events(username='carol') == 0
+
+    page_one = adapter.get_audit_events(limit=2, offset=0)
+    page_two = adapter.get_audit_events(limit=2, offset=2)
+    assert [event['id'] for event in page_one] == [3, 2]
+    assert [event['id'] for event in page_two] == [1]
+
+    filtered = adapter.get_audit_events(limit=50, offset=0, username='anna', action='db_wiped')
+    assert [event['id'] for event in filtered] == [3]
+    assert (
+        adapter.get_audit_events(limit=50, offset=0, date_from='2026-02-01', date_to='2026-02-28')[0]['username']
+        == 'bob'
+    )
+
+    assert adapter.list_audit_actions() == ['db_wiped', 'login_success']
+
+
+def test_vacuum_shrinks_database_file_after_mass_delete(tmp_path):
+    from pathlib import Path
+
+    db_path = str(tmp_path / 'vacuum.sqlite3')
+    adapter = SQLiteAdapter(db_path)
+
+    def file_size():
+        adapter.connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        return Path(db_path).stat().st_size
+
+    adapter.save_competitions(
+        [make_competition(f'Спортсменов Номер {index}', datetime(2025, index % 12 + 1, 1)) for index in range(300)]
+    )
+    size_before_delete = file_size()
+
+    adapter.delete_all_competitions()
+    size_after_delete = file_size()
+    assert size_after_delete >= size_before_delete * 0.9  # DELETE сам файл не сжимает
+
+    adapter.vacuum()
+    size_after_vacuum = file_size()
+    assert size_after_vacuum < size_before_delete * 0.5  # место реально освобождено
+    assert adapter.count_competitions() == 0

@@ -566,10 +566,41 @@ class SQLiteAdapter:
             self.connection.execute('DELETE FROM competitions')
             self.connection.commit()
 
-    def count_competitions(self) -> int:
+    def count_competitions(self, date_before: datetime | None = None) -> int:
+        """Число записей; с date_before — только записи с датой соревнования ДО неё."""
         with self._lock:
-            row = self.connection.execute('SELECT COUNT(*) AS total FROM competitions').fetchone()
+            if date_before is None:
+                row = self.connection.execute('SELECT COUNT(*) AS total FROM competitions').fetchone()
+            else:
+                row = self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions WHERE date < ?',
+                    (date_before.isoformat(),),
+                ).fetchone()
             return row['total']
+
+    def get_competitions_before(self, date_before: datetime) -> list[Competition]:
+        """Записи с датой соревнования ДО указанной (для архива перед очисткой)."""
+        with self._lock:
+            rows = self.connection.execute(
+                '''
+                SELECT
+                    id, student_id, student_name, student_sex, institute, "group", course,
+                    sport, date, level, name, position, created_at, extra_data,
+                    review_status, owner_id, review_comment
+                FROM competitions
+                WHERE date < ?
+                ORDER BY created_at ASC
+                ''',
+                (date_before.isoformat(),),
+            ).fetchall()
+            return [self._row_to_competition(row) for row in rows]
+
+    def delete_competitions_before(self, date_before: datetime) -> int:
+        """Очистка по дате соревнования (docs/data-model-decisions.md). Возвращает число удалённых."""
+        with self._lock:
+            cursor = self.connection.execute('DELETE FROM competitions WHERE date < ?', (date_before.isoformat(),))
+            self.connection.commit()
+            return cursor.rowcount
 
     def count_attachments(self) -> int:
         with self._lock:
@@ -589,6 +620,44 @@ class SQLiteAdapter:
             cursor = self.connection.execute('DELETE FROM attachments')
             self.connection.commit()
             return cursor.rowcount
+
+    def get_attachments_for_records(self, record_ids: Sequence[int]) -> list[dict]:
+        """Вложения указанных записей (для архива и подсчёта перед очисткой по дате)."""
+        ids = [int(record_id) for record_id in record_ids]
+        if not ids:
+            return []
+        placeholders = ', '.join('?' for _ in ids)
+        with self._lock:
+            rows = self.connection.execute(
+                f'SELECT id, record_id, filename, stored_name, content_type, size '
+                f'FROM attachments WHERE record_id IN ({placeholders}) ORDER BY record_id ASC, id ASC',
+                ids,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_attachments_for_records(self, record_ids: Sequence[int]) -> int:
+        """Удалить строки вложений указанных записей (очистка по дате). Возвращает число удалённых."""
+        ids = [int(record_id) for record_id in record_ids]
+        if not ids:
+            return 0
+        placeholders = ', '.join('?' for _ in ids)
+        with self._lock:
+            cursor = self.connection.execute(
+                f'DELETE FROM attachments WHERE record_id IN ({placeholders})',
+                ids,
+            )
+            self.connection.commit()
+            return cursor.rowcount
+
+    def vacuum(self) -> None:
+        """Перестроить файл БД, чтобы освободить место после массовых удалений.
+
+        Только для редких админских операций (очистка): VACUUM требует
+        завершённых транзакций и единственного писателя.
+        """
+        with self._lock:
+            self.connection.commit()
+            self.connection.execute('VACUUM')
 
     def get_sport_names(self) -> list[str]:
         """Unique sport names as stored in records, sorted alphabetically."""
@@ -963,13 +1032,67 @@ class SQLiteAdapter:
             )
             self.connection.commit()
 
-    def get_audit_events(self, limit: int = 200) -> list[dict]:
+    @staticmethod
+    def _audit_filter_clauses(
+        username: str | None = None,
+        action: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[str, list[object]]:
+        """Общие условия фильтра журнала (даты — ISO 'YYYY-MM-DD', сравнение по DATE(created_at))."""
+        clauses = []
+        params: list[object] = []
+        if username:
+            clauses.append('username LIKE ?')
+            params.append(f'%{username}%')
+        if action:
+            clauses.append('action = ?')
+            params.append(action)
+        if date_from:
+            clauses.append('DATE(created_at) >= ?')
+            params.append(date_from)
+        if date_to:
+            clauses.append('DATE(created_at) <= ?')
+            params.append(date_to)
+        where = f'WHERE {" AND ".join(clauses)}' if clauses else ''
+        return where, params
+
+    def get_audit_events(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        username: str | None = None,
+        action: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict]:
+        """Страница журнала (новые сверху) с фильтрами и смещением пагинации."""
         with self._lock:
+            where, params = self._audit_filter_clauses(username, action, date_from, date_to)
             rows = self.connection.execute(
-                'SELECT id, created_at, user_id, username, action, details FROM audit_log ORDER BY id DESC LIMIT ?',
-                (int(limit),),
+                f'SELECT id, created_at, user_id, username, action, details '
+                f'FROM audit_log {where} ORDER BY id DESC LIMIT ? OFFSET ?',
+                (*params, int(limit), max(0, int(offset))),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def count_audit_events(
+        self,
+        username: str | None = None,
+        action: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> int:
+        with self._lock:
+            where, params = self._audit_filter_clauses(username, action, date_from, date_to)
+            row = self.connection.execute(f'SELECT COUNT(*) AS total FROM audit_log {where}', params).fetchone()
+            return row['total']
+
+    def list_audit_actions(self) -> list[str]:
+        """Различные действия журнала — для выпадающего фильтра."""
+        with self._lock:
+            rows = self.connection.execute('SELECT DISTINCT action FROM audit_log ORDER BY action ASC').fetchall()
+            return [row['action'] for row in rows]
 
     def count_records_by_student_hash(self, student_id_hash: str) -> int:
         with self._lock:

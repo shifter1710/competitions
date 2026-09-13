@@ -10,6 +10,7 @@ import secrets
 import shutil
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -33,6 +34,7 @@ from sanic_ext import render
 
 from src.auth import hash_password
 from src.auth import verify_password
+from src.backup import run_backup
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
@@ -71,7 +73,9 @@ KNOWN_ROLES = {ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE}
 
 # Очистка базы — явное админское действие в два шага (объём + фраза).
 # См. docs/data-model-decisions.md «Очистка и выгрузка базы».
-WIPE_SCOPES = ('records', 'records_attachments', 'attachments')
+# Порядок пунктов — по возрастанию ущерба: вложения → записи → всё.
+WIPE_SCOPES = ('attachments', 'records', 'all')
+WIPE_MODES = ('scope', 'date')
 WIPE_CONFIRM_PHRASE = 'УДАЛИТЬ'
 
 INSECURE_SECRET_VALUES = {'', 'change-me', 'replace-with-random-string'}
@@ -84,7 +88,8 @@ login_failures: dict[str, list] = {}
 
 logger = logging.getLogger(__name__)
 
-AUDIT_PAGE_LIMIT = 200
+AUDIT_PAGE_SIZE = 50
+PRE_WIPE_ARCHIVES_SHOWN = 20
 
 BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
     {'key': 'student_name', 'label': 'ФИО'},
@@ -1857,12 +1862,122 @@ async def merge_students(request: Request):
     )
 
 
+def backups_dir() -> Path:
+    return Path(settings.data_folder) / 'backups'
+
+
+def files_dir() -> Path:
+    return Path(settings.data_folder) / 'files'
+
+
+def format_size(num_bytes: int | float) -> str:
+    """Человекочитаемый размер: 12,4 ГБ / 5 МБ / 512 Б (запятая как разделитель)."""
+    size = float(num_bytes)
+    for unit in ('Б', 'КБ', 'МБ', 'ГБ', 'ТБ'):
+        if size < 1024 or unit == 'ТБ':
+            if unit == 'Б':
+                return f'{int(size)} Б'
+            rounded = f'{size:.1f}'.replace('.', ',')
+            if rounded.endswith(',0'):
+                rounded = rounded[:-2]
+            return f'{rounded} {unit}'
+        size /= 1024
+    return f'{int(size)} Б'
+
+
+def file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def dir_size(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob('*') if item.is_file())
+
+
+def format_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M')
+
+
+def collect_maintenance_stats() -> dict:
+    """Панель состояния обслуживания (замечания №10 и №16б из FEEDBACK.md).
+
+    Только чтение: размеры БД (файл + WAL/SHM), вложений, бэкапов, место на
+    диске тома с data/, последний бэкап и список архивов очисток.
+    """
+    data_root = Path(settings.data_folder)
+    db_path = Path(settings.database_path)
+
+    db_files = []
+    for suffix, label in (('', 'файл БД'), ('-wal', 'WAL'), ('-shm', 'SHM')):
+        candidate = db_path.with_name(db_path.name + suffix)
+        size = file_size(candidate)
+        if size > 0 or not suffix:
+            db_files.append({'label': label, 'size': size, 'size_label': format_size(size)})
+    db_total = sum(item['size'] for item in db_files)
+
+    attachments_size = dir_size(data_root / 'files')
+    backups_size = dir_size(data_root / 'backups')
+
+    disk_root = data_root if data_root.is_dir() else db_path.parent if db_path.parent.is_dir() else Path('.')
+    usage = shutil.disk_usage(disk_root)
+    disk_percent = round(usage.used / usage.total * 100, 1) if usage.total else 0
+
+    last_backup = None
+    pre_wipe_archives = []
+    root = data_root / 'backups'
+    if root.is_dir():
+        backup_files = [item for item in root.rglob('*') if item.is_file()]
+        if backup_files:
+            latest = max(backup_files, key=lambda item: item.stat().st_mtime)
+            stat = latest.stat()
+            last_backup = {
+                'name': latest.name,
+                'subdir': str(latest.parent.relative_to(root)) if latest.parent != root else '',
+                'time': format_timestamp(stat.st_mtime),
+                'size_label': format_size(stat.st_size),
+            }
+        pre_wipe_files = sorted(
+            (item for item in root.iterdir() if item.is_file() and item.name.startswith('pre-wipe-')),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )[:PRE_WIPE_ARCHIVES_SHOWN]
+        pre_wipe_archives = [
+            {
+                'name': item.name,
+                'time': format_timestamp(item.stat().st_mtime),
+                'size_label': format_size(item.stat().st_size),
+            }
+            for item in pre_wipe_files
+        ]
+
+    return {
+        'db_files': db_files,
+        'db_total_label': format_size(db_total),
+        'attachments_size_label': format_size(attachments_size),
+        'backups_size_label': format_size(backups_size),
+        'disk': {
+            'percent': disk_percent,
+            'used_label': format_size(usage.used),
+            'total_label': format_size(usage.total),
+            'free_label': format_size(usage.free),
+            'caption': f'Диск: {format_size(usage.used)} из {format_size(usage.total)} занято',
+        },
+        'last_backup': last_backup,
+        'pre_wipe_archives': pre_wipe_archives,
+    }
+
+
 @app.get('/admin/maintenance')
 async def admin_maintenance_page(request: Request):
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
     storage = get_storage(request.app)
+    stats = await asyncio.to_thread(collect_maintenance_stats)
     return await render(
         template_name=jinja_env.get_template('admin_maintenance.html'),
         context={
@@ -1870,6 +1985,7 @@ async def admin_maintenance_page(request: Request):
             'wipe_confirm_phrase': WIPE_CONFIRM_PHRASE,
             'records_count': storage.count_competitions(),
             'attachments_count': storage.count_attachments(),
+            'stats': stats,
             **get_flash_args(request),
         },
     )
@@ -1948,65 +2064,408 @@ async def export_database(request: Request):
 
 def remove_attachment_files() -> None:
     """Remove uploaded attachment files only (data/files), nothing else inside data/."""
-    files_dir = Path(settings.data_folder) / 'files'
-    if files_dir.is_dir():
-        shutil.rmtree(files_dir, ignore_errors=True)
+    root = files_dir()
+    if root.is_dir():
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def remove_attachment_record_dirs(record_ids: Sequence[int]) -> None:
+    """Удалить каталоги вложений указанных записей (очистка по дате)."""
+    root = files_dir()
+    for record_id in record_ids:
+        shutil.rmtree(root / str(record_id), ignore_errors=True)
+
+
+def attachment_source_path(attachment: dict) -> Path:
+    return files_dir() / str(attachment['record_id']) / attachment['stored_name']
+
+
+def attachments_files_bytes(attachments: Sequence[dict]) -> int:
+    """Сумма размеров файлов вложений на диске (что реально освободится, №18)."""
+    return sum(file_size(attachment_source_path(attachment)) for attachment in attachments)
+
+
+def parse_wipe_request(request: Request) -> tuple[dict | None, str | None]:
+    """Валидация параметров очистки: режим (полная/по дате), объём, дата, галочка вложений."""
+    mode = get_form_value(request, 'mode').strip() or 'scope'
+    if mode not in WIPE_MODES:
+        return None, 'Некорректный режим очистки'
+    params: dict = {'mode': mode, 'scope': None, 'date_before': None, 'with_attachments': True}
+    if mode == 'scope':
+        scope = get_form_value(request, 'scope').strip()
+        if scope not in WIPE_SCOPES:
+            return None, 'Некорректный объём очистки'
+        params['scope'] = scope
+    else:
+        raw_date = get_form_value(request, 'date_before').strip()
+        try:
+            params['date_before'] = datetime.strptime(raw_date, settings.date_format)
+        except ValueError:
+            return None, 'Некорректная дата очистки (ожидается дд.мм.гггг)'
+        # Галочка «вместе с вложениями» включена по умолчанию: нет поля —
+        # считаем включённой; скрытый маркер 0 + чекбокс 1 различают снятие.
+        raw_flags = request.form.getlist('with_attachments')
+        params['with_attachments'] = '1' in raw_flags or not raw_flags
+    return params, None
+
+
+def wipe_scope_label(params: dict) -> str:
+    return params['scope'] if params['mode'] == 'scope' else 'date'
+
+
+def collect_wipe_targets(storage: SQLiteAdapter, params: dict) -> tuple[list, list[dict]]:
+    """Записи и вложения, попадающие под очистку (для превью и архива)."""
+    if params['mode'] == 'scope':
+        records = list(storage.get_competitions()) if params['scope'] != 'attachments' else []
+        attachments = storage.get_attachments() if params['scope'] != 'records' else []
+    else:
+        records = storage.get_competitions_before(params['date_before'])
+        record_ids = [int(comp.record_id) for comp in records]
+        attachments = storage.get_attachments_for_records(record_ids) if params['with_attachments'] else []
+    return records, attachments
+
+
+def perform_wipe(storage: SQLiteAdapter, params: dict, records: Sequence) -> tuple[int, int]:
+    """Исполнить очистку; возвращает (удалено записей, удалено вложений)."""
+    records_deleted = 0
+    attachments_deleted = 0
+    if params['mode'] == 'scope':
+        if params['scope'] in ('records', 'all'):
+            records_deleted = storage.delete_all_competitions()
+        if params['scope'] in ('attachments', 'all'):
+            attachments_deleted = storage.delete_all_attachments()
+            remove_attachment_files()
+    else:
+        record_ids = [int(comp.record_id) for comp in records]
+        records_deleted = storage.delete_competitions_before(params['date_before'])
+        if params['with_attachments']:
+            attachments_deleted = storage.delete_attachments_for_records(record_ids)
+            remove_attachment_record_dirs(record_ids)
+    return records_deleted, attachments_deleted
+
+
+def create_pre_wipe_archive(
+    storage: SQLiteAdapter,
+    *,
+    scope_label: str,
+    records: Sequence,
+    attachments: Sequence[dict],
+) -> dict:
+    """Архив удаляемого перед очисткой (№12): xlsx записей + zip их вложений.
+
+    В data/backups: pre-wipe-<дата>-<scope>.xlsx (когда удаляются записи)
+    и pre-wipe-<дата>-<scope>.zip (когда удаляются вложения с файлами).
+    """
+    root = backups_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    result = {
+        'scope': scope_label,
+        'xlsx': None,
+        'zip': None,
+        'records': len(records),
+        'attachments': len(attachments),
+    }
+
+    if records:
+        export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
+        df = build_index_dataframe(records, export_custom_fields)
+        xlsx_path = root / f'pre-wipe-{stamp}-{scope_label}.xlsx'
+        df.to_excel(xlsx_path, index=False)
+        result['xlsx'] = xlsx_path.name
+
+    if attachments:
+        zip_path = root / f'pre-wipe-{stamp}-{scope_label}.zip'
+        written = False
+        seen_names: set[str] = set()
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+            for attachment in attachments:
+                source = attachment_source_path(attachment)
+                if not source.is_file():
+                    continue
+                # Внутри архива — понятное имя файла; при коллизии (одноимённые
+                # вложения у одной записи) откатываемся на уникальное stored_name.
+                arc_name = f'{attachment["record_id"]}/{attachment["filename"]}'
+                if arc_name in seen_names:
+                    arc_name = f'{attachment["record_id"]}/{attachment["stored_name"]}'
+                seen_names.add(arc_name)
+                archive.write(source, arc_name)
+                written = True
+        if written:
+            result['zip'] = zip_path.name
+        else:
+            zip_path.unlink(missing_ok=True)
+    return result
+
+
+def build_wipe_preview(storage: SQLiteAdapter, params: dict) -> dict:
+    """Превью очистки: сколько записей/вложений уйдёт и сколько места освободится (№18)."""
+    records, attachments = collect_wipe_targets(storage, params)
+    attachments_bytes = attachments_files_bytes(attachments)
+    return {
+        'records': len(records),
+        'attachments': len(attachments),
+        'attachments_size_bytes': attachments_bytes,
+        'attachments_size': format_size(attachments_bytes),
+    }
+
+
+def log_wipe_execution(
+    request: Request,
+    params: dict,
+    archive: dict,
+    records_deleted: int,
+    attachments_deleted: int,
+    freed_total: int,
+) -> str:
+    """Аудит выполненной очистки (№16а) и итоговое flash-сообщение."""
+    log_audit_event(
+        request,
+        'pre_wipe_archive_created',
+        {
+            'scope': archive['scope'],
+            'archive_xlsx': archive['xlsx'],
+            'archive_zip': archive['zip'],
+            'records': archive['records'],
+            'attachments': archive['attachments'],
+        },
+    )
+    wipe_details = {
+        'scope': archive['scope'],
+        'records_deleted': records_deleted,
+        'attachments_deleted': attachments_deleted,
+        'freed_bytes': freed_total,
+        'archive_xlsx': archive['xlsx'],
+        'archive_zip': archive['zip'],
+    }
+    if params['mode'] == 'date':
+        wipe_details['date_before'] = params['date_before'].strftime(settings.date_format)
+        wipe_details['with_attachments'] = params['with_attachments']
+    log_audit_event(request, 'db_wiped', wipe_details)
+
+    summary = (
+        f'Очистка выполнена: удалено записей {records_deleted}, вложений {attachments_deleted}. '
+        f'Освобождено: {format_size(freed_total)}'
+    )
+    archive_names = ', '.join(name for name in (archive['xlsx'], archive['zip']) if name)
+    if archive_names:
+        summary += f'. Архив: {archive_names}'
+    return summary
 
 
 @app.post('/admin/maintenance/wipe')
 async def wipe_database(request: Request):
+    # Очистка в два шага: превью (POST без confirm=1 → JSON с числами) и
+    # выполнение с фразой «УДАЛИТЬ» (docs/data-model-decisions.md).
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
 
-    scope = get_form_value(request, 'scope').strip()
+    storage = get_storage(request.app)
+    params, error = parse_wipe_request(request)
+    if error is not None:
+        return text(body=error, status=400)
+
+    if get_form_value(request, 'confirm') != '1':
+        return json_response(await asyncio.to_thread(build_wipe_preview, storage, params))
+
     confirm_phrase = get_form_value(request, 'confirm_phrase').strip()
-    if scope not in WIPE_SCOPES:
-        return text(body='Некорректный объём очистки', status=400)
     if confirm_phrase != WIPE_CONFIRM_PHRASE:
         return text(body=f'Для подтверждения введите слово «{WIPE_CONFIRM_PHRASE}»', status=400)
 
-    storage = get_storage(request.app)
-    records_deleted = 0
-    attachments_deleted = 0
-    if scope in ('records', 'records_attachments'):
-        records_deleted = storage.delete_all_competitions()
-    if scope in ('records_attachments', 'attachments'):
-        attachments_deleted = storage.delete_all_attachments()
-        remove_attachment_files()
+    db_size_before = file_size(Path(settings.database_path))
+    records, attachments = await asyncio.to_thread(collect_wipe_targets, storage, params)
+    freed_files_bytes = attachments_files_bytes(attachments)
 
+    # Сначала архив — страховка от «очистил и пожалел»; не создался — не чистим.
+    try:
+        archive = await asyncio.to_thread(
+            create_pre_wipe_archive,
+            storage,
+            scope_label=wipe_scope_label(params),
+            records=records,
+            attachments=attachments,
+        )
+    except Exception:
+        logger.exception('Failed to create pre-wipe archive')
+        return build_redirect_with_message(
+            error='Не удалось создать архив очистки — очистка отменена',
+            url='/admin/maintenance',
+        )
+
+    records_deleted, attachments_deleted = await asyncio.to_thread(perform_wipe, storage, params, records)
+    try:
+        # DELETE не сжимает файл SQLite: перестраиваем базу, чтобы место
+        # реально освободилось (№18). Только здесь — редкая админская операция.
+        await asyncio.to_thread(storage.vacuum)
+    except Exception:
+        logger.exception('VACUUM after wipe failed')
+
+    freed_db_bytes = max(0, db_size_before - file_size(Path(settings.database_path)))
+    freed_total = freed_db_bytes + freed_files_bytes
+
+    summary = log_wipe_execution(request, params, archive, records_deleted, attachments_deleted, freed_total)
+    return build_redirect_with_message(message=summary, url='/admin/maintenance')
+
+
+@app.post('/admin/maintenance/backup')
+async def backup_now(request: Request):
+    """Ручной бэкап (№10): та же логика, что у таймерного scripts/backup_sqlite.py."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    result = await asyncio.to_thread(
+        run_backup,
+        Path(settings.database_path),
+        backups_dir(),
+        14,
+        files_dir(),
+    )
     log_audit_event(
         request,
-        'db_wiped',
+        'backup_created',
         {
-            'scope': scope,
-            'records_deleted': records_deleted,
-            'attachments_deleted': attachments_deleted,
+            'source': 'manual',
+            'archive': result['archive'].name,
+            'archive_size': result['archive'].stat().st_size,
+            'files_archive': result['files_archive'].name if result['files_archive'] else None,
         },
     )
-    summary = f'Очистка выполнена: удалено записей {records_deleted}, вложений {attachments_deleted}'
-    return build_redirect_with_message(message=summary, url='/admin/maintenance')
+    message = f'Бэкап создан: {result["archive"].name}'
+    if result['files_archive'] is not None:
+        message += f', вложения: {result["files_archive"].name}'
+    return build_redirect_with_message(message=message, url='/admin/maintenance')
+
+
+BACKUP_DOWNLOAD_NAME = re.compile(r'\A[A-Za-z0-9][A-Za-z0-9._-]*\Z')
+BACKUP_CONTENT_TYPES = {
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.zip': 'application/zip',
+    '.gz': 'application/gzip',
+}
+
+
+@app.get('/admin/maintenance/backups/<filename>')
+async def download_backup(request: Request, filename: str):
+    """Скачать файл из data/backups (архивы очисток и бэкапы).
+
+    Имя строго валидируется (без путей и спецсимволов) + контроль после
+    resolve() — защита от path-traversal.
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    if not BACKUP_DOWNLOAD_NAME.fullmatch(filename):
+        return text(body='Invalid backup filename', status=400)
+
+    root = backups_dir().resolve()
+    target = (root / filename).resolve()
+    if target.parent != root or not target.is_file():
+        return text(body='Not Found', status=404)
+
+    content_type = BACKUP_CONTENT_TYPES.get(target.suffix.lower(), 'application/octet-stream')
+    return raw(
+        await asyncio.to_thread(target.read_bytes),
+        headers={
+            'content-type': content_type,
+            'content-disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def parse_audit_filters(request: Request) -> tuple[dict, dict, str | None]:
+    """Фильтры журнала из GET-параметров.
+
+    Возвращает (storage-фильтры с ISO-датами, сырые значения для формы/ссылок,
+    текст ошибки или None).
+    """
+    args = dict(request.args)
+    user_filter = (get_param(args, 'user') or '').strip()
+    action_filter = (get_param(args, 'action') or '').strip()
+    date_from_raw = (get_param(args, 'date_from') or '').strip()
+    date_to_raw = (get_param(args, 'date_to') or '').strip()
+    raw_values = {
+        'user': user_filter,
+        'action': action_filter,
+        'date_from': date_from_raw,
+        'date_to': date_to_raw,
+    }
+
+    iso_dates = {}
+    for key in ('date_from', 'date_to'):
+        raw_value = raw_values[key]
+        if not raw_value:
+            iso_dates[key] = None
+            continue
+        try:
+            iso_dates[key] = datetime.strptime(raw_value, settings.date_format).date().isoformat()
+        except ValueError:
+            return {}, raw_values, f'Некорректная дата фильтра: {raw_value}'
+
+    filters = {
+        'username': user_filter or None,
+        'action': action_filter or None,
+        'date_from': iso_dates['date_from'],
+        'date_to': iso_dates['date_to'],
+    }
+    return filters, raw_values, None
 
 
 @app.get('/admin/audit')
 async def audit_page(request: Request):
+    # Журнал с фильтрами (пользователь/действие/период) и пагинацией —
+    # «стрелки + N из M» (замечание №14 из FEEDBACK.md).
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
 
-    events: list[dict] = []
-    audit_available = True
+    filters, raw_values, error = parse_audit_filters(request)
+    if error is not None:
+        return text(body=error, status=400)
+
     try:
-        events = get_storage(request.app).get_audit_events(limit=AUDIT_PAGE_LIMIT)
+        page = max(1, int(get_param(dict(request.args), 'page') or 1))
+    except ValueError:
+        page = 1
+
+    events: list[dict] = []
+    actions: list[str] = []
+    audit_available = True
+    total = 0
+    try:
+        storage = get_storage(request.app)
+        total = storage.count_audit_events(**filters)
+        pages = max(1, -(-total // AUDIT_PAGE_SIZE))
+        page = min(page, pages)
+        events = storage.get_audit_events(limit=AUDIT_PAGE_SIZE, offset=(page - 1) * AUDIT_PAGE_SIZE, **filters)
+        actions = storage.list_audit_actions()
     except Exception:
         logger.exception('Failed to read audit events')
         audit_available = False
+        pages = 1
+        page = 1
+
+    query = urlencode({key: value for key, value in raw_values.items() if value})
+
+    def page_url(page_number: int) -> str:
+        return f'/admin/audit?{query}&page={page_number}' if query else f'/admin/audit?page={page_number}'
+
     return await render(
         template_name=jinja_env.get_template('audit.html'),
         context={
             'request': request,
             'events': events,
             'audit_available': audit_available,
+            'actions': actions,
+            'filters': raw_values,
+            'page': page,
+            'pages': pages,
+            'total': total,
+            'page_size': AUDIT_PAGE_SIZE,
+            'prev_url': page_url(page - 1) if page > 1 else None,
+            'next_url': page_url(page + 1) if page < pages else None,
         },
     )
 
