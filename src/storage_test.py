@@ -517,12 +517,211 @@ def test_count_records_using_by_category(adapter):
 def test_get_and_delete_catalog_value(adapter):
     adapter.add_catalog_value('institute', 'ИСИ')
     row = adapter.get_catalog_value(adapter.list_catalog_all('institute')[0]['id'])
-    assert row == {'id': row['id'], 'category': 'institute', 'value': 'ИСИ', 'active': 1}
+    assert row == {'id': row['id'], 'category': 'institute', 'value': 'ИСИ', 'parent_id': None, 'active': 1}
     assert adapter.get_catalog_value(999) is None
 
     adapter.delete_catalog_value(row['id'])
     assert adapter.list_catalog_all('institute') == []
     assert adapter.get_catalog_value(row['id']) is None
+
+
+# --- Иерархия справочника: институты содержат группы (№15) ---
+
+
+LEGACY_CATALOG_DDL = '''
+    CREATE TABLE catalog_values (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,
+        value TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        UNIQUE (category, value)
+    )
+'''
+
+
+def seed_legacy_catalog_records(connection, rows):
+    connection.executemany(
+        'INSERT INTO competitions (student_id, student_name, student_sex, institute, "group",'
+        ' course, sport, date, level, name, position, created_at)'
+        " VALUES ('h', ?, 'М', ?, ?, 2, 'Бег', '2026-01-01', 'внутривузовские', 'Кубок', 1, '2026-01-01')",
+        rows,
+    )
+
+
+def test_catalog_hierarchy_migration_populates_pairs(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / 'legacy-catalog.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(LEGACY_COMPETITIONS_DDL)
+    seed_legacy_catalog_records(
+        connection,
+        [
+            ('Первый', 'ИСИ', 'ПГС-101'),
+            ('Второй', 'ИСИ', 'ПГС-101'),  # дубль пары — группа одна
+            ('Третий', 'ИСИ', 'ПГС-102'),
+            ('Четвёртый', 'ФМА', 'ПГС-101'),  # одноимённая группа другого института
+            ('Пятый', '', 'ПГС-777'),  # без института пара не создаётся
+        ],
+    )
+    connection.execute(LEGACY_CATALOG_DDL)
+    connection.execute(
+        "INSERT INTO catalog_values (category, value, active, created_at) VALUES ('sport', 'Бег', 1, '2026-01-01')"
+    )
+    connection.execute(
+        "INSERT INTO catalog_values (category, value, active, created_at) VALUES ('institute', 'ФМА', 1, '2026-01-01')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(catalog_values)')}
+    assert 'parent_id' in columns
+
+    # плоские легаси-значения пережили миграцию без изменений
+    sport_rows = adapter.list_catalog_all('sport')
+    assert [row['value'] for row in sport_rows] == ['Бег']
+    assert all(row['parent_id'] is None for row in sport_rows)
+
+    tree = {inst['value']: {group['value'] for group in inst['groups']} for inst in adapter.list_catalog_tree()}
+    assert tree == {'ИСИ': {'ПГС-101', 'ПГС-102'}, 'ФМА': {'ПГС-101'}}
+
+    # каждая группа смотрит на запись своего института
+    for institute in adapter.list_catalog_tree():
+        for group in institute['groups']:
+            row = adapter.get_catalog_value(group['id'])
+            parent = adapter.get_catalog_value(row['parent_id'])
+            assert row['category'] == 'group'
+            assert parent['value'] == institute['value']
+
+    # повторная инициализация не дублирует пары
+    reopened = SQLiteAdapter(str(db_path))
+    tree_again = {inst['value']: {group['value'] for group in inst['groups']} for inst in reopened.list_catalog_tree()}
+    assert tree_again == tree
+
+
+def test_ensure_catalog_pair_builds_hierarchy(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')  # идемпотентно
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-102')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-101')  # одноимённая группа другого института
+    adapter.ensure_catalog_pair('', 'ПГС-777')  # без института — игнор
+    adapter.ensure_catalog_pair('АДИ', '')  # без группы — игнор
+
+    tree = {inst['value']: {group['value'] for group in inst['groups']} for inst in adapter.list_catalog_tree()}
+    assert tree == {'ИСИ': {'ПГС-101', 'ПГС-102'}, 'ФМА': {'ПГС-101'}}
+
+    # уникальность (parent, value): прямые вставки тоже не дублируют
+    isi_id = adapter.list_catalog_tree()[0]['id']
+    adapter.add_catalog_value('group', 'ПГС-101', parent_id=isi_id)
+    adapter.add_catalog_value('group', 'ПГС-101', parent_id=isi_id)
+    group_rows = [row for row in adapter.list_catalog_all('group') if row['parent_id'] == isi_id]
+    assert [row['value'] for row in group_rows] == ['ПГС-101', 'ПГС-102']
+
+
+def test_group_options_by_institute_respect_hidden(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-201')
+    assert adapter.get_group_options_by_institute() == {'ИСИ': ['ПГС-101'], 'ФМА': ['ПГС-201']}
+
+    isi = next(inst for inst in adapter.list_catalog_tree() if inst['value'] == 'ИСИ')
+    hidden_group = next(group for group in isi['groups'] if group['value'] == 'ПГС-101')
+    adapter.hide_catalog_value(hidden_group['id'])
+
+    # скрытая группа уходит из подсказок, но остаётся в дереве админки
+    assert adapter.get_group_options_by_institute() == {'ФМА': ['ПГС-201']}
+    isi_after = next(inst for inst in adapter.list_catalog_tree() if inst['value'] == 'ИСИ')
+    assert any(group['value'] == 'ПГС-101' and not group['active'] for group in isi_after['groups'])
+
+
+def test_count_records_using_group_counts_pairs(adapter):
+    first = make_competition('Первый', datetime(2026, 1, 1))  # ИСИ / ПГС-101
+    second = make_competition('Второй', datetime(2026, 1, 2))  # ИСИ / ПГС-101
+    third = make_competition('Третий', datetime(2026, 1, 3))  # ИСИ / ПГС-999
+    third.group = 'ПГС-999'
+    fourth = make_competition('Четвёртый', datetime(2026, 1, 4))  # ФМА / ПГС-101
+    fourth.institute = 'ФМА'  # та же группа, другой институт
+    adapter.save_competitions([first, second, third, fourth])
+
+    assert adapter.count_records_using('group', 'ПГС-101', parent_value='ИСИ') == 2
+    assert adapter.count_records_using('group', 'ПГС-101', parent_value='ФМА') == 1
+    assert adapter.count_records_using('group', 'ПГС-101') == 3  # плоское вхождение
+    assert adapter.count_records_using('institute', 'ИСИ') == 3
+
+
+def test_count_child_groups_for_institute_delete_guard(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-102')
+    adapter.add_catalog_value('institute', 'ФМА')  # институт без групп
+
+    isi = next(inst for inst in adapter.list_catalog_tree() if inst['value'] == 'ИСИ')
+    assert adapter.count_child_groups(isi['id']) == 2
+
+    adapter.delete_catalog_value(isi['groups'][0]['id'])
+    assert adapter.count_child_groups(isi['id']) == 1
+
+    fma_id = next(inst for inst in adapter.list_catalog_tree() if inst['value'] == 'ФМА')['id']
+    assert adapter.count_child_groups(fma_id) == 0
+
+
+# --- Присутствие пользователей: last_login_at / last_seen_at (№17) ---
+
+
+def test_users_presence_columns_migrated(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / 'legacy-users.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            pwd_ver INTEGER NOT NULL DEFAULT 0
+        )
+        '''
+    )
+    connection.execute("INSERT INTO users (username, password_hash, role) VALUES ('admin', 'x', 'admin')")
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(users)')}
+    assert {'last_login_at', 'last_seen_at'} <= columns
+
+
+def test_set_user_last_login_writes_login_and_seen(adapter):
+    adapter.create_user('ann', 'hash', 'viewer')
+    user_id = adapter.get_user('ann')['id']
+    assert adapter.list_users()[0]['last_login_at'] is None
+
+    adapter.set_user_last_login(user_id, when=datetime(2026, 9, 13, 10, 0, 0))
+    user = adapter.list_users()[0]
+    assert user['last_login_at'] == '2026-09-13T10:00:00'
+    assert user['last_seen_at'] == '2026-09-13T10:00:00'
+
+
+def test_touch_user_seen_throttled_to_one_update(adapter):
+    adapter.create_user('bob', 'hash', 'viewer')
+    user_id = adapter.get_user('bob')['id']
+
+    assert adapter.touch_user_seen(user_id) is True
+    first_seen = adapter.list_users()[0]['last_seen_at']
+    assert first_seen is not None
+
+    # второй вызов подряд в пределах окна — UPDATE не происходит
+    assert adapter.touch_user_seen(user_id) is False
+    assert adapter.list_users()[0]['last_seen_at'] == first_seen
+
+    # когда last_seen старше окна троттлинга — обновляется снова
+    adapter.connection.execute("UPDATE users SET last_seen_at = '2020-01-01T00:00:00'")
+    adapter.connection.commit()
+    assert adapter.touch_user_seen(user_id) is True
+    assert adapter.list_users()[0]['last_seen_at'] != '2020-01-01T00:00:00'
 
 
 def test_list_users_includes_name_aliases(adapter):

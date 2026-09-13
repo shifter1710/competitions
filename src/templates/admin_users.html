@@ -27,6 +27,7 @@
                     <tr>
                         <th>Логин</th>
                         <th>Роль</th>
+                        <th>Статус</th>
                         <th>Активность</th>
                         <th>Записей</th>
                         <th>Псевдонимы</th>
@@ -49,6 +50,16 @@
                             {% endif %}
                         </td>
                         <td>{% if user.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">отключён</span>{% endif %}</td>
+                        {# Присутствие (№17): «онлайн» — приближение по last_seen
+                           за 5 минут; остальное — «был(а): …». В подсказке —
+                           последний вход. #}
+                        <td class="user-activity-cell" title="Последний вход: {{ user.last_login_label }}">
+                            {% if user.presence.online %}
+                            <span class="presence-dot presence-dot-online" aria-hidden="true"></span> онлайн
+                            {% else %}
+                            <span class="text-muted">был(а): {{ user.presence.label }}</span>
+                            {% endif %}
+                        </td>
                         <td><span class="badge text-bg-light border">{{ user.records_count }}</span></td>
                         <td class="small text-muted">{{ user.name_aliases | join(', ') if user.name_aliases else '—' }}</td>
                         <td class="text-end">

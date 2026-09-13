@@ -12,6 +12,8 @@ import time
 import uuid
 import zipfile
 from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Iterable
@@ -137,7 +139,11 @@ DEFAULT_LEVELS = ('внутривузовские', 'межвузовские')
 # Управляемые справочники значений: записи остаются свободным текстом,
 # справочник — только подсказки (docs/data-model-decisions.md,
 # «Справочники значений»). Уровни живут в своей таблице на той же странице.
+# Группы — иерархическая категория: существуют только с parent_id на
+# институт, поэтому в одиночное создание не входят.
 CATALOG_CATEGORIES: Sequence[str] = ('sport', 'institute')
+GROUP_CATEGORY = 'group'
+CATALOG_MANAGE_CATEGORIES: Sequence[str] = (*CATALOG_CATEGORIES, GROUP_CATEGORY)
 
 
 def seed_levels(storage: SQLiteAdapter):
@@ -295,6 +301,8 @@ def parse_auth_cookie(request: Request) -> dict | None:
             return None
         if int(user.get('pwd_ver', 0)) != payload['pwd_ver']:
             return None
+        # id нужен middleware присутствия (№17): last_seen без лишнего запроса.
+        return {'username': payload['username'], 'role': payload['role'], 'id': user['id']}
 
     return {'username': payload['username'], 'role': payload['role']}
 
@@ -664,6 +672,41 @@ def get_student_infos(request: Request) -> Iterable[StudentInfo] | None:
     return student_infos
 
 
+# Присутствие пользователей (№17): last_seen обновляется не чаще раза в
+# PRESENCE_THROTTLE_SECONDS на пользователя. Кэш в памяти экономит сам вызов
+# storage; окончательный троттлинг — в UPDATE (storage.touch_user_seen),
+# поэтому несколько воркеров не amplify-ят запись.
+PRESENCE_THROTTLE_SECONDS = 60
+PRESENCE_ONLINE_WINDOW = timedelta(minutes=5)
+
+_last_seen_touch: dict[int, float] = {}
+
+
+def reset_presence_tracking() -> None:
+    """Сбросить кэш троттлинга (для тестов)."""
+    _last_seen_touch.clear()
+
+
+def touch_user_seen(request: Request) -> None:
+    """Обновить last_seen аутентифицированного пользователя (№17).
+
+    Активность — сам факт запроса с валидной сессией; сбой обновления не
+    должен ломать запрос, поэтому ошибки глотаем с логом.
+    """
+    try:
+        user = get_auth_user(request) or {}
+        user_id = user.get('id')
+        if not user_id:
+            return
+        now = time.monotonic()
+        if now - _last_seen_touch.get(user_id, 0.0) < PRESENCE_THROTTLE_SECONDS:
+            return
+        get_storage(request.app).touch_user_seen(user_id)
+        _last_seen_touch[user_id] = now
+    except Exception:
+        logger.exception('Failed to update last_seen_at')
+
+
 @app.on_request
 async def authorize_request(request: Request):
     request.ctx.auth_user = parse_auth_cookie(request)
@@ -675,6 +718,7 @@ async def authorize_request(request: Request):
         return None
 
     if get_auth_user(request):
+        touch_user_seen(request)
         if request.method == 'POST' and request.path != '/login':
             if not request_csrf_is_valid(request):
                 return text(body='CSRF token missing or invalid', status=403)
@@ -729,6 +773,12 @@ async def login(request: Request):
         user_id=user.get('id'),
         username=user['username'],
     )
+    try:
+        # Присутствие (№17): успешный вход фиксирует last_login_at
+        # (и last_seen — вход тоже активность).
+        get_storage(request.app).set_user_last_login(user['id'])
+    except Exception:
+        logger.exception('Failed to update last_login_at')
     response = redirect('/')
     set_auth_cookie(request, response, user['username'], user['role'], pwd_ver=user.get('pwd_ver', 0))
     return response
@@ -766,6 +816,7 @@ async def index(request: Request):
             'levels': storage.get_level_names(),
             'sport_options': storage.list_catalog('sport'),
             'institute_options': storage.list_catalog('institute'),
+            'groups_by_institute': storage.get_group_options_by_institute(),
             'has_unapproved': any(c.review_status != 'approved' for c in competitions),
             'attachments_by_record': build_attachments_by_record(storage.get_attachments()),
             'admin_levels': storage.list_levels() if user_is_admin(request) else [],
@@ -869,7 +920,7 @@ async def admin_catalogs_page(request: Request):
         context={
             'request': request,
             'sport_values': build_catalog_entries(storage, 'sport'),
-            'institute_values': build_catalog_entries(storage, 'institute'),
+            'institute_tree': storage.list_catalog_tree(),
             'admin_levels': [
                 {**level, 'records_count': storage.count_records_using('level', level['name'])}
                 for level in storage.list_levels()
@@ -881,7 +932,7 @@ async def admin_catalogs_page(request: Request):
 
 def resolve_catalog_value(request: Request, category: str, value_id: str):
     """Общая проверка для действий над значением справочника: категория и id."""
-    if category not in CATALOG_CATEGORIES:
+    if category not in CATALOG_MANAGE_CATEGORIES:
         return None, text(body='Unknown catalog', status=404)
     try:
         numeric_value_id = int(value_id)
@@ -945,7 +996,11 @@ async def delete_catalog_value(request: Request, category: str, value_id: str):
         return error
 
     storage = get_storage(request.app)
-    records_count = storage.count_records_using(category, row['value'])
+    parent_value = None
+    if category == GROUP_CATEGORY and row.get('parent_id'):
+        parent = storage.get_catalog_value(row['parent_id'])
+        parent_value = parent['value'] if parent else None
+    records_count = storage.count_records_using(category, row['value'], parent_value=parent_value)
     if records_count > 0:
         # Значение висит на записях — историчность неприкосновенна, удалять нельзя.
         return text(
@@ -953,8 +1008,100 @@ async def delete_catalog_value(request: Request, category: str, value_id: str):
             status=400,
         )
 
+    if category == 'institute':
+        child_groups = storage.count_child_groups(row['id'])
+        if child_groups:
+            # Группы без родителя не бывают: не оставляем сирот, удаление
+            # института — только после удаления его групп.
+            return text(
+                body=f'У института «{row["value"]}» есть группы ({child_groups}) — сначала удалите их',
+                status=400,
+            )
+
     storage.delete_catalog_value(row['id'])
     return build_redirect_with_message(message='Значение удалено', url='/admin/catalogs')
+
+
+@app.post('/admin/catalogs/institute/<institute_id>/group')
+async def create_catalog_group(request: Request, institute_id: str):
+    """Добавить группу в институт (иерархия справочника, №15)."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    try:
+        numeric_institute_id = int(institute_id)
+    except ValueError:
+        return text(body='Invalid value id', status=400)
+
+    storage = get_storage(request.app)
+    institute = storage.get_catalog_value(numeric_institute_id)
+    if institute is None or institute['category'] != 'institute':
+        return build_redirect_with_message(error='Институт не найден', url='/admin/catalogs')
+
+    value = get_form_value(request, 'value').strip()
+    if not value:
+        return build_redirect_with_message(error='Название группы обязательно', url='/admin/catalogs')
+
+    storage.add_catalog_value(GROUP_CATEGORY, value, parent_id=institute['id'])
+    return build_redirect_with_message(
+        message=f'Группа «{value}» добавлена в институт «{institute["value"]}»',
+        url='/admin/catalogs',
+    )
+
+
+def ru_plural(number: int, one: str, few: str, many: str) -> str:
+    """Русская плюрализация: 1 минуту / 2 минуты / 5 минут."""
+    mod_100 = number % 100
+    mod_10 = number % 10
+    if mod_100 in range(11, 15):
+        return many
+    if mod_10 == 1:
+        return one
+    if mod_10 in range(2, 5):
+        return few
+    return many
+
+
+def format_login_moment(raw_value) -> str:
+    """Последний вход для подсказки: дд.мм.гггг чч:мм или «—»."""
+    if not raw_value:
+        return '—'
+    try:
+        moment = datetime.fromisoformat(str(raw_value)).replace(tzinfo=timezone.utc).astimezone()
+    except ValueError:
+        return '—'
+    return moment.strftime('%d.%m.%Y %H:%M')
+
+
+def describe_presence(last_seen_raw, *, now: datetime | None = None) -> dict:
+    """Колонка «Активность» на /admin/users (№17).
+
+    «Онлайн» = last_seen в пределах PRESENCE_ONLINE_WINDOW (сессии
+    stateless-cookie, точного списка живых сессий нет — приближение).
+    Остальное — человекочитаемое «был(а): …»; храним в UTC, показываем
+    локальное время сервера.
+    """
+    if not last_seen_raw:
+        return {'online': False, 'label': '—'}
+    try:
+        last_seen = datetime.fromisoformat(str(last_seen_raw)).replace(tzinfo=timezone.utc).astimezone()
+    except ValueError:
+        return {'online': False, 'label': '—'}
+
+    local_now = now or datetime.now(timezone.utc).astimezone()
+    delta = max(timedelta(0), local_now - last_seen)
+    if delta <= PRESENCE_ONLINE_WINDOW:
+        return {'online': True, 'label': 'онлайн'}
+
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return {'online': False, 'label': f'{minutes} {ru_plural(minutes, "минуту", "минуты", "минут")} назад'}
+
+    if last_seen.date() == local_now.date():
+        return {'online': False, 'label': f'сегодня {last_seen.strftime("%H:%M")}'}
+    if last_seen.date() == (local_now - timedelta(days=1)).date():
+        return {'online': False, 'label': f'вчера {last_seen.strftime("%H:%M")}'}
+    return {'online': False, 'label': last_seen.strftime('%d.%m.%Y %H:%M')}
 
 
 @app.get('/admin/users')
@@ -963,7 +1110,15 @@ async def admin_users_page(request: Request):
     if auth_error is not None:
         return auth_error
     storage = get_storage(request.app)
-    users = [{**user, 'records_count': storage.count_records_by_owner(user['id'])} for user in storage.list_users()]
+    users = [
+        {
+            **user,
+            'records_count': storage.count_records_by_owner(user['id']),
+            'presence': describe_presence(user.get('last_seen_at')),
+            'last_login_label': format_login_moment(user.get('last_login_at')),
+        }
+        for user in storage.list_users()
+    ]
     return await render(
         template_name=jinja_env.get_template('admin_users.html'),
         context={
@@ -1110,12 +1265,15 @@ def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competi
 
     Как с уровнями: справочник только собирает подсказки и ничего не
     перезаписывает в записях (docs/data-model-decisions.md). Дубликаты
-    игнорируются на стороне storage.
+    игнорируются на стороне storage. Пара институт→группа попадает в иерархию:
+    группа кладётся под свой институт (уникальность (parent, value)).
     """
     for competition in competitions:
         for category, value in (('sport', competition.sport), ('institute', competition.institute)):
             if value:
                 storage.add_catalog_value(category, value)
+        if competition.institute and competition.group:
+            storage.ensure_catalog_pair(competition.institute, competition.group)
 
 
 def split_import_competitions(

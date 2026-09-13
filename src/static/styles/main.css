@@ -229,6 +229,70 @@ select {
     flex: none;
 }
 
+/* Комбобоксы «Институт» и «Группа» в инлайн-строке (№4): поле + кнопка-
+   стрелка; сам список — в <body> с position: fixed, потому что .table-
+   responsive (overflow: auto) обрезал бы absolute-элемент внутри ячейки. */
+.interactive-table .row-editing .inline-combobox-group {
+    display: flex;
+    min-width: 128px;
+}
+
+.interactive-table .row-editing .inline-combobox-group .form-control {
+    min-width: 0;
+}
+
+.interactive-table .row-editing .combobox-toggle {
+    flex: none;
+}
+
+.combobox-dropdown {
+    position: fixed;
+    z-index: 1060; /* над закреплённой колонкой действий (z-index 1–2) */
+    min-width: 180px;
+    max-height: 220px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 0.25rem 0;
+    list-style: none;
+    font-size: 0.875rem;
+    color: var(--bs-body-color);
+    background-color: var(--bs-body-bg);
+    border: var(--bs-border-width) solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, .175);
+}
+
+.combobox-option {
+    padding: 0.25rem 0.75rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.combobox-option:hover,
+.combobox-option.combobox-option-active {
+    background-color: var(--bs-secondary-bg);
+}
+
+.combobox-empty {
+    padding: 0.25rem 0.75rem;
+    color: var(--bs-secondary-color);
+    white-space: nowrap;
+}
+
+/* Индикатор присутствия на /admin/users (№17): зелёная точка у «онлайн». */
+.presence-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--bs-secondary-color);
+    vertical-align: middle;
+}
+
+.presence-dot-online {
+    background-color: var(--bs-success);
+}
+
 /* Закреплённая колонка «Действия» (замечания №5/№9): sticky right, чтобы
    «Редактировать/Удалить» и «Сохранить/Отмена» были всегда видны при
    горизонтальной прокрутке. Фон ячеек уже непрозрачный (Bootstrap красит
