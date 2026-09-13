@@ -124,7 +124,10 @@ def test_levels_seed_and_directory(adapter):
     adapter.create_level('всероссийские')
     assert 'всероссийские' in adapter.get_level_names()
 
-    adapter.rename_level(1, 'внутривузовские (обновлено)')
+    # Переименование уровня — единый механизм справочников (решение 2026-09-13)
+    updated = adapter.rename_catalog_value('level', 'внутривузовские', 'внутривузовские (обновлено)')
+    assert updated == 0  # записей с этим уровнем в базе нет
+    assert 'внутривузовские (обновлено)' in adapter.get_level_names()
     adapter.disable_level(2)
     assert 'межвузовские' not in adapter.get_level_names()
     assert 'межвузовские' in adapter.get_level_names(include_inactive=True)
@@ -793,6 +796,130 @@ def test_count_child_groups_for_institute_delete_guard(adapter):
     assert adapter.count_child_groups(fma_id) == 0
 
 
+# --- Переименование значений справочников (решение 2026-09-13) ---
+
+
+def test_rename_level_updates_table_and_records(adapter):
+    regional = make_competition('Регионов Регион', datetime(2026, 1, 1))
+    regional.level = 'региональные'
+    urban = make_competition('Городов Город', datetime(2026, 2, 1))
+    urban.level = 'городские'
+    adapter.save_competitions([regional, urban, make_competition('Базов Базовый', datetime(2026, 3, 1))])
+    adapter.create_level('региональные')
+
+    updated = adapter.rename_catalog_value('level', 'региональные', 'областные')
+
+    # И таблица уровней, и записи (уровень в записях — текст)
+    assert updated == 1
+    names = set(adapter.get_level_names(include_inactive=True))
+    assert 'областные' in names
+    assert 'региональные' not in names
+    levels_in_records = {comp.level for comp in adapter.get_competitions()}
+    assert levels_in_records == {'областные', 'городские', 'внутривузовские'}
+
+
+def test_rename_group_updates_records_only_within_institute(adapter):
+    first = make_competition('Первый', datetime(2026, 1, 1))  # ИСИ / ПГС-101
+    second = make_competition('Второй', datetime(2026, 1, 2))  # ИСИ / ПГС-101
+    third = make_competition('Третий', datetime(2026, 1, 3))  # ФМА / ПГС-101 — та же группа, другой институт
+    third.institute = 'ФМА'
+    adapter.save_competitions([first, second, third])
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-101')
+
+    updated = adapter.rename_catalog_value('group', 'ПГС-101', 'ПГС-101А', parent_value='ИСИ')
+
+    assert updated == 2
+    # Справочник: пара (ИСИ+ПГС-101) переименована, одноимённая группа ФМА не тронута
+    tree = {inst['value']: {group['value'] for group in inst['groups']} for inst in adapter.list_catalog_tree()}
+    assert tree == {'ИСИ': {'ПГС-101А'}, 'ФМА': {'ПГС-101'}}
+    # Записи: обновлены только записи института ИСИ
+    pairs_in_records = {(comp.institute, comp.group) for comp in adapter.get_competitions()}
+    assert pairs_in_records == {('ИСИ', 'ПГС-101А'), ('ФМА', 'ПГС-101')}
+
+
+def test_rename_without_update_records_leaves_records(adapter):
+    skier = make_competition('Лыжников Лыжник', datetime(2026, 1, 1))
+    skier.sport = 'Лыжи'
+    adapter.save_competitions([skier])
+    adapter.add_catalog_value('sport', 'Лыжи')
+
+    updated = adapter.rename_catalog_value('sport', 'Лыжи', 'Горные лыжи', update_records=False)
+
+    assert updated == 0
+    assert adapter.list_catalog('sport') == ['Горные лыжи']
+    assert {comp.sport for comp in adapter.get_competitions()} == {'Лыжи'}
+
+
+def test_rename_rejects_conflicts_and_missing_values(adapter):
+    adapter.add_catalog_value('sport', 'Бег')
+    adapter.add_catalog_value('sport', 'Лыжи')
+    adapter.save_competitions([make_competition('Бегунов Бегун', datetime(2026, 1, 1))])  # спорт «Бег»
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-102')
+    adapter.create_level('городские')
+    adapter.create_level('региональные')
+
+    # конфликт с существующим значением той же категории
+    with pytest.raises(ValueError, match='уже есть'):
+        adapter.rename_catalog_value('sport', 'Бег', 'Лыжи')
+    # конфликт уровней
+    with pytest.raises(ValueError, match='уже существует'):
+        adapter.rename_catalog_value('level', 'городские', 'региональные')
+    # конфликт групп — только внутри своего института
+    with pytest.raises(ValueError, match='уже есть'):
+        adapter.rename_catalog_value('group', 'ПГС-101', 'ПГС-102', parent_value='ИСИ')
+    # одноимённая группа другого института — другое значение справочника,
+    # конфликта нет (уникальность (parent, value), а не просто value)
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-101')
+    assert adapter.rename_catalog_value('group', 'ПГС-101', 'ПГС-102', parent_value='ФМА') == 0
+
+    # отсутствующие значения и мусорные аргументы
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('sport', 'Плавание', 'Прыжки')
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('level', 'несуществующий', 'новый')
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('group', 'ПГС-101', 'ПГС-103')  # без института
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('group', 'ПГС-101', 'ПГС-103', parent_value='АДИ')  # институт не найден
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('sport', 'Бег', 'Бег')  # то же имя
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('sport', 'Бег', '   ')  # пустое имя
+    with pytest.raises(ValueError):
+        adapter.rename_catalog_value('unknown', 'Бег', 'Прыжки')
+
+    # Отказ ничего не меняет: справочник и записи как были
+    assert {row['value'] for row in adapter.list_catalog_all('sport')} == {'Бег', 'Лыжи'}
+    assert {comp.sport for comp in adapter.get_competitions()} == {'Бег'}
+    assert set(adapter.get_level_names(include_inactive=True)) >= {'городские', 'региональные'}
+
+
+def test_import_after_rename_with_update_does_not_resurrect_old_value(adapter):
+    """Инцидент 2026-09-13: импорт возвращал переименованный уровень.
+
+    Справочники сеются из записей: после переименования с обновлением в
+    записях старого значения нет, поэтому повторный импорт того же файла
+    (все строки — дубли, вставки нет) его не возвращает. Файл с реально
+    новыми строками и старым уровнем — вернёт: значение снова есть в записях.
+    """
+    rows = [make_import_row('Регионов Регион Регионович', 0, level='региональные')]
+    adapter.import_competitions(rows)
+    assert 'региональные' in adapter.get_level_names(include_inactive=True)
+
+    assert adapter.rename_catalog_value('level', 'региональные', 'областные') == 1
+
+    adapter.import_competitions([])  # повторный импорт: все строки — дубли
+    names = set(adapter.get_level_names(include_inactive=True))
+    assert 'региональные' not in names
+    assert 'областные' in names
+
+    fresh = [make_import_row('Новенький Новый Новичкович', 4, level='региональные')]
+    adapter.import_competitions(fresh)
+    assert 'региональные' in adapter.get_level_names(include_inactive=True)
+
+
 # --- Присутствие пользователей: last_login_at / last_seen_at (№17) ---
 
 
@@ -1079,12 +1206,15 @@ def make_import_row(name: str, index: int, **overrides) -> Competition:
 
 def test_import_competitions_autofills_levels_and_catalogs(adapter):
     rows = [make_import_row(f'Студентов Студент {index:05d}', index) for index in range(20)]
-    # Строка-дубль не вставляется, но её значения попадают в справочники —
-    # семантика бывших ensure_levels/ensure_catalog_values из src/main.py.
-    duplicate_row = make_import_row('Дублей Дублий Дублиевич', 3, sport='Уникальный спорт')
     new_rows = rows[:10]
 
-    adapter.import_competitions([*rows, duplicate_row], new_rows, owner_id=7)
+    # Значения сеются ИЗ ВСТАВЛЕННЫХ ЗАПИСЕЙ (решение 2026-09-13): строки,
+    # отсеянные как дубли, справочник не пополняют — иначе следующий импорт
+    # того же файла возвращал бы значения, переименованные с обновлением
+    # записей (инцидент 2026-09-13).
+    duplicate_row = make_import_row('Дублей Дублий Дублиевич', 3, sport='Уникальный спорт')
+
+    adapter.import_competitions(new_rows, owner_id=7)
 
     assert adapter.count_competitions() == len(new_rows)
     saved = adapter.get_competitions()
@@ -1095,13 +1225,15 @@ def test_import_competitions_autofills_levels_and_catalogs(adapter):
     levels = set(adapter.get_level_names(include_inactive=True))
     assert {'внутривузовские', 'межвузовские'} <= levels
     sports = set(adapter.list_catalog('sport'))
-    assert {f'Спорт-{index % 13}' for index in range(20)} <= sports
-    assert 'Уникальный спорт' in sports  # значение из строки-дубля тоже в справочнике
+    assert {f'Спорт-{index % 13}' for index in range(10)} <= sports
+    assert 'Уникальный спорт' not in sports  # значение строки-дубля не сеется
     institutes = set(adapter.list_catalog('institute'))
-    assert {f'ИПК-{index % 7}' for index in range(20)} <= institutes
+    assert {f'ИПК-{index % 7}' for index in range(10)} <= institutes
     # Пары институт→группа сложены иерархией: группа под своим институтом.
     options = adapter.get_group_options_by_institute()
     assert 'Г-3' in options['ИПК-3']
+    # Строка-дубль не вставлена — её уникального спорта в справочнике нет.
+    assert duplicate_row.student_name not in {row.student_name for row in saved}
 
 
 def test_import_competitions_is_atomic_on_failure(adapter, monkeypatch):
@@ -1125,7 +1257,7 @@ def test_import_competitions_is_atomic_on_failure(adapter, monkeypatch):
 
     monkeypatch.setattr(adapter, 'connection', MidBatchFailureConnection(adapter.connection))
     with pytest.raises(sqlite3.IntegrityError):
-        adapter.import_competitions(rows, rows)
+        adapter.import_competitions(rows)
     monkeypatch.undo()
 
     # Либо все строки импорта, либо ничего: откатились и записи, и справочники.
@@ -1135,7 +1267,7 @@ def test_import_competitions_is_atomic_on_failure(adapter, monkeypatch):
     assert 'внутривузовские' not in adapter.get_level_names(include_inactive=True)
 
     # Адаптер жив: следующий импорт проходит целиком.
-    adapter.import_competitions(rows, rows)
+    adapter.import_competitions(rows)
     assert adapter.count_competitions() == len(rows)
 
 
@@ -1157,7 +1289,7 @@ def test_import_competitions_commits_once_for_500_rows(adapter, monkeypatch):
     counting = CountingCommitConnection(adapter.connection)
     monkeypatch.setattr(adapter, 'connection', counting)
 
-    adapter.import_competitions(rows, rows)
+    adapter.import_competitions(rows)
 
     # Ориентир производительности без хрупких таймингов: один импорт — один
     # COMMIT (раньше справочники коммитились на каждую строку).

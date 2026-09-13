@@ -18,6 +18,12 @@ from src.settings import settings
 # «Справочники значений»). Уровни живут в своей таблице и сюда не входят.
 CATALOG_CATEGORIES: tuple[str, ...] = ('sport', 'institute')
 
+# Категории переименования значений справочника (решение 2026-09-13,
+# docs/data-model-decisions.md «Переименование значений справочников»):
+# уровень живёт в levels, остальные — в catalog_values. Колонка записей
+# называется так же («group» — ключевое слово SQL, экранируется в запросах).
+RENAME_CATEGORIES: tuple[str, ...] = ('level', 'sport', 'institute', 'group')
+
 # Срезы отчёта (замечание №19, docs/data-model-decisions.md «Расширение
 # отчётов»): группировка ВСЕГДА по данным записи — исторический факт на
 # момент соревнования, смена группы/института в профиле строки не склеивает.
@@ -770,7 +776,6 @@ class SQLiteAdapter:
 
     def import_competitions(
         self,
-        competitions: Sequence[Competition],
         new_competitions: Sequence[Competition],
         *,
         review_status: str = 'approved',
@@ -778,91 +783,46 @@ class SQLiteAdapter:
     ) -> None:
         """Импорт одной транзакцией с одним COMMIT (находка QA №1).
 
-        Раньше автопополнение справочников коммитилось на каждую строку
-        (до четырёх WAL+fsync на строку — ~0,2 с/строку, заморозка event
-        loop). Теперь уровни, справочники и вставка записей идут одной
-        транзакцией; сбой на любом шаге — откат всего импорта: либо все
-        строки, либо ничего (вместе со справочниками, без «полусостояний»).
+        Записи вставляются, затем справочники (уровни, виды спорта, институты,
+        пары институт→группа) пополняются значениями ИЗ ЗАПИСЕЙ — решение
+        2026-09-13 (docs/data-model-decisions.md «Переименование значений
+        справочников»): раньше справочник сеялся строками файла, включая
+        пропущенные дубли, поэтому переименованное с обновлением записей
+        значение возвращалось в справочник следующим импортом того же файла.
+        Теперь источник — таблица записей: значение возвращается, только если
+        оно реально есть в записях. Сбой на любом шаге — откат всего импорта:
+        либо все строки, либо ничего (вместе со справочниками).
 
-        `competitions` — все строки файла: справочники пополняются и из
-        строк-дублей (семантика бывших ensure_levels/ensure_catalog_values
-        из src/main.py); `new_competitions` — то, что реально вставляется.
+        `new_competitions` — то, что реально вставляется; дубли отсеивает
+        вызывающая сторона до транзакции (split_import_competitions).
         """
         with self._lock:
             try:
-                self._ensure_import_levels(competitions)
-                self._ensure_import_catalogs(competitions)
                 if new_competitions:
                     records = competition_insert_records(new_competitions, review_status, owner_id)
                     self.connection.executemany(COMPETITION_INSERT_SQL, records)
+                self._sync_catalogs_from_records()
                 self.connection.commit()
             except BaseException:
                 self.connection.rollback()
                 raise
 
-    def _ensure_import_levels(self, competitions: Sequence[Competition]) -> None:
-        """Недостающие уровни из импорта — одной вставкой, без построчных коммитов."""
-        known = {row['name'] for row in self.connection.execute('SELECT name FROM levels').fetchall()}
-        missing = sorted({item.level for item in competitions if item.level not in known})
-        if missing:
-            self.connection.executemany(
-                'INSERT INTO levels (name, sort_order) VALUES (?, 0)',
-                [(name,) for name in missing],
-            )
+    def _sync_catalogs_from_records(self) -> None:
+        """Довести справочники до значений, реально присутствующих в записях.
 
-    def _ensure_import_catalogs(self, competitions: Sequence[Competition]) -> None:
-        """Автопополнение видов спорта/институтов и пар институт→группа.
-
-        Множествами и тремя executemany вместо вызова на каждую строку —
-        семантика та же, что у add_catalog_value/ensure_catalog_pair
-        (значения обрезаются, пустые пропускаются, дубликаты игнорируются,
-        группа кладётся под плоский институт).
+        Тот же populate, что при инициализации БД: значения сеются SELECT'ом
+        из competitions, а не из строк импортируемого файла. Поэтому после
+        переименования значения с обновлением записей (rename_catalog_value)
+        следующий импорт старое значение НЕ возвращает: в записях его больше
+        нет — источника строки справочника нет. Идемпотентно: уникальные
+        индексы и INSERT OR IGNORE не дублируют строки и не «оживляют» скрытые.
         """
-        sports: set[str] = set()
-        institutes: set[str] = set()
-        pairs: set[tuple[str, str]] = set()
-        for item in competitions:
-            sport = (item.sport or '').strip()
-            if sport:
-                sports.add(sport)
-            institute = (item.institute or '').strip()
-            if institute:
-                institutes.add(institute)
-            group = (item.group or '').strip()
-            if institute and group:
-                pairs.add((institute, group))
-        now = datetime.utcnow().isoformat()
-        flat_rows = [
-            *([('sport', value, now) for value in sorted(sports)]),
-            *([('institute', value, now) for value in sorted(institutes)]),
-        ]
-        if flat_rows:
-            self.connection.executemany(
-                'INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at) '
-                'VALUES (?, ?, NULL, 1, ?)',
-                flat_rows,
-            )
-        if not pairs:
-            return
-        pair_institutes = {institute for institute, _ in pairs}
-        placeholders = ', '.join('?' for _ in pair_institutes)
-        parent_rows = self.connection.execute(
-            'SELECT id, value FROM catalog_values '
-            f"WHERE category = 'institute' AND parent_id IS NULL AND value IN ({placeholders})",
-            tuple(sorted(pair_institutes)),
-        ).fetchall()
-        parent_ids = {row['value']: row['id'] for row in parent_rows}
-        group_rows = [
-            ('group', group, parent_ids[institute], now)
-            for institute, group in sorted(pairs)
-            if institute in parent_ids
-        ]
-        if group_rows:
-            self.connection.executemany(
-                'INSERT OR IGNORE INTO catalog_values (category, value, parent_id, active, created_at) '
-                'VALUES (?, ?, ?, 1, ?)',
-                group_rows,
-            )
+        self._populate_catalog_values()
+        self._populate_catalog_hierarchy_pairs()
+        self.connection.execute(
+            'INSERT OR IGNORE INTO levels (name, sort_order) '
+            "SELECT DISTINCT level, 0 FROM competitions WHERE TRIM(level) != ''"
+        )
 
     def update_competition(self, record_id: str, competition: Competition):
         with self._lock:
@@ -1153,14 +1113,6 @@ class SQLiteAdapter:
             )
             self.connection.commit()
 
-    def rename_level(self, level_id: int, name: str) -> None:
-        with self._lock:
-            self.connection.execute(
-                'UPDATE levels SET name = ? WHERE id = ?',
-                (name, level_id),
-            )
-            self.connection.commit()
-
     def disable_level(self, level_id: int) -> None:
         with self._lock:
             self.connection.execute(
@@ -1308,6 +1260,111 @@ class SQLiteAdapter:
         with self._lock:
             self.connection.execute('DELETE FROM catalog_values WHERE id = ?', (value_id,))
             self.connection.commit()
+
+    def rename_catalog_value(
+        self,
+        category: str,
+        old_value: str,
+        new_value: str,
+        *,
+        parent_value: str | None = None,
+        update_records: bool = True,
+    ) -> int:
+        """Переименовать значение справочника одной транзакцией.
+
+        Решение 2026-09-13 (docs/data-model-decisions.md «Переименование
+        значений справочников»): записи хранят значения текстом, поэтому
+        справочник и записи меняются вместе — иначе справочник и записи
+        расходятся, а следующий импорт возвращает старое значение (значения
+        сеются из записей). update_records=False — переименовать только
+        справочник (осознанное расхождение, например для архивных значений).
+
+        Уровень меняется в levels, остальные категории — в catalog_values;
+        группа — по паре институт+группа (parent_value — её институт),
+        одноимённые группы других институтов не затрагиваются. Возвращает
+        число обновлённых записей (0 при update_records=False). Конфликт
+        нового имени с существующим значением категории (для группы — в том
+        же институте) или отсутствие старого — ValueError без изменений.
+        """
+        if category not in RENAME_CATEGORIES:
+            raise ValueError(f'Неизвестная категория справочника: {category}')
+        old_value = old_value.strip()
+        new_value = new_value.strip()
+        parent_value = (parent_value or '').strip()
+        if not old_value or not new_value:
+            raise ValueError('Значение не может быть пустым')
+        if old_value == new_value:
+            raise ValueError('Новое имя совпадает со старым')
+
+        with self._lock:
+            try:
+                if category == 'level':
+                    self._rename_level_row(old_value, new_value)
+                else:
+                    self._rename_catalog_row(category, old_value, new_value, parent_value)
+                updated = 0
+                if update_records:
+                    if category == 'group':
+                        cursor = self.connection.execute(
+                            'UPDATE competitions SET "group" = ? WHERE "group" = ? AND institute = ?',
+                            (new_value, old_value, parent_value),
+                        )
+                    else:
+                        cursor = self.connection.execute(
+                            f'UPDATE competitions SET {category} = ? WHERE {category} = ?',
+                            (new_value, old_value),
+                        )
+                    updated = cursor.rowcount
+                self.connection.commit()
+                return updated
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def _rename_level_row(self, old_value: str, new_value: str) -> None:
+        """Строка таблицы levels: конфликт по UNIQUE(name), затем UPDATE."""
+        conflict = self.connection.execute('SELECT 1 FROM levels WHERE name = ?', (new_value,)).fetchone()
+        if conflict is not None:
+            raise ValueError(f'Уровень «{new_value}» уже существует')
+        cursor = self.connection.execute('UPDATE levels SET name = ? WHERE name = ?', (new_value, old_value))
+        if not cursor.rowcount:
+            raise ValueError(f'Уровень «{old_value}» не найден')
+
+    def _rename_catalog_row(self, category: str, old_value: str, new_value: str, parent_value: str) -> None:
+        """Строка catalog_values: плоские значения по (category, value),
+        группы — по паре (parent_id института, value)."""
+        if category == 'group':
+            if not parent_value:
+                raise ValueError('Для переименования группы нужен её институт')
+            parent = self.connection.execute(
+                'SELECT id FROM catalog_values ' "WHERE category = 'institute' AND parent_id IS NULL AND value = ?",
+                (parent_value,),
+            ).fetchone()
+            if parent is None:
+                raise ValueError(f'Институт «{parent_value}» не найден')
+            conflict = self.connection.execute(
+                "SELECT 1 FROM catalog_values WHERE category = 'group' AND value = ? AND parent_id = ?",
+                (new_value, parent['id']),
+            ).fetchone()
+            if conflict is not None:
+                raise ValueError(f'Группа «{new_value}» уже есть в институте «{parent_value}»')
+            cursor = self.connection.execute(
+                'UPDATE catalog_values SET value = ? ' "WHERE category = 'group' AND value = ? AND parent_id = ?",
+                (new_value, old_value, parent['id']),
+            )
+        else:
+            conflict = self.connection.execute(
+                'SELECT 1 FROM catalog_values WHERE category = ? AND value = ? AND parent_id IS NULL',
+                (category, new_value),
+            ).fetchone()
+            if conflict is not None:
+                raise ValueError(f'Значение «{new_value}» уже есть в справочнике')
+            cursor = self.connection.execute(
+                'UPDATE catalog_values SET value = ? WHERE category = ? AND value = ? AND parent_id IS NULL',
+                (new_value, category, old_value),
+            )
+        if not cursor.rowcount:
+            raise ValueError(f'Значение «{old_value}» не найдено')
 
     def count_records_using(self, category: str, value: str, parent_value: str | None = None) -> int:
         """Сколько записей соревнований содержат это значение справочника.

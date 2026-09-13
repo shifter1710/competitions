@@ -166,6 +166,15 @@ CATALOG_CATEGORIES: Sequence[str] = ('sport', 'institute')
 GROUP_CATEGORY = 'group'
 CATALOG_MANAGE_CATEGORIES: Sequence[str] = (*CATALOG_CATEGORIES, GROUP_CATEGORY)
 
+# Переименование значений справочника (решение 2026-09-13): уровень живёт в
+# levels, остальные — в catalog_values; label — для страницы-подтверждения.
+CATALOG_RENAME_LABELS: dict[str, str] = {
+    'level': 'Уровень',
+    'sport': 'Вид спорта',
+    'institute': 'Институт',
+    GROUP_CATEGORY: 'Группа',
+}
+
 
 def seed_levels(storage: SQLiteAdapter):
     if not storage.get_level_names(include_inactive=True):
@@ -1104,6 +1113,150 @@ async def create_catalog_group(request: Request, institute_id: str):
     )
 
 
+def resolve_rename_target(request: Request, category: str, value_id: str):
+    """Строка справочника для переименования: уровень — по id в levels,
+    остальные категории — по id в catalog_values. Для группы вторым
+    элементом сразу её институт (переименование затрагивает пару)."""
+    if category not in CATALOG_RENAME_LABELS:
+        return None, None, text(body='Unknown catalog', status=404)
+    try:
+        numeric_value_id = int(value_id)
+    except ValueError:
+        return None, None, text(body='Invalid value id', status=400)
+
+    storage = get_storage(request.app)
+    if category == 'level':
+        level = next((item for item in storage.list_levels() if item['id'] == numeric_value_id), None)
+        if level is None:
+            return None, None, build_redirect_with_message(error='Значение не найдено', url='/admin/catalogs')
+        # уровни хранят имя в «name»; дальше работаем с унифицированным «value»
+        return {'id': level['id'], 'value': level['name'], 'active': level.get('active')}, None, None
+
+    row = storage.get_catalog_value(numeric_value_id)
+    if row is None or row['category'] != category:
+        return None, None, build_redirect_with_message(error='Значение не найдено', url='/admin/catalogs')
+    parent_value = None
+    if category == GROUP_CATEGORY:
+        parent = storage.get_catalog_value(row['parent_id']) if row.get('parent_id') else None
+        if parent is None or parent['category'] != 'institute':
+            return None, None, build_redirect_with_message(error='Институт группы не найден', url='/admin/catalogs')
+        parent_value = parent['value']
+    return row, parent_value, None
+
+
+def catalog_rename_conflict(storage: SQLiteAdapter, category: str, row: dict, new_name: str) -> bool:
+    """Конфликт нового имени с существующим значением категории (для группы —
+    в том же институте). Проверка до выполнения, чтобы вернуть ошибку рано;
+    авторитетная — внутри storage.rename_catalog_value, в транзакции."""
+    if category == 'level':
+        return new_name in storage.get_level_names(include_inactive=True)
+    if category == GROUP_CATEGORY:
+        return any(
+            item['value'] == new_name and item['parent_id'] == row.get('parent_id')
+            for item in storage.list_catalog_all(GROUP_CATEGORY)
+        )
+    return any(item['value'] == new_name for item in storage.list_catalog_all(category))
+
+
+@app.get('/admin/catalogs/<category>/<value_id>/rename')
+async def catalog_rename_page(request: Request, category: str, value_id: str):
+    """Шаг 2 переименования без JS: подтверждение с числом записей и галочкой
+    «обновить записи» (шаг 1 — GET-форма со старым значением в списке)."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    row, parent_value, error = resolve_rename_target(request, category, value_id)
+    if error is not None:
+        return error
+
+    new_name = (get_param(dict(request.args), 'new_name') or '').strip()
+    if not new_name:
+        return build_redirect_with_message(error='Новое имя обязательно', url='/admin/catalogs')
+    if new_name == row['value']:
+        return build_redirect_with_message(error='Новое имя совпадает со старым', url='/admin/catalogs')
+    storage = get_storage(request.app)
+    if catalog_rename_conflict(storage, category, row, new_name):
+        return build_redirect_with_message(error=f'«{new_name}» уже есть в справочнике', url='/admin/catalogs')
+
+    return await render(
+        template_name=jinja_env.get_template('admin_catalog_rename.html'),
+        context={
+            'request': request,
+            'category': category,
+            'category_label': CATALOG_RENAME_LABELS[category],
+            'value_id': row['id'],
+            'old_name': row['value'],
+            'new_name': new_name,
+            'parent_value': parent_value,
+            'records_count': storage.count_records_using(category, row['value'], parent_value=parent_value),
+        },
+    )
+
+
+@app.post('/admin/catalogs/<category>/<value_id>/rename')
+async def rename_catalog_value(request: Request, category: str, value_id: str):
+    """Переименование значения справочника (решение 2026-09-13, по образцу merge).
+
+    Без confirm — JSON-превью, сколько записей затронет. С confirm —
+    выполнение: справочник и (по галочке update_records) записи одной
+    транзакцией в storage; каждое выполнение — audit catalog_value_renamed
+    (кто, что, во что, сколько записей обновлено).
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    row, parent_value, error = resolve_rename_target(request, category, value_id)
+    if error is not None:
+        return error
+
+    new_name = get_form_value(request, 'new_name').strip()
+    if not new_name:
+        return build_redirect_with_message(error='Новое имя обязательно', url='/admin/catalogs')
+    if new_name == row['value']:
+        return build_redirect_with_message(error='Новое имя совпадает со старым', url='/admin/catalogs')
+    storage = get_storage(request.app)
+    if catalog_rename_conflict(storage, category, row, new_name):
+        return build_redirect_with_message(error=f'«{new_name}» уже есть в справочнике', url='/admin/catalogs')
+
+    if not checkbox_to_bool(get_form_value(request, 'confirm')):
+        return json_response(
+            {
+                'preview': True,
+                'category': category,
+                'old': row['value'],
+                'new': new_name,
+                'records': storage.count_records_using(category, row['value'], parent_value=parent_value),
+            }
+        )
+
+    update_records = checkbox_to_bool(get_form_value(request, 'update_records'))
+    try:
+        records_updated = storage.rename_catalog_value(
+            category,
+            row['value'],
+            new_name,
+            parent_value=parent_value,
+            update_records=update_records,
+        )
+    except ValueError as exc:
+        return build_redirect_with_message(error=str(exc), url='/admin/catalogs')
+
+    audit_details = {
+        'category': category,
+        'old': row['value'],
+        'new': new_name,
+        'update_records': update_records,
+        'records_updated': records_updated,
+    }
+    if category == GROUP_CATEGORY:
+        audit_details['parent'] = parent_value
+    log_audit_event(request, 'catalog_value_renamed', audit_details)
+
+    message = f'«{row["value"]}» → «{new_name}»'
+    message += f': обновлено записей — {records_updated}' if update_records else ' (записи не тронуты)'
+    return build_redirect_with_message(message=message, url='/admin/catalogs')
+
+
 def ru_plural(number: int, one: str, few: str, many: str) -> str:
     """Русская плюрализация: 1 минуту / 2 минуты / 5 минут."""
     mod_100 = number % 100
@@ -1373,9 +1526,10 @@ async def upload(request: Request):
     # Одна транзакция и один COMMIT на весь импорт, в отдельном потоке:
     # построчные коммиты справочников (WAL+fsync ~4 раза на строку) и запись
     # в event loop замораживали приложение на всё время импорта (QA №1).
+    # Дубли отсеяны до транзакции; справочники storage пополняет значениями
+    # из вставленных записей (решение 2026-09-13 по инциденту rename).
     await asyncio.to_thread(
         storage.import_competitions,
-        competitions,
         new_competitions,
         owner_id=get_current_user_id(request),
     )
@@ -1956,25 +2110,6 @@ async def create_level(request: Request):
 
     get_storage(request.app).create_level(name)
     return build_redirect_with_message(message='Уровень добавлен', url='/admin/catalogs')
-
-
-@app.post('/admin/levels/<level_id>')
-async def rename_level(request: Request, level_id: str):
-    auth_error = require_admin(request)
-    if auth_error is not None:
-        return auth_error
-
-    try:
-        numeric_level_id = int(level_id)
-    except ValueError:
-        return text(body='Invalid level id', status=400)
-
-    name = get_form_value(request, 'name').strip()
-    if not name:
-        return build_redirect_with_message(error='Название уровня обязательно', url='/admin/catalogs')
-
-    get_storage(request.app).rename_level(numeric_level_id, name)
-    return build_redirect_with_message(message='Уровень переименован', url='/admin/catalogs')
 
 
 @app.post('/admin/levels/<level_id>/delete')

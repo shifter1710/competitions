@@ -1,9 +1,19 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Справочники значений{% endblock admin_title %}
-{% block admin_description %}Подсказки для форм, а не контроль: записи остаются свободным текстом, значения в существующих записях не перезаписываются. Новые виды спорта и институты из записей и импорта добавляются автоматически.{% endblock admin_description %}
+{% block admin_description %}Подсказки для форм, а не контроль: записи остаются свободным текстом, значения в существующих записях не перезаписываются автоматически. Единственное исключение — переименование значения с галочкой «обновить записи»: явное админское действие, фиксируется в журнале аудита. Новые виды спорта и институты из записей и импорта добавляются автоматически.{% endblock admin_description %}
 
 {% block admin_content %}
+
+{# Переименование значения (решение 2026-09-13): шаг 1 — GET-форма с новым
+   именем, шаг 2 — страница-подтверждение /admin/catalogs/<category>/<id>/rename
+   с числом записей и галочкой «обновить записи». Без JS, CSRF — на шаге 2. #}
+{% macro rename_form(category, item_id, current_value) %}
+<form action="/admin/catalogs/{{ category }}/{{ item_id }}/rename" class="d-flex gap-1" method="get">
+    <input aria-label="Новое название" class="form-control form-control-sm" name="new_name" type="text" value="{{ current_value }}" required>
+    <button class="btn btn-sm btn-outline-primary text-nowrap" type="submit">Переименовать</button>
+</form>
+{% endmacro %}
 
 {% macro value_catalog_section(title, hint, values, category, id_prefix) %}
 <div class="card shadow-sm mb-4">
@@ -36,7 +46,7 @@
                 <tbody>
                     {% for item in values %}
                     <tr {% if not item.active %}class="table-secondary"{% endif %}>
-                        <td>{{ item.value }}</td>
+                        <td>{{ rename_form(category, item.id, item.value) }}</td>
                         <td>{{ item.records_count }}</td>
                         <td>{% if item.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
                         <td class="d-flex gap-2">
@@ -106,7 +116,7 @@
                 <tbody>
                     {% for institute in institute_tree %}
                     <tr {% if not institute.active %}class="table-secondary"{% endif %}>
-                        <td><strong>{{ institute.value }}</strong></td>
+                        <td>{{ rename_form('institute', institute.id, institute.value) }}</td>
                         <td>{{ institute.records_count }}</td>
                         <td>{% if institute.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
                         <td class="d-flex gap-2">
@@ -133,7 +143,7 @@
                     </tr>
                     {% for group in institute.groups %}
                     <tr {% if not group.active %}class="table-secondary"{% endif %}>
-                        <td class="ps-4">— {{ group.value }}</td>
+                        <td class="ps-4">{{ rename_form('group', group.id, group.value) }}</td>
                         <td>{{ group.records_count }}</td>
                         <td>{% if group.active %}<span class="badge text-bg-success">активна</span>{% else %}<span class="badge text-bg-secondary">скрыта</span>{% endif %}</td>
                         <td class="d-flex gap-2">
@@ -211,13 +221,7 @@
                 <tbody>
                     {% for level in admin_levels %}
                     <tr {% if not level.active %}class="table-secondary"{% endif %}>
-                        <td>
-                            <form action="/admin/levels/{{ level.id }}" class="d-flex gap-2" method="post">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                <input class="form-control form-control-sm" name="name" type="text" value="{{ level.name }}" required>
-                                <button class="btn btn-sm btn-outline-primary" type="submit">Переименовать</button>
-                            </form>
-                        </td>
+                        <td>{{ rename_form('level', level.id, level.name) }}</td>
                         <td>{{ level.records_count }}</td>
                         <td>{% if level.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
                         <td>

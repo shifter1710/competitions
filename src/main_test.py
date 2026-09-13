@@ -1,10 +1,12 @@
 import hmac
+import json
 import re
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from unittest.mock import Mock
 from urllib.parse import quote
+from urllib.parse import unquote_plus
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -119,8 +121,8 @@ def client() -> SanicTestClient:
     fake_storage.get_level_names.return_value = ['внутривузовские', 'межвузовские']
     fake_storage.list_levels.return_value = []
     fake_storage.create_level.return_value = None
-    fake_storage.rename_level.return_value = None
     fake_storage.disable_level.return_value = None
+    fake_storage.rename_catalog_value.return_value = 0
     fake_storage.list_catalog.side_effect = lambda category: {
         'sport': ['Бег', 'Лыжи'],
         'institute': ['ИСИ'],
@@ -276,7 +278,7 @@ def test_upload_accepts_text_dates_in_app_format(client: SanicTestClient):
     assert 'Импортировано записей: 1' in response.text
     assert 'дублей' not in response.text
     app.ctx.storage.import_competitions.assert_called_once()
-    saved = app.ctx.storage.import_competitions.call_args[0][1][0]
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
     assert saved.date == datetime(2026, 3, 15)
 
 
@@ -346,7 +348,7 @@ def test_upload_skips_duplicates(client: SanicTestClient):
     assert response.status == 200
     assert 'Импортировано записей: 1' in response.text
     assert 'Пропущено дублей: 1' in response.text
-    saved_rows = app.ctx.storage.import_competitions.call_args[0][1]
+    saved_rows = app.ctx.storage.import_competitions.call_args[0][0]
     assert len(saved_rows) == 1
     assert saved_rows[0].student_name == 'Новый Студент'
     app.ctx.storage.get_competitions.return_value = []
@@ -1640,9 +1642,9 @@ def test_template_date_column_is_typed(client: SanicTestClient):
 
 
 def test_import_auto_adds_unknown_level(client: SanicTestClient):
-    # Само автопополнение уровней теперь внутри одной транзакции импорта и
-    # проверяется на реальном адаптере (storage_test: autofills levels and
-    # catalogs); здесь — что роут отдаёт импорту все строки, включая новый уровень.
+    # Само автопополнение уровней — внутри одной транзакции импорта, значения
+    # сеются из записей (storage_test: autofills levels and catalogs); здесь —
+    # что роут отдаёт импорту вставляемые строки с новым уровнем как есть.
     app.ctx.storage.import_competitions.reset_mock()
     df = pd.DataFrame(
         [
@@ -1679,8 +1681,7 @@ def test_import_auto_adds_unknown_level(client: SanicTestClient):
     )
 
     assert response.status == 200
-    parsed_rows, inserted_rows = app.ctx.storage.import_competitions.call_args[0]
-    assert [row.level for row in parsed_rows] == ['всероссийские']
+    inserted_rows = app.ctx.storage.import_competitions.call_args[0][0]
     assert [row.level for row in inserted_rows] == ['всероссийские']
 
 
@@ -1826,6 +1827,247 @@ def test_catalog_delete_rejects_value_with_records(client: SanicTestClient):
     app.ctx.storage.count_records_using.return_value = 0
 
 
+# --- Переименование значений справочников (решение 2026-09-13) ---
+
+
+def rename_sport_value_mock(row_id: int = 5, value: str = 'Бег'):
+    app.ctx.storage.get_catalog_value.return_value = {
+        'id': row_id,
+        'category': 'sport',
+        'value': value,
+        'parent_id': None,
+        'active': 1,
+    }
+
+
+def reset_rename_mocks():
+    app.ctx.storage.get_catalog_value.return_value = None
+    app.ctx.storage.list_catalog_all.return_value = []
+    app.ctx.storage.count_records_using.return_value = 0
+    app.ctx.storage.list_levels.return_value = []
+
+
+def test_catalog_rename_preview_returns_records_count(client: SanicTestClient):
+    rename_sport_value_mock()
+    app.ctx.storage.count_records_using.return_value = 4
+    app.ctx.storage.rename_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    # без confirm — только превью, ничего не выполняется
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'Кросс'},
+    )
+    assert response.status == 200
+    assert response.json['preview'] is True
+    assert response.json['records'] == 4
+    assert response.json['old'] == 'Бег'
+    assert response.json['new'] == 'Кросс'
+    app.ctx.storage.rename_catalog_value.assert_not_called()
+
+    reset_rename_mocks()
+
+
+def test_catalog_rename_executes_with_update_and_writes_audit(client: SanicTestClient):
+    rename_sport_value_mock()
+    app.ctx.storage.rename_catalog_value.reset_mock()
+    app.ctx.storage.rename_catalog_value.return_value = 3
+    app.ctx.storage.add_audit_event.reset_mock()
+    headers = get_auth_headers()
+
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'Кросс', 'confirm': 'on', 'update_records': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.rename_catalog_value.assert_called_once_with(
+        'sport', 'Бег', 'Кросс', parent_value=None, update_records=True
+    )
+
+    audit_call = app.ctx.storage.add_audit_event.call_args
+    assert audit_call[1]['action'] == 'catalog_value_renamed'
+    details = json.loads(audit_call[1]['details'])
+    assert details == {
+        'category': 'sport',
+        'old': 'Бег',
+        'new': 'Кросс',
+        'update_records': True,
+        'records_updated': 3,
+    }
+
+    reset_rename_mocks()
+    app.ctx.storage.rename_catalog_value.return_value = 0
+
+
+def test_catalog_rename_execution_without_update_records_flag(client: SanicTestClient):
+    rename_sport_value_mock()
+    app.ctx.storage.rename_catalog_value.reset_mock()
+    app.ctx.storage.rename_catalog_value.return_value = 0
+    headers = get_auth_headers()
+
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'Кросс', 'confirm': 'on'},  # галочка снята
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'записи не тронуты' in unquote_plus(response.headers['location'])
+    app.ctx.storage.rename_catalog_value.assert_called_once_with(
+        'sport', 'Бег', 'Кросс', parent_value=None, update_records=False
+    )
+
+    reset_rename_mocks()
+
+
+def test_catalog_rename_level_uses_levels_table(client: SanicTestClient):
+    app.ctx.storage.list_levels.return_value = [
+        {'id': 9, 'name': 'городские', 'sort_order': 0, 'active': 1},
+        {'id': 10, 'name': 'внутривузовские', 'sort_order': 0, 'active': 1},
+    ]
+    app.ctx.storage.rename_catalog_value.reset_mock()
+    app.ctx.storage.rename_catalog_value.return_value = 2
+    headers = get_auth_headers()
+
+    _, response = client.post(
+        '/admin/catalogs/level/9/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'муниципальные', 'confirm': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.rename_catalog_value.assert_called_once_with(
+        'level', 'городские', 'муниципальные', parent_value=None, update_records=False
+    )
+
+    reset_rename_mocks()
+    app.ctx.storage.rename_catalog_value.return_value = 0
+
+
+def test_catalog_rename_confirmation_page(client: SanicTestClient):
+    rename_sport_value_mock()
+    app.ctx.storage.count_records_using.return_value = 7
+    headers = get_auth_headers()
+
+    _, response = client.get(f'/admin/catalogs/sport/5/rename?new_name={quote("Кросс")}', headers=headers)
+    assert response.status == 200
+    assert '«Бег» → «Кросс»' in response.text
+    assert 'name="update_records"' in response.text  # галочка «обновить записи»
+    assert 'name="confirm"' in response.text
+
+    reset_rename_mocks()
+
+
+def test_catalog_rename_validations(client: SanicTestClient):
+    rename_sport_value_mock()
+    app.ctx.storage.list_catalog_all.return_value = [
+        {'id': 6, 'category': 'sport', 'value': 'Кросс', 'parent_id': None, 'active': 1}
+    ]
+    app.ctx.storage.rename_catalog_value.reset_mock()
+    headers = get_auth_headers()
+
+    # пустое имя
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': '   ', 'confirm': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+    # то же имя
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'Бег', 'confirm': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+
+    # конфликт с существующим значением той же категории
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'Кросс', 'confirm': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.rename_catalog_value.assert_not_called()
+
+    # неизвестная категория
+    _, response = client.post(
+        '/admin/catalogs/unknown/5/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'X', 'confirm': 'on'},
+    )
+    assert response.status == 404
+
+    reset_rename_mocks()
+
+
+def test_catalog_rename_group_uses_parent_institute(client: SanicTestClient):
+    app.ctx.storage.get_catalog_value.side_effect = lambda value_id: {
+        7: {'id': 7, 'category': 'institute', 'value': 'ИСИ', 'parent_id': None, 'active': 1},
+        8: {'id': 8, 'category': 'group', 'value': 'ПГС-101', 'parent_id': 7, 'active': 1},
+    }.get(value_id)
+    app.ctx.storage.list_catalog_all.return_value = []
+    app.ctx.storage.rename_catalog_value.reset_mock()
+    app.ctx.storage.rename_catalog_value.return_value = 2
+    headers = get_auth_headers()
+
+    _, response = client.post(
+        '/admin/catalogs/group/8/rename',
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'ПГС-101А', 'confirm': 'on', 'update_records': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.rename_catalog_value.assert_called_once_with(
+        'group', 'ПГС-101', 'ПГС-101А', parent_value='ИСИ', update_records=True
+    )
+    audit_details = json.loads(app.ctx.storage.add_audit_event.call_args[1]['details'])
+    assert audit_details['parent'] == 'ИСИ'
+
+    app.ctx.storage.get_catalog_value.side_effect = None
+    reset_rename_mocks()
+    app.ctx.storage.rename_catalog_value.return_value = 0
+
+
+def test_catalog_rename_forbidden_for_non_admin(client: SanicTestClient):
+    editor_headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/admin/catalogs/sport/5/rename',
+        headers=editor_headers,
+        data={**csrf_for(editor_headers), 'new_name': 'Кросс', 'confirm': 'on'},
+    )
+    assert response.status == 403
+
+    _, response = client.get('/admin/catalogs/sport/5/rename?new_name=Кросс', headers=editor_headers)
+    assert response.status == 403
+
+
+def test_old_level_rename_route_removed(client: SanicTestClient):
+    # Старый POST /admin/levels/<id> (rename без каскада) удалён: UI переехал
+    # на /admin/catalogs/<category>/<id>/rename. GET несуществующего пути — 404;
+    # POST перехватывается CSRF-middleware до роутера (Sanic не парсит form-body
+    # для unmatched-маршрутов) — как у удалённого /clean_db.
+    headers = get_auth_headers()
+    _, response = client.get('/admin/levels/9', headers=headers, allow_redirects=False)
+    assert response.status == 404
+
+    _, response = client.post('/admin/levels/9', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    assert response.status == 403
+
+
 def test_create_competition_auto_adds_catalog_values(client: SanicTestClient):
     app.ctx.storage.add_catalog_value.reset_mock()
     headers = get_auth_headers(role='editor')
@@ -1854,10 +2096,11 @@ def test_create_competition_auto_adds_catalog_values(client: SanicTestClient):
 
 
 def test_import_auto_adds_catalog_values(client: SanicTestClient):
-    # Справочники импорт пополняет батчем внутри storage.import_competitions
-    # (одна транзакция с записями); само пополнение проверено на реальном
-    # адаптере в storage_test (autofills levels and catalogs). Здесь — что
-    # все строки файла со значениями доходят до импорта.
+    # Справочники импорт пополняет из вставленных записей внутри
+    # storage.import_competitions (одна транзакция с записями); само
+    # пополнение проверено на реальном адаптере в storage_test (autofills
+    # levels and catalogs). Здесь — что строки файла со значениями доходят
+    # до импорта.
     app.ctx.storage.import_competitions.reset_mock()
     app.ctx.storage.get_competitions.return_value = []
     df = pd.DataFrame(
@@ -1894,9 +2137,8 @@ def test_import_auto_adds_catalog_values(client: SanicTestClient):
         },
     )
     assert response.status == 200
-    parsed_rows, inserted_rows = app.ctx.storage.import_competitions.call_args[0]
+    inserted_rows = app.ctx.storage.import_competitions.call_args[0][0]
     assert [(row.sport, row.institute) for row in inserted_rows] == [('Шахматы', 'АДИ')]
-    assert parsed_rows == inserted_rows
 
 
 def test_index_datalists_show_active_catalog_values(client: SanicTestClient):
@@ -2147,7 +2389,7 @@ def test_import_auto_adds_catalog_pair(client: SanicTestClient):
         },
     )
     assert response.status == 200
-    inserted_rows = app.ctx.storage.import_competitions.call_args[0][1]
+    inserted_rows = app.ctx.storage.import_competitions.call_args[0][0]
     assert [(row.institute, row.group) for row in inserted_rows] == [('АДИ', 'ША-101')]
 
 
