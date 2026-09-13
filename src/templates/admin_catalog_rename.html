@@ -1,0 +1,45 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Переименование значения справочника{% endblock admin_title %}
+{% block admin_description %}
+    Явное админское действие: выполнение фиксируется в журнале аудита, отмена
+    на этом экране ничего не меняет.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">
+            {{ category_label }}: «{{ old_name }}» → «{{ new_name }}»
+        </h5>
+        {% if parent_value %}
+        <div class="text-muted mb-2">Институт: {{ parent_value }} (переименование затрагивает только эту пару институт+группа)</div>
+        {% endif %}
+        <p>
+            Этим значением пользуются записей:
+            <strong>{{ records_count }}</strong>.
+            {% if records_count %}
+            Без обновления записи останутся со старым значением — справочник и записи разойдутся, а отчёты продолжат группировать по старому тексту.
+            {% else %}
+            Обновлять нечего: на этом значении записей нет.
+            {% endif %}
+        </p>
+
+        <form action="/admin/catalogs/{{ category }}/{{ value_id }}/rename" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="new_name" value="{{ new_name }}">
+            <input type="hidden" name="confirm" value="on">
+            <div class="form-check mb-3">
+                <input checked class="form-check-input" id="update-records" name="update_records" type="checkbox">
+                <label class="form-check-label" for="update-records">
+                    Обновить записи ({{ records_count }}): заменить «{{ old_name }}» на «{{ new_name }}» в существующих записях
+                </label>
+            </div>
+            <button class="btn btn-success" type="submit">Переименовать</button>
+            <a class="btn btn-outline-secondary" href="/admin/catalogs">Отмена</a>
+        </form>
+    </div>
+</div>
+
+{% endblock admin_content %}
