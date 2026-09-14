@@ -1726,6 +1726,12 @@ class Main {
             if (key) {
                 cell.dataset.columnKey = key;
             }
+            // №24 (hotfix): колонка привязанного link-поля скрыта через
+            // d-none на th — ячейка инлайн-строки должна скрываться так же,
+            // иначе лишнее видимое поле ломает вёрстку строки.
+            if (header.classList.contains("d-none")) {
+                cell.classList.add("d-none");
+            }
             if (!key || key === "index" || key === "status" || key === "attachments") {
                 row.append(cell);
                 return;
