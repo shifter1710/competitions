@@ -109,7 +109,9 @@
     <div class="calendar-comp-row">
         <span class="calendar-comp-row__dates">{{ event.date_label }}</span>
         <div class="calendar-comp-row__main">
-            <span class="calendar-comp-row__name">{{ event.name }}</span>
+            {# Волна B (прототип 16): карточка ведёт внутрь соревнования —
+               на страницу участников. #}
+            <a class="calendar-comp-row__name" href="/calendar/{{ event.id }}">{{ event.name }}</a>
             <div class="calendar-comp-row__meta">{{ event.level }}{% if event.level and event.sport %} · {% endif %}{{ event.sport }}</div>
             {% if can_manage %}
             <div class="collapse mt-2" id="calendar-edit-{{ event.id }}">

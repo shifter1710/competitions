@@ -2343,3 +2343,31 @@ class SQLiteAdapter:
                 }
                 for row in rows
             ]
+
+    def list_calendar_event_participants(self, event_id: int) -> list[dict]:
+        """Записи реестра — участники события по пресету (name + date + date_to).
+
+        Волна B (прототип 16): записи остаются обычными записями реестра
+        (никаких FK), совпадение — тот же пресет, что и в счётчиках.
+        Сначала с результатом, затем «ждут результата», внутри — по ФИО.
+        """
+        with self._lock:
+            rows = self.connection.execute(
+                f'''
+                SELECT
+                    c.id AS record_id,
+                    c.student_name,
+                    c.student_sex,
+                    c.institute,
+                    c."group" AS group_name,
+                    c.course,
+                    c.position
+                FROM calendar_events e, competitions c
+                WHERE e.id = ? AND {self._calendar_preset_match_sql()}
+                ORDER BY
+                    CASE WHEN c.position = 0 THEN 1 ELSE 0 END,
+                    c.student_name ASC
+                ''',
+                (event_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]

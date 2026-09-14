@@ -2469,4 +2469,236 @@ class Main {
 
 window.addEventListener("DOMContentLoaded", () => {
     new Main();
+    // Страница участников соревнования (волна B, прототип 16): резолвер ФИО
+    // в строке добавления + инлайн-правка строки (место «дописать позже»).
+    if (document.querySelector("[data-participants-page]")) {
+        new ParticipantsPage();
+    }
 });
+
+// Страница участников соревнования (волна B, docs/feedback-live.md №23).
+// Переиспользует FioResolver (выбор варианта подставляет пол/институт/
+// группу/курс — поля остаются редактируемыми) и те же эндпоинты записей
+// реестра, что и инлайн-правка главной: сохранение — POST /competition/<id>,
+// удаление — POST /competition/<id>/delete. Название/даты/уровень/спорт
+// в правке не редактируются — берутся из data-* атрибутов таблицы (пресет
+// события), историчность записи не нарушается.
+class ParticipantsPage {
+    constructor() {
+        this.table = document.querySelector("[data-participants-page]");
+        this.editingRow = null;
+        this.editingBackup = null;
+        this.keydownHandler = null;
+        this.attachAddFormResolver();
+        this.table.addEventListener("click", (event) => this.handleClick(event));
+    }
+
+    getCsrfToken() {
+        const meta = document.querySelector('meta[name="csrf-token"]');
+        return meta ? meta.content : "";
+    }
+
+    request(url, {body, onSuccess = () => {}, onError = () => {}}) {
+        if (body instanceof FormData && !body.has("csrf_token")) {
+            body.append("csrf_token", this.getCsrfToken());
+        }
+        fetch(url, {method: "POST", body})
+            .then((response) => {
+                if (!response.ok) {
+                    return response.text().then((message) => {
+                        throw new Error(message);
+                    });
+                }
+                return response.text();
+            })
+            .then(onSuccess)
+            .catch((error) => onError(error.message));
+    }
+
+    // Резолвер ФИО в строке добавления (та же логика, что у инлайн-строки
+    // главной): выбор варианта подставляет известные значения, поля
+    // остаются редактируемыми. Свободный ввод — как на главной.
+    attachAddFormResolver() {
+        const fioInput = document.getElementById("participant-fio");
+        if (!fioInput || document.body.dataset.role === "athlete") {
+            return;
+        }
+        const fill = (athleteKey, inputId) => {
+            const value = athlete[athleteKey];
+            const input = value ? document.getElementById(inputId) : null;
+            if (input && !input.value) {
+                input.value = value;
+            }
+        };
+        new FioResolver(fioInput, (athlete) => {
+            fill("sex", "participant-sex");
+            fill("institute", "participant-institute");
+            fill("group", "participant-group");
+            fill("course", "participant-course");
+        });
+    }
+
+    handleClick(event) {
+        const editButton = event.target.closest(".participant-edit-button");
+        if (editButton) {
+            this.startEdit(editButton);
+            return;
+        }
+        const saveButton = event.target.closest(".participant-save-button");
+        if (saveButton) {
+            this.saveEdit();
+            return;
+        }
+        const cancelButton = event.target.closest(".participant-cancel-button");
+        if (cancelButton) {
+            this.cancelEdit();
+            return;
+        }
+        const deleteButton = event.target.closest(".participant-delete-button");
+        if (deleteButton) {
+            this.deleteParticipant(deleteButton.dataset.recordId, deleteButton.dataset.studentName);
+        }
+    }
+
+    buildTextInput(key, value, type = "text") {
+        const input = document.createElement("input");
+        input.type = type;
+        input.className = "form-control form-control-sm";
+        input.dataset.editKey = key;
+        input.value = value ?? "";
+        if (type === "number") {
+            input.min = key === "course" ? "1" : "0";
+            input.step = "1";
+        }
+        return input;
+    }
+
+    // Инлайн-правка строки участника: те же поля, что и при добавлении.
+    // Место «дописать позже» — правка и сохранение записи целиком тем же
+    // эндпоинтом, что и на главной (историчность — на сервере).
+    startEdit(button) {
+        if (this.editingRow) {
+            return;
+        }
+        const row = button.closest("tr");
+        const cells = row.querySelectorAll("td");
+        const dataset = button.dataset;
+        // Ячейки: №, ФИО, Пол, Институт, Группа, Курс, Место, Результат?, Действия
+        const sexCell = cells[2];
+        const instituteCell = cells[3];
+        const groupCell = cells[4];
+        const courseCell = cells[5];
+        const positionCell = cells[6];
+        const actionsCell = cells[cells.length - 1];
+
+        this.editingBackup = row.innerHTML;
+        this.editingRow = row;
+
+        const fioInput = this.buildTextInput("student_name", dataset.studentName);
+        const sexInput = document.createElement("select");
+        ["М", "Ж"].forEach((option) => {
+            const item = document.createElement("option");
+            item.value = option;
+            item.textContent = option;
+            sexInput.append(item);
+        });
+        sexInput.className = "form-control form-control-sm";
+        sexInput.dataset.editKey = "student_sex";
+        sexInput.value = dataset.studentSex || "М";
+
+        const courseInput = this.buildTextInput("course", dataset.course, "number");
+        const positionInput = this.buildTextInput("position", dataset.position, "number");
+        const instituteInput = this.buildTextInput("institute", dataset.institute);
+        const groupInput = this.buildTextInput("group", dataset.group);
+
+        instituteCell.replaceChildren(instituteInput);
+        groupCell.replaceChildren(groupInput);
+        sexCell.replaceChildren(sexInput);
+        courseCell.replaceChildren(courseInput);
+        positionCell.replaceChildren(positionInput);
+        row.children[1].replaceChildren(fioInput);
+
+        actionsCell.innerHTML = "";
+        const saveButton = document.createElement("button");
+        saveButton.type = "button";
+        saveButton.className = "btn btn-sm btn-success participant-save-button";
+        saveButton.textContent = "✓";
+        saveButton.title = "Сохранить";
+        const cancelButton = document.createElement("button");
+        cancelButton.type = "button";
+        cancelButton.className = "btn btn-sm btn-outline-secondary participant-cancel-button";
+        cancelButton.textContent = "✗";
+        cancelButton.title = "Отмена";
+        actionsCell.append(saveButton, cancelButton);
+
+        new FioResolver(fioInput, (athlete) => {
+            const mapping = {sex: sexInput, institute: instituteInput, group: groupInput, course: courseInput};
+            Object.entries(mapping).forEach(([athleteKey, input]) => {
+                const value = athlete[athleteKey];
+                if (value && String(input.value) !== String(value)) {
+                    input.value = value;
+                }
+            });
+        });
+
+        this.keydownHandler = (keyEvent) => {
+            if (keyEvent.key === "Escape") {
+                keyEvent.preventDefault();
+                this.cancelEdit();
+            } else if (keyEvent.key === "Enter" && keyEvent.target.tagName !== "SELECT") {
+                keyEvent.preventDefault();
+                this.saveEdit();
+            }
+        };
+        row.addEventListener("keydown", this.keydownHandler);
+        fioInput.focus();
+    }
+
+    saveEdit() {
+        if (!this.editingRow) {
+            return;
+        }
+        const recordId = this.editingRow.dataset.recordId;
+        const formData = new FormData();
+        this.editingRow.querySelectorAll("[data-edit-key]").forEach((input) => {
+            formData.append(input.dataset.editKey, input.value);
+        });
+        // Поля события — из пресета таблицы: в записи они не редактируются.
+        ["date", "level", "name", "sport"].forEach((key) => {
+            formData.append(key, this.table.dataset[`event${key.charAt(0).toUpperCase()}${key.slice(1)}`] || "");
+        });
+        this.request(`/competition/${recordId}`, {
+            body: formData,
+            onSuccess: () => window.location.reload(),
+            onError: (message) => alert(message || "Ошибка сохранения записи"),
+        });
+    }
+
+    cancelEdit() {
+        if (!this.editingRow) {
+            return;
+        }
+        if (this.keydownHandler) {
+            this.editingRow.removeEventListener("keydown", this.keydownHandler);
+            this.keydownHandler = null;
+        }
+        this.editingRow.innerHTML = this.editingBackup;
+        this.editingRow = null;
+        this.editingBackup = null;
+    }
+
+    // Удаление участника из соревнования — это обычное удаление записи
+    // реестра (с правами роли: эндпоинт админский, кнопка видна только
+    // админу). После удаления страница перечитается, счётчики обновятся.
+    deleteParticipant(recordId, studentName) {
+        const message = studentName ? `Удалить запись «${studentName}»?` : "Удалить запись?";
+        if (!confirm(message)) {
+            return;
+        }
+        this.request(`/competition/${recordId}/delete`, {
+            body: new FormData(),
+            onSuccess: () => window.location.reload(),
+            onError: (message2) => alert(message2 || "Ошибка удаления записи"),
+        });
+    }
+}

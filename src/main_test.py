@@ -201,6 +201,7 @@ def client() -> SanicTestClient:
     fake_storage.update_calendar_event.return_value = None
     fake_storage.delete_calendar_event.return_value = None
     fake_storage.count_calendar_event_participants.return_value = 0
+    fake_storage.list_calendar_event_participants.return_value = []
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -6021,3 +6022,255 @@ def test_calendar_filters_pass_sport_to_storage(client: SanicTestClient):
     _, response = client.get('/calendar?status=past&sport=Бег', headers=headers)
     assert response.status == 200
     app.ctx.storage.list_calendar_events.assert_called_with(sport='Бег')
+
+
+# ---- Страница соревнования: участники (волна B, прототип 16) ----
+
+
+def _event_for_page():
+    return {
+        'id': 7,
+        'name': 'Кросс СибАДИ',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'sport': 'Бег',
+        'url': 'https://example.com/reglement',
+        'created_at': '2026-01-01T00:00:00',
+    }
+
+
+def _participants_sample():
+    return [
+        {
+            'record_id': 11,
+            'student_name': 'Иванов Дмитрий Сергеевич',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group_name': 'ПГСб-41',
+            'course': 4,
+            'position': 1,
+        },
+        {
+            'record_id': 12,
+            'student_name': 'Волков Артём Игоревич',
+            'student_sex': 'М',
+            'institute': 'ИТМ',
+            'group_name': 'ТМб-12',
+            'course': 1,
+            'position': 0,
+        },
+    ]
+
+
+def test_calendar_event_page_shows_participants_and_counts(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _participants_sample()
+    try:
+        headers = get_auth_headers('viewer')
+        _, response = client.get('/calendar/7', headers=headers)
+        assert response.status == 200
+        body = response.body.decode()
+        # Заголовок события и пресет-метаданные
+        assert 'Кросс СибАДИ' in body
+        assert '25.06.2026' in body
+        assert 'внутривузовские' in body
+        assert 'Бег' in body
+        # Счётчики: участников 2, без результата 1
+        assert 'Участников: <strong>2</strong>' in body
+        assert 'Без результата: <strong>1</strong>' in body
+        # Бейдж «ждёт результата» у записи без места
+        assert 'ждёт результата' in body
+        # Viewer — просмотр без кнопок управления
+        assert 'participant-add-form' not in body
+        assert 'participant-edit-button' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_calendar_event_page_result_filter(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _participants_sample()
+    try:
+        headers = get_auth_headers('viewer')
+        _, response = client.get('/calendar/7?result=without', headers=headers)
+        assert response.status == 200
+        body = response.body.decode()
+        # Фильтр клиентский на списке: показан только «без результата»
+        assert 'Волков Артём Игоревич' in body
+        assert 'Иванов Дмитрий Сергеевич' not in body
+        # Показано 1 из 2 (между «из» и числом в шаблоне перенос строки)
+        assert 'Показано <strong>1</strong>' in body
+        assert '<strong>2</strong> участников' in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_calendar_event_page_forbidden_for_athlete(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    try:
+        cookie = create_auth_cookie_value(username='sportik', role='athlete')
+        headers = {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+        _, response = client.get('/calendar/7', headers=headers)
+        assert response.status == 403
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_event_page_not_found(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = None
+    headers = get_auth_headers('editor')
+    _, response = client.get('/calendar/999', headers=headers)
+    assert response.status == 404
+
+
+def test_calendar_event_page_invalid_id(client: SanicTestClient):
+    headers = get_auth_headers('editor')
+    _, response = client.get('/calendar/abc', headers=headers)
+    assert response.status == 400
+
+
+def test_editor_adds_participant_as_registry_record(client: SanicTestClient):
+    # Участник — ОБЫЧНАЯ запись реестра: пресет события (name/date/date_to,
+    # уровень, спорт) копируется в запись; никаких FK (историчность —
+    # docs/data-model-decisions.md).
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.save_competitions.reset_mock()
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/7/participants',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'student_name': 'Соколова Екатерина Дмитриевна',
+                'student_sex': 'Ж',
+                'institute': 'ИСИ',
+                'group': 'ГТб-42',
+                'course': '4',
+                'position': '',
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert response.headers['location'].endswith('/calendar/7')
+        app.ctx.storage.save_competitions.assert_called_once()
+        args, kwargs = app.ctx.storage.save_competitions.call_args
+        competition = args[0][0]
+        assert competition.student_name == 'Соколова Екатерина Дмитриевна'
+        assert competition.name == 'Кросс СибАДИ'
+        assert competition.date.isoformat() == '2026-06-25T00:00:00'
+        assert competition.date_to is None
+        assert competition.level == 'внутривузовские'
+        assert competition.sport == 'Бег'
+        # Место опционально («дописать позже») → position = 0.
+        assert competition.position == 0
+        assert kwargs['review_status'] == 'approved'
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.save_competitions.reset_mock()
+
+
+def test_editor_adds_participant_with_place(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.save_competitions.reset_mock()
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/7/participants',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'student_name': 'Новый Атлет',
+                'student_sex': 'М',
+                'institute': '',
+                'group': '',
+                'course': '2',
+                'position': '3',
+            },
+        )
+        assert response.status == 200
+        args, _ = app.ctx.storage.save_competitions.call_args
+        assert args[0][0].position == 3
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.save_competitions.reset_mock()
+
+
+def test_add_participant_requires_name(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.save_competitions.reset_mock()
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/7/participants',
+            headers=headers,
+            data={**csrf_for(headers), 'student_name': '   ', 'course': '1'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'admin_error' in response.headers['location']
+        app.ctx.storage.save_competitions.assert_not_called()
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.save_competitions.reset_mock()
+
+
+def test_viewer_cannot_add_participant(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.save_competitions.reset_mock()
+    try:
+        headers = get_auth_headers('viewer')
+        _, response = client.post(
+            '/calendar/7/participants',
+            headers=headers,
+            data={**csrf_for(headers), 'student_name': 'Кто-то', 'course': '1'},
+            allow_redirects=False,
+        )
+        assert response.status == 403
+        app.ctx.storage.save_competitions.assert_not_called()
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.save_competitions.reset_mock()
+
+
+def test_calendar_event_edit_redirects_back_to_event_page(client: SanicTestClient):
+    # Правка со страницы соревнования (next=/calendar/7) возвращает внутрь
+    # события; открытый редирект исключён — только пути /calendar/.
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/7/edit',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'name': 'Кросс СибАДИ',
+                'date': '25.06.2026',
+                'level': 'внутривузовские',
+                'sport': 'Бег',
+                'url': '',
+                'next': '/calendar/7',
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert response.headers['location'].endswith('/calendar/7')
+
+        _, response = client.post(
+            '/calendar/7/edit',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'name': 'Кросс СибАДИ',
+                'date': '25.06.2026',
+                'next': 'https://evil.example',
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert response.headers['location'] == '/calendar'
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None

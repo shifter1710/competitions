@@ -1558,7 +1558,132 @@ async def edit_calendar_event(request: Request, event_id: str):
         sport=values['sport'],
         url=values['url'],
     )
+    # Правка со страницы соревнования (волна B, прототип 16) возвращает
+    # внутрь события; из календаря — в календарь. next принимаем только
+    # как путь внутрь /calendar/ — открытый редирект исключён.
+    next_url = get_form_value(request, 'next')
+    if next_url.startswith('/calendar/'):
+        return redirect(to=next_url)
     return redirect(to='/calendar')
+
+
+# Страница соревнования (волна B, прототип 16): участники = записи реестра
+# по пресету события (name + date + date_to). Фильтр результата — GET,
+# ссылки шарятся, как на главной.
+CALENDAR_RESULT_FILTERS: Sequence[tuple[str, str]] = (
+    ('', 'Все'),
+    ('with', 'С результатом'),
+    ('without', 'Без результата'),
+)
+
+
+def get_calendar_event_or_error(request: Request, event_id: str):
+    """Общий разбор id события из URL: (event dict | None, response | None)."""
+    try:
+        numeric_id = int(event_id)
+    except ValueError:
+        return None, text(body='Invalid event id', status=400)
+    event = get_storage(request.app).get_calendar_event(numeric_id)
+    if event is None:
+        return None, text(body='Event not found', status=404)
+    return event, None
+
+
+@app.get('/calendar/<event_id>')
+async def calendar_event_page(request: Request, event_id: str):
+    # Решение по ролям — как у календаря: admin/editor — полный доступ,
+    # viewer — просмотр без кнопок, athlete — 403.
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
+
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    args = dict(request.args)
+    result_filter = (get_param(args, 'result') or '').strip()
+    if result_filter not in {key for key, _ in CALENDAR_RESULT_FILTERS}:
+        result_filter = ''
+
+    storage = get_storage(request.app)
+    participants = storage.list_calendar_event_participants(event['id'])
+    total_count = len(participants)
+    no_result_count = sum(1 for participant in participants if participant['position'] == 0)
+    if result_filter == 'with':
+        participants = [participant for participant in participants if participant['position'] != 0]
+    elif result_filter == 'without':
+        participants = [participant for participant in participants if participant['position'] == 0]
+
+    return await render(
+        template_name=jinja_env.get_template('calendar_event.html'),
+        context={
+            'request': request,
+            'event': decorate_calendar_event(event),
+            'participants': participants,
+            'total_count': total_count,
+            'no_result_count': no_result_count,
+            'shown_count': len(participants),
+            'can_write': user_can_write(request),
+            'result_filter': result_filter,
+            'result_filter_options': CALENDAR_RESULT_FILTERS,
+            'sport_options': storage.list_catalog('sport'),
+            'level_options': storage.get_level_names(),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/calendar/<event_id>/participants')
+async def add_calendar_event_participant(request: Request, event_id: str):
+    # Участник добавляется как ОБЫЧНАЯ запись реестра (историчность —
+    # docs/data-model-decisions.md): пресет события (name/date/date_to)
+    # копируется в запись, никаких FK. Роли: admin/editor — полный доступ
+    # (viewer пишет? нет), поэтому require_moderator; запись сразу approved.
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    back_url = f'/calendar/{event["id"]}'
+    student_name = clean_str(get_form_value(request, 'student_name'))
+    if not student_name:
+        return build_redirect_with_message(error='ФИО обязательно', url=back_url)
+
+    event_date = datetime.fromisoformat(event['date'])
+    event_date_to = datetime.fromisoformat(event['date_to']) if event.get('date_to') else None
+    storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
+    record = {
+        'ФИО': student_name,
+        'Пол': get_form_value(request, 'student_sex'),
+        'Институт': get_form_value(request, 'institute'),
+        'Группа': get_form_value(request, 'group'),
+        'Вид спорта': event['sport'],
+        # Период — компактной строкой: тот же парсер, что у ручного ввода
+        # (format_date_range реимпортируем обратно).
+        'Дата': format_date_range(event_date, event_date_to),
+        'Уровень соревнований': event['level'],
+        'Название соревнований': event['name'],
+        # Место опционально («можно дописать позже»): пусто → position = 0.
+        'Место': get_form_value(request, 'position'),
+        'Курс': get_form_value(request, 'course'),
+    }
+
+    try:
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
+    except (TypeError, ValueError) as exc:
+        return build_redirect_with_message(error=str(exc), url=back_url)
+
+    ensure_catalog_values(storage, [competition])
+    storage.save_competitions(
+        [competition],
+        review_status='approved',
+        owner_id=get_current_user_id(request),
+    )
+    return redirect(to=back_url)
 
 
 @app.post('/calendar/<event_id>/delete')
