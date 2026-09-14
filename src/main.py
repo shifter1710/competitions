@@ -30,6 +30,7 @@ from sanic import redirect
 from sanic import Request
 from sanic import Sanic
 from sanic import text
+from sanic.response import HTTPResponse
 from sanic.response import json as json_response
 from sanic.response import raw
 from sanic_ext import render
@@ -1165,6 +1166,15 @@ def touch_user_seen(request: Request) -> None:
         _last_seen_touch[user_id] = now
     except Exception:
         logger.exception('Failed to update last_seen_at')
+
+
+@app.on_response
+async def static_no_cache(request: Request, response: HTTPResponse):
+    """Статика без версионирования в URL: заставляем браузер
+    перепроверять файл по Last-Modified, иначе после деплоя дни висит
+    старый CSS/JS (симптом: «поломанная тёмная тема»)."""
+    if request.path.startswith('/static'):
+        response.headers['Cache-Control'] = 'no-cache'
 
 
 @app.on_request
