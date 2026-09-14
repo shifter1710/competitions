@@ -19,6 +19,21 @@
             }
         })();
     </script>
+    {# Подсказки (№26) применяются до отрисовки, чтобы при выключенных
+       подсказках они не мигали при загрузке. Хранится только в localStorage
+       (ключ "hints": on|off), дефолт — включены. Класс hints-off на <html>
+       скрывает все элементы .ui-hint через main.css. #}
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("hints") === "off") {
+                    document.documentElement.classList.add("hints-off");
+                }
+            } catch (error) {
+                // localStorage недоступен — подсказки остаются включёнными
+            }
+        })();
+    </script>
     {% if request.ctx.auth_user %}
     <meta name="csrf-token" content="{{ csrf_token(request) }}">
     {% endif %}
@@ -70,6 +85,8 @@
                     {% endif %}
                     <button class="btn btn-outline-light btn-sm theme-toggle-button" type="button"
                         aria-label="Переключить тему">🌙</button>
+                    <button class="btn btn-outline-light btn-sm hints-toggle-button" type="button"
+                        aria-label="Показывать подсказки">💡</button>
                     {% if request.ctx.auth_user %}
                     <form action="/logout" method="post">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">

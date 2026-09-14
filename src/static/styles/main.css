@@ -1044,6 +1044,12 @@ select {
     margin-top: 8px;
 }
 
+/* Переключатель подсказок (№26): класс hints-off на <html> ставит
+   inline-скрипт в base.html до отрисовки, чтобы подсказки не мигали. */
+html.hints-off .ui-hint {
+    display: none !important;
+}
+
 .report-export-form {
     margin: 12px 0 0;
 }

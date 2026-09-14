@@ -468,6 +468,7 @@ class Main {
         this.tableCard = document.querySelector(".table-card");
         this.tableElement = document.querySelector(".interactive-table");
         this.themeToggleButton = document.querySelector(".theme-toggle-button");
+        this.hintsToggleButton = document.querySelector(".hints-toggle-button");
         this.usersSearchInput = document.querySelector(".users-search-input");
         this.usersRoleFilter = document.querySelector(".users-role-filter");
         this.usersTable = document.querySelector(".users-table");
@@ -558,6 +559,10 @@ class Main {
         if (this.themeToggleButton) {
             this.updateThemeToggleButton();
             this.themeToggleButton.addEventListener("click", () => this.handleThemeToggle());
+        }
+        if (this.hintsToggleButton) {
+            this.updateHintsToggleButton();
+            this.hintsToggleButton.addEventListener("click", () => this.handleHintsToggle());
         }
         this.initUsersPage();
         this.initIndexFilterCard();
@@ -821,6 +826,30 @@ class Main {
         const isDark = document.documentElement.dataset.bsTheme === "dark";
         this.themeToggleButton.textContent = isDark ? "☀️" : "🌙";
         this.themeToggleButton.title = isDark ? "Включить светлую тему" : "Включить тёмную тему";
+    }
+
+    // Подсказки (№26) живут только на клиенте: класс hints-off на <html>
+    // ставит inline-скрипт в base.html до отрисовки, здесь — переключение
+    // класса и запись выбора в localStorage (ключ "hints": on|off).
+    // Дефолт — включены. Скрытие элементов .ui-hint делает main.css.
+    handleHintsToggle() {
+        const hintsOff = document.documentElement.classList.toggle("hints-off");
+        try {
+            localStorage.setItem("hints", hintsOff ? "off" : "on");
+        } catch (error) {
+            // localStorage недоступен — подсказки переключаются до перезагрузки
+        }
+        this.updateHintsToggleButton();
+    }
+
+    updateHintsToggleButton() {
+        if (!this.hintsToggleButton) {
+            return;
+        }
+        const hintsOff = document.documentElement.classList.contains("hints-off");
+        this.hintsToggleButton.textContent = hintsOff ? "✕💡" : "💡";
+        this.hintsToggleButton.title = hintsOff ? "Включить подсказки" : "Скрыть подсказки";
+        this.hintsToggleButton.setAttribute("aria-label", hintsOff ? "Показывать подсказки" : "Скрывать подсказки");
     }
 
     bindContentWrapperEvents() {

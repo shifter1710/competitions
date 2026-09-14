@@ -60,7 +60,7 @@
                         <tr><th>Место</th><td>{{ entry.matched.position }}</td></tr>
                     </tbody>
                 </table>
-                <div class="form-text mt-2">«Заменить существующую» перезапишет эту запись полями кандидата (запись №{{ entry.matched.record_id }}), прежние значения зафиксируются в аудите.</div>
+                <div class="form-text mt-2 ui-hint">«Заменить существующую» перезапишет эту запись полями кандидата (запись №{{ entry.matched.record_id }}), прежние значения зафиксируются в аудите.</div>
                 {% else %}
                 <div class="alert alert-secondary mb-0">
                     Похожая запись из этого же файла (первая из похожих строк была вставлена при импорте).
