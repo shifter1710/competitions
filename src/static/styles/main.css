@@ -1363,7 +1363,7 @@ span.pager__btn:hover {
 .calendar-month-title {
     margin: 24px 0 12px;
     font-size: var(--fs-md);
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
     color: var(--text-2);
 }
 
@@ -1409,7 +1409,7 @@ span.pager__btn:hover {
 
 .calendar-comp-row__name {
     font-size: var(--fs-md);
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
     color: var(--text);
 }
 
@@ -1443,7 +1443,7 @@ a.calendar-comp-row__name:hover {
 
 .calendar-comp-row__count strong {
     color: var(--text);
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
 }
 
 /* Квадратные кнопки-иконки на карточке: ссылка, правка, удаление */
@@ -1521,7 +1521,7 @@ a.calendar-comp-row__name:hover {
 
 .range-picker-panel {
     position: fixed;
-    z-index: var(--z-overlay);
+    z-index: 100; /* tokens.css --z-overlay */
     padding: var(--sp-3);
     background-color: var(--surface);
     border: 1px solid var(--border-strong);
@@ -1541,7 +1541,7 @@ a.calendar-comp-row__name:hover {
 }
 
 .rp-title {
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
     font-size: var(--fs-sm);
     text-transform: capitalize;
 }
@@ -1626,11 +1626,11 @@ a.calendar-comp-row__name:hover {
 }
 
 .rp-day.is-single {
-    border-radius: var(--r-full);
+    border-radius: 999px; /* tokens.css --r-full */
 }
 
 .rp-hint {
-    margin-top: var(--sp-2);
+    margin-top: 8px; /* tokens.css --sp-2 */
     font-size: var(--fs-xs);
     color: var(--text-3);
 }
