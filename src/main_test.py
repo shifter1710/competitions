@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
+from unittest.mock import ANY
 from unittest.mock import Mock
 from urllib.parse import quote
 from urllib.parse import unquote_plus
@@ -5102,6 +5103,227 @@ def test_import_queue_skip_marks_skipped_and_audits(client: SanicTestClient):
     app.ctx.storage.set_import_queue_status.assert_called_once_with(11, 'skipped')
     assert app.ctx.storage.add_audit_event.call_args[1]['action'] == 'import_conflict_resolved'
     assert json.loads(app.ctx.storage.add_audit_event.call_args[1]['details'])['decision'] == 'skipped'
+
+
+def test_import_queue_replace_updates_existing_record_and_audits(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    entry_payload = {
+        'student_id': 'hash-r',
+        'student_name': 'Заменяемый Захар',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': 2,
+        'sport': 'Лыжи',
+        'date': '2026-03-15T00:00:00',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 2,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2026-03-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 13,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': json.dumps(entry_payload),
+        'payload': entry_payload,
+        'status': 'pending',
+        'matched_record_id': 3,
+        'created_by': 2,
+    }
+    existing = Competition(
+        student_id='hash-r',
+        student_name='Заменяемый Захар',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+    )
+    app.ctx.storage.get_competition_by_id.return_value = existing
+    app.ctx.storage.update_competition.reset_mock()
+    app.ctx.storage.set_import_queue_status.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    app.ctx.storage.save_competitions.reset_mock()
+
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/13/replace',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    # Существующая запись обновляется по месту: record_id сохраняется, вставки нет.
+    app.ctx.storage.update_competition.assert_called_once_with(3, ANY)
+    replaced = app.ctx.storage.update_competition.call_args[0][1]
+    assert replaced.sport == 'Лыжи'
+    assert replaced.position == 2
+    app.ctx.storage.save_competitions.assert_not_called()
+    app.ctx.storage.set_import_queue_status.assert_called_once_with(13, 'replaced')
+    audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
+    assert audit_kwargs['action'] == 'import_conflict_resolved'
+    details = json.loads(audit_kwargs['details'])
+    assert details['decision'] == 'replaced'
+    assert details['matched_record_id'] == 3
+    assert details['changes']['sport'] == {'old': 'Бег', 'new': 'Лыжи'}
+    assert details['changes']['position'] == {'old': '1', 'new': '2'}
+
+
+def test_import_queue_replace_without_matched_record_rejected(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 14,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': '{}',
+        'payload': {},
+        'status': 'pending',
+        'matched_record_id': None,
+        'created_by': 1,
+    }
+    app.ctx.storage.update_competition.reset_mock()
+    app.ctx.storage.set_import_queue_status.reset_mock()
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/14/replace',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    app.ctx.storage.update_competition.assert_not_called()
+    app.ctx.storage.set_import_queue_status.assert_not_called()
+
+
+def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    entry_payload = {
+        'student_id': 'hash-e',
+        'student_name': 'Ручной Роман',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': 2,
+        'sport': 'Лыжи',
+        'date': '2026-03-15T00:00:00',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 2,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2026-03-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 15,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': json.dumps(entry_payload),
+        'payload': entry_payload,
+        'status': 'pending',
+        'matched_record_id': 3,
+        'created_by': 2,
+    }
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.set_import_queue_status.reset_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/15/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Ручной Роман',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '3',
+            'sport': 'Шахматы',
+            'date': '20.03.2026',
+            'level': 'внутривузовские',
+            'name': 'Кубок edited',
+            'position': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    app.ctx.storage.save_competitions.assert_called_once()
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.sport == 'Шахматы'
+    assert saved.name == 'Кубок edited'
+    assert saved.date == datetime(2026, 3, 20)
+    app.ctx.storage.set_import_queue_status.assert_called_once_with(15, 'accepted')
+    audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
+    assert audit_kwargs['action'] == 'import_conflict_resolved'
+    details = json.loads(audit_kwargs['details'])
+    assert details['decision'] == 'accepted'
+    assert details['edited'] is True
+
+
+def test_import_queue_edit_rejects_bad_date(client: SanicTestClient):
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 16,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': '{}',
+        'payload': {},
+        'status': 'pending',
+        'matched_record_id': 3,
+        'created_by': 1,
+    }
+    app.ctx.storage.save_competitions.reset_mock()
+    app.ctx.storage.set_import_queue_status.reset_mock()
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/16/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Ручной Роман',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '3',
+            'sport': 'Шахматы',
+            'date': '2026-03-20',
+            'level': 'внутривузовские',
+            'name': 'Кубок',
+            'position': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    app.ctx.storage.save_competitions.assert_not_called()
+    app.ctx.storage.set_import_queue_status.assert_not_called()
+
+
+def test_import_queue_editor_forbidden_on_replace_and_edit(client: SanicTestClient):
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/admin/import-queue/5/replace',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    _, response = client.post(
+        '/admin/import-queue/5/edit',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 403
 
 
 def test_split_import_similar_rows_within_file(client: SanicTestClient):
