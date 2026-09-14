@@ -119,8 +119,34 @@
 
         .conflict__edit-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            /* Сетка 3-4 в ряд на широких экранах — блок не разрастается вниз */
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: var(--sp-3);
+        }
+
+        /* Поля, задающие конфликт (ФИО и дата): не редактируются,
+           показываются заглушкой «определяют конфликт» */
+        .conflict__edit-static {
+            padding: 7px 11px;
+            border: 1px dashed var(--border-strong);
+            border-radius: var(--r-sm);
+            background: var(--surface-alt);
+            color: var(--text-2);
+            font-size: var(--fs-sm);
+            min-height: calc(1.5em + 14px);
+            display: flex;
+            align-items: center;
+            gap: var(--sp-2);
+            flex-wrap: wrap;
+        }
+
+        .conflict__edit-static .value {
+            color: var(--text);
+        }
+
+        .conflict__edit-static .why {
+            font-size: var(--fs-xs);
+            color: var(--text-3);
         }
     </style>
 </head>
@@ -211,15 +237,42 @@
                     </div>
                     <!-- Раскрытый режим «Решить вручную»: инлайн-инпуты кандидата -->
                     <div class="conflict__edit">
-                        <p class="conflict__edit-title">Решить вручную — отредактируйте значения кандидата, затем примите</p>
+                        <p class="conflict__edit-title">Решить вручную — отредактируйте значения кандидата, затем примите. ФИО и дату править нельзя: они задают конфликт (совпадение с существующей записью).</p>
                         <div class="conflict__edit-grid">
+                            <div style="grid-column: span 2;">
+                                <label class="label">ФИО</label>
+                                <div class="conflict__edit-static" title="ФИО задаёт конфликт и не редактируется"><span class="value">Иванов Иван Иванович</span><span class="why">определяет конфликт</span></div>
+                            </div>
                             <div>
-                                <label class="label" for="c1-fio">ФИО</label>
-                                <input class="input" id="c1-fio" type="text" value="Иванов Иван Иванович">
+                                <label class="label">Дата</label>
+                                <div class="conflict__edit-static" title="Дата задаёт конфликт и не редактируется"><span class="value">25.06.2026</span><span class="why">определяет конфликт</span></div>
+                            </div>
+                            <div>
+                                <label class="label" for="c1-gender">Пол</label>
+                                <select class="select" id="c1-gender">
+                                    <option selected>М</option>
+                                    <option>Ж</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="label" for="c1-inst">Институт</label>
+                                <input class="input" id="c1-inst" type="text" value="Строительный">
+                            </div>
+                            <div>
+                                <label class="label" for="c1-group">Группа</label>
+                                <input class="input" id="c1-group" type="text" value="СТ-21">
+                            </div>
+                            <div>
+                                <label class="label" for="c1-course">Курс</label>
+                                <input class="input" id="c1-course" type="text" value="2">
                             </div>
                             <div>
                                 <label class="label" for="c1-sport">Вид спорта</label>
                                 <input class="input" id="c1-sport" type="text" value="Плавание">
+                            </div>
+                            <div>
+                                <label class="label" for="c1-level">Уровень соревнований</label>
+                                <input class="input" id="c1-level" type="text" value="вуз">
                             </div>
                             <div>
                                 <label class="label" for="c1-name">Название соревнований</label>
