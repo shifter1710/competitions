@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import Mock
 from urllib.parse import quote
 from urllib.parse import unquote_plus
@@ -5383,6 +5384,19 @@ def test_index_renders_bound_link_in_target_column(client: SanicTestClient):
     app.ctx.storage.get_custom_fields.return_value = []
     app.ctx.storage.get_competitions_page.return_value = []
     app.ctx.storage.count_competitions_filtered.return_value = 0
+
+
+def test_inline_new_row_hides_bound_link_column():
+    """Хотфикс: инлайн-строка новой записи строится по всем th, включая
+    скрытую d-none колонку привязанного link-поля. JS обязан переносить
+    d-none с th на td, иначе в строке появляется лишнее видимое поле
+    (placeholder https://) и вёрстка съезжает."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    start = script.index('startNewRowEdit()')
+    end = script.index('saveNewRowEdit()', start)
+    body = script[start:end]
+    assert 'header.classList.contains("d-none")' in body
+    assert 'cell.classList.add("d-none")' in body
 
 
 def test_update_custom_field_saves_link_target(client: SanicTestClient):
