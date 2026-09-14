@@ -76,9 +76,63 @@
                 </div>
                 <div class="card__body">
                     <form class="form-grid">
-                        <div class="col-4">
+                        <div class="col-3">
+                            <label class="label" for="r-group-by">Группировать по</label>
+                            <select class="select" id="r-group-by">
+                                <option selected>Студент</option>
+                                <option>Группа</option>
+                                <option>Институт</option>
+                                <option>Курс</option>
+                                <option>Вид спорта</option>
+                                <option>Уровень</option>
+                                <option>Год</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-institute">Институт</label>
+                            <select class="select" id="r-institute">
+                                <option>Все</option>
+                                <option>ИСИ</option>
+                                <option>ИАиД</option>
+                                <option>АДИ</option>
+                                <option>ИТМ</option>
+                                <option>ИЭУ</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-group">Группа</label>
+                            <select class="select" id="r-group">
+                                <option>Все</option>
+                                <option>ПГСб-41</option>
+                                <option>ГТб-42</option>
+                                <option>ДАб-21</option>
+                                <option>АДб-22</option>
+                                <option>ТМб-12</option>
+                                <option>ЭУТб-31</option>
+                                <option>Мб-32</option>
+                                <option>СГб-11</option>
+                            </select>
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-sport">Вид спорта</label>
+                            <select class="select" id="r-sport">
+                                <option>Все</option>
+                                <option>Лёгкая атлетика</option>
+                                <option>Волейбол</option>
+                                <option>Баскетбол</option>
+                                <option>Плавание</option>
+                                <option>Лыжные гонки</option>
+                                <option>Шахматы</option>
+                            </select>
+                        </div>
+                        <div class="col-3">
                             <label class="label" for="r-name">ФИО</label>
                             <input class="input" id="r-name" type="text" placeholder="Все студенты">
+                        </div>
+                        <div class="col-2">
+                            <label class="label" for="r-custom">Тренер</label>
+                            <!-- Кастомные поля записей появляются в фильтрах автоматически -->
+                            <input class="input" id="r-custom" type="text" placeholder="кастомное поле">
                         </div>
                         <div class="col-2">
                             <label class="label" for="r-date-from">Дата (от)</label>

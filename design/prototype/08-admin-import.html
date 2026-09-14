@@ -62,7 +62,7 @@
             <div class="page-head">
                 <div>
                     <h1 class="page-title">Импорт записей</h1>
-                    <p class="page-sub">Загрузка Excel и шаблон для оператора. Дубли записей пропускаются автоматически.</p>
+                    <p class="page-sub">Загрузка Excel и шаблон для оператора. Точные дубли пропускаются автоматически, похожие строки попадают в очередь подтверждения.</p>
                 </div>
                 <a class="backlink" href="07-admin-hub.html">В админку</a>
             </div>
@@ -93,30 +93,19 @@
             <section class="card">
                 <div class="card__header">
                     <div>
-                        <h2 class="card__title">Результат последнего импорта</h2>
-                        <p class="card__sub">11.09.2026 14:22 · файл «соревнования_весна_2026.xlsx» · оператор editor1</p>
+                        <h2 class="card__title">Результат импорта</h2>
+                        <p class="card__sub">Единая сводка после загрузки файла: точные дубли пропускаются, похожие строки — ждут решения в очереди.</p>
                     </div>
-                    <span class="badge badge--ok"><span class="badge__dot"></span>завершён</span>
                 </div>
                 <div class="card__body">
-                    <div class="stat-row mb-4">
-                        <div class="stat">
-                            <div class="stat__value">214</div>
-                            <div class="stat__label">добавлено записей</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat__value">18</div>
-                            <div class="stat__label">пропущено дублей</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat__value" style="color: var(--danger);">2</div>
-                            <div class="stat__label">строк с ошибками</div>
-                        </div>
+                    <div class="note note--ok mb-3">
+                        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.8 8.6l3.4 3.4 7-8.2"/></svg>
+                        <span>Импортировано записей: <strong class="tabnum">214</strong>. Пропущено дублей: <strong class="tabnum">18</strong>. На подтверждение: <strong class="tabnum">2</strong>.</span>
                     </div>
-
-                    <div class="note note--warn">
+                    <div class="note note--warn mb-0">
                         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
-                        <span>Строки 15 и 47 не импортированы: неверный формат даты — ожидается «дд.мм.гггг». Исправьте строки и загрузите файл повторно: дубли пропустятся, недостающие записи добавятся.</span>
+                        <span>Похожих строк на подтверждении: <strong class="tabnum">2</strong> — совпадают ФИО и дата начала, но не вся запись. Ничего не вставлено, пока вы не примете решение.
+                        <a href="17-import-queue.html">Разобрать очередь →</a></span>
                     </div>
                 </div>
             </section>
