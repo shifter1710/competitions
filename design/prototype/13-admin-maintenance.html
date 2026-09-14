@@ -98,6 +98,14 @@
                         </div>
                     </div>
 
+                    <!-- Полоса занятости диска — как в продукте (страница «Обслуживание») -->
+                    <div style="margin-bottom: 20px;">
+                        <div style="height: 8px; border-radius: 999px; background: var(--surface-alt); border: 1px solid var(--border); overflow: hidden;">
+                            <div style="height: 100%; width: 10.6%; background: var(--accent);"></div>
+                        </div>
+                        <div class="fs-xs text-3" style="margin-top: 6px;">Диск: 193,5 ГБ из 1,8 ТБ занято · свободно 1,5 ТБ</div>
+                    </div>
+
                     <div class="table-wrap">
                         <table class="table table--hover">
                             <thead>
@@ -217,7 +225,11 @@
                         </div>
                         <div class="step__body" style="padding-bottom: 0;">
                             <h3 class="step__title">Подтвердите</h3>
-                            <p class="step__desc">Кнопка активируется только при точном совпадении слова:</p>
+                            <p class="step__desc">Кнопка «Предпросмотр» показывает, сколько записей и вложений попадёт под удаление (и их суммарный размер) — ещё до подтверждения. Затем введите слово:</p>
+                            <div class="btn-row" style="margin-bottom: 12px;">
+                                <button class="btn btn--secondary btn--sm" type="button">Предпросмотр</button>
+                                <span class="fs-sm text-2">Под критерий попадает: записей — <strong class="tabnum">14</strong>, вложений — <strong class="tabnum">3</strong> · 1,8 МБ</span>
+                            </div>
                             <div class="form-grid">
                                 <div class="col-4">
                                     <label class="label" for="wipe-phrase">Для подтверждения введите слово «УДАЛИТЬ»</label>

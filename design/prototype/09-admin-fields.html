@@ -69,6 +69,83 @@
 
             <section class="card mb-4">
                 <div class="card__header">
+                    <div>
+                        <h2 class="card__title">Базовые поля</h2>
+                        <p class="card__sub">Тип и обязательность основных колонок записей. ФИО и Дата всегда обязательны: по ним работает дедупликация импорта и срезы отчётов. Тип «текст» разрешает нечисловые значения (например, Курс «Выпускник 2025/26»).</p>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <div class="table-wrap">
+                        <table class="table table--mid">
+                            <thead>
+                                <tr>
+                                    <th>Поле</th>
+                                    <th>Тип</th>
+                                    <th>Обязательное</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>ФИО <span class="text-3">(всегда обязательное)</span></td>
+                                    <td><select class="select select--sm" disabled><option selected>text</option></select></td>
+                                    <td><label class="check"><input type="checkbox" checked disabled><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Пол</td>
+                                    <td><select class="select select--sm"><option selected>text</option><option>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Институт</td>
+                                    <td><select class="select select--sm"><option selected>text</option><option>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Группа</td>
+                                    <td><select class="select select--sm"><option selected>text</option><option>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Вид спорта</td>
+                                    <td><select class="select select--sm"><option selected>text</option><option>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Дата <span class="text-3">(всегда обязательное)</span></td>
+                                    <td><select class="select select--sm" disabled><option selected>text</option></select></td>
+                                    <td><label class="check"><input type="checkbox" checked disabled><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Уровень соревнований</td>
+                                    <td><select class="select select--sm"><option selected>text</option><option>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Название соревнований</td>
+                                    <td><select class="select select--sm"><option selected>text</option><option>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Место</td>
+                                    <td><select class="select select--sm"><option>text</option><option selected>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox"><span>обязательное</span></label></td>
+                                </tr>
+                                <tr>
+                                    <td>Курс</td>
+                                    <td><select class="select select--sm"><option>text</option><option selected>number</option></select></td>
+                                    <td><label class="check"><input type="checkbox" checked><span>обязательное</span></label></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="btn-row mt-3">
+                        <button class="btn btn--primary" type="button">Сохранить базовые поля</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card mb-4">
+                <div class="card__header">
                     <h2 class="card__title">Новое поле</h2>
                 </div>
                 <div class="card__body">
@@ -120,6 +197,7 @@
                         <tr>
                             <th>Поле</th>
                             <th>Тип</th>
+                            <th>Отображать в колонке</th>
                             <th class="th--num">Порядок</th>
                             <th>Обязательное</th>
                             <th>В таблице</th>
@@ -132,6 +210,16 @@
                         <tr>
                             <td><strong>Протокол (ссылка)</strong></td>
                             <td><span class="code">url</span></td>
+                            <td>
+                                <!-- Настройка только у полей типа url: значение рисуется
+                                     гиперссылкой в выбранной колонке; пусто — отдельная колонка -->
+                                <select class="select select--sm" style="min-width: 160px;">
+                                    <option selected>(не привязана)</option>
+                                    <option>ФИО</option>
+                                    <option>Название соревнований</option>
+                                    <option>Тренер</option>
+                                </select>
+                            </td>
                             <td class="td--num">10</td>
                             <td class="text-3">—</td>
                             <td style="color: var(--ok-fg);">✓</td>
@@ -147,6 +235,7 @@
                         <tr>
                             <td><strong>Разряд ЕВСК</strong></td>
                             <td><span class="code">text</span></td>
+                            <td class="text-3">—</td>
                             <td class="td--num">20</td>
                             <td class="text-3">—</td>
                             <td style="color: var(--ok-fg);">✓</td>
@@ -162,6 +251,7 @@
                         <tr>
                             <td><strong>Номер зачётной книжки</strong></td>
                             <td><span class="code">number</span></td>
+                            <td class="text-3">—</td>
                             <td class="td--num">30</td>
                             <td style="color: var(--ok-fg);">✓</td>
                             <td class="text-3">—</td>

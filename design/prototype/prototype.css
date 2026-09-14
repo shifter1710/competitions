@@ -1739,3 +1739,26 @@ html[data-theme="dark"] .i-moon { display: none; }
         padding: var(--sp-4) var(--sp-4) var(--sp-12);
     }
 }
+
+/* --- Синхронизация с продуктом (v0.4) --- */
+
+/* Онлайн-точка активности пользователя (страница 10) */
+.presence-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border-strong);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.presence-dot--online {
+    background: var(--ok-fg, #2e9e5b);
+}
+
+/* Компактный селект в строках таблиц настроек */
+.select--sm {
+    font-size: var(--fs-sm);
+    padding: 4px 8px;
+}

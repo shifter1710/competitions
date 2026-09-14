@@ -90,7 +90,9 @@
                             <th>Институт</th>
                             <th>Группа</th>
                             <th class="th--num">Курс</th>
-                            <th class="th--num th--wrap">Количество участий</th>
+                            <th class="th--num th--wrap">Участий</th>
+                            <th class="th--num">Побед</th>
+                            <th class="th--num">Призовых</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -102,6 +104,8 @@
                             <td>ПГСб-41</td>
                             <td class="td--num">4</td>
                             <td class="td--num"><strong>6</strong></td>
+                            <td class="td--num">3</td>
+                            <td class="td--num">4</td>
                         </tr>
                         <tr>
                             <td class="td--num">2</td>
@@ -111,6 +115,8 @@
                             <td>ЭУТб-31</td>
                             <td class="td--num">3</td>
                             <td class="td--num"><strong>5</strong></td>
+                            <td class="td--num">3</td>
+                            <td class="td--num">4</td>
                         </tr>
                         <tr>
                             <td class="td--num">3</td>
@@ -120,6 +126,8 @@
                             <td>ГТб-42</td>
                             <td class="td--num">4</td>
                             <td class="td--num"><strong>4</strong></td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
                         </tr>
                         <tr>
                             <td class="td--num">4</td>
@@ -129,6 +137,8 @@
                             <td>ДАб-21</td>
                             <td class="td--num">2</td>
                             <td class="td--num"><strong>4</strong></td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
                         </tr>
                         <tr>
                             <td class="td--num">5</td>
@@ -138,6 +148,8 @@
                             <td>АДб-22</td>
                             <td class="td--num">2</td>
                             <td class="td--num"><strong>3</strong></td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
                         </tr>
                         <tr>
                             <td class="td--num">6</td>
@@ -147,6 +159,8 @@
                             <td>Мб-32</td>
                             <td class="td--num">3</td>
                             <td class="td--num"><strong>3</strong></td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
                         </tr>
                         <tr>
                             <td class="td--num">7</td>
@@ -156,6 +170,8 @@
                             <td>ПГСб-41</td>
                             <td class="td--num">4</td>
                             <td class="td--num"><strong>3</strong></td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
                         </tr>
                         <tr>
                             <td class="td--num">8</td>
@@ -165,6 +181,8 @@
                             <td>ГТб-32</td>
                             <td class="td--num">3</td>
                             <td class="td--num"><strong>3</strong></td>
+                            <td class="td--num">2</td>
+                            <td class="td--num">3</td>
                         </tr>
                         <tr>
                             <td class="td--num">9</td>
@@ -174,6 +192,8 @@
                             <td>ТМб-12</td>
                             <td class="td--num">1</td>
                             <td class="td--num"><strong>2</strong></td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">2</td>
                         </tr>
                         <tr>
                             <td class="td--num">10</td>
@@ -183,6 +203,8 @@
                             <td>ТМб-12</td>
                             <td class="td--num">1</td>
                             <td class="td--num"><strong>2</strong></td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">2</td>
                         </tr>
                         <tr>
                             <td class="td--num">11</td>
@@ -192,6 +214,8 @@
                             <td>АДб-22</td>
                             <td class="td--num">2</td>
                             <td class="td--num"><strong>2</strong></td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">2</td>
                         </tr>
                         <tr>
                             <td class="td--num">12</td>
@@ -201,6 +225,8 @@
                             <td>СГб-11</td>
                             <td class="td--num">1</td>
                             <td class="td--num"><strong>1</strong></td>
+                            <td class="td--num">1</td>
+                            <td class="td--num">1</td>
                         </tr>
                     </tbody>
                 </table>
@@ -215,7 +241,7 @@
                 <div class="card__header">
                     <div>
                         <h2 class="card__title">Выгрузить в Excel</h2>
-                        <p class="card__sub">Отметьте колонки, которые попадут в файл выгрузки.</p>
+                        <p class="card__sub">Отметьте колонки, которые попадут в файл выгрузки. Набор колонок зависит от среза: для «Студент» — ФИО, пол, институт, группа и курс; при смене среза на группу/институт/курс/вид спорта/уровень/год колонки подставляются под выбранный срез.</p>
                     </div>
                 </div>
                 <div class="card__body">
@@ -225,7 +251,9 @@
                         <label class="check"><input type="checkbox" checked><span>Институт</span></label>
                         <label class="check"><input type="checkbox" checked><span>Группа</span></label>
                         <label class="check"><input type="checkbox" checked><span>Курс</span></label>
-                        <label class="check"><input type="checkbox" checked><span>Количество участий</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Участий</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Побед</span></label>
+                        <label class="check"><input type="checkbox" checked><span>Призовых</span></label>
                         <span class="toolbar__spacer"></span>
                         <button class="btn btn--primary" type="button">
                             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7.5M4.5 6.5 8 10l3.5-3.5M2.5 13.5h11"/></svg>

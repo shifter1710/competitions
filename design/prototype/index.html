@@ -43,7 +43,7 @@
             <div class="app-header__inner">
                 <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
                 <div class="app-header__side">
-                    <span class="user-chip">Дизайн-прототип · v0.3 · сентябрь 2026</span>
+                    <span class="user-chip">Дизайн-прототип · v0.4 · сентябрь 2026</span>
                     <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
                         <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
                         <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
@@ -54,7 +54,7 @@
 
         <main class="cover">
             <div class="cover__hero">
-                <div class="cover__kicker">Дизайн-прототип · статический HTML · итерация 2</div>
+                <div class="cover__kicker">Дизайн-прототип · статический HTML · итерация 4 (синхронизация с продуктом)</div>
                 <h1 class="cover__title">СибАДИ Competitions</h1>
                 <p class="cover__lead">
                     Все страницы приложения как отправная точка дизайна. Открывается двойным кликом по файлу —
@@ -62,13 +62,13 @@
                     акцент, нейтральные поверхности. Две темы из одного набора токенов, переключатель — в шапке.
                 </p>
                 <div class="btn-row mt-4">
-                    <span class="badge badge--info">16 страниц</span>
+                    <span class="badge badge--info">17 страниц</span>
                     <span class="badge badge--info">светлая и тёмная темы</span>
                     <span class="badge badge--info">системные шрифты, без CDN</span>
                 </div>
                 <div class="note note--plain mt-4">
                     <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
-                    <span>Итерация 2 — по замечаниям владельца (см. <span class="code">FEEDBACK.md</span>): крупнее шрифты, заголовки таблиц не обрезаются и не выделяются, колонка «Действия» закреплена справа, внизу таблиц — счётчик «Показано N из M», размер страницы и пагинация; институт и группа — комбобоксы с фильтрацией («можно ввести своё»), поля дат — с календарём и автопостановкой точек; обслуживание базы — панель состояния, бэкапы и очистка по возрастанию ущерба с архивом перед удалением; журнал аудита — с фильтрами и пагинацией. Всё работает в обеих темах.</span>
+                    <span>Итерация 4 — синхронизация с фактическим состоянием продукта (волны 0–3.5) и замечания итерации 2 (см. <span class="code">FEEDBACK.md</span>): крупнее шрифты, заголовки таблиц не обрезаются и не выделяются, колонка «Действия» закреплена справа, внизу таблиц — счётчик «Показано N из M», размер страницы и пагинация; институт и группа — комбобоксы с фильтрацией («можно ввести своё»), поля дат — с календарём и автопостановкой точек; обслуживание базы — панель состояния, бэкапы и очистка по возрастанию ущерба с архивом перед удалением; журнал аудита — с фильтрами и пагинацией; новая страница «Очередь импорта», трёхчастная сводка импорта, чипы условий отчёта, базовые поля и активность пользователей. Всё работает в обеих темах.</span>
                 </div>
             </div>
 
@@ -129,12 +129,12 @@
                 <div class="cover-grid">
                     <a class="cover-card" href="07-admin-hub.html">
                         <div class="cover-card__top"><span class="cover-card__num">07</span><span class="cover-card__title">Админ-хаб</span></div>
-                        <p class="cover-card__desc">Разделы управления карточками: импорт, поля, справочники, пользователи, merge, аудит, обслуживание.</p>
-                        <div class="cover-card__tags"><span class="badge">7 разделов</span></div>
+                        <p class="cover-card__desc">Разделы управления карточками: импорт (+ очередь подтверждения), поля, справочники, пользователи, merge, аудит, обслуживание.</p>
+                        <div class="cover-card__tags"><span class="badge">8 разделов</span></div>
                     </a>
                     <a class="cover-card" href="08-admin-import.html">
                         <div class="cover-card__top"><span class="cover-card__num">08</span><span class="cover-card__title">Импорт</span></div>
-                        <p class="cover-card__desc">Загрузка Excel, пустой шаблон и результат последнего импорта со счётчиками.</p>
+                        <p class="cover-card__desc">Загрузка Excel, пустой шаблон и трёхчастная сводка: импортировано / дубли / на подтверждение, со ссылкой на очередь.</p>
                         <div class="cover-card__tags"><span class="badge">xlsx</span></div>
                     </a>
                     <a class="cover-card" href="09-admin-fields.html">
@@ -166,6 +166,11 @@
                         <div class="cover-card__top"><span class="cover-card__num">14</span><span class="cover-card__title">Журнал аудита</span></div>
                         <p class="cover-card__desc">Время, пользователь, действие, детали; фильтры (пользователь/действие/период) и пагинация вместо лимита 200.</p>
                         <div class="cover-card__tags"><span class="badge">append-only</span><span class="badge">пагинация</span></div>
+                    </a>
+                    <a class="cover-card" href="17-import-queue.html">
+                        <div class="cover-card__top"><span class="cover-card__num">17</span><span class="cover-card__title">Очередь импорта</span></div>
+                        <p class="cover-card__desc">Строки импорта, похожие на существующие записи: кандидат слева, похожая запись справа, решение — «Принять» или «Пропустить».</p>
+                        <div class="cover-card__tags"><span class="badge badge--warn">требует решения</span></div>
                     </a>
                 </div>
             </section>
