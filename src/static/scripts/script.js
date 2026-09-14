@@ -2469,12 +2469,61 @@ class Main {
 
 window.addEventListener("DOMContentLoaded", () => {
     new Main();
+    initCalendarPeriodForms();
     // Страница участников соревнования (волна B, прототип 16): резолвер ФИО
     // в строке добавления + инлайн-правка строки (место «дописать позже»).
     if (document.querySelector("[data-participants-page]")) {
         new ParticipantsPage();
     }
 });
+
+// Период календаря (calendar.html / calendar_event.html): вместо текстового
+// гибридного поля — два нативных <input type="date"> «с»/«по» (отзыв
+// владельца: «календарь не открывается»). На submit JS собирает прежнее
+// поле формы date («DD.MM.YYYY» или «DD.MM.YYYY-DD.MM.YYYY») — контракт
+// POST /calendar/new и /calendar/<id>/edit не меняется. «по» не может быть
+// раньше «с» (min-атрибут); серверная валидация остаётся источником истины.
+function composePeriodDate(isoDate) {
+    const [year, month, day] = isoDate.split("-");
+    return `${day}.${month}.${year}`;
+}
+
+function initCalendarPeriodForms() {
+    document.querySelectorAll("form[data-period-form]").forEach((form) => {
+        if (form.dataset.periodBound === "true") {
+            return;
+        }
+        form.dataset.periodBound = "true";
+        const dateFrom = form.querySelector('input[name="date_from"]');
+        const dateTo = form.querySelector('input[name="date_to"]');
+        const composed = form.querySelector('input[name="date"][data-period-field]');
+        if (!dateFrom || !dateTo || !composed) {
+            return;
+        }
+        const syncMin = () => {
+            if (dateFrom.value) {
+                dateTo.min = dateFrom.value;
+                if (dateTo.value && dateTo.value < dateFrom.value) {
+                    dateTo.value = dateFrom.value;
+                }
+            } else {
+                dateTo.removeAttribute("min");
+            }
+        };
+        dateFrom.addEventListener("change", syncMin);
+        dateTo.addEventListener("change", syncMin);
+        form.addEventListener("submit", () => {
+            const parts = [];
+            if (dateFrom.value) {
+                parts.push(composePeriodDate(dateFrom.value));
+                if (dateTo.value && dateTo.value > dateFrom.value) {
+                    parts.push(composePeriodDate(dateTo.value));
+                }
+            }
+            composed.value = parts.join("-");
+        });
+    });
+}
 
 // Страница участников соревнования (волна B, docs/feedback-live.md №23).
 // Переиспользует FioResolver (выбор варианта подставляет пол/институт/
