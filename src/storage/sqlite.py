@@ -285,6 +285,23 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            # Календарь соревнований (волна A, docs/feedback-live.md №23):
+            # план на год — шаблон-пресет для группы записей участников
+            # (сами записи реестра не трогаются, участники — волна B).
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS calendar_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    date_to TEXT,
+                    level TEXT NOT NULL DEFAULT '',
+                    sport TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                '''
+            )
             # Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md
             # «Реестр полей: лёгкая версия сейчас, полная запланирована»):
             # настройки ТИПА и ОБЯЗАТЕЛЬНОСТИ базовых полей. Дефолты отражают
@@ -2204,3 +2221,125 @@ class SQLiteAdapter:
                 )
             self.connection.commit()
             return cursor.rowcount
+
+    # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
+    #
+    # Событие календаря — план (пресет): название + период + уровень +
+    # вид спорта + ссылка. Участники — обычные записи реестра, совпадающие
+    # с пресетом по (name, date, date_to); записи хранят даты в ISO, пустой
+    # date_to = однодневное (совпадение по COALESCE с обеих сторон).
+
+    @staticmethod
+    def _calendar_preset_match_sql(alias: str = 'c') -> str:
+        return (
+            f'({alias}.name = e.name'
+            f' AND {alias}.date = e.date'
+            f" AND COALESCE({alias}.date_to, '') = COALESCE(e.date_to, ''))"
+        )
+
+    def create_calendar_event(
+        self,
+        name: str,
+        date: str,
+        date_to: str | None,
+        level: str,
+        sport: str,
+        url: str,
+    ) -> int:
+        with self._lock:
+            cursor = self.connection.execute(
+                'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
+                ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (name, date, date_to, level, sport, url, datetime.utcnow().isoformat()),
+            )
+            self.connection.commit()
+            return cursor.lastrowid
+
+    def get_calendar_event(self, event_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, name, date, date_to, level, sport, url, created_at' ' FROM calendar_events WHERE id = ?',
+                (event_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_calendar_event(
+        self,
+        event_id: int,
+        name: str,
+        date: str,
+        date_to: str | None,
+        level: str,
+        sport: str,
+        url: str,
+    ) -> None:
+        with self._lock:
+            self.connection.execute(
+                'UPDATE calendar_events'
+                ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?, url = ?'
+                ' WHERE id = ?',
+                (name, date, date_to, level, sport, url, event_id),
+            )
+            self.connection.commit()
+
+    def count_calendar_event_participants(self, event_id: int) -> int:
+        """Записи реестра, совпадающие с пресетом (name + date + date_to)."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM calendar_events e, competitions c'
+                f' WHERE e.id = ? AND {self._calendar_preset_match_sql()}',
+                (event_id,),
+            ).fetchone()
+            return row['total']
+
+    def delete_calendar_event(self, event_id: int) -> None:
+        with self._lock:
+            self.connection.execute('DELETE FROM calendar_events WHERE id = ?', (event_id,))
+            self.connection.commit()
+
+    def list_calendar_events(self, sport: str = '') -> list[dict]:
+        """Все события по хронологии; рядом — счётчики участников по пресету:
+        participant_count — все совпавшие записи реестра, no_result_count —
+        из них с position = 0 («без результата»)."""
+        with self._lock:
+            params: list[object] = []
+            where = ''
+            if sport:
+                where = 'WHERE e.sport = ?'
+                params.append(sport)
+            rows = self.connection.execute(
+                f'''
+                SELECT
+                    e.id,
+                    e.name,
+                    e.date,
+                    e.date_to,
+                    e.level,
+                    e.sport,
+                    e.url,
+                    e.created_at,
+                    COUNT(c.id) AS participant_count,
+                    SUM(CASE WHEN c.position = 0 THEN 1 ELSE 0 END) AS no_result_count
+                FROM calendar_events e
+                LEFT JOIN competitions c ON {self._calendar_preset_match_sql()}
+                {where}
+                GROUP BY e.id
+                ORDER BY e.date ASC, e.name ASC
+                ''',
+                params,
+            ).fetchall()
+            return [
+                {
+                    'id': row['id'],
+                    'name': row['name'],
+                    'date': row['date'],
+                    'date_to': row['date_to'],
+                    'level': row['level'],
+                    'sport': row['sport'],
+                    'url': row['url'],
+                    'created_at': row['created_at'],
+                    'participant_count': row['participant_count'] or 0,
+                    'no_result_count': row['no_result_count'] or 0,
+                }
+                for row in rows
+            ]

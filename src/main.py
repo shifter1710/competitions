@@ -1381,6 +1381,221 @@ async def reports_page(request: Request):
     )
 
 
+# Календарь соревнований (волна A, docs/feedback-live.md №23): план на год.
+# Статус «запланировано/прошло» — АВТОМАТИЧЕСКИ по дате окончания (выводимой):
+# date_to (или date) >= сегодня → «запланировано».
+CALENDAR_MONTH_NAMES: Sequence[str] = (
+    'Январь',
+    'Февраль',
+    'Март',
+    'Апрель',
+    'Май',
+    'Июнь',
+    'Июль',
+    'Август',
+    'Сентябрь',
+    'Октябрь',
+    'Ноябрь',
+    'Декабрь',
+)
+CALENDAR_STATUS_PLANNED = 'planned'
+CALENDAR_STATUS_PAST = 'past'
+CALENDAR_STATUS_FILTERS: Sequence[tuple[str, str]] = (
+    ('', 'Все'),
+    (CALENDAR_STATUS_PLANNED, 'запланировано'),
+    (CALENDAR_STATUS_PAST, 'прошло'),
+)
+
+
+def calendar_event_status(event: dict, today=None) -> str:
+    end_raw = event.get('date_to') or event['date']
+    end = datetime.fromisoformat(end_raw).date() if isinstance(end_raw, str) else end_raw
+    current = today if today is not None else datetime.now().date()
+    return CALENDAR_STATUS_PLANNED if end >= current else CALENDAR_STATUS_PAST
+
+
+def decorate_calendar_event(event: dict, today=None) -> dict:
+    """Готовые к шаблону поля: даты-объекты, компактный период, статус."""
+    date_from = datetime.fromisoformat(event['date'])
+    date_to = datetime.fromisoformat(event['date_to']) if event.get('date_to') else None
+    decorated = dict(event)
+    decorated['date_from'] = date_from
+    decorated['date_to_obj'] = date_to
+    decorated['date_label'] = format_date_range(date_from, date_to)
+    decorated['status'] = calendar_event_status(event, today)
+    return decorated
+
+
+def group_calendar_events_by_month(events: Sequence[dict]) -> list[dict]:
+    """Группировка карточек по месяцам начала (прототип 15): заголовок
+    «Сентябрь 2026 · N», внутри — карточка соревнования."""
+    groups: list[dict] = []
+    index: dict[tuple[int, int], dict] = {}
+    for event in events:
+        date_from = event['date_from']
+        key = (date_from.year, date_from.month)
+        if key not in index:
+            group = {
+                'key': key,
+                'label': f'{CALENDAR_MONTH_NAMES[date_from.month - 1]} {date_from.year}',
+                'events': [],
+            }
+            index[key] = group
+            groups.append(group)
+        index[key]['events'].append(event)
+    for group in groups:
+        group['count'] = len(group['events'])
+    return groups
+
+
+def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
+    """Разобрать форму соревнования календаря. Возвращает (значения, ошибка).
+
+    Период — одно гибридное поле, тот же парсер, что у записей реестра
+    (решение «Даты-диапазоны: визуально одно, под капотом два»).
+    """
+    name = clean_str(get_form_value(request, 'name'))
+    if not name:
+        return {}, 'Название обязательно'
+    try:
+        date_from, date_to = parse_date_value(get_form_value(request, 'date'), manual_input=True)
+    except ValueError as exc:
+        return {}, str(exc)
+    return {
+        'name': name,
+        'date': date_from,
+        'date_to': date_to,
+        'level': clean_str(get_form_value(request, 'level')),
+        'sport': clean_str(get_form_value(request, 'sport')),
+        'url': clean_str(get_form_value(request, 'url')),
+    }, None
+
+
+@app.get('/calendar')
+async def calendar_page(request: Request):
+    # Решение по ролям: admin/editor — полный доступ, viewer — просмотр без
+    # кнопок, athlete — 403 (план — внутренняя кухня).
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
+    storage = get_storage(request.app)
+    args = dict(request.args)
+
+    raw_status = (get_param(args, 'status') or '').strip()
+    if raw_status not in {key for key, _ in CALENDAR_STATUS_FILTERS}:
+        raw_status = ''
+    sport_filter = (get_param(args, 'sport') or '').strip()
+
+    today = datetime.now().date()
+    events = [decorate_calendar_event(event, today) for event in storage.list_calendar_events(sport=sport_filter)]
+    if raw_status:
+        events = [event for event in events if event['status'] == raw_status]
+
+    return await render(
+        template_name=jinja_env.get_template('calendar.html'),
+        context={
+            'request': request,
+            'month_groups': group_calendar_events_by_month(events),
+            'events_count': len(events),
+            'planned_count': sum(1 for event in events if event['status'] == CALENDAR_STATUS_PLANNED),
+            'past_count': sum(1 for event in events if event['status'] == CALENDAR_STATUS_PAST),
+            'can_manage': user_is_moderator(request),
+            'status_filter': raw_status,
+            'status_filter_options': CALENDAR_STATUS_FILTERS,
+            'sport_filter': sport_filter,
+            'sport_options': storage.list_catalog('sport'),
+            'level_options': storage.get_level_names(),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/calendar/new')
+async def create_calendar_event(request: Request):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    values, error = parse_calendar_event_form(request)
+    if error is not None:
+        return text(body=error, status=400)
+
+    get_storage(request.app).create_calendar_event(
+        name=values['name'],
+        date=values['date'].isoformat(),
+        date_to=values['date_to'].isoformat() if values['date_to'] else None,
+        level=values['level'],
+        sport=values['sport'],
+        url=values['url'],
+    )
+    return redirect(to='/calendar')
+
+
+@app.post('/calendar/<event_id>/edit')
+async def edit_calendar_event(request: Request, event_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(event_id)
+    except ValueError:
+        return text(body='Invalid event id', status=400)
+
+    storage = get_storage(request.app)
+    if storage.get_calendar_event(numeric_id) is None:
+        return text(body='Event not found', status=404)
+
+    values, error = parse_calendar_event_form(request)
+    if error is not None:
+        return text(body=error, status=400)
+
+    storage.update_calendar_event(
+        event_id=numeric_id,
+        name=values['name'],
+        date=values['date'].isoformat(),
+        date_to=values['date_to'].isoformat() if values['date_to'] else None,
+        level=values['level'],
+        sport=values['sport'],
+        url=values['url'],
+    )
+    return redirect(to='/calendar')
+
+
+@app.post('/calendar/<event_id>/delete')
+async def delete_calendar_event(request: Request, event_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(event_id)
+    except ValueError:
+        return text(body='Invalid event id', status=400)
+
+    storage = get_storage(request.app)
+    event = storage.get_calendar_event(numeric_id)
+    if event is None:
+        return text(body='Event not found', status=404)
+
+    # Удаление с участниками — отказ: сначала удалить участников (волна B
+    # даст инструмент), счётчик подсказывает объём.
+    participants = storage.count_calendar_event_participants(numeric_id)
+    if participants > 0:
+        return build_redirect_with_message(
+            error=f'У соревнования «{event["name"]}» есть участники: {participants}. '
+            'Сначала удалите участников, затем соревнование.',
+            url='/calendar',
+        )
+
+    storage.delete_calendar_event(numeric_id)
+    log_audit_event(
+        request,
+        'calendar_event_deleted',
+        {'event_id': numeric_id, 'name': event['name'], 'date': event['date']},
+    )
+    return redirect(to='/calendar')
+
+
 @app.get('/admin')
 async def admin_page(request: Request):
     auth_error = require_moderator(request)

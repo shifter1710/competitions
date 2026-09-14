@@ -1358,3 +1358,131 @@ span.pager__btn:hover {
 .catalog-institute.is-inactive {
     background-color: var(--surface-alt);
 }
+
+/* Календарь соревнований (прототип 15): заголовки месяцев, строки-карточки */
+.calendar-month-title {
+    margin: 24px 0 12px;
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
+    color: var(--text-2);
+}
+
+.calendar-month-title:first-of-type {
+    margin-top: 0;
+}
+
+.calendar-month-count {
+    color: var(--text-3);
+    font-weight: var(--fw-medium);
+    font-size: var(--fs-sm);
+}
+
+.calendar-card {
+    overflow: hidden;
+}
+
+.calendar-comp-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 16px 20px;
+}
+
+.calendar-comp-row + .calendar-comp-row {
+    border-top: 1px solid var(--border);
+}
+
+.calendar-comp-row__dates {
+    flex: none;
+    width: 118px;
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    white-space: nowrap;
+}
+
+.calendar-comp-row__main {
+    flex: 1;
+    min-width: 260px;
+}
+
+.calendar-comp-row__name {
+    font-size: var(--fs-md);
+    font-weight: var(--fw-semibold);
+    color: var(--text);
+}
+
+.calendar-comp-row__meta {
+    margin-top: 3px;
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+}
+
+.calendar-comp-row__side {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.calendar-comp-row__count {
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+    white-space: nowrap;
+}
+
+.calendar-comp-row__count strong {
+    color: var(--text);
+    font-weight: var(--fw-semibold);
+}
+
+/* Квадратные кнопки-иконки на карточке: ссылка, правка, удаление */
+.calendar-comp-row__open {
+    width: 32px;
+    height: 32px;
+    display: inline-grid;
+    place-items: center;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--text-2);
+    padding: 0;
+    transition: background-color var(--tr-fast, 0.15s), color var(--tr-fast, 0.15s);
+}
+
+.calendar-comp-row__open:hover {
+    background: var(--accent-soft, var(--surface-hover));
+    color: var(--accent-fg, var(--text));
+    text-decoration: none;
+}
+
+.calendar-comp-row__open--danger:hover {
+    background: var(--err-bg);
+    color: var(--err-fg);
+    border-color: var(--err-br);
+}
+
+/* Точка внутри бейджа статуса (прототип 15) */
+.badge__dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    margin-right: 5px;
+    vertical-align: middle;
+}
+
+/* Строка-подсказка внизу страницы (как .note прототипа) */
+.calendar-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--surface-alt, var(--surface));
+    color: var(--text-2);
+    font-size: var(--fs-sm);
+}
