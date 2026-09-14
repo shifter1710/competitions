@@ -20,10 +20,13 @@ from src.conftest import make_report_fixture
 from src.conftest import make_report_unapproved_fixture
 from src.main import app
 from src.main import build_competition
+from src.main import calendar_event_status
 from src.main import competition_duplicate_key
 from src.main import competition_to_export_row
 from src.main import create_auth_cookie_value
+from src.main import decorate_calendar_event
 from src.main import format_date_range
+from src.main import group_calendar_events_by_month
 from src.main import normalize_position
 from src.main import parse_date_value
 from src.main import split_import_competitions
@@ -191,6 +194,13 @@ def client() -> SanicTestClient:
     fake_storage.add_import_queue_entry.return_value = 1
     fake_storage.set_import_queue_status.return_value = None
     fake_storage.get_competition_by_id.return_value = None
+    # Календарь соревнований (волна A, docs/feedback-live.md №23)
+    fake_storage.list_calendar_events.return_value = []
+    fake_storage.create_calendar_event.return_value = 1
+    fake_storage.get_calendar_event.return_value = None
+    fake_storage.update_calendar_event.return_value = None
+    fake_storage.delete_calendar_event.return_value = None
+    fake_storage.count_calendar_event_participants.return_value = 0
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -5798,3 +5808,216 @@ def test_update_custom_field_rejects_unknown_link_target(client: SanicTestClient
     assert response.status == 302
     _, kwargs = app.ctx.storage.update_custom_field.call_args
     assert kwargs['link_target'] is None
+
+
+# ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
+
+
+def test_calendar_event_status_auto_by_end_date():
+    today = datetime(2026, 9, 14).date()
+    # Будущее → запланировано
+    assert calendar_event_status({'date': '2026-09-20', 'date_to': None}, today) == 'planned'
+    # Многодневное, сегодня внутри диапазона → ещё запланировано
+    assert calendar_event_status({'date': '2026-09-10', 'date_to': '2026-09-15'}, today) == 'planned'
+    # Дата окончания = сегодня → ещё запланировано
+    assert calendar_event_status({'date': '2026-09-14', 'date_to': None}, today) == 'planned'
+    # Однодневное вчера → прошло
+    assert calendar_event_status({'date': '2026-09-13', 'date_to': None}, today) == 'past'
+    # Диапазон закончился вчера → прошло
+    assert calendar_event_status({'date': '2026-09-01', 'date_to': '2026-09-13'}, today) == 'past'
+
+
+def test_calendar_events_grouped_by_month():
+    events = [
+        decorate_calendar_event({'date': '2026-09-12', 'date_to': None, 'name': 'A'}, datetime(2026, 9, 14).date()),
+        decorate_calendar_event(
+            {'date': '2026-09-26', 'date_to': '2026-09-27', 'name': 'B'}, datetime(2026, 9, 14).date()
+        ),
+        decorate_calendar_event({'date': '2026-10-17', 'date_to': None, 'name': 'C'}, datetime(2026, 9, 14).date()),
+    ]
+    groups = group_calendar_events_by_month(events)
+    assert [group['label'] for group in groups] == ['Сентябрь 2026', 'Октябрь 2026']
+    assert [group['count'] for group in groups] == [2, 1]
+    assert groups[0]['events'][0]['date_label'] == '12.09.2026'
+    assert groups[0]['events'][1]['date_label'] == '26-27.09.2026'
+
+
+def test_calendar_page_available_for_viewer(client: SanicTestClient):
+    headers = get_auth_headers('viewer')
+    _, response = client.get('/calendar', headers=headers)
+    assert response.status == 200
+    # Viewer — просмотр без кнопок управления.
+    assert 'Запланировать'.encode() not in response.body
+
+
+def test_calendar_page_forbidden_for_athlete(client: SanicTestClient):
+    # У атлета нет дев-аккаунта в настройках — собираем cookie вручную.
+    cookie = create_auth_cookie_value(username='sportik', role='athlete')
+    headers = {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+    _, response = client.get('/calendar', headers=headers)
+    assert response.status == 403
+
+
+def test_editor_can_create_calendar_event(client: SanicTestClient):
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Осенний кросс СибАДИ',
+            'date': '25-27.06.2026',
+            'level': 'внутривузовские',
+            'sport': 'Бег',
+            'url': 'https://example.com/reglement',
+        },
+    )
+    assert response.status == 200
+    _, kwargs = app.ctx.storage.create_calendar_event.call_args
+    assert kwargs['name'] == 'Осенний кросс СибАДИ'
+    assert kwargs['date'] == '2026-06-25T00:00:00'
+    assert kwargs['date_to'] == '2026-06-27T00:00:00'
+    assert kwargs['url'] == 'https://example.com/reglement'
+
+
+def test_calendar_create_requires_name(client: SanicTestClient):
+    # client — module-scoped Mock: сбрасываем вызовы прошлых тестов.
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={**csrf_for(headers), 'name': '  ', 'date': '25.06.2026'},
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+
+def test_calendar_create_rejects_bad_date_and_reversed_range(client: SanicTestClient):
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    for bad_date in ('завтра', '27-25.06.2026'):
+        _, response = client.post(
+            '/calendar/new',
+            headers=headers,
+            data={**csrf_for(headers), 'name': 'Кросс', 'date': bad_date},
+            allow_redirects=False,
+        )
+        assert response.status == 400
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+
+def test_viewer_cannot_create_calendar_event(client: SanicTestClient):
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('viewer')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+
+def test_editor_can_edit_calendar_event(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = {
+        'id': 7,
+        'name': 'Кросс',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/7/edit',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'name': 'Осенний кросс СибАДИ',
+                'date': '30.01-01.02.2026',
+                'level': 'региональные',
+                'sport': 'Лыжи',
+                'url': '',
+            },
+        )
+        assert response.status == 200
+        _, kwargs = app.ctx.storage.update_calendar_event.call_args
+        assert kwargs['event_id'] == 7
+        assert kwargs['name'] == 'Осенний кросс СибАДИ'
+        assert kwargs['date'] == '2026-01-30T00:00:00'
+        assert kwargs['date_to'] == '2026-02-01T00:00:00'
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_delete_refuses_with_participants(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = {
+        'id': 5,
+        'name': 'Кросс',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    app.ctx.storage.count_calendar_event_participants.return_value = 14
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/5/delete',
+            headers=headers,
+            data=csrf_for(headers),
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'calendar' in response.headers['location']
+        assert '14' in response.headers['location']
+        app.ctx.storage.delete_calendar_event.assert_not_called()
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.count_calendar_event_participants.return_value = 0
+
+
+def test_calendar_delete_without_participants_writes_audit(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = {
+        'id': 5,
+        'name': 'Пустой турнир',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/5/delete',
+            headers=headers,
+            data=csrf_for(headers),
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        app.ctx.storage.delete_calendar_event.assert_called_once_with(5)
+        audit_calls = [
+            call
+            for call in app.ctx.storage.add_audit_event.call_args_list
+            if call.kwargs.get('action') == 'calendar_event_deleted'
+        ]
+        assert audit_calls, 'ожидалось audit-событие calendar_event_deleted'
+        app.ctx.storage.delete_calendar_event.reset_mock()
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_filters_pass_sport_to_storage(client: SanicTestClient):
+    headers = get_auth_headers('viewer')
+    _, response = client.get('/calendar?status=past&sport=Бег', headers=headers)
+    assert response.status == 200
+    app.ctx.storage.list_calendar_events.assert_called_with(sport='Бег')

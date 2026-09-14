@@ -1757,3 +1757,116 @@ def test_link_target_saved_and_read(adapter):
         link_target=None,
     )
     assert adapter.get_custom_fields()[0].link_target is None
+
+
+# ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
+
+
+def make_calendar_record(name: str, date: datetime, date_to: datetime | None, position: int = 1) -> Competition:
+    competition = make_competition(name, date)
+    competition.name = name
+    competition.date = date
+    competition.date_to = date_to
+    competition.position = position
+    return competition
+
+
+def test_calendar_event_crud(adapter):
+    event_id = adapter.create_calendar_event(
+        name='Осенний кросс СибАДИ',
+        date='2026-09-12',
+        date_to=None,
+        level='внутривузовские',
+        sport='Бег',
+        url='https://example.com',
+    )
+    assert event_id
+
+    event = adapter.get_calendar_event(event_id)
+    assert event['name'] == 'Осенний кросс СибАДИ'
+    assert event['date'] == '2026-09-12'
+    assert event['date_to'] is None
+
+    adapter.update_calendar_event(
+        event_id,
+        name='Осенний кросс СибАДИ',
+        date='2026-09-12',
+        date_to='2026-09-13',
+        level='региональные',
+        sport='Бег',
+        url='',
+    )
+    event = adapter.get_calendar_event(event_id)
+    assert event['date_to'] == '2026-09-13'
+    assert event['level'] == 'региональные'
+
+    adapter.delete_calendar_event(event_id)
+    assert adapter.get_calendar_event(event_id) is None
+
+
+def test_calendar_list_counts_participants_by_preset(adapter):
+    """Счётчики: N — записи по пресету (название + дата начала + дата
+    окончания), M — из них с position=0 («без результата»)."""
+    # Даты хранятся в том же ISO-формате, что и в записях реестра
+    # (datetime.isoformat(), 'YYYY-MM-DDTHH:MM:SS') — совпадение по строке.
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-09-12T00:00:00',
+        date_to='2026-09-13T00:00:00',
+        level='',
+        sport='Бег',
+        url='',
+    )
+    adapter.save_competitions(
+        [
+            # Совпадает, без результата
+            make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0),
+            make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0),
+            # Совпадает, с результатом
+            make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=1),
+            # Другое название
+            make_calendar_record('Кубок', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0),
+            # Другая дата начала
+            make_calendar_record('Кросс', datetime(2026, 9, 11), datetime(2026, 9, 13), position=0),
+            # Нет date_to у записи (пресет многодневный)
+            make_calendar_record('Кросс', datetime(2026, 9, 12), None, position=0),
+        ],
+        review_status='approved',
+        owner_id=None,
+    )
+    events = adapter.list_calendar_events()
+    assert len(events) == 1
+    assert events[0]['id'] == event_id
+    assert events[0]['participant_count'] == 3
+    assert events[0]['no_result_count'] == 2
+
+    assert adapter.count_calendar_event_participants(event_id) == 3
+
+
+def test_calendar_list_matches_oneday_preset_exactly(adapter):
+    """Однодневный пресет (date_to NULL) не должен подхватывать многодневные
+    записи с тем же началом (COALESCE-совпадение с обеих сторон)."""
+    adapter.create_calendar_event(name='Кубок', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url='')
+    adapter.save_competitions(
+        [
+            make_calendar_record('Кубок', datetime(2026, 9, 12), None, position=0),
+            make_calendar_record('Кубок', datetime(2026, 9, 12), datetime(2026, 9, 14), position=0),
+        ],
+        review_status='approved',
+        owner_id=None,
+    )
+    events = adapter.list_calendar_events()
+    assert events[0]['participant_count'] == 1
+    assert events[0]['no_result_count'] == 1
+
+
+def test_calendar_list_orders_chronologically_and_filters_by_sport(adapter):
+    adapter.create_calendar_event(
+        name='Поздний', date='2026-10-17T00:00:00', date_to=None, level='', sport='Волейбол', url=''
+    )
+    adapter.create_calendar_event(
+        name='Ранний', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    assert [event['name'] for event in adapter.list_calendar_events()] == ['Ранний', 'Поздний']
+    assert [event['name'] for event in adapter.list_calendar_events(sport='Бег')] == ['Ранний']
+    assert adapter.list_calendar_events(sport='Шахматы') == []

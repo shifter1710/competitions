@@ -1,0 +1,200 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+{# Композиция страницы — по прототипу 15: page-head с кнопкой «+ Запланировать
+   соревнование», фильтры статус/вид спорта, форма планирования СВЕРХУ,
+   карточки соревнований, сгруппированные по месяцам. #}
+<div class="page-head">
+    <div>
+        <h1 class="page-title">Календарь соревнований</h1>
+        <p class="page-sub">План на учебный сезон: соревнования запланированы заранее, участники заполняются внутри — место и результат можно дописать позже.</p>
+    </div>
+    {% if can_manage %}
+    <button class="btn btn-primary" type="button" data-bs-toggle="collapse" data-bs-target="#calendar-new-form"
+        aria-expanded="false" aria-controls="calendar-new-form">+ Запланировать соревнование</button>
+    {% endif %}
+</div>
+
+{% if can_manage %}
+<section class="card shadow-sm mb-4">
+    <div class="card-body">
+        <form class="row g-3 filter-form" method="get" action="/calendar">
+            <div class="col-md-3">
+                <span class="label">Статус</span>
+                <select class="form-select" name="status">
+                    {% for key, label in status_filter_options %}
+                    <option value="{{ key }}"{% if key == status_filter %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <span class="label">Вид спорта</span>
+                <select class="form-select" name="sport">
+                    <option value="">Все</option>
+                    {% for value in sport_options %}
+                    <option value="{{ value }}"{% if value == sport_filter %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3 d-flex align-items-end gap-2">
+                <button class="btn btn-primary" type="submit">Применить</button>
+                <a class="btn btn-outline-secondary" href="/calendar">Сбросить</a>
+            </div>
+        </form>
+    </div>
+</section>
+
+<section class="card shadow-sm mb-4 collapse" id="calendar-new-form">
+    <div class="card-body">
+        <h3 class="title mb-1">Запланировать соревнование</h3>
+        <div class="text-muted mb-3">План на год — не запись реестра. Период: «01.09.2026», «25-27.06.2026» или «30.01-01.02.2026».</div>
+        <form class="row g-3" method="post" action="/calendar/new">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-6">
+                <label class="label" for="calendar-new-name">Название<span class="req">*</span></label>
+                <input class="form-control" id="calendar-new-name" name="name" type="text" required
+                    placeholder="Например: Осенний кросс СибАДИ">
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="calendar-new-date">Период<span class="req">*</span></label>
+                <input class="form-control" id="calendar-new-date" name="date" type="text" required
+                    placeholder="25-27.06.2026" title="Введите цифры — точки поставятся сами">
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="calendar-new-level">Уровень</label>
+                <input class="form-control" id="calendar-new-level" name="level" type="text" list="calendar-levels"
+                    autocomplete="off">
+                <datalist id="calendar-levels">
+                    {% for value in level_options %}
+                    <option value="{{ value }}">
+                    {% endfor %}
+                </datalist>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="calendar-new-sport">Вид спорта</label>
+                <input class="form-control" id="calendar-new-sport" name="sport" type="text" list="calendar-sports"
+                    autocomplete="off">
+                <datalist id="calendar-sports">
+                    {% for value in sport_options %}
+                    <option value="{{ value }}">
+                    {% endfor %}
+                </datalist>
+            </div>
+            <div class="col-md-6">
+                <label class="label" for="calendar-new-url">Ссылка</label>
+                <input class="form-control" id="calendar-new-url" name="url" type="text" placeholder="https://… — положение, регламент">
+                <div class="text-muted small mt-1">Необязательно; откроется с карточки соревнования</div>
+            </div>
+            <div class="col-12 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">Запланировать</button>
+                <button class="btn btn-outline-secondary" type="reset">Отмена</button>
+            </div>
+        </form>
+    </div>
+</section>
+{% endif %}
+
+<div class="table-meta">
+    <span>Соревнований: <strong>{{ events_count }}</strong> · запланировано <strong>{{ planned_count }}</strong> ·
+        прошло <strong>{{ past_count }}</strong></span>
+    <span>Сортировка: по датам, по хронологии</span>
+</div>
+
+{% if month_groups %}
+{% for group in month_groups %}
+<h2 class="calendar-month-title">{{ group.label }} <span class="calendar-month-count">· {{ group.count }}</span></h2>
+<div class="card calendar-card">
+    {% for event in group.events %}
+    <div class="calendar-comp-row">
+        <span class="calendar-comp-row__dates">{{ event.date_label }}</span>
+        <div class="calendar-comp-row__main">
+            <span class="calendar-comp-row__name">{{ event.name }}</span>
+            <div class="calendar-comp-row__meta">{{ event.level }}{% if event.level and event.sport %} · {% endif %}{{ event.sport }}</div>
+            {% if can_manage %}
+            <div class="collapse mt-2" id="calendar-edit-{{ event.id }}">
+                <form class="row g-2" method="post" action="/calendar/{{ event.id }}/edit">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <div class="col-md-6">
+                        <label class="label">Название<span class="req">*</span></label>
+                        <input class="form-control form-control-sm" name="name" type="text" value="{{ event.name }}" required>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="label">Период<span class="req">*</span></label>
+                        <input class="form-control form-control-sm" name="date" type="text" value="{{ event.date_label }}" required>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="label">Уровень</label>
+                        <input class="form-control form-control-sm" name="level" type="text" value="{{ event.level }}"
+                            list="calendar-levels" autocomplete="off">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="label">Вид спорта</label>
+                        <input class="form-control form-control-sm" name="sport" type="text" value="{{ event.sport }}"
+                            list="calendar-sports" autocomplete="off">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="label">Ссылка</label>
+                        <input class="form-control form-control-sm" name="url" type="text" value="{{ event.url }}">
+                    </div>
+                    <div class="col-12">
+                        <button class="btn btn-sm btn-primary" type="submit">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+        <div class="calendar-comp-row__side">
+            {% if event.status == 'planned' %}
+            <span class="badge text-bg-primary"><span class="badge__dot"></span>запланировано</span>
+            {% else %}
+            <span class="badge text-bg-secondary"><span class="badge__dot"></span>прошло</span>
+            {% endif %}
+            <span class="calendar-comp-row__count">участников: <strong>{{ event.participant_count }}</strong></span>
+            <span class="calendar-comp-row__count">без результата: <strong>{{ event.no_result_count }}</strong></span>
+            {% if event.url %}
+            <a class="calendar-comp-row__open" href="{{ event.url }}" target="_blank" rel="noopener"
+                aria-label="Ссылка на соревнование" title="Ссылка на соревнование">
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M6.5 3.5H3.8A1.3 1.3 0 0 0 2.5 4.8v7.4a1.3 1.3 0 0 0 1.3 1.3h7.4a1.3 1.3 0 0 0 1.3-1.3V9.5" />
+                    <path d="M9.5 2.5h4v4M13.2 2.8 7.8 8.2" />
+                </svg>
+            </a>
+            {% endif %}
+            {% if can_manage %}
+            <button class="calendar-comp-row__open" type="button" data-bs-toggle="collapse"
+                data-bs-target="#calendar-edit-{{ event.id }}" aria-label="Изменить соревнование"
+                title="Изменить соревнование">
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M11.3 2.4a1.4 1.4 0 0 1 2 2L6 11.7l-2.8.8.8-2.8z" />
+                </svg>
+            </button>
+            <form method="post" action="/calendar/{{ event.id }}/delete" class="d-inline"
+                onsubmit="return confirm('Удалить соревнование из календаря?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="calendar-comp-row__open calendar-comp-row__open--danger" type="submit"
+                    aria-label="Удалить соревнование" title="Удалить соревнование">
+                    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"
+                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2.5 4.5h11M5.5 4.5V3a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1.5M4 4.5l.6 8a1 1 0 0 0 1 .9h4.8a1 1 0 0 0 1-.9l.6-8" />
+                    </svg>
+                </button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% else %}
+<div class="empty-content">В календаре пока нет соревнований</div>
+{% endif %}
+
+<div class="calendar-note mt-4">
+    <span>Календарь — план на год (не записи реестра): участники заполняются внутри соревнования, место и результат
+        можно дописать позже. Записи участников после соревнования становятся обычными записями реестра.</span>
+</div>
+
+{% endblock content %}
