@@ -2643,7 +2643,7 @@ class RangePicker {
             const outside = parts.m !== this.viewMonth;
             let state = "";
             if (outside) {
-                state = "is-outside";
+                state = " is-outside";
             }
             if (time === todayTime) {
                 state += " is-today";
