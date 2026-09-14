@@ -1630,8 +1630,9 @@ async def replace_import_queue_entry(request: Request, entry_id: str):
     return redirect(to='/admin/import-queue?admin_message=Существующая+запись+заменена+данными+кандидата')
 
 
-# Ручное решение (№25): админ правит поля кандидата инлайн (даты — дд.мм.гггг),
-# после сохранения кандидат вставляется как обычный accepted.
+# Ручное решение (№25, №27в): админ правит поля кандидата инлайн, кроме ФИО
+# и даты — они задают конфликт и всегда берутся из payload очереди; после
+# сохранения кандидат вставляется как обычный accepted.
 @app.post('/admin/import-queue/<entry_id>/edit')
 async def edit_import_queue_entry(request: Request, entry_id: str):
     auth_error = require_admin(request)
@@ -1642,13 +1643,18 @@ async def edit_import_queue_entry(request: Request, entry_id: str):
         return error
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
+    # №27в: ФИО и дата задают конфликт с существующей записью — из формы не
+    # берутся (подмена игнорируется), только из payload очереди. Остальные
+    # поля приходят из формы. Дату форматируем в дд.мм.гггг (с диапазоном),
+    # так её понимает ручной парсер build_competition.
+    payload = entry['payload']
     record = {
-        'ФИО': get_form_value(request, 'student_name'),
+        'ФИО': '' if payload.get('student_name') is None else str(payload['student_name']),
         'Пол': get_form_value(request, 'student_sex'),
         'Институт': get_form_value(request, 'institute'),
         'Группа': get_form_value(request, 'group'),
         'Вид спорта': get_form_value(request, 'sport'),
-        'Дата': get_form_value(request, 'date'),
+        'Дата': queue_edit_values(payload)['date'],
         'Уровень соревнований': get_form_value(request, 'level'),
         'Название соревнований': get_form_value(request, 'name'),
         'Место': get_form_value(request, 'position'),

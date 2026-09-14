@@ -76,12 +76,12 @@
                     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                     <div class="row g-3">
                         <div class="col-md-6">
-                            <label class="form-label" for="edit-{{ entry.id }}-student_name">ФИО</label>
-                            <input class="form-control" id="edit-{{ entry.id }}-student_name" name="student_name"
-                                   value="{{ entry.edit_values.student_name }}" required>
+                            <label class="form-label">ФИО</label>
+                            <div class="form-control-plaintext fw-bold">{{ entry.edit_values.student_name }}</div>
+                            <div class="form-text ui-hint">Определяет конфликт — редактировать нельзя.</div>
                         </div>
                         <div class="col-md-6">
-                            <label class="form-label" for="edit-{{ entry.id }}-student_sex">Пол</label>
+                            <label class="form-label">Пол</label>
                             <input class="form-control" id="edit-{{ entry.id }}-student_sex" name="student_sex"
                                    value="{{ entry.edit_values.student_sex }}">
                         </div>
@@ -106,9 +106,9 @@
                                    value="{{ entry.edit_values.sport }}">
                         </div>
                         <div class="col-md-6">
-                            <label class="form-label" for="edit-{{ entry.id }}-date">Дата (дд.мм.гггг, можно диапазон «25-27.06.2026»)</label>
-                            <input class="form-control" id="edit-{{ entry.id }}-date" name="date"
-                                   value="{{ entry.edit_values.date }}" required>
+                            <label class="form-label">Дата</label>
+                            <div class="form-control-plaintext fw-bold">{{ entry.edit_values.date }}</div>
+                            <div class="form-text ui-hint">Определяет конфликт — редактировать нельзя.</div>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="edit-{{ entry.id }}-level">Уровень соревнований</label>

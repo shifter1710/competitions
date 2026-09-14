@@ -5244,14 +5244,15 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
         headers=headers,
         data={
             **csrf_for(headers),
-            'student_name': 'Ручной Роман',
-            'student_sex': 'М',
-            'institute': 'ИСИ',
-            'group': 'ПГС-101',
+            # №27в: подмена ФИО и даты формой игнорируется — берутся из payload.
+            'student_name': 'Подмена ФИО',
+            'student_sex': 'Ж',
+            'institute': 'ИГДН',
+            'group': 'ТД-202',
             'course': '3',
             'sport': 'Шахматы',
             'date': '20.03.2026',
-            'level': 'внутривузовские',
+            'level': 'городские',
             'name': 'Кубок edited',
             'position': '1',
         },
@@ -5260,9 +5261,17 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
     assert response.status == 302
     app.ctx.storage.save_competitions.assert_called_once()
     saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.student_name == 'Ручной Роман'
+    assert saved.student_sex == 'Ж'
+    assert saved.institute == 'ИГДН'
+    assert saved.group == 'ТД-202'
     assert saved.sport == 'Шахматы'
+    assert saved.date == datetime(2026, 3, 15)
+    assert saved.date_to is None
+    assert saved.level == 'городские'
     assert saved.name == 'Кубок edited'
-    assert saved.date == datetime(2026, 3, 20)
+    assert saved.position == 1
+    assert saved.course == 3
     app.ctx.storage.set_import_queue_status.assert_called_once_with(15, 'accepted')
     audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
     assert audit_kwargs['action'] == 'import_conflict_resolved'
@@ -5271,7 +5280,125 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
     assert details['edited'] is True
 
 
+def test_import_queue_edit_uses_payload_date_range_from_payload(client: SanicTestClient):
+    """№27в: диапазон дат кандидата сохраняется из payload, форма дату не меняет."""
+    app.ctx.storage.get_field_settings.return_value = {}
+    entry_payload = {
+        'student_name': 'Диапазон Дарья',
+        'student_sex': 'Ж',
+        'institute': 'ИСИ',
+        'group': 'ПГС-102',
+        'course': 1,
+        'sport': 'Биатлон',
+        'date': '2026-06-25T00:00:00',
+        'date_to': '2026-06-27T00:00:00',
+        'level': 'областные',
+        'name': 'Спартакиада',
+        'position': 3,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2026-06-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 17,
+        'created_at': '2026-06-01T12:00:00',
+        'payload_json': json.dumps(entry_payload),
+        'payload': entry_payload,
+        'status': 'pending',
+        'matched_record_id': None,
+        'created_by': 2,
+    }
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.save_competitions.reset_mock()
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/17/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_sex': 'Ж',
+            'institute': 'ИСИ',
+            'group': 'ПГС-103',
+            'course': '2',
+            'sport': 'Лёгкая атлетика',
+            'date': '01.01.2027',
+            'level': 'городские',
+            'name': 'Спартакиада edited',
+            'position': '5',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.student_name == 'Диапазон Дарья'
+    assert saved.date == datetime(2026, 6, 25)
+    assert saved.date_to == datetime(2026, 6, 27)
+    assert saved.group == 'ПГС-103'
+    assert saved.sport == 'Лёгкая атлетика'
+    assert saved.level == 'городские'
+    assert saved.name == 'Спартакиада edited'
+    assert saved.position == 5
+    assert saved.course == 2
+
+
+def test_import_queue_edit_course_text_allowed_by_field_settings(client: SanicTestClient):
+    """№27в: валидация по field_settings — course type=text принимает «Выпускник 2025/26»."""
+    app.ctx.storage.get_field_settings.return_value = {'course': {'value_type': 'text', 'required': True}}
+    entry_payload = {
+        'student_name': 'Выпускник Влада',
+        'student_sex': 'Ж',
+        'institute': 'ИСИ',
+        'group': 'ПГС-103',
+        'course': 'Выпускник 2025/26',
+        'sport': 'Волейбол',
+        'date': '2026-03-15T00:00:00',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 2,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2026-03-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    app.ctx.storage.get_import_queue_entry.return_value = {
+        'id': 18,
+        'created_at': '2026-03-01T12:00:00',
+        'payload_json': json.dumps(entry_payload),
+        'payload': entry_payload,
+        'status': 'pending',
+        'matched_record_id': None,
+        'created_by': 2,
+    }
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.save_competitions.reset_mock()
+    headers = get_auth_headers(role='admin')
+    _, response = client.post(
+        '/admin/import-queue/18/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_sex': 'Ж',
+            'institute': 'ИСИ',
+            'group': 'ПГС-103',
+            'course': 'Выпускник 2025/26',
+            'sport': 'Волейбол',
+            'level': 'внутривузовские',
+            'name': 'Кубок',
+            'position': '2',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    saved = app.ctx.storage.save_competitions.call_args[0][0][0]
+    assert saved.course == 'Выпускник 2025/26'
+
+
 def test_import_queue_edit_rejects_bad_date(client: SanicTestClient):
+    """№27в: дата берётся из payload — битая дата payload даёт 400."""
     app.ctx.storage.get_field_settings.return_value = {}
     app.ctx.storage.get_import_queue_entry.return_value = {
         'id': 16,
