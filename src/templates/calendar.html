@@ -48,18 +48,22 @@
 <section class="card shadow-sm mb-4 collapse" id="calendar-new-form">
     <div class="card-body">
         <h3 class="title mb-1">Запланировать соревнование</h3>
-        <div class="text-muted mb-3">План на год — не запись реестра. Период: «01.09.2026», «25-27.06.2026» или «30.01-01.02.2026».</div>
-        <form class="row g-3" method="post" action="/calendar/new">
+        <div class="text-muted mb-3">План на год — не запись реестра. Период: одна дата или диапазон «с … по …»; пустое «по» = однодневное соревнование.</div>
+        <form class="row g-3" method="post" action="/calendar/new" data-period-form>
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="date" data-period-field>
             <div class="col-md-6">
                 <label class="label" for="calendar-new-name">Название<span class="req">*</span></label>
                 <input class="form-control" id="calendar-new-name" name="name" type="text" required
                     placeholder="Например: Осенний кросс СибАДИ">
             </div>
             <div class="col-md-3">
-                <label class="label" for="calendar-new-date">Период<span class="req">*</span></label>
-                <input class="form-control" id="calendar-new-date" name="date" type="text" required
-                    placeholder="25-27.06.2026" title="Введите цифры — точки поставятся сами">
+                <label class="label" for="calendar-new-date-from">Период с<span class="req">*</span></label>
+                <input class="form-control" id="calendar-new-date-from" name="date_from" type="date" required>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="calendar-new-date-to">Период по</label>
+                <input class="form-control" id="calendar-new-date-to" name="date_to" type="date">
             </div>
             <div class="col-md-3">
                 <label class="label" for="calendar-new-level">Уровень</label>
@@ -115,15 +119,22 @@
             <div class="calendar-comp-row__meta">{{ event.level }}{% if event.level and event.sport %} · {% endif %}{{ event.sport }}</div>
             {% if can_manage %}
             <div class="collapse mt-2" id="calendar-edit-{{ event.id }}">
-                <form class="row g-2" method="post" action="/calendar/{{ event.id }}/edit">
+                <form class="row g-2" method="post" action="/calendar/{{ event.id }}/edit" data-period-form>
                     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <input type="hidden" name="date" data-period-field>
                     <div class="col-md-6">
                         <label class="label">Название<span class="req">*</span></label>
                         <input class="form-control form-control-sm" name="name" type="text" value="{{ event.name }}" required>
                     </div>
                     <div class="col-md-3">
-                        <label class="label">Период<span class="req">*</span></label>
-                        <input class="form-control form-control-sm" name="date" type="text" value="{{ event.date_label }}" required>
+                        <label class="label">Период с<span class="req">*</span></label>
+                        <input class="form-control form-control-sm" name="date_from" type="date" required
+                            value="{{ event.date_from.strftime('%Y-%m-%d') }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="label">Период по</label>
+                        <input class="form-control form-control-sm" name="date_to" type="date"
+                            {% if event.date_to_obj %}value="{{ event.date_to_obj.strftime('%Y-%m-%d') }}"{% endif %}>
                     </div>
                     <div class="col-md-3">
                         <label class="label">Уровень</label>

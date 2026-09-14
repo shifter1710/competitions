@@ -1495,3 +1495,15 @@ a.calendar-comp-row__name:hover {
     color: var(--text-2);
     font-size: var(--fs-sm);
 }
+
+/* Период календаря (calendar.html / calendar_event.html): нативные
+   <input type="date"> «с»/«по». В тёмной теме подсказываем браузеру
+   цветовую схему — иначе календарь и иконка пикера рендерятся в светлой
+   схеме и становятся нечитаемыми. */
+input[type="date"].form-control {
+    color-scheme: light;
+}
+
+[data-bs-theme="dark"] input[type="date"].form-control {
+    color-scheme: dark;
+}
