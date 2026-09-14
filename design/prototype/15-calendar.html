@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Календарь соревнований — СибАДИ Competitions</title>
+    <script>
+        (function () {
+            try {
+                if (localStorage.getItem("sc-proto-theme") === "dark") {
+                    document.documentElement.setAttribute("data-theme", "dark");
+                }
+            } catch (error) {
+                /* localStorage недоступен — остаётся светлая тема */
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                var buttons = document.querySelectorAll("[data-theme-toggle]");
+                for (var i = 0; i < buttons.length; i++) {
+                    buttons[i].addEventListener("click", function () {
+                        var root = document.documentElement;
+                        var dark = root.getAttribute("data-theme") === "dark";
+                        if (dark) {
+                            root.removeAttribute("data-theme");
+                        } else {
+                            root.setAttribute("data-theme", "dark");
+                        }
+                        try {
+                            localStorage.setItem("sc-proto-theme", dark ? "light" : "dark");
+                        } catch (error) {
+                            /* ничего не делаем */
+                        }
+                    });
+                }
+            });
+        })();
+    </script>
+    <link rel="stylesheet" href="tokens.css">
+    <link rel="stylesheet" href="prototype.css">
+    <style>
+        /* Локальные стили страницы: только на основе токенов tokens.css */
+        .month-title {
+            margin: var(--sp-6) 0 var(--sp-3);
+            font-size: var(--fs-md);
+            font-weight: var(--fw-semibold);
+            color: var(--text-2);
+        }
+
+        .month-title:first-of-type {
+            margin-top: 0;
+        }
+
+        .month-title .tabnum {
+            color: var(--text-3);
+            font-weight: var(--fw-medium);
+        }
+
+        .comp-row {
+            display: flex;
+            align-items: center;
+            gap: var(--sp-4);
+            flex-wrap: wrap;
+            padding: var(--sp-4) var(--sp-5);
+        }
+
+        .comp-row + .comp-row {
+            border-top: 1px solid var(--border);
+        }
+
+        .comp-row__dates {
+            flex: none;
+            width: 118px;
+            font-variant-numeric: tabular-nums;
+            font-size: var(--fs-sm);
+            color: var(--text-2);
+            white-space: nowrap;
+        }
+
+        .comp-row__main {
+            flex: 1;
+            min-width: 260px;
+        }
+
+        .comp-row__name {
+            font-size: var(--fs-md);
+            font-weight: var(--fw-semibold);
+        }
+
+        .comp-row__meta {
+            margin-top: 3px;
+            font-size: var(--fs-sm);
+            color: var(--text-2);
+        }
+
+        .comp-row__side {
+            display: flex;
+            align-items: center;
+            gap: var(--sp-2);
+            flex-wrap: wrap;
+        }
+
+        .comp-row__count {
+            font-size: var(--fs-xs);
+            color: var(--text-3);
+            white-space: nowrap;
+        }
+
+        .comp-row__count strong {
+            color: var(--text);
+            font-weight: var(--fw-semibold);
+        }
+
+        .comp-row__open {
+            width: 32px;
+            height: 32px;
+            display: inline-grid;
+            place-items: center;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-md);
+            background: var(--surface);
+            color: var(--text-2);
+            transition: background-color var(--tr-fast), color var(--tr-fast);
+        }
+
+        .comp-row__open:hover {
+            background: var(--accent-soft);
+            color: var(--accent-fg);
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="proto">
+        <header class="app-header">
+            <div class="app-header__inner">
+                <a class="brand" href="index.html"><span class="brand__mark">С</span><span>СибАДИ Competitions</span></a>
+                <nav class="app-nav">
+                    <a href="02-index-table.html">Таблица</a>
+                    <a class="is-active" href="15-calendar.html">Календарь</a>
+                    <a href="05-reports.html">Отчёты</a>
+                    <a href="07-admin-hub.html">Админ</a>
+                </nav>
+                <div class="app-header__side">
+                    <span class="user-chip">Пользователь: <strong>admin</strong><span class="user-chip__role">admin</span></span>
+                    <button class="icon-btn" type="button" data-theme-toggle aria-label="Переключить тему" title="Переключить тему">
+                        <svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.7 9.9A5.9 5.9 0 0 1 6.1 2.3a5.9 5.9 0 1 0 7.6 7.6z"/></svg>
+                        <svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"/></svg>
+                    </button>
+                    <a class="btn btn--secondary btn--sm" href="01-login.html">Выйти</a>
+                </div>
+            </div>
+        </header>
+
+        <main class="container">
+            <div class="page-head">
+                <div>
+                    <h1 class="page-title">Календарь соревнований</h1>
+                    <p class="page-sub">План на учебный сезон: соревнования запланированы заранее, участники заполняются внутри — место и результат можно дописать позже.</p>
+                </div>
+                <button class="btn btn--primary" type="button">+ Запланировать соревнование</button>
+            </div>
+
+            <section class="card mb-4">
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-3">
+                            <label class="label" for="cf-status">Статус</label>
+                            <select class="select" id="cf-status">
+                                <option>Все</option>
+                                <option>запланировано</option>
+                                <option>прошло</option>
+                            </select>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="cf-sport">Вид спорта</label>
+                            <select class="select" id="cf-sport">
+                                <option>Все</option>
+                                <option>Лёгкая атлетика</option>
+                                <option>Волейбол</option>
+                                <option>Баскетбол</option>
+                                <option>Настольный теннис</option>
+                                <option>Плавание</option>
+                                <option>Лыжные гонки</option>
+                                <option>Шахматы</option>
+                                <option>Мини-футбол</option>
+                                <option>Бадминтон</option>
+                            </select>
+                        </div>
+                        <div class="col-3" style="display: flex; align-items: flex-end; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Применить</button>
+                            <button class="btn btn--secondary" type="reset">Сбросить</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <div class="table-meta">
+                <span>Сезон 01.09.2026 — 31.08.2027: запланировано <strong class="tabnum" style="color: var(--text);">9</strong>, прошло <strong class="tabnum" style="color: var(--text);">1</strong></span>
+                <span>Сортировка: по датам, по хронологии</span>
+            </div>
+
+            <h2 class="month-title">Сентябрь 2026 <span class="fs-sm">· 2</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">12.09.2026</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Осенний кросс СибАДИ</a>
+                        <div class="comp-row__meta">внутривузовские · Лёгкая атлетика</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge"><span class="badge__dot"></span>прошло</span>
+                        <span class="comp-row__count">участников: <strong>14</strong></span>
+                        <span class="comp-row__count">без результата: <strong>2</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+                <div class="comp-row">
+                    <span class="comp-row__dates">26–27.09.2026</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Турнир по настольному теннису СибАДИ</a>
+                        <div class="comp-row__meta">внутривузовские · Настольный теннис</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>8</strong></span>
+                        <span class="comp-row__count">без результата: <strong>8</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Октябрь 2026 <span class="fs-sm">· 1</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">17–18.10.2026</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Чемпионат Омской области по волейболу среди студентов</a>
+                        <div class="comp-row__meta">региональные · Волейбол</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>12</strong></span>
+                        <span class="comp-row__count">без результата: <strong>12</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Декабрь 2026 <span class="fs-sm">· 1</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">13.12.2026</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Кубок ректоров вузов Омска по плаванию</a>
+                        <div class="comp-row__meta">межвузовские · Плавание</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>5</strong></span>
+                        <span class="comp-row__count">без результата: <strong>5</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Январь 2027 <span class="fs-sm">· 1</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">24–25.01.2027</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Первенство СибАДИ по шахматам</a>
+                        <div class="comp-row__meta">внутривузовские · Шахматы</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>10</strong></span>
+                        <span class="comp-row__count">без результата: <strong>10</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Февраль 2027 <span class="fs-sm">· 2</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">06–07.02.2027</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Омская лыжня-2027</a>
+                        <div class="comp-row__meta">региональные · Лыжные гонки</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>0</strong></span>
+                        <span class="comp-row__count">без результата: <strong>0</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+                <div class="comp-row">
+                    <span class="comp-row__dates">20–21.02.2027</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Студенческая лига СибАДИ по мини-футболу. Финал</a>
+                        <div class="comp-row__meta">внутривузовские · Мини-футбол</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>0</strong></span>
+                        <span class="comp-row__count">без результата: <strong>0</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Март 2027 <span class="fs-sm">· 1</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">13–14.03.2027</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Универсиада вузов Омска. Баскетбол</a>
+                        <div class="comp-row__meta">межвузовские · Баскетбол</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>0</strong></span>
+                        <span class="comp-row__count">без результата: <strong>0</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Апрель 2027 <span class="fs-sm">· 1</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">10.04.2027</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Весенний турнир по бадминтону</a>
+                        <div class="comp-row__meta">внутривузовские · Бадминтон</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>0</strong></span>
+                        <span class="comp-row__count">без результата: <strong>0</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title">Июнь 2027 <span class="fs-sm">· 1</span></h2>
+            <div class="card card--flat">
+                <div class="comp-row">
+                    <span class="comp-row__dates">25–27.06.2027</span>
+                    <div class="comp-row__main">
+                        <a class="comp-row__name" href="16-competition.html">Всероссийский фестиваль студенческого спорта</a>
+                        <div class="comp-row__meta">всероссийские · Лёгкая атлетика</div>
+                    </div>
+                    <div class="comp-row__side">
+                        <span class="badge badge--info"><span class="badge__dot"></span>запланировано</span>
+                        <span class="comp-row__count">участников: <strong>0</strong></span>
+                        <span class="comp-row__count">без результата: <strong>0</strong></span>
+                        <a class="comp-row__open" href="16-competition.html" aria-label="Открыть участников соревнования" title="Участники соревнования">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <h2 class="month-title mt-5" id="new-form">+ Запланировать соревнование <span class="fs-sm">· форма раскрыта в макете</span></h2>
+            <section class="card">
+                <div class="card__header">
+                    <div>
+                        <div class="card__title">Новое соревнование в календаре</div>
+                        <div class="card__sub">По кнопке «+ Запланировать соревнование» форма открывается модалом; здесь она раскрыта статично</div>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-6">
+                            <label class="label" for="nf-name">Название<span class="req">*</span></label>
+                            <input class="input" id="nf-name" type="text" placeholder="Например: Осенний кросс СибАДИ">
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-date-from">Период: с<span class="req">*</span></label>
+                            <div class="datefield">
+                                <input class="input" id="nf-date-from" type="text" placeholder="01.09.2026" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-date-to">Период: по<span class="req">*</span></label>
+                            <div class="datefield">
+                                <input class="input" id="nf-date-to" type="text" placeholder="31.08.2027" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-level">Уровень<span class="req">*</span></label>
+                            <select class="select" id="nf-level">
+                                <option>внутривузовские</option>
+                                <option>межвузовские</option>
+                                <option>региональные</option>
+                                <option>всероссийские</option>
+                            </select>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-sport">Вид спорта<span class="req">*</span></label>
+                            <select class="select" id="nf-sport">
+                                <option>Лёгкая атлетика</option>
+                                <option>Волейбол</option>
+                                <option>Баскетбол</option>
+                                <option>Настольный теннис</option>
+                                <option>Плавание</option>
+                                <option>Лыжные гонки</option>
+                                <option>Шахматы</option>
+                                <option>Мини-футбол</option>
+                                <option>Бадминтон</option>
+                            </select>
+                        </div>
+                        <div class="col-6">
+                            <label class="label" for="nf-link">Ссылка</label>
+                            <input class="input" id="nf-link" type="text" placeholder="https://… — положение, регламент">
+                            <p class="field__hint">Необязательно; откроется с карточки соревнования</p>
+                        </div>
+                        <div class="col-12" style="display: flex; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Запланировать</button>
+                            <button class="btn btn--secondary" type="reset">Отмена</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <div class="note note--plain mt-4">
+                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
+                <span>Календарь — план на год (не записи реестра): внутри соревнования оператор заполняет участников, место и результат можно дописать позже. Соревнование без занесённых результатов — обычное состояние. Записи участников после соревнования становятся обычными записями реестра.</span>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
