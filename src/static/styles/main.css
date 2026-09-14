@@ -1413,6 +1413,15 @@ span.pager__btn:hover {
     color: var(--text);
 }
 
+/* Волна B: имя — ссылка на страницу участников (прототип 16). */
+a.calendar-comp-row__name {
+    text-decoration: none;
+}
+
+a.calendar-comp-row__name:hover {
+    text-decoration: underline;
+}
+
 .calendar-comp-row__meta {
     margin-top: 3px;
     font-size: var(--fs-sm);

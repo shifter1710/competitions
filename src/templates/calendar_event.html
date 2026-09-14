@@ -1,0 +1,239 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+{# Страница соревнования — участники (волна B, прототип 16). Участники —
+   обычные записи реестра по пресету события (name + date + date_to);
+   место можно дописать позже; историчность — docs/data-model-decisions.md. #}
+
+{# Форма добавления живёт вне таблицы: поля строки ссылаются на неё через
+   form="participant-add-form" (валидная разметка внутри <table>). #}
+{% if can_write %}
+<form id="participant-add-form" method="post" action="/calendar/{{ event.id }}/participants">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+</form>
+{% endif %}
+
+<div class="page-head d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+    <div>
+        <a class="backlink" href="/calendar">← В календарь</a>
+        <h1 class="page-title mt-2">{{ event.name }}</h1>
+        <div class="d-flex align-items-center flex-wrap gap-2 mt-1 text-muted">
+            <span class="text-nowrap">{{ event.date_label }}</span>
+            <span>·</span>
+            <span>{{ event.level }}</span>
+            <span>·</span>
+            <span>{{ event.sport }}</span>
+            <span>·</span>
+            {% if event.status == 'planned' %}
+            <span class="badge text-bg-primary"><span class="badge__dot"></span>запланировано</span>
+            {% else %}
+            <span class="badge text-bg-secondary"><span class="badge__dot"></span>прошло</span>
+            {% endif %}
+        </div>
+        {% if event.url %}
+        <p class="mt-1 mb-0">
+            Ссылка: <a href="{{ event.url }}" target="_blank" rel="noopener">{{ event.url }}</a>
+        </p>
+        {% endif %}
+    </div>
+    {% if can_write %}
+    <div class="d-flex gap-2">
+        <a class="btn btn-outline-secondary" href="/calendar">← В календарь</a>
+        <button class="btn btn-outline-primary" type="button" data-bs-toggle="collapse"
+            data-bs-target="#event-edit-form" aria-expanded="false" aria-controls="event-edit-form">
+            Редактировать соревнование
+        </button>
+    </div>
+    {% endif %}
+</div>
+
+{% if can_write %}
+<section class="card shadow-sm mb-4 collapse" id="event-edit-form">
+    <div class="card-body">
+        <h3 class="title mb-1">Редактировать соревнование</h3>
+        <div class="text-muted mb-3">Период: «01.09.2026», «25-27.06.2026» или «30.01-01.02.2026».</div>
+        {# Та же форма правки, что на календаре; next возвращает на страницу
+           участников после сохранения. #}
+        <form class="row g-3" method="post" action="/calendar/{{ event.id }}/edit">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="next" value="/calendar/{{ event.id }}">
+            <div class="col-md-6">
+                <label class="label" for="event-edit-name">Название<span class="req">*</span></label>
+                <input class="form-control" id="event-edit-name" name="name" type="text" value="{{ event.name }}"
+                    required>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="event-edit-date">Период<span class="req">*</span></label>
+                <input class="form-control" id="event-edit-date" name="date" type="text"
+                    value="{{ event.date_label }}" required>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="event-edit-level">Уровень</label>
+                <input class="form-control" id="event-edit-level" name="level" type="text" value="{{ event.level }}"
+                    list="calendar-levels" autocomplete="off">
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="event-edit-sport">Вид спорта</label>
+                <input class="form-control" id="event-edit-sport" name="sport" type="text" value="{{ event.sport }}"
+                    list="calendar-sports" autocomplete="off">
+            </div>
+            <div class="col-md-6">
+                <label class="label" for="event-edit-url">Ссылка</label>
+                <input class="form-control" id="event-edit-url" name="url" type="text" value="{{ event.url }}"
+                    placeholder="https://… — положение, регламент">
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Сохранить</button>
+            </div>
+        </form>
+    </div>
+</section>
+{% endif %}
+
+<div class="table-meta d-flex flex-wrap align-items-center gap-3 mb-2">
+    <label class="d-flex align-items-center gap-2 mb-0">
+        Показать:
+        <select class="form-select form-select-sm" onchange="window.location = this.value">
+            {% for key, label in result_filter_options %}
+            <option value="/calendar/{{ event.id }}{% if key %}?result={{ key }}{% endif %}"
+                {% if key == result_filter %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <span>Участников: <strong>{{ total_count }}</strong> · Без результата: <strong>{{ no_result_count }}</strong></span>
+</div>
+
+<datalist id="calendar-levels">
+    {% for value in level_options %}
+    <option value="{{ value }}">
+    {% endfor %}
+</datalist>
+<datalist id="calendar-sports">
+    {% for value in sport_options %}
+    <option value="{{ value }}">
+    {% endfor %}
+</datalist>
+
+<div class="table-responsive">
+    <table class="table table-striped table-bordered align-middle"
+        data-participants-page data-event-date="{{ event.date_label }}" data-event-level="{{ event.level }}"
+        data-event-name="{{ event.name }}" data-event-sport="{{ event.sport }}">
+        <thead class="table-dark">
+            <tr>
+                <th scope="col" class="text-center" style="width: 48px;">№</th>
+                <th scope="col">ФИО</th>
+                <th scope="col" style="width: 70px;">Пол</th>
+                <th scope="col" style="width: 160px;">Институт</th>
+                <th scope="col" style="width: 140px;">Группа</th>
+                <th scope="col" style="width: 80px;">Курс</th>
+                <th scope="col" style="width: 90px;">Место</th>
+                <th scope="col" style="width: 170px;">Результат?</th>
+                {% if can_write %}
+                <th scope="col" style="width: 240px;">Действия</th>
+                {% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% if can_write %}
+            {# Строка добавления участника (прототип 16 — раскрыта сверху):
+               ФИО с резолвером, место опционально; название/даты/уровень/спорт
+               берутся из события на сервере. #}
+            <tr class="table-light row-new">
+                <td class="text-center text-muted">+</td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-fio" name="student_name" required autocomplete="off"
+                        placeholder="ФИО: поиск по первым буквам" title="Известные атлеты подскажут пол, институт, группу и курс">
+                </td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-sex" name="student_sex" maxlength="1" placeholder="М/Ж">
+                </td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-institute" name="institute">
+                </td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-group" name="group">
+                </td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="number" min="1"
+                        step="1" id="participant-course" name="course" required>
+                </td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="number" min="0"
+                        step="1" id="participant-position" name="position" placeholder="—"
+                        title="Место можно дописать позже">
+                </td>
+                <td><span class="badge text-bg-light text-muted" title="Место можно дописать позже">ждёт результата</span>
+                </td>
+                <td>
+                    <button class="btn btn-sm btn-success" type="submit" form="participant-add-form">Добавить</button>
+                </td>
+            </tr>
+            {% endif %}
+            {% for participant in participants %}
+            <tr data-record-id="{{ participant.record_id }}" data-student-name="{{ participant.student_name }}">
+                <td class="text-center">{{ loop.index }}</td>
+                <td>{{ participant.student_name }}</td>
+                <td>{{ participant.student_sex }}</td>
+                <td>{{ participant.institute }}</td>
+                <td>{{ participant.group_name }}</td>
+                <td>{{ participant.course }}</td>
+                <td class="participant-position">
+                    {% if participant.position %}{{ participant.position }}{% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td>
+                    {% if participant.position %}
+                    <span class="badge text-bg-success"><span class="badge__dot"></span>есть</span>
+                    {% else %}
+                    <span class="badge text-bg-light text-muted"
+                        title="Место можно дописать позже — участник сохранён">ждёт результата</span>
+                    {% endif %}
+                </td>
+                {% if can_write %}
+                <td>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-outline-primary participant-edit-button" type="button"
+                            data-record-id="{{ participant.record_id }}" data-student-name="{{ participant.student_name }}"
+                            data-student-sex="{{ participant.student_sex }}" data-institute="{{ participant.institute }}"
+                            data-group="{{ participant.group_name }}" data-course="{{ participant.course }}"
+                            data-position="{{ participant.position }}">Редактировать</button>
+                        {% if is_admin %}
+                        <button class="btn btn-sm btn-outline-danger participant-delete-button" type="button"
+                            data-record-id="{{ participant.record_id }}"
+                            data-student-name="{{ participant.student_name }}">Удалить</button>
+                        {% endif %}
+                    </div>
+                </td>
+                {% endif %}
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="{{ 9 if can_write else 8 }}" class="text-center text-muted py-4">
+                    Участников пока нет{% if can_write %} — добавьте первого в строке выше{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if participants %}
+<div class="table-foot">
+    <span class="table-foot__count">Показано <strong>{{ shown_count }}</strong> из
+        <strong>{{ total_count }}</strong> участников</span>
+</div>
+{% endif %}
+
+{% if can_write %}
+<div class="calendar-note mt-4">
+    <span>Участники — обычные записи реестра: ФИО ищется по первым буквам среди известных атлетов, пол, институт,
+        группа и курс подставляются (поля формы всегда имеют приоритет). Место можно дописать позже — «Редактировать»
+        в строке участника.</span>
+</div>
+{% endif %}
+
+{% endblock content %}
