@@ -582,8 +582,13 @@ html[data-theme="dark"] .i-moon { display: none; }
     left: 0;
     z-index: 30;
     min-width: 250px;
-    max-height: 320px;
+    /* Ограниченная высота: длинный список совпадений прокручивается,
+       а не обрезается заглушкой «и ещё N совпадений» */
+    max-height: 168px;
     overflow: auto;
+    /* Скроллбар в стиле токенов (Firefox) */
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
     padding: 6px;
     background: var(--surface);
     border: 1px solid var(--border-strong);
@@ -619,6 +624,21 @@ html[data-theme="dark"] .i-moon { display: none; }
     background: var(--accent-soft);
     color: var(--accent-fg);
     font-weight: var(--fw-semibold);
+}
+
+/* Скроллбар списка вариантов: webkit-браузеры, цвета из токенов */
+.combobox__menu::-webkit-scrollbar {
+    width: 10px;
+}
+
+.combobox__menu::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.combobox__menu::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 5px;
+    border: 2px solid var(--surface);
 }
 
 /* Вариант, скрытый фильтром: остаётся в макете, чтобы был виден сам
