@@ -1363,7 +1363,7 @@ span.pager__btn:hover {
 .calendar-month-title {
     margin: 24px 0 12px;
     font-size: var(--fs-md);
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
     color: var(--text-2);
 }
 
@@ -1409,7 +1409,7 @@ span.pager__btn:hover {
 
 .calendar-comp-row__name {
     font-size: var(--fs-md);
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
     color: var(--text);
 }
 
@@ -1443,7 +1443,7 @@ a.calendar-comp-row__name:hover {
 
 .calendar-comp-row__count strong {
     color: var(--text);
-    font-weight: var(--fw-semibold);
+    font-weight: 600; /* tokens.css --fw-semibold */
 }
 
 /* Квадратные кнопки-иконки на карточке: ссылка, правка, удаление */
@@ -1496,14 +1496,141 @@ a.calendar-comp-row__name:hover {
     font-size: var(--fs-sm);
 }
 
-/* Период календаря (calendar.html / calendar_event.html): нативные
-   <input type="date"> «с»/«по». В тёмной теме подсказываем браузеру
-   цветовую схему — иначе календарь и иконка пикера рендерятся в светлой
-   схеме и становятся нечитаемыми. */
-input[type="date"].form-control {
-    color-scheme: light;
+/* Период календаря: единый всплывающий календарь RangePicker вместо двух
+   нативных <input type="date">. Стилирование — на токенах прототипа:
+   form-control-эстетика поля, радиусы/тени карточек главной таблицы. */
+
+.range-picker {
+    position: relative;
 }
 
-[data-bs-theme="dark"] input[type="date"].form-control {
-    color-scheme: dark;
+.range-picker .form-control {
+    padding-right: 36px;
+    cursor: pointer;
+    background-color: var(--field-bg);
+}
+
+.range-picker__icon {
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    transform: translateY(-50%);
+    pointer-events: none;
+    color: var(--text-3);
+}
+
+.range-picker-panel {
+    position: fixed;
+    z-index: 100; /* tokens.css --z-overlay */
+    padding: var(--sp-3);
+    background-color: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2);
+    color: var(--text);
+    font-size: var(--fs-sm);
+    user-select: none;
+}
+
+.rp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-2);
+}
+
+.rp-title {
+    font-weight: 600; /* tokens.css --fw-semibold */
+    font-size: var(--fs-sm);
+    text-transform: capitalize;
+}
+
+.rp-nav {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--text-2);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.rp-nav:hover {
+    background-color: var(--surface-hover);
+    color: var(--text);
+    border-color: var(--border-strong);
+}
+
+.rp-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 34px);
+    gap: 2px;
+}
+
+.rp-dow {
+    padding: 2px 0 4px;
+    text-align: center;
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-medium);
+    color: var(--text-3);
+}
+
+.rp-day {
+    height: 30px;
+    border: none;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+}
+
+.rp-day:hover {
+    background-color: var(--surface-hover);
+}
+
+.rp-day.is-outside {
+    color: var(--text-3);
+    opacity: 0.6;
+}
+
+.rp-day.is-today {
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* Отрезок между началом и концом: мягкая синяя подложка, без скругления
+   (скруглены только края диапазона). */
+.rp-day.is-in-range {
+    background-color: var(--accent-soft);
+    border-radius: 0;
+    color: var(--text);
+}
+
+.rp-day.is-edge,
+.rp-day.is-edge-preview {
+    background-color: var(--accent);
+    color: #FFFFFF;
+    border-radius: var(--r-sm);
+}
+
+.rp-day.is-edge:hover {
+    background-color: var(--accent-hover);
+}
+
+.rp-day.is-single {
+    border-radius: 999px; /* tokens.css --r-full */
+}
+
+.rp-hint {
+    margin-top: 8px; /* tokens.css --sp-2 */
+    font-size: var(--fs-xs);
+    color: var(--text-3);
 }

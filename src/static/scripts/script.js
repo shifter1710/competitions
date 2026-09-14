@@ -2469,7 +2469,7 @@ class Main {
 
 window.addEventListener("DOMContentLoaded", () => {
     new Main();
-    initCalendarPeriodForms();
+    initCalendarPeriodPickers();
     // Страница участников соревнования (волна B, прототип 16): резолвер ФИО
     // в строке добавления + инлайн-правка строки (место «дописать позже»).
     if (document.querySelector("[data-participants-page]")) {
@@ -2477,53 +2477,288 @@ window.addEventListener("DOMContentLoaded", () => {
     }
 });
 
-// Период календаря (calendar.html / calendar_event.html): вместо текстового
-// гибридного поля — два нативных <input type="date"> «с»/«по» (отзыв
-// владельца: «календарь не открывается»). На submit JS собирает прежнее
-// поле формы date («DD.MM.YYYY» или «DD.MM.YYYY-DD.MM.YYYY») — контракт
-// POST /calendar/new и /calendar/<id>/edit не меняется. «по» не может быть
-// раньше «с» (min-атрибут); серверная валидация остаётся источником истины.
-function composePeriodDate(isoDate) {
-    const [year, month, day] = isoDate.split("-");
-    return `${day}.${month}.${year}`;
+// Период календаря (calendar.html / calendar_event.html): единый всплывающий
+// календарь RangePicker (отзыв владельца: «выбор диапазона 2-мя нажатиями на
+// 1 календарь, в стиле главной таблицы»). Видимое readonly-поле показывает
+// «DD.MM.YYYY» или «DD.MM.YYYY – DD.MM.YYYY», на submit в скрытое поле date
+// уходит то же значение через дефис («DD.MM.YYYY-DD.MM.YYYY») — контракт
+// POST /calendar/new и /calendar/<id>/edit не меняется, серверная валидация
+// остаётся источником истины.
+//
+// Выбор: 1-й клик = начало, 2-й клик = конец (hover подсвечивает отрезок).
+// Повторный клик по той же дате = однодневный диапазон и закрытие панели,
+// поэтому одинарный режим отдельного переключателя не требует. Закрытие
+// по Esc/клику вне панели при выбранном только начале фиксирует его
+// как однодневную дату (прощение, а не отмена: пустое «по» = однодневное).
+
+const RP_MONTH_NAMES = [
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+];
+const RP_WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
+
+function rpIsoToParts(iso) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || "").trim());
+    if (!match) {
+        return null;
+    }
+    return { y: Number(match[1]), m: Number(match[2]) - 1, d: Number(match[3]) };
 }
 
-function initCalendarPeriodForms() {
-    document.querySelectorAll("form[data-period-form]").forEach((form) => {
-        if (form.dataset.periodBound === "true") {
+function rpToTime(parts) {
+    // Полдень локального дня: сравнения и сдвиги без сюрпризов DST/полуночи.
+    return new Date(parts.y, parts.m, parts.d, 12).getTime();
+}
+
+function initCalendarPeriodPickers() {
+    document.querySelectorAll("input[data-range-picker]").forEach((input) => {
+        if (input.dataset.rpBound === "true") {
             return;
         }
-        form.dataset.periodBound = "true";
-        const dateFrom = form.querySelector('input[name="date_from"]');
-        const dateTo = form.querySelector('input[name="date_to"]');
-        const composed = form.querySelector('input[name="date"][data-period-field]');
-        if (!dateFrom || !dateTo || !composed) {
-            return;
-        }
-        const syncMin = () => {
-            if (dateFrom.value) {
-                dateTo.min = dateFrom.value;
-                if (dateTo.value && dateTo.value < dateFrom.value) {
-                    dateTo.value = dateFrom.value;
-                }
-            } else {
-                dateTo.removeAttribute("min");
-            }
-        };
-        dateFrom.addEventListener("change", syncMin);
-        dateTo.addEventListener("change", syncMin);
-        form.addEventListener("submit", () => {
-            const parts = [];
-            if (dateFrom.value) {
-                parts.push(composePeriodDate(dateFrom.value));
-                if (dateTo.value && dateTo.value > dateFrom.value) {
-                    parts.push(composePeriodDate(dateTo.value));
-                }
-            }
-            composed.value = parts.join("-");
-        });
+        input.dataset.rpBound = "true";
+        new RangePicker(input);
     });
 }
+
+class RangePicker {
+    constructor(input) {
+        this.input = input;
+        const form = input.closest("form");
+        this.hidden = form ? form.querySelector('input[name="date"][data-period-field]') : null;
+        this.start = null;
+        this.end = null;
+        this.panel = null;
+        this.onDocClick = null;
+        this.onDocKey = null;
+        const from = rpIsoToParts(input.dataset.rangeFrom);
+        const to = rpIsoToParts(input.dataset.rangeTo);
+        if (from) {
+            this.start = from;
+            this.end = to && rpToTime(to) > rpToTime(from) ? to : null;
+        }
+        this.input.addEventListener("click", () => this.open());
+        // readonly-поле не участвует в constraint-валидации (required на нём
+        // браузер игнорирует), поэтому пустой сабмит перехватываем сами:
+        // вместо отправки открываем пикер.
+        if (form) {
+            form.addEventListener("submit", (event) => {
+                if (!this.start) {
+                    event.preventDefault();
+                    this.open();
+                    this.input.focus();
+                }
+            });
+        }
+        this.input.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+                event.preventDefault();
+                this.toggle();
+            } else if (event.key === "Escape") {
+                this.close();
+            }
+        });
+        this.syncValue();
+    }
+
+    toggle() {
+        if (this.panel) {
+            this.close();
+        } else {
+            this.open();
+        }
+    }
+
+    open() {
+        if (this.panel) {
+            return;
+        }
+        const anchor = this.start || rpIsoToParts(
+            new Date().toLocaleDateString("sv-SE") // локальная today как YYYY-MM-DD
+        );
+        this.viewYear = anchor.y;
+        this.viewMonth = anchor.m;
+        this.panel = document.createElement("div");
+        this.panel.className = "range-picker-panel";
+        this.panel.setAttribute("role", "dialog");
+        this.panel.setAttribute("aria-label", "Выбор периода");
+        document.body.appendChild(this.panel);
+        this.render();
+        this.position();
+        this.onDocClick = (event) => {
+            if (!this.panel.contains(event.target) && event.target !== this.input) {
+                this.close();
+            }
+        };
+        this.onDocKey = (event) => {
+            if (event.key === "Escape") {
+                this.close();
+            }
+        };
+        document.addEventListener("mousedown", this.onDocClick, true);
+        document.addEventListener("keydown", this.onDocKey, true);
+    }
+
+    close() {
+        if (!this.panel) {
+            return;
+        }
+        document.removeEventListener("mousedown", this.onDocClick, true);
+        document.removeEventListener("keydown", this.onDocKey, true);
+        this.onDocClick = null;
+        this.onDocKey = null;
+        this.panel.remove();
+        this.panel = null;
+        this.syncValue();
+    }
+
+    position() {
+        const rect = this.input.getBoundingClientRect();
+        const width = this.panel.offsetWidth;
+        const height = this.panel.offsetHeight;
+        let left = rect.left;
+        if (left + width > window.innerWidth - 8) {
+            left = Math.max(8, window.innerWidth - width - 8);
+        }
+        let top = rect.bottom + 4;
+        if (top + height > window.innerHeight - 8 && rect.top - height - 4 >= 8) {
+            top = rect.top - height - 4;
+        }
+        this.panel.style.left = `${Math.round(left)}px`;
+        this.panel.style.top = `${Math.round(top)}px`;
+    }
+
+    render() {
+        const first = new Date(this.viewYear, this.viewMonth, 1, 12);
+        // Сдвиг к понедельнику (неделя с пн, как в остальной таблице).
+        let lead = (first.getDay() + 6) % 7;
+        const cells = [];
+        const cursor = new Date(first);
+        cursor.setDate(cursor.getDate() - lead);
+        const todayTime = rpToTime(rpIsoToParts(new Date().toLocaleDateString("sv-SE")));
+        const startTime = this.start ? rpToTime(this.start) : null;
+        const endTime = this.end ? rpToTime(this.end) : null;
+        for (let i = 0; i < 42; i += 1) {
+            const parts = { y: cursor.getFullYear(), m: cursor.getMonth(), d: cursor.getDate() };
+            const time = rpToTime(parts);
+            const outside = parts.m !== this.viewMonth;
+            let state = "";
+            if (outside) {
+                state = " is-outside";
+            }
+            if (time === todayTime) {
+                state += " is-today";
+            }
+            const inRange = startTime !== null && endTime !== null
+                && time > startTime && time < endTime;
+            if (inRange) {
+                state += " is-in-range";
+            }
+            if ((startTime !== null && time === startTime)
+                || (endTime !== null && time === endTime)) {
+                state += " is-edge";
+                if (startTime !== null && time === startTime
+                    && endTime !== null && time === endTime) {
+                    state += " is-single";
+                }
+            }
+            cells.push(`<button type="button" class="rp-day${state}" data-day="${parts.y}-`
+                + `${String(parts.m + 1).padStart(2, "0")}-${String(parts.d).padStart(2, "0")}"`
+                + `${outside ? " tabindex=\"-1\"" : ""}>${parts.d}</button>`);
+            cursor.setDate(cursor.getDate() + 1);
+        }
+        const dows = RP_WEEKDAYS.map((d) => `<span class="rp-dow">${d}</span>`).join("");
+        this.panel.innerHTML = `
+            <div class="rp-head">
+                <button type="button" class="rp-nav" data-nav="-1" aria-label="Предыдущий месяц">&#8249;</button>
+                <span class="rp-title">${RP_MONTH_NAMES[this.viewMonth]} ${this.viewYear}</span>
+                <button type="button" class="rp-nav" data-nav="1" aria-label="Следующий месяц">&#8250;</button>
+            </div>
+            <div class="rp-grid">${dows}${cells.join("")}</div>
+            <div class="rp-hint">Два клика: начало и конец. Повторный клик по той же дате — однодневное.</div>`;
+        this.panel.querySelectorAll("[data-nav]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                this.viewMonth += Number(btn.dataset.nav);
+                if (this.viewMonth < 0) {
+                    this.viewMonth = 11;
+                    this.viewYear -= 1;
+                } else if (this.viewMonth > 11) {
+                    this.viewMonth = 0;
+                    this.viewYear += 1;
+                }
+                this.render();
+                this.position();
+            });
+        });
+        this.panel.querySelectorAll(".rp-day").forEach((btn) => {
+            btn.addEventListener("mouseenter", () => this.previewHover(btn));
+            btn.addEventListener("click", () => this.pickDay(btn.dataset.day));
+        });
+    }
+
+    previewHover(btn) {
+        // Hover-подсветка отрезка между первым кликом и текущей ячейкой.
+        const day = rpIsoToParts(btn.dataset.day);
+        if (!day || !this.start || this.end) {
+            return;
+        }
+        const startTime = rpToTime(this.start);
+        const dayTime = rpToTime(day);
+        this.panel.querySelectorAll(".rp-day").forEach((cell) => {
+            const parts = rpIsoToParts(cell.dataset.day);
+            const time = rpToTime(parts);
+            const between = dayTime > startTime
+                ? time > startTime && time < dayTime
+                : time < startTime && time > dayTime;
+            cell.classList.toggle("is-in-range", between);
+            cell.classList.toggle("is-edge-preview", time === dayTime);
+        });
+    }
+
+    pickDay(iso) {
+        const day = rpIsoToParts(iso);
+        if (!day) {
+            return;
+        }
+        if (!this.start || (this.start && this.end)) {
+            // Новый выбор (или перезапуск, если кликнули раньше начала).
+            this.start = day;
+            this.end = null;
+            this.render();
+            return;
+        }
+        if (rpToTime(day) < rpToTime(this.start)) {
+            // Конец раньше начала — начинаем выбор заново с этой даты.
+            this.start = day;
+            this.end = null;
+            this.render();
+            return;
+        }
+        this.end = rpToTime(day) === rpToTime(this.start) ? null : day;
+        this.syncValue();
+        this.close();
+    }
+
+    syncValue() {
+        const fmt = (p) => `${String(p.d).padStart(2, "0")}.${String(p.m + 1).padStart(2, "0")}.${p.y}`;
+        let display = "";
+        let composed = "";
+        if (this.start) {
+            display = fmt(this.start);
+            composed = display;
+            if (this.end) {
+                display += ` – ${fmt(this.end)}`;
+                composed += `-${fmt(this.end)}`;
+            }
+        }
+        this.input.value = display;
+        if (this.hidden) {
+            this.hidden.value = composed;
+        }
+    }
+}
+
+// Привязка пикеров периода к формам календаря (планирование, инлайн-правки,
+// правка на /calendar/<id>): поле ввода readonly + скрытое поле date.
 
 // Страница участников соревнования (волна B, docs/feedback-live.md №23).
 // Переиспользует FioResolver (выбор варианта подставляет пол/институт/

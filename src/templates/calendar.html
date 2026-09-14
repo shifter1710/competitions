@@ -2,6 +2,15 @@
 
 {% block content %}
 
+{# Иконка календаря для полей периода (единый всплывающий пикер) #}
+{% macro calendar_icon() %}
+<svg class="range-picker__icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"
+    stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="2.5" y="3.5" width="11" height="10" rx="1.5" />
+    <path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" />
+</svg>
+{% endmacro %}
+
 {# Композиция страницы — по прототипу 15: page-head с кнопкой «+ Запланировать
    соревнование», фильтры статус/вид спорта, форма планирования СВЕРХУ,
    карточки соревнований, сгруппированные по месяцам. #}
@@ -48,7 +57,7 @@
 <section class="card shadow-sm mb-4 collapse" id="calendar-new-form">
     <div class="card-body">
         <h3 class="title mb-1">Запланировать соревнование</h3>
-        <div class="text-muted mb-3">План на год — не запись реестра. Период: одна дата или диапазон «с … по …»; пустое «по» = однодневное соревнование.</div>
+        <div class="text-muted mb-3">План на год — не запись реестра. Период: два клика по календарю — начало и конец; повторный клик по той же дате — однодневное соревнование.</div>
         <form class="row g-3" method="post" action="/calendar/new" data-period-form>
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="date" data-period-field>
@@ -58,12 +67,12 @@
                     placeholder="Например: Осенний кросс СибАДИ">
             </div>
             <div class="col-md-3">
-                <label class="label" for="calendar-new-date-from">Период с<span class="req">*</span></label>
-                <input class="form-control" id="calendar-new-date-from" name="date_from" type="date" required>
-            </div>
-            <div class="col-md-3">
-                <label class="label" for="calendar-new-date-to">Период по</label>
-                <input class="form-control" id="calendar-new-date-to" name="date_to" type="date">
+                <label class="label" for="calendar-new-date">Период<span class="req">*</span></label>
+                <div class="range-picker">
+                    <input class="form-control" id="calendar-new-date" type="text" readonly required
+                        placeholder="25.06.2026 или 25.06 – 01.07.2026" autocomplete="off" data-range-picker>
+                    {{ calendar_icon() }}
+                </div>
             </div>
             <div class="col-md-3">
                 <label class="label" for="calendar-new-level">Уровень</label>
@@ -127,14 +136,14 @@
                         <input class="form-control form-control-sm" name="name" type="text" value="{{ event.name }}" required>
                     </div>
                     <div class="col-md-3">
-                        <label class="label">Период с<span class="req">*</span></label>
-                        <input class="form-control form-control-sm" name="date_from" type="date" required
-                            value="{{ event.date_from.strftime('%Y-%m-%d') }}">
-                    </div>
-                    <div class="col-md-3">
-                        <label class="label">Период по</label>
-                        <input class="form-control form-control-sm" name="date_to" type="date"
-                            {% if event.date_to_obj %}value="{{ event.date_to_obj.strftime('%Y-%m-%d') }}"{% endif %}>
+                        <label class="label">Период<span class="req">*</span></label>
+                        <div class="range-picker">
+                            <input class="form-control form-control-sm" type="text" readonly required
+                                autocomplete="off" data-range-picker
+                                data-range-from="{{ event.date_from.strftime('%Y-%m-%d') }}"
+                                {% if event.date_to_obj %}data-range-to="{{ event.date_to_obj.strftime('%Y-%m-%d') }}"{% endif %}>
+                            {{ calendar_icon() }}
+                        </div>
                     </div>
                     <div class="col-md-3">
                         <label class="label">Уровень</label>

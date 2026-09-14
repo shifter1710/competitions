@@ -52,7 +52,7 @@
 <section class="card shadow-sm mb-4 collapse" id="event-edit-form">
     <div class="card-body">
         <h3 class="title mb-1">Редактировать соревнование</h3>
-        <div class="text-muted mb-3">Период: одна дата или диапазон «с … по …»; пустое «по» = однодневное соревнование.</div>
+        <div class="text-muted mb-3">Период: два клика по календарю — начало и конец; повторный клик по той же дате — однодневное соревнование.</div>
         {# Та же форма правки, что на календаре; next возвращает на страницу
            участников после сохранения. #}
         <form class="row g-3" method="post" action="/calendar/{{ event.id }}/edit" data-period-form>
@@ -65,14 +65,19 @@
                     required>
             </div>
             <div class="col-md-3">
-                <label class="label" for="event-edit-date-from">Период с<span class="req">*</span></label>
-                <input class="form-control" id="event-edit-date-from" name="date_from" type="date" required
-                    value="{{ event.date[:10] }}">
-            </div>
-            <div class="col-md-3">
-                <label class="label" for="event-edit-date-to">Период по</label>
-                <input class="form-control" id="event-edit-date-to" name="date_to" type="date"
-                    value="{{ (event.date_to or '')[:10] }}">
+                <label class="label" for="event-edit-date">Период<span class="req">*</span></label>
+                <div class="range-picker">
+                    <input class="form-control" id="event-edit-date" type="text" readonly required
+                        autocomplete="off" data-range-picker
+                        data-range-from="{{ event.date[:10] }}"
+                        {% if event.date_to %}data-range-to="{{ event.date_to[:10] }}"{% endif %}>
+                    <svg class="range-picker__icon" viewBox="0 0 16 16" width="16" height="16" fill="none"
+                        stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+                        aria-hidden="true">
+                        <rect x="2.5" y="3.5" width="11" height="10" rx="1.5" />
+                        <path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" />
+                    </svg>
+                </div>
             </div>
             <div class="col-md-3">
                 <label class="label" for="event-edit-level">Уровень</label>
