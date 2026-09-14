@@ -2523,7 +2523,7 @@ class ParticipantsPage {
         if (!fioInput || document.body.dataset.role === "athlete") {
             return;
         }
-        const fill = (athleteKey, inputId) => {
+        const fill = (athlete, athleteKey, inputId) => {
             const value = athlete[athleteKey];
             const input = value ? document.getElementById(inputId) : null;
             if (input && !input.value) {
@@ -2531,10 +2531,10 @@ class ParticipantsPage {
             }
         };
         new FioResolver(fioInput, (athlete) => {
-            fill("sex", "participant-sex");
-            fill("institute", "participant-institute");
-            fill("group", "participant-group");
-            fill("course", "participant-course");
+            fill(athlete, "sex", "participant-sex");
+            fill(athlete, "institute", "participant-institute");
+            fill(athlete, "group", "participant-group");
+            fill(athlete, "course", "participant-course");
         });
     }
 
