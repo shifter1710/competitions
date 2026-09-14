@@ -193,6 +193,73 @@
                 </div>
             </section>
 
+            <section class="card mb-4" id="new-form">
+                <div class="card__header">
+                    <div>
+                        <div class="card__title">Запланировать соревнование</div>
+                        <div class="card__sub">Форма наверху, под фильтрами: запланированное сразу видно в списке ниже</div>
+                    </div>
+                </div>
+                <div class="card__body">
+                    <form class="form-grid">
+                        <div class="col-6">
+                            <label class="label" for="nf-name">Название<span class="req">*</span></label>
+                            <input class="input" id="nf-name" type="text" placeholder="Например: Осенний кросс СибАДИ">
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-date-from">Период: с<span class="req">*</span></label>
+                            <div class="datefield">
+                                <input class="input" id="nf-date-from" type="text" placeholder="01.09.2026" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-date-to">Период: по<span class="req">*</span></label>
+                            <div class="datefield">
+                                <input class="input" id="nf-date-to" type="text" placeholder="31.08.2027" title="Введите цифры — точки поставятся сами">
+                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-level">Уровень<span class="req">*</span></label>
+                            <select class="select" id="nf-level">
+                                <option>внутривузовские</option>
+                                <option>межвузовские</option>
+                                <option>региональные</option>
+                                <option>всероссийские</option>
+                            </select>
+                        </div>
+                        <div class="col-3">
+                            <label class="label" for="nf-sport">Вид спорта<span class="req">*</span></label>
+                            <select class="select" id="nf-sport">
+                                <option>Лёгкая атлетика</option>
+                                <option>Волейбол</option>
+                                <option>Баскетбол</option>
+                                <option>Настольный теннис</option>
+                                <option>Плавание</option>
+                                <option>Лыжные гонки</option>
+                                <option>Шахматы</option>
+                                <option>Мини-футбол</option>
+                                <option>Бадминтон</option>
+                            </select>
+                        </div>
+                        <div class="col-6">
+                            <label class="label" for="nf-link">Ссылка</label>
+                            <input class="input" id="nf-link" type="text" placeholder="https://… — положение, регламент">
+                            <p class="field__hint">Необязательно; откроется с карточки соревнования</p>
+                        </div>
+                        <div class="col-12" style="display: flex; gap: 8px;">
+                            <button class="btn btn--primary" type="button">Запланировать</button>
+                            <button class="btn btn--secondary" type="reset">Отмена</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
             <div class="table-meta">
                 <span>Сезон 01.09.2026 — 31.08.2027: запланировано <strong class="tabnum" style="color: var(--text);">9</strong>, прошло <strong class="tabnum" style="color: var(--text);">1</strong></span>
                 <span>Сортировка: по датам, по хронологии</span>
@@ -379,74 +446,6 @@
                     </div>
                 </div>
             </div>
-
-            <h2 class="month-title mt-5" id="new-form">+ Запланировать соревнование <span class="fs-sm">· форма раскрыта в макете</span></h2>
-            <section class="card">
-                <div class="card__header">
-                    <div>
-                        <div class="card__title">Новое соревнование в календаре</div>
-                        <div class="card__sub">По кнопке «+ Запланировать соревнование» форма открывается модалом; здесь она раскрыта статично</div>
-                    </div>
-                </div>
-                <div class="card__body">
-                    <form class="form-grid">
-                        <div class="col-6">
-                            <label class="label" for="nf-name">Название<span class="req">*</span></label>
-                            <input class="input" id="nf-name" type="text" placeholder="Например: Осенний кросс СибАДИ">
-                        </div>
-                        <div class="col-3">
-                            <label class="label" for="nf-date-from">Период: с<span class="req">*</span></label>
-                            <div class="datefield">
-                                <input class="input" id="nf-date-from" type="text" placeholder="01.09.2026" title="Введите цифры — точки поставятся сами">
-                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
-                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="col-3">
-                            <label class="label" for="nf-date-to">Период: по<span class="req">*</span></label>
-                            <div class="datefield">
-                                <input class="input" id="nf-date-to" type="text" placeholder="31.08.2027" title="Введите цифры — точки поставятся сами">
-                                <button class="datefield__btn" type="button" aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">
-                                    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="11.1" rx="1.6"/><path d="M2.2 6.4h11.6M5.4 1.8v2.6M10.6 1.8v2.6"/></svg>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="col-3">
-                            <label class="label" for="nf-level">Уровень<span class="req">*</span></label>
-                            <select class="select" id="nf-level">
-                                <option>внутривузовские</option>
-                                <option>межвузовские</option>
-                                <option>региональные</option>
-                                <option>всероссийские</option>
-                            </select>
-                        </div>
-                        <div class="col-3">
-                            <label class="label" for="nf-sport">Вид спорта<span class="req">*</span></label>
-                            <select class="select" id="nf-sport">
-                                <option>Лёгкая атлетика</option>
-                                <option>Волейбол</option>
-                                <option>Баскетбол</option>
-                                <option>Настольный теннис</option>
-                                <option>Плавание</option>
-                                <option>Лыжные гонки</option>
-                                <option>Шахматы</option>
-                                <option>Мини-футбол</option>
-                                <option>Бадминтон</option>
-                            </select>
-                        </div>
-                        <div class="col-6">
-                            <label class="label" for="nf-link">Ссылка</label>
-                            <input class="input" id="nf-link" type="text" placeholder="https://… — положение, регламент">
-                            <p class="field__hint">Необязательно; откроется с карточки соревнования</p>
-                        </div>
-                        <div class="col-12" style="display: flex; gap: 8px;">
-                            <button class="btn btn--primary" type="button">Запланировать</button>
-                            <button class="btn btn--secondary" type="reset">Отмена</button>
-                        </div>
-                    </form>
-                </div>
-            </section>
 
             <div class="note note--plain mt-4">
                 <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>

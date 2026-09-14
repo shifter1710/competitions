@@ -36,6 +36,93 @@
     </script>
     <link rel="stylesheet" href="tokens.css">
     <link rel="stylesheet" href="prototype.css">
+    <style>
+        /* Локальные стили страницы: только на основе токенов tokens.css */
+        .conflict {
+            border: 1px solid var(--border);
+            border-radius: var(--r-lg);
+            background: var(--surface);
+            overflow: hidden;
+        }
+
+        .conflict + .conflict {
+            margin-top: var(--sp-5);
+        }
+
+        .conflict__head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: var(--sp-4);
+            flex-wrap: wrap;
+            padding: var(--sp-4) var(--sp-5);
+            border-bottom: 1px solid var(--border);
+            background: var(--surface-alt);
+        }
+
+        .conflict__title {
+            font-size: var(--fs-md);
+            font-weight: var(--fw-semibold);
+        }
+
+        .conflict__sub {
+            margin-top: 2px;
+            font-size: var(--fs-sm);
+            color: var(--text-2);
+        }
+
+        .conflict__body {
+            padding: var(--sp-5);
+        }
+
+        .conflict__cols {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: var(--sp-4);
+        }
+
+        .conflict__col-title {
+            margin: 0 0 var(--sp-2);
+            font-size: var(--fs-sm);
+            font-weight: var(--fw-semibold);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-2);
+        }
+
+        .conflict td.diff {
+            background: var(--warn-bg);
+            color: var(--warn-fg);
+        }
+
+        .conflict__actions {
+            display: flex;
+            gap: var(--sp-2);
+            flex-wrap: wrap;
+            margin-top: var(--sp-4);
+        }
+
+        .conflict__edit {
+            margin-top: var(--sp-4);
+            padding: var(--sp-4);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            background: var(--surface-alt);
+        }
+
+        .conflict__edit-title {
+            margin: 0 0 var(--sp-3);
+            font-size: var(--fs-sm);
+            font-weight: var(--fw-semibold);
+            color: var(--text-2);
+        }
+
+        .conflict__edit-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: var(--sp-3);
+        }
+    </style>
 </head>
 <body>
     <div class="proto">
@@ -67,22 +154,19 @@
                 <a class="backlink" href="07-admin-hub.html">В админку</a>
             </div>
 
-            <!-- Кандидат 1 из 2: строка-кандидат слева, похожая существующая запись справа -->
-            <section class="card mb-4">
-                <div class="card__header">
+            <!-- Конфликт 1 из 2: раскрыт режим «Решить вручную» (инлайн-инпуты) -->
+            <section class="conflict">
+                <div class="conflict__head">
                     <div>
-                        <h2 class="card__title">Кандидат #1</h2>
-                        <p class="card__sub">Из импорта от 14.09.2026 04:24 · файл «соревнования_сентябрь.xlsx»</p>
+                        <div class="conflict__title">Конфликт 1 из 2 — Иванов Иван Иванович, 25.06.2026</div>
+                        <p class="conflict__sub">Из импорта от 14.09.2026 04:24 · файл «соревнования_сентябрь.xlsx» · строка 4</p>
                     </div>
-                    <div class="btn-row">
-                        <button class="btn btn--primary" type="button">Принять</button>
-                        <button class="btn btn--danger-outline" type="button">Пропустить</button>
-                    </div>
+                    <span class="badge badge--warn"><span class="badge__dot"></span>требует решения</span>
                 </div>
-                <div class="card__body">
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--sp-4);">
+                <div class="conflict__body">
+                    <div class="conflict__cols">
                         <div>
-                            <h3 class="fs-sm text-2 mb-2" style="text-transform: uppercase; letter-spacing: 0.06em;">Строка-кандидат</h3>
+                            <h3 class="conflict__col-title">Кандидат (из файла)</h3>
                             <div class="table-wrap" style="box-shadow: none;">
                                 <table class="table table--mid">
                                     <tbody>
@@ -94,14 +178,14 @@
                                         <tr><th>Вид спорта</th><td>Плавание</td></tr>
                                         <tr><th>Дата</th><td>25.06.2026</td></tr>
                                         <tr><th>Уровень соревнований</th><td>вуз</td></tr>
-                                        <tr><th>Название соревнований</th><td>Кубок вуза по плаванию (финал)</td></tr>
-                                        <tr><th>Место</th><td>2</td></tr>
+                                        <tr><th>Название соревнований</th><td class="diff">Кубок вуза по плаванию (финал)</td></tr>
+                                        <tr><th>Место</th><td class="diff">2</td></tr>
                                     </tbody>
                                 </table>
                             </div>
                         </div>
                         <div>
-                            <h3 class="fs-sm text-2 mb-2" style="text-transform: uppercase; letter-spacing: 0.06em;">Похожая существующая запись</h3>
+                            <h3 class="conflict__col-title">Существующая запись (в реестре)</h3>
                             <div class="table-wrap" style="box-shadow: none;">
                                 <table class="table table--mid">
                                     <tbody>
@@ -113,31 +197,60 @@
                                         <tr><th>Вид спорта</th><td>Плавание</td></tr>
                                         <tr><th>Дата</th><td>25.06.2026</td></tr>
                                         <tr><th>Уровень соревнований</th><td>вуз</td></tr>
-                                        <tr><th>Название соревнований</th><td>Кубок вуза по плаванию</td></tr>
-                                        <tr><th>Место</th><td>1</td></tr>
+                                        <tr><th>Название соревнований</th><td class="diff">Кубок вуза по плаванию</td></tr>
+                                        <tr><th>Место</th><td class="diff">1</td></tr>
                                     </tbody>
                                 </table>
                             </div>
+                        </div>
+                    </div>
+                    <div class="conflict__actions">
+                        <button class="btn btn--secondary" type="button">Пропустить</button>
+                        <button class="btn btn--danger-outline" type="button">Заменить существующую</button>
+                        <button class="btn btn--primary" type="button">Решить вручную</button>
+                    </div>
+                    <!-- Раскрытый режим «Решить вручную»: инлайн-инпуты кандидата -->
+                    <div class="conflict__edit">
+                        <p class="conflict__edit-title">Решить вручную — отредактируйте значения кандидата, затем примите</p>
+                        <div class="conflict__edit-grid">
+                            <div>
+                                <label class="label" for="c1-fio">ФИО</label>
+                                <input class="input" id="c1-fio" type="text" value="Иванов Иван Иванович">
+                            </div>
+                            <div>
+                                <label class="label" for="c1-sport">Вид спорта</label>
+                                <input class="input" id="c1-sport" type="text" value="Плавание">
+                            </div>
+                            <div>
+                                <label class="label" for="c1-name">Название соревнований</label>
+                                <input class="input" id="c1-name" type="text" value="Кубок вуза по плаванию (финал)">
+                            </div>
+                            <div>
+                                <label class="label" for="c1-place">Место</label>
+                                <input class="input" id="c1-place" type="number" min="0" step="1" value="2">
+                            </div>
+                        </div>
+                        <div class="btn-row" style="margin-top: var(--sp-4);">
+                            <button class="btn btn--primary" type="button">Принять с изменениями</button>
+                            <button class="btn btn--secondary" type="button">Отменить правку</button>
                         </div>
                     </div>
                 </div>
             </section>
 
-            <section class="card">
-                <div class="card__header">
+            <!-- Конфликт 2 из 2: режим «Решить вручную» не раскрыт -->
+            <section class="conflict">
+                <div class="conflict__head">
                     <div>
-                        <h2 class="card__title">Кандидат #2</h2>
-                        <p class="card__sub">Из импорта от 14.09.2026 04:24 · файл «соревнования_сентябрь.xlsx»</p>
+                        <div class="conflict__title">Конфликт 2 из 2 — Петрова Анна Сергеевна, 10.05.2026</div>
+                        <p class="conflict__sub">Из импорта от 14.09.2026 04:24 · файл «соревнования_сентябрь.xlsx» · строка 11</p>
                     </div>
-                    <div class="btn-row">
-                        <button class="btn btn--primary" type="button">Принять</button>
-                        <button class="btn btn--danger-outline" type="button">Пропустить</button>
-                    </div>
+                    <span class="badge badge--warn"><span class="badge__dot"></span>требует решения</span>
                 </div>
-                <div class="card__body">
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--sp-4);">
+                <div class="conflict__body">
+                    <div class="conflict__cols">
                         <div>
-                            <h3 class="fs-sm text-2 mb-2" style="text-transform: uppercase; letter-spacing: 0.06em;">Строка-кандидат</h3>
+                            <h3 class="conflict__col-title">Кандидат (из файла)</h3>
                             <div class="table-wrap" style="box-shadow: none;">
                                 <table class="table table--mid">
                                     <tbody>
@@ -149,14 +262,14 @@
                                         <tr><th>Вид спорта</th><td>Волейбол</td></tr>
                                         <tr><th>Дата</th><td>10.05.2026</td></tr>
                                         <tr><th>Уровень соревнований</th><td>область</td></tr>
-                                        <tr><th>Название соревнований</th><td>Первенство области по волейболу</td></tr>
-                                        <tr><th>Место</th><td>3</td></tr>
+                                        <tr><th>Название соревнований</th><td class="diff">Первенство области по волейболу</td></tr>
+                                        <tr><th>Место</th><td class="diff">3</td></tr>
                                     </tbody>
                                 </table>
                             </div>
                         </div>
                         <div>
-                            <h3 class="fs-sm text-2 mb-2" style="text-transform: uppercase; letter-spacing: 0.06em;">Похожая существующая запись</h3>
+                            <h3 class="conflict__col-title">Существующая запись (в реестре)</h3>
                             <div class="table-wrap" style="box-shadow: none;">
                                 <table class="table table--mid">
                                     <tbody>
@@ -168,19 +281,24 @@
                                         <tr><th>Вид спорта</th><td>Волейбол</td></tr>
                                         <tr><th>Дата</th><td>10.05.2026</td></tr>
                                         <tr><th>Уровень соревнований</th><td>область</td></tr>
-                                        <tr><th>Название соревнований</th><td>Первенство области</td></tr>
-                                        <tr><th>Место</th><td>2</td></tr>
+                                        <tr><th>Название соревнований</th><td class="diff">Первенство области</td></tr>
+                                        <tr><th>Место</th><td class="diff">2</td></tr>
                                     </tbody>
                                 </table>
                             </div>
                         </div>
+                    </div>
+                    <div class="conflict__actions">
+                        <button class="btn btn--secondary" type="button">Пропустить</button>
+                        <button class="btn btn--danger-outline" type="button">Заменить существующую</button>
+                        <button class="btn btn--primary" type="button">Решить вручную</button>
                     </div>
                 </div>
             </section>
 
             <div class="note note--plain mt-4">
                 <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 7.4v3.3"/><path d="M8 5.1v.01"/></svg>
-                <span><strong>Принять</strong> — строка вставляется как новая запись реестра. <strong>Пропустить</strong> — строка отбрасывается, существующая запись не меняется. Исторический факт не перезаписывается ни в одном из решений: если строка и запись расходятся (другое название или место), это разные выступления и решение за администратором. Очередь видна роли admin; editor попадает сюда по кнопке «Очередь подтверждения» на админ-хабе и со страницы импорта.</span>
+                <span><strong>Пропустить</strong> — кандидат отбрасывается, существующая запись не меняется. <strong>Заменить существующую</strong> — существующая запись перезаписывается значениями кандидата. <strong>Решить вручную</strong> — поля кандидата открываются на редактирование, после правок — «Принять с изменениями». Расхождения с существующей записью подсвечены. Очередь видна роли admin; editor попадает сюда по кнопке «Очередь подтверждения» на админ-хабе и со страницы импорта.</span>
             </div>
         </main>
     </div>
