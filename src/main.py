@@ -1449,6 +1449,50 @@ def queue_candidate_view(payload: dict) -> list[tuple[str, str]]:
     return view
 
 
+def queue_edit_values(payload: dict) -> dict:
+    """Предзаполнение инлайн-формы ручного решения: значения кандидата,
+    даты — в формате дд.мм.гггг (парсер ручного ввода понимает и диапазон
+    «25-27.06.2026» в одном поле)."""
+    date_display = ''
+    if payload.get('date'):
+        try:
+            date_display = format_date_range(
+                datetime.fromisoformat(payload['date']),
+                datetime.fromisoformat(payload['date_to']) if payload.get('date_to') else None,
+            )
+        except (TypeError, ValueError):
+            date_display = ''
+    return {
+        'student_name': '' if payload.get('student_name') is None else str(payload.get('student_name')),
+        'student_sex': '' if payload.get('student_sex') is None else str(payload.get('student_sex')),
+        'institute': '' if payload.get('institute') is None else str(payload.get('institute')),
+        'group': '' if payload.get('group') is None else str(payload.get('group')),
+        'course': '' if payload.get('course') is None else str(payload.get('course')),
+        'sport': '' if payload.get('sport') is None else str(payload.get('sport')),
+        'date': date_display,
+        'level': '' if payload.get('level') is None else str(payload.get('level')),
+        'name': '' if payload.get('name') is None else str(payload.get('name')),
+        'position': '' if payload.get('position') is None else str(payload.get('position')),
+    }
+
+
+def queue_field_changes(old: Competition, new: Competition) -> dict:
+    """Изменения полей old→new для аудита замены существующей записи."""
+    changes = {}
+    for key in QUEUE_FIELD_ORDER:
+        old_value = getattr(old, key, None)
+        new_value = getattr(new, key, None)
+        if key in ('date', 'date_to'):
+            old_value = old_value.isoformat() if old_value else None
+            new_value = new_value.isoformat() if new_value else None
+        if old_value != new_value:
+            changes[key] = {
+                'old': '' if old_value is None else str(old_value),
+                'new': '' if new_value is None else str(new_value),
+            }
+    return changes
+
+
 def resolve_queue_entry(request: Request, entry_id: str):
     """Общая проверка действия над записью очереди: id и статус pending."""
     try:
@@ -1478,6 +1522,7 @@ async def admin_import_queue_page(request: Request):
             {
                 **entry,
                 'candidate': queue_candidate_view(entry['payload']),
+                'edit_values': queue_edit_values(entry['payload']),
                 'matched': matched,
             }
         )
@@ -1547,6 +1592,101 @@ async def skip_import_queue_entry(request: Request, entry_id: str):
         {'decision': 'skipped', 'queue_id': entry['id'], 'matched_record_id': entry['matched_record_id']},
     )
     return redirect(to='/admin/import-queue?admin_message=Кандидат+пропущен')
+
+
+# Замена существующей записи данными кандидата (№25): историчность обеспечивает
+# аудит old→new по полям; record_id существующей сохраняется, её владелец и
+# review-статус не меняются (update_competition не трогает эти колонки).
+@app.post('/admin/import-queue/<entry_id>/replace')
+async def replace_import_queue_entry(request: Request, entry_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    entry, error = resolve_queue_entry(request, entry_id)
+    if error is not None:
+        return error
+    if not entry['matched_record_id']:
+        return text(body='Queue entry has no matched record', status=400)
+    storage = get_storage(request.app)
+    existing = storage.get_competition_by_id(int(entry['matched_record_id']))
+    if existing is None:
+        return text(body='Matched record not found', status=404)
+
+    competition = Competition.model_validate(entry['payload'])
+    ensure_catalog_values(storage, [competition])
+    changes = queue_field_changes(existing, competition)
+    storage.update_competition(int(entry['matched_record_id']), competition)
+    storage.set_import_queue_status(entry['id'], 'replaced')
+    log_audit_event(
+        request,
+        'import_conflict_resolved',
+        {
+            'decision': 'replaced',
+            'queue_id': entry['id'],
+            'matched_record_id': entry['matched_record_id'],
+            'changes': changes,
+        },
+    )
+    return redirect(to='/admin/import-queue?admin_message=Существующая+запись+заменена+данными+кандидата')
+
+
+# Ручное решение (№25): админ правит поля кандидата инлайн (даты — дд.мм.гггг),
+# после сохранения кандидат вставляется как обычный accepted.
+@app.post('/admin/import-queue/<entry_id>/edit')
+async def edit_import_queue_entry(request: Request, entry_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    entry, error = resolve_queue_entry(request, entry_id)
+    if error is not None:
+        return error
+    storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
+    record = {
+        'ФИО': get_form_value(request, 'student_name'),
+        'Пол': get_form_value(request, 'student_sex'),
+        'Институт': get_form_value(request, 'institute'),
+        'Группа': get_form_value(request, 'group'),
+        'Вид спорта': get_form_value(request, 'sport'),
+        'Дата': get_form_value(request, 'date'),
+        'Уровень соревнований': get_form_value(request, 'level'),
+        'Название соревнований': get_form_value(request, 'name'),
+        'Место': get_form_value(request, 'position'),
+        'Курс': get_form_value(request, 'course'),
+    }
+    try:
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
+    except (TypeError, ValueError) as exc:
+        return text(body=f'Invalid row data: {exc}', status=400)
+
+    # Тот же анти-дубликат, что и у «Принять»: строка вставляется только
+    # по явному решению админа.
+    duplicate_now = any(
+        competition_duplicate_key(comp) == competition_duplicate_key(competition) for comp in storage.get_competitions()
+    )
+    if duplicate_now:
+        storage.set_import_queue_status(entry['id'], 'skipped')
+        log_audit_event(
+            request,
+            'import_conflict_resolved',
+            {'decision': 'skipped', 'queue_id': entry['id'], 'reason': 'duplicate_already_exists', 'edited': True},
+        )
+        return redirect(to='/admin/import-queue?admin_message=Запись+уже+существует,+кандидат+пропущен')
+
+    ensure_catalog_values(storage, [competition])
+    storage.save_competitions([competition], review_status='approved', owner_id=entry['created_by'])
+    storage.set_import_queue_status(entry['id'], 'accepted')
+    log_audit_event(
+        request,
+        'import_conflict_resolved',
+        {
+            'decision': 'accepted',
+            'edited': True,
+            'queue_id': entry['id'],
+            'matched_record_id': entry['matched_record_id'],
+        },
+    )
+    return redirect(to='/admin/import-queue?admin_message=Кандидат+принят+с+ручными+правками')
 
 
 @app.get('/admin/fields')

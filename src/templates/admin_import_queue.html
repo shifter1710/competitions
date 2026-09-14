@@ -15,15 +15,20 @@
                 <h3 class="title mb-1">Кандидат #{{ entry.id }}</h3>
                 <div class="text-muted">Из импорта от {{ entry.created_at[:16].replace('T', ' ') }}</div>
             </div>
-            <div class="d-flex gap-2">
-                <form action="/admin/import-queue/{{ entry.id }}/accept" method="post">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                    <button class="btn btn-success" type="submit">Принять</button>
-                </form>
+            <div class="d-flex gap-2 flex-wrap">
                 <form action="/admin/import-queue/{{ entry.id }}/skip" method="post">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                     <button class="btn btn-outline-danger" type="submit">Пропустить</button>
                 </form>
+                {% if entry.matched %}
+                <form action="/admin/import-queue/{{ entry.id }}/replace" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <button class="btn btn-warning" type="submit">Заменить существующую</button>
+                </form>
+                {% endif %}
+                <button class="btn btn-primary" type="button" data-bs-toggle="collapse"
+                        data-bs-target="#edit-{{ entry.id }}" aria-expanded="false"
+                        aria-controls="edit-{{ entry.id }}">Решить вручную</button>
             </div>
         </div>
 
@@ -55,11 +60,76 @@
                         <tr><th>Место</th><td>{{ entry.matched.position }}</td></tr>
                     </tbody>
                 </table>
+                <div class="form-text mt-2">«Заменить существующую» перезапишет эту запись полями кандидата (запись №{{ entry.matched.record_id }}), прежние значения зафиксируются в аудите.</div>
                 {% else %}
                 <div class="alert alert-secondary mb-0">
                     Похожая запись из этого же файла (первая из похожих строк была вставлена при импорте).
                 </div>
                 {% endif %}
+            </div>
+        </div>
+
+        <div class="collapse mt-3" id="edit-{{ entry.id }}">
+            <div class="border rounded p-3 bg-light">
+                <h5 class="mb-3">Ручная правка кандидата</h5>
+                <form action="/admin/import-queue/{{ entry.id }}/edit" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-student_name">ФИО</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-student_name" name="student_name"
+                                   value="{{ entry.edit_values.student_name }}" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-student_sex">Пол</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-student_sex" name="student_sex"
+                                   value="{{ entry.edit_values.student_sex }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-institute">Институт</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-institute" name="institute"
+                                   value="{{ entry.edit_values.institute }}">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label" for="edit-{{ entry.id }}-group">Группа</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-group" name="group"
+                                   value="{{ entry.edit_values.group }}">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label" for="edit-{{ entry.id }}-course">Курс</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-course" name="course"
+                                   value="{{ entry.edit_values.course }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-sport">Вид спорта</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-sport" name="sport"
+                                   value="{{ entry.edit_values.sport }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-date">Дата (дд.мм.гггг, можно диапазон «25-27.06.2026»)</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-date" name="date"
+                                   value="{{ entry.edit_values.date }}" required>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-level">Уровень соревнований</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-level" name="level"
+                                   value="{{ entry.edit_values.level }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-name">Название соревнований</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-name" name="name"
+                                   value="{{ entry.edit_values.name }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="edit-{{ entry.id }}-position">Место</label>
+                            <input class="form-control" id="edit-{{ entry.id }}-position" name="position"
+                                   value="{{ entry.edit_values.position }}" required>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <button class="btn btn-success" type="submit">Сохранить и принять</button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
