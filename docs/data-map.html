@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>СибАДИ · Соревнования студентов — как устроены данные</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #12151B; }
+  svg { display: block; font-family: -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+</style>
+</head>
+<body>
+<svg width="1560" height="1700" viewBox="0 0 1560 1700" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrO" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#E0A34C"/>
+    </marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4C8DFF"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3F9B6C"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1560" height="1700" fill="#12151B"/>
+
+  <!-- ===== Заголовок ===== -->
+  <text x="60" y="52" font-size="26" font-weight="700" fill="#E7EBF1">СибАДИ · Соревнования студентов</text>
+  <text x="60" y="80" font-size="14" fill="#97A3B4">Как устроены данные: таблицы, их связи и основные потоки</text>
+
+  <!-- ===== Легенда ===== -->
+  <g>
+    <rect x="1010" y="26" width="490" height="112" rx="12" fill="#1B212B" stroke="#2C3440"/>
+    <line x1="1034" y1="56" x2="1094" y2="56" stroke="#E0A34C" stroke-width="2.5" marker-end="url(#arrO)"/>
+    <text x="1106" y="61" font-size="13" fill="#E7EBF1">жёсткая ссылка (внешний ключ, FK)</text>
+    <line x1="1034" y1="86" x2="1094" y2="86" stroke="#4C8DFF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrB)"/>
+    <text x="1106" y="91" font-size="13" fill="#E7EBF1">связь по тексту (логическая)</text>
+    <line x1="1034" y1="116" x2="1094" y2="116" stroke="#3F9B6C" stroke-width="2.5" marker-end="url(#arrG)"/>
+    <text x="1106" y="121" font-size="13" fill="#E7EBF1">поток: данные попадают в реестр</text>
+  </g>
+
+  <!-- ===== Карточки таблиц ===== -->
+
+  <!-- levels -->
+  <g>
+    <rect x="60" y="110" width="320" height="128" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="60" y="110" width="6" height="128" rx="3" fill="#8B6BD9"/>
+    <text x="84" y="138" font-size="15" font-weight="700" fill="#E7EBF1">levels — уровни соревнований</text>
+    <text x="84" y="162" font-size="12.5" fill="#B9C2CF">id (ключ) · name — название · sort_order</text>
+    <text x="84" y="181" font-size="12.5" fill="#B9C2CF">active — показывать в выборе</text>
+    <text x="84" y="207" font-size="12" fill="#8B95A6" font-style="italic">уровень записи реестра = name отсюда</text>
+  </g>
+
+  <!-- catalog_values -->
+  <g>
+    <rect x="60" y="270" width="320" height="196" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="60" y="270" width="6" height="196" rx="3" fill="#8B6BD9"/>
+    <text x="84" y="298" font-size="15" font-weight="700" fill="#E7EBF1">catalog_values — справочники</text>
+    <text x="84" y="322" font-size="12.5" fill="#B9C2CF">id (ключ) · category: вид спорта /</text>
+    <text x="84" y="340" font-size="12.5" fill="#B9C2CF">институт / группа</text>
+    <text x="84" y="364" font-size="12.5" fill="#B9C2CF">value — значение · active — показывать</text>
+    <text x="84" y="388" font-size="12.5" fill="#E0A34C">parent_id → эта же таблица:</text>
+    <text x="84" y="406" font-size="12.5" fill="#B9C2CF">группа привязана к своему институту</text>
+    <text x="84" y="436" font-size="12" fill="#8B95A6" font-style="italic">наполняется из записей автоматически</text>
+  </g>
+
+  <!-- users -->
+  <g>
+    <rect x="60" y="510" width="320" height="210" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="60" y="510" width="6" height="210" rx="3" fill="#4C8DFF"/>
+    <text x="84" y="538" font-size="15" font-weight="700" fill="#E7EBF1">users — аккаунты</text>
+    <text x="84" y="562" font-size="12.5" fill="#B9C2CF">id (ключ) · username · password_hash</text>
+    <text x="84" y="586" font-size="12.5" fill="#B9C2CF">role: admin / editor / viewer / athlete</text>
+    <text x="84" y="610" font-size="12.5" fill="#B9C2CF">profile_data (JSON): институт,</text>
+    <text x="84" y="628" font-size="12.5" fill="#B9C2CF">группа, курс — подстановка в формы</text>
+    <text x="84" y="652" font-size="12.5" fill="#B9C2CF">name_aliases (JSON): варианты ФИО</text>
+    <text x="84" y="676" font-size="12.5" fill="#B9C2CF">last_login_at · last_seen_at</text>
+    <text x="84" y="700" font-size="12" fill="#8B95A6" font-style="italic">атлет видит только свои записи</text>
+  </g>
+
+  <!-- calendar_events -->
+  <g>
+    <rect x="610" y="30" width="340" height="192" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="610" y="30" width="6" height="192" rx="3" fill="#3F9B6C"/>
+    <text x="634" y="58" font-size="15" font-weight="700" fill="#E7EBF1">calendar_events — календарь (план)</text>
+    <text x="634" y="82" font-size="12.5" fill="#B9C2CF">id (ключ) · name — соревнование</text>
+    <text x="634" y="106" font-size="12.5" fill="#B9C2CF">date … date_to — дата / период</text>
+    <text x="634" y="130" font-size="12.5" fill="#B9C2CF">level · sport · url — пресет события</text>
+    <text x="634" y="160" font-size="12" fill="#8B95A6" font-style="italic">план на период: «запланировано / прошло»</text>
+    <text x="634" y="178" font-size="12" fill="#8B95A6" font-style="italic">определяется по датам</text>
+  </g>
+
+  <!-- competitions -->
+  <g>
+    <rect x="560" y="300" width="450" height="430" rx="14" fill="#232B37" stroke="#4C8DFF" stroke-width="1.5"/>
+    <rect x="560" y="300" width="450" height="44" rx="14" fill="#2A3547"/>
+    <rect x="560" y="330" width="450" height="14" fill="#2A3547"/>
+    <text x="584" y="329" font-size="17" font-weight="800" fill="#FFFFFF">competitions — реестр участий (центральная таблица)</text>
+    <text x="584" y="368" font-size="12.5" fill="#E0A34C" font-weight="600">id</text>
+    <text x="612" y="368" font-size="12.5" fill="#B9C2CF">— номер записи</text>
+    <text x="584" y="392" font-size="12.5" fill="#B9C2CF" font-weight="600">Студент:</text>
+    <text x="668" y="392" font-size="12.5" fill="#B9C2CF">student_id (код), ФИО, пол,</text>
+    <text x="584" y="410" font-size="12.5" fill="#B9C2CF">институт, группа, курс</text>
+    <text x="584" y="434" font-size="12.5" fill="#B9C2CF" font-weight="600">Соревнование:</text>
+    <text x="706" y="434" font-size="12.5" fill="#B9C2CF">name — название</text>
+    <text x="584" y="458" font-size="12.5" fill="#B9C2CF">sport — вид спорта · date — дата</text>
+    <text x="584" y="482" font-size="12.5" fill="#B9C2CF">level — уровень · position — занятое место</text>
+    <text x="584" y="506" font-size="12.5" fill="#B9C2CF">extra_data (JSON) — ответы кастомных полей</text>
+    <text x="584" y="536" font-size="12.5" fill="#3F9B6C" font-weight="600">review_status — статус проверки:</text>
+    <text x="584" y="556" font-size="12.5" fill="#B9C2CF">approved (подтверждена) · pending (на проверке) ·</text>
+    <text x="584" y="574" font-size="12.5" fill="#B9C2CF">rejected (отклонена) · review_comment — причина</text>
+    <text x="584" y="604" font-size="12.5" fill="#E0A34C">owner_id → users.id</text>
+    <text x="742" y="604" font-size="12.5" fill="#B9C2CF">— кто внёс запись</text>
+    <text x="584" y="628" font-size="12.5" fill="#B9C2CF">created_at — когда добавлена</text>
+    <text x="584" y="660" font-size="12" fill="#8B95A6" font-style="italic">Здесь лежат все участия: и введённые вручную,</text>
+    <text x="584" y="678" font-size="12" fill="#8B95A6" font-style="italic">и от атлетов, и участники календарных событий,</text>
+    <text x="584" y="696" font-size="12" fill="#8B95A6" font-style="italic">и строки импорта. Отчёты и Excel строятся отсюда.</text>
+  </g>
+
+  <!-- attachments -->
+  <g>
+    <rect x="1130" y="300" width="370" height="196" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="1130" y="300" width="6" height="196" rx="3" fill="#4C8DFF"/>
+    <text x="1154" y="328" font-size="15" font-weight="700" fill="#E7EBF1">attachments — вложения</text>
+    <text x="1154" y="352" font-size="12.5" fill="#B9C2CF">id (ключ) · filename — имя файла</text>
+    <text x="1154" y="376" font-size="12.5" fill="#E0A34C">record_id → competitions.id</text>
+    <text x="1154" y="400" font-size="12.5" fill="#B9C2CF">stored_name — файл лежит в data/files</text>
+    <text x="1154" y="424" font-size="12.5" fill="#E0A34C">uploaded_by → users.id</text>
+    <text x="1154" y="452" font-size="12" fill="#8B95A6" font-style="italic">подтверждающие документы записи</text>
+    <text x="1154" y="470" font-size="12" fill="#8B95A6" font-style="italic">(грамоты, справки), до 5 МБ</text>
+  </g>
+
+  <!-- import_queue -->
+  <g>
+    <rect x="1130" y="540" width="370" height="200" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="1130" y="540" width="6" height="200" rx="3" fill="#E0A34C"/>
+    <text x="1154" y="568" font-size="15" font-weight="700" fill="#E7EBF1">import_queue — очередь импорта</text>
+    <text x="1154" y="592" font-size="12.5" fill="#B9C2CF">id (ключ) · payload_json — строка из Excel</text>
+    <text x="1154" y="616" font-size="12.5" fill="#B9C2CF">status: pending (ждёт) / resolved (решён)</text>
+    <text x="1154" y="640" font-size="12.5" fill="#E0A34C">matched_record_id → competitions.id</text>
+    <text x="1154" y="664" font-size="12.5" fill="#E0A34C">created_by → users.id</text>
+    <text x="1154" y="692" font-size="12" fill="#8B95A6" font-style="italic">спорные строки импорта ждут решения</text>
+    <text x="1154" y="710" font-size="12" fill="#8B95A6" font-style="italic">человека: добавить / заменить / пропустить</text>
+  </g>
+
+  <!-- custom_fields -->
+  <g>
+    <rect x="560" y="790" width="450" height="180" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="560" y="790" width="6" height="180" rx="3" fill="#8B6BD9"/>
+    <text x="584" y="818" font-size="15" font-weight="700" fill="#E7EBF1">custom_fields — кастомные поля</text>
+    <text x="584" y="842" font-size="12.5" fill="#B9C2CF">id (ключ) · key — код · label — заголовок · field_type</text>
+    <text x="584" y="866" font-size="12.5" fill="#B9C2CF">show_in_table / show_in_export / show_in_template</text>
+    <text x="584" y="890" font-size="12.5" fill="#B9C2CF">link_target — подсказки из справочника</text>
+    <text x="584" y="920" font-size="12" fill="#8B95A6" font-style="italic">администратор добавляет свои колонки таблицы;</text>
+    <text x="584" y="938" font-size="12" fill="#8B95A6" font-style="italic">значения — в competitions.extra_data по ключу</text>
+  </g>
+
+  <!-- field_settings -->
+  <g>
+    <rect x="60" y="790" width="320" height="130" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="60" y="790" width="6" height="130" rx="3" fill="#8B6BD9"/>
+    <text x="84" y="818" font-size="15" font-weight="700" fill="#E7EBF1">field_settings — настройки полей</text>
+    <text x="84" y="842" font-size="12.5" fill="#B9C2CF">key (ключ) — базовое поле реестра</text>
+    <text x="84" y="866" font-size="12.5" fill="#B9C2CF">value_type — тип · required — обязательно</text>
+    <text x="84" y="896" font-size="12" fill="#8B95A6" font-style="italic">можно делать поле текстовым или скрыть</text>
+  </g>
+
+  <!-- audit_log -->
+  <g>
+    <rect x="60" y="960" width="320" height="160" rx="12" fill="#1E242E" stroke="#2C3440"/>
+    <rect x="60" y="960" width="6" height="160" rx="3" fill="#97A3B4"/>
+    <text x="84" y="988" font-size="15" font-weight="700" fill="#E7EBF1">audit_log — журнал действий</text>
+    <text x="84" y="1012" font-size="12.5" fill="#B9C2CF">id (ключ) · created_at — когда</text>
+    <text x="84" y="1036" font-size="12.5" fill="#E0A34C">user_id → users.id</text>
+    <text x="84" y="1060" font-size="12.5" fill="#B9C2CF">username · action — что сделано · details</text>
+    <text x="84" y="1090" font-size="12" fill="#8B95A6" font-style="italic">кто удалил, кто импортировал, кто поменял</text>
+  </g>
+
+  <!-- ===== Связи ===== -->
+
+  <!-- calendar_events -> competitions -->
+  <path d="M 780 222 L 780 296" fill="none" stroke="#3F9B6C" stroke-width="2.5" marker-end="url(#arrG)"/>
+  <text x="794" y="248" font-size="12.5" fill="#3F9B6C">участники события становятся</text>
+  <text x="794" y="266" font-size="12.5" fill="#3F9B6C">записями реестра</text>
+
+  <!-- catalog_values -> competitions (text match) -->
+  <path d="M 380 350 L 554 350" fill="none" stroke="#4C8DFF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrB)"/>
+  <text x="386" y="336" font-size="12" fill="#4C8DFF">институт / группа —</text>
+  <text x="386" y="368" font-size="12" fill="#4C8DFF">совпадение текста</text>
+
+  <!-- levels -> competitions (text match) -->
+  <path d="M 380 174 L 470 174 L 470 500 L 554 500" fill="none" stroke="#4C8DFF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrB)"/>
+  <text x="386" y="198" font-size="12" fill="#4C8DFF">уровень — совпадение текста</text>
+
+  <!-- users -> competitions: owner_id -->
+  <path d="M 380 592 L 554 592" fill="none" stroke="#E0A34C" stroke-width="2.5" marker-end="url(#arrO)"/>
+  <text x="386" y="584" font-size="12" fill="#E0A34C">owner_id — кто внёс запись</text>
+
+  <!-- users -> competitions: aliases -->
+  <path d="M 380 648 L 554 648" fill="none" stroke="#4C8DFF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrB)"/>
+  <text x="386" y="636" font-size="12" fill="#4C8DFF">name_aliases —</text>
+  <text x="386" y="668" font-size="12" fill="#4C8DFF">подсказки и привязка ФИО</text>
+
+  <!-- attachments -> competitions -->
+  <path d="M 1130 380 L 1016 380" fill="none" stroke="#E0A34C" stroke-width="2.5" marker-end="url(#arrO)"/>
+  <text x="1072" y="372" font-size="12" fill="#E0A34C" text-anchor="middle">record_id</text>
+
+  <!-- import_queue -> competitions -->
+  <path d="M 1130 620 L 1016 620" fill="none" stroke="#E0A34C" stroke-width="2.5" marker-end="url(#arrO)"/>
+  <text x="1072" y="612" font-size="12" fill="#E0A34C" text-anchor="middle">matched_record_id</text>
+
+  <!-- custom_fields -> competitions -->
+  <path d="M 770 786 L 770 736" fill="none" stroke="#4C8DFF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrB)"/>
+  <text x="782" y="768" font-size="12" fill="#4C8DFF">key хранится в extra_data (JSON)</text>
+
+  <!-- field_settings -> competitions -->
+  <path d="M 380 830 L 470 830 L 470 716 L 554 716" fill="none" stroke="#4C8DFF" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#arrB)"/>
+  <text x="386" y="852" font-size="12" fill="#4C8DFF">тип / обязательность</text>
+  <text x="386" y="868" font-size="12" fill="#4C8DFF">базовых полей</text>
+
+  <!-- audit_log -> users -->
+  <path d="M 220 956 L 220 724" fill="none" stroke="#E0A34C" stroke-width="2.5" marker-end="url(#arrO)"/>
+  <text x="232" y="844" font-size="12" fill="#E0A34C">user_id</text>
+
+  <!-- ===== Потоки данных ===== -->
+  <text x="60" y="1200" font-size="20" font-weight="700" fill="#E7EBF1">Как данные попадают в реестр и выходят из него</text>
+
+  <!-- lane 1: атлет -->
+  <text x="60" y="1240" font-size="13.5" font-weight="700" fill="#97A3B4">Запись атлета</text>
+  <g font-size="12.5" fill="#E7EBF1">
+    <rect x="220" y="1218" width="240" height="36" rx="10" fill="#26303D" stroke="#3F9B6C"/>
+    <text x="340" y="1241" text-anchor="middle">атлет вводит участие</text>
+    <line x1="460" y1="1236" x2="492" y2="1236" stroke="#3F9B6C" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="500" y="1218" width="270" height="36" rx="10" fill="#26303D" stroke="#3F9B6C"/>
+    <text x="635" y="1241" text-anchor="middle">статус «на проверке» (pending)</text>
+    <line x1="770" y1="1236" x2="802" y2="1236" stroke="#3F9B6C" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="810" y="1218" width="300" height="36" rx="10" fill="#26303D" stroke="#3F9B6C"/>
+    <text x="960" y="1241" text-anchor="middle">editor / admin подтверждает или отклоняет</text>
+    <line x1="1110" y1="1236" x2="1142" y2="1236" stroke="#3F9B6C" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="1150" y="1218" width="250" height="36" rx="10" fill="#1F3A2C" stroke="#3F9B6C"/>
+    <text x="1275" y="1241" text-anchor="middle">запись в реестре (approved)</text>
+  </g>
+
+  <!-- lane 2: импорт -->
+  <text x="60" y="1305" font-size="13.5" font-weight="700" fill="#97A3B4">Импорт Excel</text>
+  <g font-size="12.5" fill="#E7EBF1">
+    <rect x="220" y="1283" width="240" height="36" rx="10" fill="#26303D" stroke="#E0A34C"/>
+    <text x="340" y="1306" text-anchor="middle">шаблон → заполнение → загрузка</text>
+    <line x1="460" y1="1301" x2="492" y2="1301" stroke="#E0A34C" stroke-width="2" marker-end="url(#arrO)"/>
+    <rect x="500" y="1283" width="270" height="36" rx="10" fill="#26303D" stroke="#E0A34C"/>
+    <text x="635" y="1306" text-anchor="middle">чистые строки — сразу в реестр</text>
+    <line x1="770" y1="1301" x2="802" y2="1301" stroke="#E0A34C" stroke-width="2" marker-end="url(#arrO)"/>
+    <rect x="810" y="1283" width="300" height="36" rx="10" fill="#26303D" stroke="#E0A34C"/>
+    <text x="960" y="1306" text-anchor="middle">спорные — в очередь импорта (pending)</text>
+    <line x1="1110" y1="1301" x2="1142" y2="1301" stroke="#E0A34C" stroke-width="2" marker-end="url(#arrO)"/>
+    <rect x="1150" y="1283" width="250" height="36" rx="10" fill="#26303D" stroke="#E0A34C"/>
+    <text x="1275" y="1306" text-anchor="middle">человек решает → в реестр</text>
+  </g>
+
+  <!-- lane 3: календарь -->
+  <text x="60" y="1370" font-size="13.5" font-weight="700" fill="#97A3B4">Календарь</text>
+  <g font-size="12.5" fill="#E7EBF1">
+    <rect x="220" y="1348" width="240" height="36" rx="10" fill="#26303D" stroke="#3F9B6C"/>
+    <text x="340" y="1371" text-anchor="middle">событие-план: даты, уровень, вид</text>
+    <line x1="460" y1="1366" x2="492" y2="1366" stroke="#3F9B6C" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="500" y="1348" width="270" height="36" rx="10" fill="#26303D" stroke="#3F9B6C"/>
+    <text x="635" y="1371" text-anchor="middle">участники добавляются по ФИО</text>
+    <line x1="770" y1="1366" x2="802" y2="1366" stroke="#3F9B6C" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="810" y="1348" width="300" height="36" rx="10" fill="#26303D" stroke="#3F9B6C"/>
+    <text x="960" y="1371" text-anchor="middle">готовые записи реестра с пресетом события</text>
+    <line x1="1110" y1="1366" x2="1142" y2="1366" stroke="#3F9B6C" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="1150" y="1348" width="250" height="36" rx="10" fill="#1F3A2C" stroke="#3F9B6C"/>
+    <text x="1275" y="1371" text-anchor="middle">реестр · календарь остаётся планом</text>
+  </g>
+
+  <!-- lane 4: отчёты -->
+  <text x="60" y="1435" font-size="13.5" font-weight="700" fill="#97A3B4">Отчёты</text>
+  <g font-size="12.5" fill="#E7EBF1">
+    <rect x="220" y="1413" width="240" height="36" rx="10" fill="#26303D" stroke="#4C8DFF"/>
+    <text x="340" y="1436" text-anchor="middle">реестр + кастомные поля</text>
+    <line x1="460" y1="1431" x2="492" y2="1431" stroke="#4C8DFF" stroke-width="2" marker-end="url(#arrB)"/>
+    <rect x="500" y="1413" width="270" height="36" rx="10" fill="#26303D" stroke="#4C8DFF"/>
+    <text x="635" y="1436" text-anchor="middle">выгрузка в Excel: отчёт и шаблон</text>
+    <line x1="770" y1="1431" x2="802" y2="1431" stroke="#97A3B4" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="810" y="1413" width="300" height="36" rx="10" fill="#26303D" stroke="#97A3B4"/>
+    <text x="960" y="1436" text-anchor="middle">каждое значимое действие — в журнал</text>
+    <line x1="1110" y1="1431" x2="1142" y2="1431" stroke="#97A3B4" stroke-width="2" marker-end="url(#arrG)"/>
+    <rect x="1150" y="1413" width="250" height="36" rx="10" fill="#26303D" stroke="#97A3B4"/>
+    <text x="1275" y="1436" text-anchor="middle">audit_log: кто и что сделал</text>
+  </g>
+
+  <!-- lane 5: резервные копии -->
+  <text x="60" y="1500" font-size="13.5" font-weight="700" fill="#97A3B4">Резервные копии</text>
+  <g font-size="12.5" fill="#E7EBF1">
+    <rect x="220" y="1478" width="240" height="36" rx="10" fill="#26303D" stroke="#8B6BD9"/>
+    <text x="340" y="1501" text-anchor="middle">база SQLite + папка вложений</text>
+    <line x1="460" y1="1496" x2="492" y2="1496" stroke="#8B6BD9" stroke-width="2" marker-end="url(#arrB)"/>
+    <rect x="500" y="1478" width="270" height="36" rx="10" fill="#26303D" stroke="#8B6BD9"/>
+    <text x="635" y="1501" text-anchor="middle">автоматически каждый день в 03:15</text>
+    <line x1="770" y1="1496" x2="802" y2="1496" stroke="#8B6BD9" stroke-width="2" marker-end="url(#arrB)"/>
+    <rect x="810" y="1478" width="300" height="36" rx="10" fill="#26303D" stroke="#8B6BD9"/>
+    <text x="960" y="1501" text-anchor="middle">хранятся последние 14 копий</text>
+    <line x1="1110" y1="1496" x2="1142" y2="1496" stroke="#8B6BD9" stroke-width="2" marker-end="url(#arrB)"/>
+    <rect x="1150" y="1478" width="250" height="36" rx="10" fill="#26303D" stroke="#8B6BD9"/>
+    <text x="1275" y="1501" text-anchor="middle">восстановление по запросу</text>
+  </g>
+
+  <!-- ===== Роли ===== -->
+  <g>
+    <rect x="60" y="1560" width="1440" height="118" rx="12" fill="#1B212B" stroke="#2C3440"/>
+    <text x="84" y="1590" font-size="14" font-weight="700" fill="#E7EBF1">Роли пользователей</text>
+    <text x="84" y="1614" font-size="12.5" fill="#B9C2CF">admin — всё: справочники, кастомные поля, удаления · editor — ввод данных, импорт, подтверждение записей, выгрузки</text>
+    <text x="84" y="1636" font-size="12.5" fill="#B9C2CF">athlete — вводит только свои участия: после проверки они попадают в общий реестр</text>
+    <text x="84" y="1658" font-size="12.5" fill="#B9C2CF">viewer — просмотр и отчёты, без изменений</text>
+  </g>
+</svg>
+</body>
+</html>
