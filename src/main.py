@@ -1747,6 +1747,18 @@ async def admin_page(request: Request):
     )
 
 
+@app.get('/admin/data-map')
+async def admin_data_map_page(request: Request):
+    """Карта данных: таблицы базы, связи и потоки (постер для владельца)."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    return await render(
+        template_name=jinja_env.get_template('admin_data_map.html'),
+        context={'request': request},
+    )
+
+
 @app.get('/admin/import')
 async def admin_import_page(request: Request):
     auth_error = require_moderator(request)

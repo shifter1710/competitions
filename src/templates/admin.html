@@ -95,6 +95,17 @@
         </div>
     </div>
     {% endif %}
+    {% if is_admin %}
+    <div class="col-md-4">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h5 class="card-title">Карта данных</h5>
+                <p class="card-text text-muted">Схема: таблицы базы, их связи и потоки данных — импорт, календарь, модерация, отчёты, резервные копии.</p>
+                <a class="btn btn-primary" href="/admin/data-map">Открыть</a>
+            </div>
+        </div>
+    </div>
+    {% endif %}
 </div>
 
 {% endblock content %}
