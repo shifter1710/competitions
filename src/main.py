@@ -1759,6 +1759,19 @@ async def admin_data_map_page(request: Request):
     )
 
 
+@app.get('/admin/data-guide')
+async def admin_data_guide_page(request: Request):
+    """Инструкция простыми словами: что делает каждый раздел,
+    откуда данные и куда попадают (для администратора-тренера)."""
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    return await render(
+        template_name=jinja_env.get_template('admin_data_guide.html'),
+        context={'request': request},
+    )
+
+
 @app.get('/admin/import')
 async def admin_import_page(request: Request):
     auth_error = require_moderator(request)
