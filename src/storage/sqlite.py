@@ -2506,30 +2506,43 @@ class SQLiteAdapter:
     def find_student_candidates(self, name: str) -> list[dict]:
         """Кандидаты-карточки для ФИО из записи/профиля — ТОЛЬКО предложения.
 
-        Точное совпадение (strip, регистр важен — как легаси-ключ
-        sha256(ФИО)) по full_name или псевдониму; только активные карточки.
-        Одна строка на карточку: совпадение по full_name приоритетнее
-        совпадения по псевдониму. Порядок — по алфавиту ФИО.
+        Точное совпадение БЕЗ учёта регистра (strip + casefold) по full_name
+        или псевдониму; только активные карточки. Сравнение — в Python:
+        lower() в SQLite не знает кириллицы (как и справочники — см.
+        find_catalog_row / _known_athletes). Одна строка на карточку:
+        совпадение по full_name приоритетнее совпадения по псевдониму.
+        Порядок — по алфавиту ФИО.
         """
-        name = (name or '').strip()
-        if not name:
+        target = (name or '').strip().casefold()
+        if not target:
             return []
         with self._lock:
-            full_matches = self.connection.execute(
+            students = self.connection.execute(
                 'SELECT id, full_name, sex, institute, group_name, course '
-                'FROM students WHERE active = 1 AND full_name = ? ORDER BY full_name ASC, id ASC',
-                (name,),
+                'FROM students WHERE active = 1 ORDER BY full_name ASC, id ASC'
             ).fetchall()
-            alias_matches = self.connection.execute(
+            aliases = self.connection.execute(
                 '''
-                SELECT s.id, s.full_name, s.sex, s.institute, s.group_name, s.course, a.name AS alias_name
-                FROM students s
-                JOIN student_aliases a ON a.student_id = s.id
-                WHERE s.active = 1 AND a.name = ?
-                ORDER BY s.full_name ASC, s.id ASC, a.name ASC
-                ''',
-                (name,),
+                SELECT a.student_id, a.name
+                FROM student_aliases a
+                JOIN students s ON s.id = a.student_id
+                WHERE s.active = 1
+                ORDER BY a.student_id ASC, a.name ASC
+                '''
             ).fetchall()
+        # Первый подходящий псевдоним карточки (порядок a.name ASC —
+        # детерминированный выбор при регистровых вариантах одного псевдонима)
+        matching_alias: dict[int, str] = {}
+        for row in aliases:
+            if row['student_id'] not in matching_alias and (row['name'] or '').strip().casefold() == target:
+                matching_alias[row['student_id']] = row['name']
+        full_rows = []
+        alias_rows = []
+        for row in students:
+            if (row['full_name'] or '').strip().casefold() == target:
+                full_rows.append(row)
+            elif row['id'] in matching_alias:
+                alias_rows.append(row)
         candidates: list[dict] = [
             {
                 'student_id': row['id'],
@@ -2541,25 +2554,21 @@ class SQLiteAdapter:
                 'match_type': 'full_name',
                 'alias_name': None,
             }
-            for row in full_matches
+            for row in full_rows
         ]
-        seen_ids = {candidate['student_id'] for candidate in candidates}
-        for row in alias_matches:
-            if row['id'] in seen_ids:
-                continue
-            seen_ids.add(row['id'])
-            candidates.append(
-                {
-                    'student_id': row['id'],
-                    'full_name': row['full_name'],
-                    'sex': row['sex'],
-                    'institute': row['institute'],
-                    'group_name': row['group_name'],
-                    'course': row['course'],
-                    'match_type': 'alias',
-                    'alias_name': row['alias_name'],
-                }
-            )
+        candidates.extend(
+            {
+                'student_id': row['id'],
+                'full_name': row['full_name'],
+                'sex': row['sex'],
+                'institute': row['institute'],
+                'group_name': row['group_name'],
+                'course': row['course'],
+                'match_type': 'alias',
+                'alias_name': matching_alias[row['id']],
+            }
+            for row in alias_rows
+        )
         return candidates
 
     def link_competitions(self, record_ids: Sequence[int], student_id: int) -> tuple[int, str | None]:

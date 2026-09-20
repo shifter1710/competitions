@@ -2213,8 +2213,8 @@ def test_unlinked_competitions_list_pagination_search_and_ordering(adapter):
 
 
 def test_find_student_candidates_exact_full_name_and_alias(adapter):
-    """Точное совпадение (strip, регистр важен — как легаси sha256(ФИО))
-    по full_name или псевдониму; full_name приоритетнее псевдонима."""
+    """Точное совпадение БЕЗ учёта регистра (strip + casefold) по full_name
+    или псевдониму; full_name приоритетнее псевдонима."""
     student_id = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
     adapter.add_student_alias(student_id, 'Иванов И.И.')
 
@@ -2238,14 +2238,41 @@ def test_find_student_candidates_exact_full_name_and_alias(adapter):
     assert by_alias[0]['match_type'] == 'alias'
     assert by_alias[0]['alias_name'] == 'Иванов И.И.'
 
+    # Регистр НЕ важен: другой регистр ФИО/псевдонима — кандидат,
+    # отображается каноническое ФИО карточки
+    upper = adapter.find_student_candidates('ИВАНОВ ИВАН ИВАНОВИЧ')
+    assert [candidate['student_id'] for candidate in upper] == [student_id]
+    assert upper[0]['match_type'] == 'full_name'
+    assert upper[0]['full_name'] == 'Иванов Иван Иванович'
+    lower_alias = adapter.find_student_candidates('иванов и.и.')
+    assert lower_alias[0]['student_id'] == student_id
+    assert lower_alias[0]['match_type'] == 'alias'
+    assert lower_alias[0]['alias_name'] == 'Иванов И.И.'
+
+    # Несколько псевдонимов-регистровых вариантов — одна строка на карточку
+    adapter.add_student_alias(student_id, 'ИВАНОВ И.И.')
+    two_aliases = adapter.find_student_candidates('ИвАнОв и.И.')
+    assert len(two_aliases) == 1
+    assert two_aliases[0]['student_id'] == student_id
+    assert two_aliases[0]['alias_name'] in {'Иванов И.И.', 'ИВАНОВ И.И.'}
+
+    # full_name приоритетнее псевдонима и при регистровых вариациях
+    twin_id = adapter.create_student('Смирнов Семён Семёнович', 'М', '', '', '')
+    adapter.add_student_alias(twin_id, 'СМИРНОВ СЕМЁН СЕМЁНОВИЧ')
+    twin = adapter.find_student_candidates('смирнов СЕМЁН Семёнович')
+    assert twin[0]['student_id'] == twin_id
+    assert twin[0]['match_type'] == 'full_name'
+    assert twin[0]['alias_name'] is None
+
     # strip и пустая строка
     assert adapter.find_student_candidates('  Иванов И.И.  ')[0]['student_id'] == student_id
     assert adapter.find_student_candidates('   ') == []
 
-    # Точность и регистр: подстрока/другой регистр не совпадают
+    # Точность: подстрока и другое написание (не только регистр) не совпадают
     assert adapter.find_student_candidates('Иванов') == []
-    assert adapter.find_student_candidates('иванов и.и.') == []
-    assert adapter.find_student_candidates('ИВАНОВ ИВАН ИВАНОВИЧ') == []
+    assert adapter.find_student_candidates('Иванов Иван Ивановч') == []
+    assert adapter.find_student_candidates('Иванов Иван Иванович мл.') == []
+    assert adapter.find_student_candidates('Петров Иван Иванович') == []
 
 
 def test_find_student_candidates_exclude_inactive_and_list_namesakes(adapter):
@@ -2262,6 +2289,18 @@ def test_find_student_candidates_exclude_inactive_and_list_namesakes(adapter):
     candidates = adapter.find_student_candidates('Козлов Кирилл Кириллович')
     assert [candidate['student_id'] for candidate in candidates] == [first, second]
     assert len({candidate['institute'] for candidate in candidates}) == 2
+
+    # Тёзки с регистровыми вариациями написания — тоже все, id разные
+    third = adapter.create_student('КОЗЛОВ КИРИЛЛ КИРИЛЛОВИЧ', 'Ж', 'ИПЭ', 'Э-303', '3')
+    mixed_case = adapter.find_student_candidates('козлов Кирилл КИРИЛЛОВИЧ')
+    assert sorted(candidate['student_id'] for candidate in mixed_case) == sorted([first, second, third])
+    assert len({candidate['institute'] for candidate in mixed_case}) == 3
+    assert {candidate['match_type'] for candidate in mixed_case} == {'full_name'}
+    # Отображается каноническое ФИО каждой карточки — как она записана
+    assert {candidate['full_name'] for candidate in mixed_case} == {
+        'Козлов Кирилл Кириллович',
+        'КОЗЛОВ КИРИЛЛ КИРИЛЛОВИЧ',
+    }
 
 
 def test_link_competitions_atomic_rejects_already_linked(adapter):
