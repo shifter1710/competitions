@@ -143,6 +143,8 @@ package.json          манифест инструментов сборки (te
 - [docs/quickstart.md](docs/quickstart.md) — быстрый старт: новая раскатка
   и перенос на другой сервер
 - [docs/roles.md](docs/roles.md) — роли: что каждая может делать в системе
+- [docs/data-model.md](docs/data-model.md) — актуальная модель данных:
+  таблицы, ER-диаграмма, идентификация студентов, вопросы дизайна
 - [docs/data-model-decisions.md](docs/data-model-decisions.md) — решения по
   модели данных (историчность записей, псевдонимы, merge, справочники,
   аудит, очистка)
