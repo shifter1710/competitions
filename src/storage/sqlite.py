@@ -331,6 +331,39 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            # Карточки студентов (Student Identity v1, Phase 1 — фундамент):
+            # актуальные данные и псевдонимы ФИО. Авто-связей нет: ссылки
+            # записей/аккаунтов (student_ref_id) с Phase 2 заполняются только
+            # вручную через сопоставление, легаси-идентичность sha256(ФИО)
+            # не меняется. merged_into_id зарезервирована и не пишется/не
+            # читается.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS students (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    full_name TEXT NOT NULL,
+                    sex TEXT,
+                    institute TEXT,
+                    group_name TEXT,
+                    course TEXT,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    merged_into_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS student_aliases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (student_id, name)
+                )
+                '''
+            )
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
@@ -343,6 +376,10 @@ class SQLiteAdapter:
                 self.connection.execute('ALTER TABLE users ADD COLUMN last_login_at TEXT')
             if 'last_seen_at' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN last_seen_at TEXT')
+            # Student Identity v1 (Phase 1): стабильная ссылка аккаунта на
+            # карточку студента; существующие учётки НЕ мигрируются (NULL).
+            if 'student_ref_id' not in user_columns:
+                self.connection.execute('ALTER TABLE users ADD COLUMN student_ref_id INTEGER')
             self.connection.commit()
 
     def _migrate_competitions_columns(self, columns: set[str]) -> None:
@@ -362,6 +399,11 @@ class SQLiteAdapter:
         # существующие записи не трогаются — колонка рядом с date (НАЧАЛО).
         if 'date_to' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN date_to TEXT')
+        # Student Identity v1, Phase 1 (фундамент): стабильная ссылка записи
+        # на карточку студента. Существующие записи НЕ мигрируются — колонка
+        # остаётся NULL, легаси-ключ student_id (sha256 ФИО) не меняется.
+        if 'student_ref_id' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN student_ref_id INTEGER')
 
     def _migrate_custom_fields_columns(self):
         """№24 (docs/feedback-live.md): колонка link_target у кастомных полей.
@@ -2234,6 +2276,503 @@ class SQLiteAdapter:
                 )
             self.connection.commit()
             return cursor.rowcount
+
+    # ---- Карточки студентов (Student Identity v1, Phase 1 — фундамент) ----
+    #
+    # Карточка — АКТУАЛЬНЫЕ данные студента (ФИО, пол, институт, группа,
+    # курс) и его псевдонимы ФИО. Связи записей/аккаунтов с карточкой
+    # (student_ref_id) заполняет только ручное сопоставление (Phase 2);
+    # импорт/отчёты/merge работают по легаси-ключу sha256(ФИО) как раньше.
+    # Физического удаления студентов нет — только active=0.
+
+    def create_student(
+        self,
+        full_name: str,
+        sex: str,
+        institute: str,
+        group_name: str,
+        course: str,
+    ) -> int:
+        """Создать карточку студента; возвращает id новой строки."""
+        with self._lock:
+            now = datetime.utcnow().isoformat()
+            cursor = self.connection.execute(
+                'INSERT INTO students (full_name, sex, institute, group_name, course, active, created_at, updated_at) '
+                'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+                (full_name, sex, institute, group_name, course, now, now),
+            )
+            self.connection.commit()
+            return cursor.lastrowid
+
+    def get_student_by_id(self, student_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
+                'created_at, updated_at FROM students WHERE id = ?',
+                (student_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_students(self, search: str = '') -> list[dict]:
+        """Все карточки: активные сверху, по алфавиту; search — подстрока ФИО
+        (LIKE, как фильтр ФИО в отчётах)."""
+        with self._lock:
+            params: list[object] = []
+            where = ''
+            if search:
+                where = 'WHERE full_name LIKE ?'
+                params.append(f'%{search}%')
+            rows = self.connection.execute(
+                f'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
+                f'created_at, updated_at FROM students {where} ORDER BY active DESC, full_name ASC',
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_student(
+        self,
+        student_id: int,
+        full_name: str,
+        sex: str,
+        institute: str,
+        group_name: str,
+        course: str,
+    ) -> bool:
+        """Обновить актуальные данные карточки (updated_at меняется).
+        Возвращает False, если студента с таким id нет."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE students SET full_name = ?, sex = ?, institute = ?, group_name = ?, course = ?, '
+                'updated_at = ? WHERE id = ?',
+                (full_name, sex, institute, group_name, course, datetime.utcnow().isoformat(), student_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def set_student_active(self, student_id: int, active: bool) -> bool:
+        """Включить/выключить карточку (физического удаления нет)."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE students SET active = ? WHERE id = ?',
+                (int(active), student_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def add_student_alias(self, student_id: int, name: str) -> bool:
+        """Добавить псевдоним ФИО; False — пустое имя, нет такого студента
+        или дубль пары (student_id, name) по UNIQUE."""
+        name = name.strip()
+        if not name:
+            return False
+        with self._lock:
+            if self.get_student_by_id(student_id) is None:
+                return False
+            try:
+                self.connection.execute(
+                    'INSERT INTO student_aliases (student_id, name, created_at) VALUES (?, ?, ?)',
+                    (student_id, name, datetime.utcnow().isoformat()),
+                )
+                self.connection.commit()
+            except sqlite3.IntegrityError:
+                self.connection.rollback()
+                return False
+            return True
+
+    def remove_student_alias(self, student_id: int, alias_id: int) -> bool:
+        """Удалить псевдоним в пределах карточки: WHERE id = ? AND student_id = ?."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'DELETE FROM student_aliases WHERE id = ? AND student_id = ?',
+                (alias_id, student_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def list_student_aliases(self, student_id: int) -> list[dict]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, student_id, name, created_at FROM student_aliases WHERE student_id = ? ORDER BY id',
+                (student_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    # ---- Сопоставление данных (Student Identity v1, Phase 2). ----
+    #
+    # Ручное заполнение стабильных связей student_ref_id существующих
+    # записей/аккаунтов с карточками. Кандидаты — ТОЛЬКО предложения:
+    # ничего не связывается автоматически. Привязка меняет ТОЛЬКО
+    # student_ref_id: снимки данных в записях, легаси-ключ
+    # student_id (sha256 ФИО) и рабочие workflow не трогаются.
+
+    def count_student_reconciliation(self) -> dict:
+        """Сводные счётчики сопоставления: всего/связано/без связи."""
+        with self._lock:
+            records_total = self.connection.execute('SELECT COUNT(*) AS total FROM competitions').fetchone()['total']
+            records_linked = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM competitions WHERE student_ref_id IS NOT NULL'
+            ).fetchone()['total']
+            athlete_users_total = self.connection.execute(
+                "SELECT COUNT(*) AS total FROM users WHERE role = 'athlete'"
+            ).fetchone()['total']
+            athlete_users_linked = self.connection.execute(
+                "SELECT COUNT(*) AS total FROM users WHERE role = 'athlete' AND student_ref_id IS NOT NULL"
+            ).fetchone()['total']
+        return {
+            'records_total': records_total,
+            'records_linked': records_linked,
+            'records_unlinked': records_total - records_linked,
+            'athlete_users_total': athlete_users_total,
+            'athlete_users_linked': athlete_users_linked,
+            'athlete_users_unlinked': athlete_users_total - athlete_users_linked,
+        }
+
+    def count_unlinked_competitions(self, search: str = '') -> int:
+        """Число записей без карточки студента (с тем же поиском, что список)."""
+        with self._lock:
+            params: list[object] = []
+            where = 'WHERE student_ref_id IS NULL'
+            if search:
+                where += ' AND student_name LIKE ?'
+                params.append(f'%{search}%')
+            row = self.connection.execute(
+                f'SELECT COUNT(*) AS total FROM competitions {where}',
+                params,
+            ).fetchone()
+            return row['total']
+
+    def list_unlinked_competitions(self, search: str = '', limit: int = 50, offset: int = 0) -> list[dict]:
+        """Записи без карточки студента: по ФИО, затем по дате, затем по id."""
+        with self._lock:
+            params: list[object] = []
+            where = 'WHERE student_ref_id IS NULL'
+            if search:
+                where += ' AND student_name LIKE ?'
+                params.append(f'%{search}%')
+            rows = self.connection.execute(
+                f'''
+                SELECT
+                    id, student_name, student_sex, institute, "group", course,
+                    sport, date, date_to, name, level, position, review_status
+                FROM competitions
+                {where}
+                ORDER BY student_name ASC, date ASC, id ASC
+                LIMIT ? OFFSET ?
+                ''',
+                [*params, int(limit), int(offset)],
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_unlinked_athlete_users(self) -> list[dict]:
+        """Аккаунты атлетов без карточки студента, по логину.
+
+        Без пагинации: аккаунтов немного, а карточки развёрнутые.
+        """
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, username, active, profile_data, name_aliases FROM users '
+                "WHERE role = 'athlete' AND student_ref_id IS NULL ORDER BY username ASC"
+            ).fetchall()
+            return [
+                {
+                    'id': row['id'],
+                    'username': row['username'],
+                    'active': row['active'],
+                    'profile_data': json.loads(row['profile_data'] or '{}'),
+                    'name_aliases': json.loads(row['name_aliases'] or '[]'),
+                }
+                for row in rows
+            ]
+
+    def get_unlinked_athlete_user(self, user_id: int) -> dict | None:
+        """Один аккаунт атлета без карточки по id (для создания студента
+        из профиля): None — нет такого, роль не athlete или уже привязан."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, username, active, profile_data, name_aliases FROM users '
+                "WHERE id = ? AND role = 'athlete' AND student_ref_id IS NULL",
+                (int(user_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                'id': row['id'],
+                'username': row['username'],
+                'active': row['active'],
+                'profile_data': json.loads(row['profile_data'] or '{}'),
+                'name_aliases': json.loads(row['name_aliases'] or '[]'),
+            }
+
+    def find_student_candidates(self, name: str) -> list[dict]:
+        """Кандидаты-карточки для ФИО из записи/профиля — ТОЛЬКО предложения.
+
+        Точное совпадение БЕЗ учёта регистра (strip + casefold) по full_name
+        или псевдониму; только активные карточки. Сравнение — в Python:
+        lower() в SQLite не знает кириллицы (как и справочники — см.
+        find_catalog_row / _known_athletes). Одна строка на карточку:
+        совпадение по full_name приоритетнее совпадения по псевдониму.
+        Порядок — по алфавиту ФИО.
+        """
+        target = (name or '').strip().casefold()
+        if not target:
+            return []
+        with self._lock:
+            students = self.connection.execute(
+                'SELECT id, full_name, sex, institute, group_name, course '
+                'FROM students WHERE active = 1 ORDER BY full_name ASC, id ASC'
+            ).fetchall()
+            aliases = self.connection.execute(
+                '''
+                SELECT a.student_id, a.name
+                FROM student_aliases a
+                JOIN students s ON s.id = a.student_id
+                WHERE s.active = 1
+                ORDER BY a.student_id ASC, a.name ASC
+                '''
+            ).fetchall()
+        # Первый подходящий псевдоним карточки (порядок a.name ASC —
+        # детерминированный выбор при регистровых вариантах одного псевдонима)
+        matching_alias: dict[int, str] = {}
+        for row in aliases:
+            if row['student_id'] not in matching_alias and (row['name'] or '').strip().casefold() == target:
+                matching_alias[row['student_id']] = row['name']
+        full_rows = []
+        alias_rows = []
+        for row in students:
+            if (row['full_name'] or '').strip().casefold() == target:
+                full_rows.append(row)
+            elif row['id'] in matching_alias:
+                alias_rows.append(row)
+        candidates: list[dict] = [
+            {
+                'student_id': row['id'],
+                'full_name': row['full_name'],
+                'sex': row['sex'],
+                'institute': row['institute'],
+                'group_name': row['group_name'],
+                'course': row['course'],
+                'match_type': 'full_name',
+                'alias_name': None,
+            }
+            for row in full_rows
+        ]
+        candidates.extend(
+            {
+                'student_id': row['id'],
+                'full_name': row['full_name'],
+                'sex': row['sex'],
+                'institute': row['institute'],
+                'group_name': row['group_name'],
+                'course': row['course'],
+                'match_type': 'alias',
+                'alias_name': matching_alias[row['id']],
+            }
+            for row in alias_rows
+        )
+        return candidates
+
+    def link_competitions(self, record_ids: Sequence[int], student_id: int) -> tuple[int, str | None]:
+        """Атомарно привязать записи к карточке: либо все, либо ничего.
+
+        Проверки и UPDATE — под одной блокировкой, без изменений при любой
+        ошибке. Возвращает (число привязанных, код ошибки или None):
+        student_not_found / student_inactive / records_not_found /
+        already_linked.
+        """
+        ids = sorted({int(record_id) for record_id in record_ids})
+        if not ids:
+            return 0, 'records_not_found'
+        with self._lock:
+            student = self.connection.execute(
+                'SELECT active FROM students WHERE id = ?',
+                (int(student_id),),
+            ).fetchone()
+            if student is None:
+                return 0, 'student_not_found'
+            if not student['active']:
+                return 0, 'student_inactive'
+            placeholders = ', '.join('?' for _ in ids)
+            found = self.connection.execute(
+                f'SELECT COUNT(*) AS total FROM competitions WHERE id IN ({placeholders})',
+                ids,
+            ).fetchone()['total']
+            if found != len(ids):
+                return 0, 'records_not_found'
+            unlinked = self.connection.execute(
+                f'SELECT COUNT(*) AS total FROM competitions '
+                f'WHERE id IN ({placeholders}) AND student_ref_id IS NULL',
+                ids,
+            ).fetchone()['total']
+            if unlinked != len(ids):
+                return 0, 'already_linked'
+            cursor = self.connection.execute(
+                f'UPDATE competitions SET student_ref_id = ? '
+                f'WHERE id IN ({placeholders}) AND student_ref_id IS NULL',
+                [int(student_id), *ids],
+            )
+            self.connection.commit()
+            return cursor.rowcount, None
+
+    def unlink_competition(self, record_id: int) -> int | None:
+        """Снять связь записи с карточкой; прежний student_ref_id (или None,
+        если записи нет либо связи и так не было)."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT student_ref_id FROM competitions WHERE id = ?',
+                (int(record_id),),
+            ).fetchone()
+            if row is None or row['student_ref_id'] is None:
+                return None
+            self.connection.execute(
+                'UPDATE competitions SET student_ref_id = NULL WHERE id = ?',
+                (int(record_id),),
+            )
+            self.connection.commit()
+            return row['student_ref_id']
+
+    def relink_competition(self, record_id: int, student_id: int) -> tuple[int | None, str | None]:
+        """Перепривязать запись на другую карточку (можно и с NULL — тогда
+        это привязка). Возвращает (прежний ref или None, ошибка или None)."""
+        with self._lock:
+            student = self.connection.execute(
+                'SELECT active FROM students WHERE id = ?',
+                (int(student_id),),
+            ).fetchone()
+            if student is None:
+                return None, 'student_not_found'
+            if not student['active']:
+                return None, 'student_inactive'
+            row = self.connection.execute(
+                'SELECT student_ref_id FROM competitions WHERE id = ?',
+                (int(record_id),),
+            ).fetchone()
+            if row is None:
+                return None, 'records_not_found'
+            self.connection.execute(
+                'UPDATE competitions SET student_ref_id = ? WHERE id = ?',
+                (int(student_id), int(record_id)),
+            )
+            self.connection.commit()
+            return row['student_ref_id'], None
+
+    def link_user(self, user_id: int, student_id: int) -> tuple[int, str | None]:
+        """Привязать аккаунт атлета к карточке. Два аккаунта МОГУТ указывать
+        на одну карточку (дубликаты — вопрос модерации, не запрета).
+
+        Коды ошибок: user_not_found / user_not_athlete / user_already_linked /
+        student_not_found / student_inactive.
+        """
+        with self._lock:
+            user = self.connection.execute(
+                'SELECT role, student_ref_id FROM users WHERE id = ?',
+                (int(user_id),),
+            ).fetchone()
+            if user is None:
+                return 0, 'user_not_found'
+            if user['role'] != 'athlete':
+                return 0, 'user_not_athlete'
+            if user['student_ref_id'] is not None:
+                return 0, 'user_already_linked'
+            student = self.connection.execute(
+                'SELECT active FROM students WHERE id = ?',
+                (int(student_id),),
+            ).fetchone()
+            if student is None:
+                return 0, 'student_not_found'
+            if not student['active']:
+                return 0, 'student_inactive'
+            cursor = self.connection.execute(
+                'UPDATE users SET student_ref_id = ? WHERE id = ? AND student_ref_id IS NULL',
+                (int(student_id), int(user_id)),
+            )
+            self.connection.commit()
+            return cursor.rowcount, None
+
+    def unlink_user(self, user_id: int) -> int | None:
+        """Снять связь аккаунта с карточкой; прежний student_ref_id (или
+        None, если аккаунта нет либо связи и так не было)."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT student_ref_id FROM users WHERE id = ?',
+                (int(user_id),),
+            ).fetchone()
+            if row is None or row['student_ref_id'] is None:
+                return None
+            self.connection.execute('UPDATE users SET student_ref_id = NULL WHERE id = ?', (int(user_id),))
+            self.connection.commit()
+            return row['student_ref_id']
+
+    def relink_user(self, user_id: int, student_id: int) -> tuple[int | None, str | None]:
+        """Перепривязать аккаунт атлета на другую карточку (можно и с NULL).
+        Возвращает (прежний ref или None, ошибка или None)."""
+        with self._lock:
+            user = self.connection.execute(
+                'SELECT role, student_ref_id FROM users WHERE id = ?',
+                (int(user_id),),
+            ).fetchone()
+            if user is None:
+                return None, 'user_not_found'
+            if user['role'] != 'athlete':
+                return None, 'user_not_athlete'
+            student = self.connection.execute(
+                'SELECT active FROM students WHERE id = ?',
+                (int(student_id),),
+            ).fetchone()
+            if student is None:
+                return None, 'student_not_found'
+            if not student['active']:
+                return None, 'student_inactive'
+            self.connection.execute(
+                'UPDATE users SET student_ref_id = ? WHERE id = ?',
+                (int(student_id), int(user_id)),
+            )
+            self.connection.commit()
+            return user['student_ref_id'], None
+
+    def linked_records_count(self, student_id: int) -> int:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM competitions WHERE student_ref_id = ?',
+                (int(student_id),),
+            ).fetchone()
+            return row['total']
+
+    def list_linked_records(self, student_id: int, limit: int = 50) -> list[dict]:
+        """Записи, привязанные к карточке (свежие сверху). student_name —
+        снимок из самой записи, а не актуальное ФИО карточки."""
+        with self._lock:
+            rows = self.connection.execute(
+                '''
+                SELECT id, student_name, sport, date, date_to, name
+                FROM competitions
+                WHERE student_ref_id = ?
+                ORDER BY date DESC, id DESC
+                LIMIT ?
+                ''',
+                (int(student_id), int(limit)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def linked_athlete_users(self, student_id: int) -> list[dict]:
+        """Аккаунты атлетов, привязанные к карточке, по логину."""
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, username, active FROM users '
+                "WHERE role = 'athlete' AND student_ref_id = ? ORDER BY username ASC",
+                (int(student_id),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_competition_student_ref(self, record_id: int) -> tuple[bool, int | None]:
+        """(запись существует, её student_ref_id) — для страниц сопоставления."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT student_ref_id FROM competitions WHERE id = ?',
+                (int(record_id),),
+            ).fetchone()
+            if row is None:
+                return False, None
+            return True, row['student_ref_id']
 
     # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
     #

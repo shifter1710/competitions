@@ -1,0 +1,135 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Студенты{% endblock admin_title %}
+{% block admin_description %}
+    Актуальные данные студентов. Правка карточки не меняет исторические записи
+    о соревнованиях; чтобы перенести записи со старого ФИО на новое,
+    используйте раздел «Объединение студентов».
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        {# Поиск — GET-форма (паттерн журнала аудита): фильтр живёт в URL,
+           «Сброс» — просто ссылка без параметров. Кнопка создания — в той же
+           строке, открывает модал (паттерн страницы пользователей). #}
+        <div class="d-flex flex-column flex-sm-row gap-2 justify-content-between align-items-sm-center mb-3">
+            <form action="/admin/people" class="d-flex flex-wrap gap-2" method="get">
+                <input aria-label="Поиск по ФИО" autocomplete="off" class="form-control" name="q"
+                       placeholder="часть ФИО" type="search" value="{{ q }}">
+                <button class="btn btn-outline-primary" type="submit">Показать</button>
+                <a class="btn btn-outline-secondary" href="/admin/people">Сброс</a>
+            </form>
+            <div class="d-flex flex-wrap gap-2 align-items-sm-center">
+                {# Бейдж с числом непривязанных записей — только когда они есть. #}
+                <a class="btn btn-outline-secondary align-self-sm-start" href="/admin/people/reconcile">
+                    Сопоставление данных
+                    {% if reconcile_unlinked %}
+                    <span class="badge text-bg-light border">{{ reconcile_unlinked }}</span>
+                    {% endif %}
+                </a>
+                <button class="btn btn-primary align-self-sm-start" data-bs-target="#student-create-modal" data-bs-toggle="modal" type="button">+ Добавить студента</button>
+            </div>
+        </div>
+
+        {% if q %}
+        <div class="text-muted mb-2">Найдено: {{ students|length }} из {{ total }}</div>
+        {% endif %}
+
+        {% if students %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>ФИО</th>
+                        <th>Пол</th>
+                        <th>Институт</th>
+                        <th>Группа</th>
+                        <th>Курс</th>
+                        <th>Статус</th>
+                        <th class="text-end">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for student in students %}
+                    <tr {% if not student.active %}class="table-secondary"{% endif %}>
+                        <td><a href="/admin/people/{{ student.id }}">{{ student.full_name }}</a></td>
+                        <td>{{ student.sex or '—' }}</td>
+                        <td>{{ student.institute or '—' }}</td>
+                        <td>{{ student.group_name or '—' }}</td>
+                        <td>{{ student.course or '—' }}</td>
+                        <td>
+                            {% if student.active %}
+                            <span class="badge text-bg-success">активен</span>
+                            {% else %}
+                            <span class="badge text-bg-secondary">неактивен</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end">
+                            <a class="btn btn-sm btn-outline-primary" href="/admin/people/{{ student.id }}">Карточка</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% elif q %}
+        <div class="text-muted">По запросу «{{ q }}» ничего не найдено.</div>
+        {% else %}
+        <div class="text-muted">Студентов пока нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{# Модал создания студента (паттерн модала пользователя): обычный POST
+   /admin/people. Кроме ФИО поля можно оставить пустыми и заполнить позже
+   в карточке. #}
+<div aria-hidden="true" aria-labelledby="student-create-modal-title" class="modal fade" id="student-create-modal" tabindex="-1">
+    <div class="modal-dialog">
+        <form action="/admin/people" class="modal-content" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="modal-header">
+                <h5 class="modal-title" id="student-create-modal-title">Новый студент</h5>
+                <button aria-label="Закрыть" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label" for="student-create-full-name">ФИО</label>
+                    <input class="form-control" id="student-create-full-name" list="student-names-list" name="full_name" required type="text">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="student-create-sex">Пол</label>
+                    <select class="form-select" id="student-create-sex" name="sex">
+                        <option value="">не указан</option>
+                        <option value="М">М</option>
+                        <option value="Ж">Ж</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="student-create-institute">Институт</label>
+                    <input class="form-control" id="student-create-institute" name="institute" type="text">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="student-create-group">Группа</label>
+                    <input class="form-control" id="student-create-group" name="group" type="text">
+                </div>
+                <div class="mb-1">
+                    <label class="form-label" for="student-create-course">Курс</label>
+                    <input class="form-control" id="student-create-course" name="course" placeholder="например, 2" type="text">
+                </div>
+                <div class="form-text ui-hint">Кроме ФИО, поля можно заполнить позже в карточке студента.</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
+                <button class="btn btn-primary" type="submit">Добавить</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
+   (script.js): на странице достаточно пустого datalist с этим id. #}
+<datalist id="student-names-list"></datalist>
+
+{% endblock admin_content %}

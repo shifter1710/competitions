@@ -1,0 +1,107 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Сопоставление данных{% endblock admin_title %}
+{% block admin_description %}
+    Привязка существующих записей о соревнованиях и аккаунтов атлетов к карточкам
+    студентов. Сами записи при привязке не изменяются.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+{# Сводка и вкладки общие для обеих вкладок раздела (Phase 2). Здесь —
+   аккаунты атлетов без карточки: кандидаты по ФИО профиля, псевдонимы
+   аккаунта в кандидатах НЕ участвуют и при привязке не переносятся. #}
+<div class="text-muted mb-2">
+    Записей о соревнованиях: {{ counters.records_total }}, из них без студента:
+    <strong>{{ counters.records_unlinked }}</strong>.
+    Аккаунтов атлетов: {{ counters.athlete_users_total }}, из них без студента:
+    <strong>{{ counters.athlete_users_unlinked }}</strong>.
+</div>
+
+<ul class="nav nav-pills mb-3">
+    <li class="nav-item">
+        <a class="nav-link" href="/admin/people/reconcile">Записи без студента
+            <span class="badge text-bg-light border">{{ counters.records_unlinked }}</span></a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link active" href="/admin/people/reconcile/users">Аккаунты атлетов без студента
+            <span class="badge text-bg-light border">{{ counters.athlete_users_unlinked }}</span></a>
+    </li>
+</ul>
+
+{% if users %}
+
+{% for user in users %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+            <h3 class="title mb-0">{{ user.username }}
+                <span class="badge text-bg-secondary">#{{ user.id }}</span>
+            </h3>
+            <span class="badge text-bg-success">athlete</span>
+        </div>
+
+        <div class="row g-3">
+            <div class="col-lg-5">
+                <table class="table table-sm table-striped align-middle mb-2">
+                    <tbody>
+                        <tr><th style="width: 40%">ФИО</th><td>{{ user.profile_data.student_name or '—' }}</td></tr>
+                        <tr><th>Пол</th><td>{{ user.profile_data.student_sex or '—' }}</td></tr>
+                        <tr><th>Институт</th><td>{{ user.profile_data.institute or '—' }}</td></tr>
+                        <tr><th>Группа</th><td>{{ user.profile_data.group or '—' }}</td></tr>
+                        <tr><th>Курс</th><td>{{ user.profile_data.course or '—' }}</td></tr>
+                    </tbody>
+                </table>
+                <div class="small text-muted">
+                    Псевдонимы ФИО аккаунта:
+                    {% if user.name_aliases %}{{ user.name_aliases | join(', ') }}{% else %}—{% endif %}
+                </div>
+                <div class="form-text ui-hint">
+                    Не переносятся: привязка не копирует псевдонимы аккаунта студенту —
+                    они остаются у аккаунта.
+                </div>
+            </div>
+            <div class="col-lg-7">
+                {% if user.candidates %}
+                {% for candidate in user.candidates %}
+                <div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
+                    <a href="/admin/people/{{ candidate.student_id }}">{{ candidate.full_name }}</a>
+                    <span class="text-muted">
+                        #{{ candidate.student_id }} · {{ candidate.institute or '—' }} ·
+                        {{ candidate.group_name or '—' }}
+                    </span>
+                    {% if candidate.match_type == 'alias' %}
+                    <span class="badge text-bg-light border"
+                          title="Совпадение по псевдониму «{{ candidate.alias_name }}»">псевдоним</span>
+                    {% else %}
+                    <span class="badge text-bg-secondary">ФИО</span>
+                    {% endif %}
+                    <form action="/admin/people/reconcile/users/link" method="post">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                        <input type="hidden" name="user_id" value="{{ user.id }}">
+                        <input type="hidden" name="student_id" value="{{ candidate.student_id }}">
+                        <input type="hidden" name="back" value="{{ back_url }}">
+                        <button class="btn btn-sm btn-outline-primary" type="submit">Привязать</button>
+                    </form>
+                </div>
+                {% endfor %}
+                {% else %}
+                <span class="small text-muted d-block mb-1">Подходящих студентов не найдено.</span>
+                {% endif %}
+                <a class="btn btn-sm btn-outline-secondary mt-2"
+                   href="/admin/people/reconcile/users/create?user_id={{ user.id }}&amp;back={{ back_url | urlencode }}">Создать студента из профиля</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endfor %}
+
+{% else %}
+<div class="card shadow-sm">
+    <div class="card-body">
+        <div class="text-muted">Аккаунтов атлетов без студента нет — всё сопоставлено.</div>
+    </div>
+</div>
+{% endif %}
+
+{% endblock admin_content %}

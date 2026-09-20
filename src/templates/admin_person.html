@@ -1,0 +1,236 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Студент: {{ student.full_name }}{% endblock admin_title %}
+{% block admin_description %}
+    Карточка студента: актуальные данные и псевдонимы ФИО. Правка карточки
+    не меняет исторические записи о соревнованиях.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<a class="btn btn-outline-secondary mb-3" href="/admin/people">← К списку</a>
+
+{# Актуальные данные. Сохранение меняет ТОЛЬКО карточку: ФИО и данные
+   существующих записей, отчётов и выгрузок не переписываются. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+            <h5 class="card-title mb-0">
+                Данные студента
+                {% if student.active %}
+                <span class="badge text-bg-success">активен</span>
+                {% else %}
+                <span class="badge text-bg-secondary">неактивен</span>
+                {% endif %}
+            </h5>
+            <form action="/admin/people/{{ student.id }}/active" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                {% if student.active %}
+                <button class="btn btn-sm btn-outline-warning" type="submit">Деактивировать</button>
+                {% else %}
+                <button class="btn btn-sm btn-outline-success" type="submit">Активировать</button>
+                {% endif %}
+            </form>
+        </div>
+        <form action="/admin/people/{{ student.id }}/edit" class="row g-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="person-full-name">ФИО</label>
+                <input class="form-control" id="person-full-name" name="full_name" required type="text" value="{{ student.full_name }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="person-sex">Пол</label>
+                <select class="form-select" id="person-sex" name="sex">
+                    <option value="" {% if not student.sex %}selected{% endif %}>не указан</option>
+                    <option value="М" {% if student.sex == 'М' %}selected{% endif %}>М</option>
+                    <option value="Ж" {% if student.sex == 'Ж' %}selected{% endif %}>Ж</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="person-institute">Институт</label>
+                <input class="form-control" id="person-institute" name="institute" type="text" value="{{ student.institute or '' }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="person-group">Группа</label>
+                <input class="form-control" id="person-group" name="group" type="text" value="{{ student.group_name or '' }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="person-course">Курс</label>
+                <input class="form-control" id="person-course" name="course" type="text" value="{{ student.course or '' }}">
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Сохранить</button>
+                <div class="form-text ui-hint">
+                    Сохранение меняет только актуальные данные карточки. ФИО и данные
+                    в существующих записях о соревнованиях, отчётах и выгрузках не переписываются.
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Псевдонимы: другие написания ФИО, встречающиеся в записях и импорте. #}
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h5 class="card-title">Псевдонимы</h5>
+        <div class="text-muted mb-3">Другие написания ФИО этого студента, встречающиеся в записях и импорте.</div>
+
+        {% if aliases %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Псевдоним</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for alias in aliases %}
+                    <tr>
+                        <td>{{ alias.name }}</td>
+                        <td>
+                            <form action="/admin/people/{{ student.id }}/alias/{{ alias.id }}/delete" method="post"
+                                  onsubmit="return confirm('Удалить псевдоним «{{ alias.name }}»?')">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted mb-3">Псевдонимов пока нет.</div>
+        {% endif %}
+
+        <form action="/admin/people/{{ student.id }}/alias" class="row g-2 align-items-center" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <input aria-label="Новый псевдоним" autocomplete="off" class="form-control form-control-sm"
+                       list="student-names-list" name="name" placeholder="Другое написание ФИО" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-outline-primary" type="submit">Добавить</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Связанные данные (Phase 2): записи и аккаунты, привязанные вручную через
+   сопоставление. Привязка меняет только student_ref_id — кабинет атлета,
+   отчёты и выгрузки работают по легаси-ключу sha256(ФИО) как раньше. #}
+<div class="card shadow-sm mt-4">
+    <div class="card-body">
+        <h5 class="card-title">Связанные данные</h5>
+        <div class="text-muted mb-3">Записи о соревнованиях и аккаунты атлета, привязанные к этому студенту.</div>
+
+        <h6 class="mb-2">Записи о соревнованиях
+            <span class="badge text-bg-secondary">{{ linked_records_count }}</span>
+        </h6>
+        {% if linked_records %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">№</th>
+                        <th scope="col">ФИО в записи</th>
+                        <th scope="col">Спорт · Дата</th>
+                        <th scope="col">Название</th>
+                        <th scope="col">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in linked_records %}
+                    <tr>
+                        <td>{{ record.id }}</td>
+                        <td>{{ record.student_name }}</td>
+                        <td>{{ record.sport }} · {{ format_date_range(record.date, record.date_to) }}</td>
+                        <td>{{ record.name }}</td>
+                        <td>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">
+                                <form action="/admin/people/reconcile/unlink" method="post"
+                                      onsubmit="return confirm('Отвязать запись №{{ record.id }} от этого студента? Запись сохранится, но снова появится в сопоставлении.')">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <input type="hidden" name="record_id" value="{{ record.id }}">
+                                    <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
+                                </form>
+                                <details class="d-inline-block">
+                                    <summary class="btn btn-sm btn-outline-secondary">Перепривязать</summary>
+                                    <form action="/admin/people/reconcile/relink" class="d-flex flex-wrap gap-2 mt-2"
+                                          method="post"
+                                          onsubmit="return confirm('Перепривязать запись №{{ record.id }} на выбранного студента?')">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                        <input type="hidden" name="record_id" value="{{ record.id }}">
+                                        <select aria-label="Студент" class="form-select form-select-sm" name="student_id" required>
+                                            {% for item in active_students %}
+                                            {% if item.id != student.id %}
+                                            <option value="{{ item.id }}">
+                                                {{ item.full_name }} (#{{ item.id }}, {{ item.institute or '—' }}, {{ item.group_name or '—' }})
+                                            </option>
+                                            {% endif %}
+                                            {% endfor %}
+                                        </select>
+                                        <button class="btn btn-sm btn-primary" type="submit">Перепривязать</button>
+                                    </form>
+                                </details>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if linked_records_count > linked_records | length %}
+        <div class="text-muted">…и ещё {{ linked_records_count - linked_records | length }} записей (показаны первые 50).</div>
+        {% endif %}
+        {% else %}
+        <div class="text-muted mb-3">Привязанных записей пока нет.</div>
+        {% endif %}
+
+        <h6 class="mt-4 mb-2">Аккаунты атлетов
+            <span class="badge text-bg-secondary">{{ linked_users | length }}</span>
+        </h6>
+        {% if linked_users | length > 1 %}
+        <div class="alert alert-warning" role="alert">
+            К этому студенту привязано {{ linked_users | length }} аккаунта атлета. Обычно аккаунт один —
+            проверьте, нет ли дубликатов.
+        </div>
+        {% endif %}
+        {% if linked_users %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Логин</th>
+                        <th scope="col">Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in linked_users %}
+                    <tr>
+                        <td>{{ user.username }}</td>
+                        <td>
+                            <form action="/admin/people/reconcile/users/unlink" method="post"
+                                  onsubmit="return confirm('Отвязать аккаунт {{ user.username }} от студента? Связь карточки с аккаунтом будет снята; кабинет атлета сейчас работает по ФИО и не изменится.')">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input type="hidden" name="user_id" value="{{ user.id }}">
+                                <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted">Аккаунтов атлетов нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
+   (script.js): на странице достаточно пустого datalist с этим id. #}
+<datalist id="student-names-list"></datalist>
+
+{% endblock admin_content %}
