@@ -1166,6 +1166,36 @@ def test_attachments_for_records_select_and_delete(adapter):
     assert adapter.delete_attachments_for_records([]) == 0
 
 
+def test_delete_competition_with_attachments(adapter):
+    # M4: удаление записи админом тянет за собой её вложения — одна
+    # транзакция, соседние записи не задеты.
+    adapter.save_competitions(
+        [
+            make_competition('Первый', datetime(2026, 1, 1)),
+            make_competition('Второй', datetime(2026, 2, 1)),
+        ]
+    )
+    for record_id, filename in ((1, 'a.png'), (1, 'b.png'), (2, 'c.png')):
+        adapter.create_attachment(
+            record_id=record_id,
+            filename=filename,
+            stored_name=filename,
+            content_type='image/png',
+            size=10,
+            uploaded_by=None,
+        )
+    assert adapter.count_attachments() == 3
+
+    assert adapter.delete_competition_with_attachments(1) == 2
+
+    assert [comp.student_name for comp in adapter.get_competitions()] == ['Второй']
+    assert adapter.count_attachments() == 1
+    assert [attachment['record_id'] for attachment in adapter.get_attachments()] == [2]
+
+    # повторное удаление — без эффекта и без ошибок
+    assert adapter.delete_competition_with_attachments(1) == 0
+
+
 def insert_audit_event(adapter, created_at, username, action):
     adapter.connection.execute(
         'INSERT INTO audit_log (created_at, user_id, username, action, details) VALUES (?, ?, ?, ?, ?)',

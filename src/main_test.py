@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import json
 import re
@@ -578,7 +579,16 @@ def test_athlete_update_approved_competition_returns_to_pending(client: SanicTes
     app.ctx.storage.get_competition_review.return_value = None
 
 
-def test_admin_can_delete_competition(client: SanicTestClient):
+def test_admin_can_delete_competition(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    # M4: удаление записи удаляет и её вложения — строки в БД (метод
+    # storage) и файлы на диске (каталог files/<id>).
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    record_dir = tmp_path / 'files' / '123'
+    record_dir.mkdir(parents=True)
+    (record_dir / 'stored.png').write_bytes(b'fake-png-bytes')
+
     headers = get_auth_headers()
     _, response = client.post(
         '/competition/123/delete',
@@ -589,7 +599,8 @@ def test_admin_can_delete_competition(client: SanicTestClient):
 
     assert response.status == 302
     assert response.headers['location'] == '/'
-    app.ctx.storage.delete_competition.assert_called_once_with(123)
+    app.ctx.storage.delete_competition_with_attachments.assert_called_once_with(123)
+    assert not record_dir.exists()
 
 
 def test_editor_cannot_delete_competition(client: SanicTestClient):
@@ -1710,6 +1721,226 @@ def test_login_rate_limit_locks_out_after_failures(client: SanicTestClient):
     assert response.status == 429
 
 
+def test_login_rate_limit_counts_by_real_client_ip_behind_proxy(client: SanicTestClient):
+    # M1: PROXIES_COUNT=1 — бакет лимита ведётся по X-Forwarded-For (реальный
+    # клиент за nginx), а не по адресу прокси. client — module-scoped:
+    # сбрасываем общий login_failures до и после.
+    from src.main import login_failures
+
+    login_failures.clear()
+    for _ in range(5):
+        _, response = client.post(
+            '/login',
+            headers={'X-Forwarded-For': '198.51.100.10'},
+            data={'username': settings.auth_admin_username, 'password': 'wrong'},
+            allow_redirects=False,
+        )
+        assert response.status == 401
+
+    # Другой клиент — отдельный бакет: корректный вход не задет чужой блокировкой.
+    _, response = client.post(
+        '/login',
+        headers={'X-Forwarded-For': '198.51.100.20'},
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    login_failures.clear()
+
+
+def test_login_rate_limit_locks_forwarded_client_ip(client: SanicTestClient):
+    from src.main import login_failures
+
+    login_failures.clear()
+    for _ in range(5):
+        client.post(
+            '/login',
+            headers={'X-Forwarded-For': '198.51.100.10'},
+            data={'username': settings.auth_admin_username, 'password': 'wrong'},
+            allow_redirects=False,
+        )
+
+    _, response = client.post(
+        '/login',
+        headers={'X-Forwarded-For': '198.51.100.10'},
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 429
+    login_failures.clear()
+
+
+def test_login_rate_limit_uses_last_forwarded_entry(client: SanicTestClient):
+    # nginx дописывает реальный IP ПОСЛЕДНИМ ($proxy_add_x_forwarded_for):
+    # бакет ключуется по последней записи, подделка первой записи ничего
+    # не даёт.
+    from src.main import login_failures
+
+    login_failures.clear()
+    for _ in range(5):
+        client.post(
+            '/login',
+            headers={'X-Forwarded-For': '6.0.0.6, 198.51.100.10'},
+            data={'username': settings.auth_admin_username, 'password': 'wrong'},
+            allow_redirects=False,
+        )
+
+    # Заблокирован 198.51.100.10; «клиент» с другой последней записью
+    # (пусть даже с той же подделанной первой) входит свободно.
+    _, response = client.post(
+        '/login',
+        headers={'X-Forwarded-For': '6.0.0.6, 198.51.100.30'},
+        data={
+            'username': settings.auth_admin_username,
+            'password': settings.auth_admin_password,
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    login_failures.clear()
+
+
+@pytest.fixture
+def bootstrap_settings(monkeypatch):
+    """Синтетические настройки посева учёток: сильные уникальные пароли,
+    viewer пустой (не создаётся). Тесты точечно подменяют нужное поле."""
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'auth_secret_key', 'unit-test-random-secret-key')
+    monkeypatch.setattr(main_module.settings, 'auth_admin_username', 'admin')
+    monkeypatch.setattr(main_module.settings, 'auth_admin_password', 'strong-admin-pass-123456')
+    monkeypatch.setattr(main_module.settings, 'auth_editor_username', 'editor')
+    monkeypatch.setattr(main_module.settings, 'auth_editor_password', 'strong-editor-pass-123456')
+    monkeypatch.setattr(main_module.settings, 'auth_viewer_username', '')
+    monkeypatch.setattr(main_module.settings, 'auth_viewer_password', '')
+    return main_module.settings
+
+
+def test_find_weak_bootstrap_accounts_flags_weak_passwords(bootstrap_settings, monkeypatch):
+    from src.main import find_weak_bootstrap_accounts
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_admin_password', 'change-me')
+    storage = Mock()
+    storage.get_user.return_value = None
+    # учётки ещё нет → посев со слабым паролем → отказ; editor силён, viewer пуст
+    assert find_weak_bootstrap_accounts(storage) == ['admin']
+
+
+def test_find_weak_bootstrap_accounts_skips_existing_users(bootstrap_settings, monkeypatch):
+    from src.main import find_weak_bootstrap_accounts
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_admin_password', 'change-me')
+    storage = Mock()
+    storage.get_user.return_value = {'username': 'admin', 'role': 'admin'}
+    # посев не перезаписывает существующие учётки — слабый .env не опасен
+    assert find_weak_bootstrap_accounts(storage) == []
+
+
+def test_find_weak_bootstrap_accounts_empty_for_strong_passwords(bootstrap_settings):
+    from src.main import find_weak_bootstrap_accounts
+
+    storage = Mock()
+    storage.get_user.return_value = None
+    assert find_weak_bootstrap_accounts(storage) == []
+
+
+def test_find_weak_bootstrap_accounts_flags_default_viewer_placeholder(bootstrap_settings, monkeypatch):
+    from src.main import find_weak_bootstrap_accounts
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_viewer_username', 'viewer')
+    monkeypatch.setattr(bootstrap_settings, 'auth_viewer_password', 'change-me-viewer')
+    storage = Mock()
+    storage.get_user.return_value = None
+    assert find_weak_bootstrap_accounts(storage) == ['viewer']
+
+
+def make_bootstrap_app_holder():
+    holder = Mock()
+    holder.ctx.storage = None
+    return holder
+
+
+def test_init_storage_refuses_startup_with_weak_bootstrap_password(bootstrap_settings, monkeypatch, tmp_path):
+    from src import main as main_module
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_admin_password', 'change-me')
+    monkeypatch.setattr(bootstrap_settings, 'database_path', str(tmp_path / 'guard.sqlite3'))
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(main_module.init_storage(make_bootstrap_app_holder(), None))
+
+    message = str(exc_info.value)
+    assert 'AUTH_ADMIN_PASSWORD' in message
+    assert 'change-me' not in message  # значение пароля не раскрывается
+
+
+def test_init_storage_starts_when_weak_env_accounts_already_exist(bootstrap_settings, monkeypatch, tmp_path):
+    from src import main as main_module
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_admin_password', 'change-me')
+    monkeypatch.setattr(bootstrap_settings, 'database_path', str(tmp_path / 'seeded.sqlite3'))
+    holder = make_bootstrap_app_holder()
+
+    # «старая установка»: учётки посеяны до появления guard (в test-режиме)
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', True)
+    asyncio.run(main_module.init_storage(holder, None))
+    seeded = holder.ctx.storage
+
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', False)
+    asyncio.run(main_module.init_storage(holder, None))  # не бросает
+    assert seeded.get_user('admin') is not None
+
+
+def test_init_storage_seeds_accounts_with_strong_passwords(bootstrap_settings, monkeypatch, tmp_path):
+    from src import main as main_module
+
+    monkeypatch.setattr(bootstrap_settings, 'database_path', str(tmp_path / 'fresh.sqlite3'))
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', False)
+    holder = make_bootstrap_app_holder()
+
+    asyncio.run(main_module.init_storage(holder, None))
+
+    storage = holder.ctx.storage
+    assert storage.get_user('admin') is not None
+    assert storage.get_user('editor') is not None
+    assert storage.get_user('viewer') is None  # пустые AUTH_VIEWER_* — учётки нет
+
+
+def test_init_storage_refuses_bootstrap_username_with_colon(bootstrap_settings, monkeypatch, tmp_path):
+    from src import main as main_module
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_admin_username', 'bad:admin')
+    monkeypatch.setattr(bootstrap_settings, 'database_path', str(tmp_path / 'colon.sqlite3'))
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(main_module.init_storage(make_bootstrap_app_holder(), None))
+
+    assert 'AUTH_ADMIN_USERNAME' in str(exc_info.value)
+
+
+def test_init_storage_starts_when_colon_user_already_exists(bootstrap_settings, monkeypatch, tmp_path):
+    from src import main as main_module
+
+    monkeypatch.setattr(bootstrap_settings, 'auth_admin_username', 'bad:admin')
+    monkeypatch.setattr(bootstrap_settings, 'database_path', str(tmp_path / 'colon-seeded.sqlite3'))
+    holder = make_bootstrap_app_holder()
+
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', True)
+    asyncio.run(main_module.init_storage(holder, None))
+
+    # существующая (пусть и некрасивая) учётка не пересеивается — не блокируем
+    monkeypatch.setattr(main_module.Sanic, 'test_mode', False)
+    asyncio.run(main_module.init_storage(holder, None))
+
+
 def test_admin_can_create_user(client: SanicTestClient):
     headers = get_auth_headers()
     _, response = client.post(
@@ -1736,6 +1967,50 @@ def test_create_user_rejects_short_password(client: SanicTestClient):
     )
     assert response.status == 302
     assert 'admin_error' in response.headers['location']
+
+
+def test_create_user_rejects_colon_in_username(client: SanicTestClient):
+    # L8: двоеточие ломает подписанную cookie «логин:роль:...».
+    headers = get_auth_headers()
+    app.ctx.storage.create_user.reset_mock()
+    _, response = client.post(
+        '/admin/users',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'bad:name', 'password': 'secret123', 'role': 'editor'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.create_user.assert_not_called()
+
+
+def test_create_user_rejects_control_character_in_username(client: SanicTestClient):
+    headers = get_auth_headers()
+    app.ctx.storage.create_user.reset_mock()
+    _, response = client.post(
+        '/admin/users',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'na\x01me', 'password': 'secret123', 'role': 'editor'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' in response.headers['location']
+    app.ctx.storage.create_user.assert_not_called()
+
+
+def test_create_user_accepts_regular_username(client: SanicTestClient):
+    headers = get_auth_headers()
+    app.ctx.storage.create_user.reset_mock()
+    _, response = client.post(
+        '/admin/users',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'operator-9', 'password': 'secret123', 'role': 'editor'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_error' not in response.headers['location']
+    app.ctx.storage.create_user.assert_called_once()
+    assert app.ctx.storage.create_user.call_args[0][0] == 'operator-9'
 
 
 def test_admin_can_reset_user_password(client: SanicTestClient):
@@ -5909,6 +6184,35 @@ def test_calendar_create_rejects_bad_date_and_reversed_range(client: SanicTestCl
     app.ctx.storage.create_calendar_event.assert_not_called()
 
 
+def test_calendar_create_rejects_non_http_url(client: SanicTestClient):
+    # M2: ссылка календаря рендерится как href — принимаем только http/https.
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    for bad_url in ('javascript:alert(1)', 'data:text/html,<b>', 'vbscript:msgbox'):
+        _, response = client.post(
+            '/calendar/new',
+            headers=headers,
+            data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026', 'url': bad_url},
+            allow_redirects=False,
+        )
+        assert response.status == 400
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+
+def test_calendar_create_accepts_http_https_and_empty_url(client: SanicTestClient):
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    for good_url in ('http://example.com/a', 'https://example.com', ''):
+        _, response = client.post(
+            '/calendar/new',
+            headers=headers,
+            data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026', 'url': good_url},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert app.ctx.storage.create_calendar_event.call_args[1]['url'] == good_url
+
+
 def test_viewer_cannot_create_calendar_event(client: SanicTestClient):
     app.ctx.storage.create_calendar_event.reset_mock()
     headers = get_auth_headers('viewer')
@@ -5953,6 +6257,68 @@ def test_editor_can_edit_calendar_event(client: SanicTestClient):
         assert kwargs['date'] == '2026-01-30T00:00:00'
         assert kwargs['date_to'] == '2026-02-01T00:00:00'
     finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_edit_rejects_non_http_url(client: SanicTestClient):
+    # Тот же парсер формы, что у создания: правка не обходит проверку схемы.
+    app.ctx.storage.get_calendar_event.return_value = {
+        'id': 7,
+        'name': 'Кросс',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    app.ctx.storage.update_calendar_event.reset_mock()
+    try:
+        headers = get_auth_headers('editor')
+        for bad_url in ('javascript:alert(1)', 'data:text/html,<b>', 'vbscript:msgbox'):
+            _, response = client.post(
+                '/calendar/7/edit',
+                headers=headers,
+                data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026', 'url': bad_url},
+                allow_redirects=False,
+            )
+            assert response.status == 400
+        app.ctx.storage.update_calendar_event.assert_not_called()
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_pages_render_unsafe_stored_url_as_text(client: SanicTestClient):
+    # Эшелонированная защита: значения, сохранённые до валидации схемы,
+    # рендерятся как обычный текст, а не как href.
+    unsafe_event = {
+        'id': 9,
+        'name': 'Кросс',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': 'javascript:alert(1)',
+        'created_at': '2026-01-01T00:00:00',
+        'participant_count': 0,
+        'no_result_count': 0,
+    }
+    app.ctx.storage.list_calendar_events.return_value = [unsafe_event]
+    app.ctx.storage.get_calendar_event.return_value = unsafe_event
+    try:
+        headers = get_auth_headers('viewer')
+
+        _, response = client.get('/calendar', headers=headers)
+        assert response.status == 200
+        assert 'href="javascript:' not in response.text
+
+        _, response = client.get('/calendar/9', headers=headers)
+        assert response.status == 200
+        assert 'href="javascript:' not in response.text
+        # значение не теряется — показывается обычным текстом
+        assert 'javascript:alert(1)' in response.text
+    finally:
+        app.ctx.storage.list_calendar_events.return_value = []
         app.ctx.storage.get_calendar_event.return_value = None
 
 

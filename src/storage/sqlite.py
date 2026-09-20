@@ -1220,6 +1220,19 @@ class SQLiteAdapter:
             self.connection.execute('DELETE FROM competitions WHERE id = ?', (int(record_id),))
             self.connection.commit()
 
+    def delete_competition_with_attachments(self, record_id: int) -> int:
+        """Удалить запись вместе с её вложениями (удаление записи админом).
+
+        Одна транзакция под одной блокировкой: сначала строки вложений,
+        потом сама запись. Возвращает число удалённых строк вложений.
+        """
+        with self._lock:
+            cursor = self.connection.execute('DELETE FROM attachments WHERE record_id = ?', (int(record_id),))
+            deleted_attachments = cursor.rowcount
+            self.connection.execute('DELETE FROM competitions WHERE id = ?', (int(record_id),))
+            self.connection.commit()
+            return deleted_attachments
+
     def clean_db(self):
         with self._lock:
             self.connection.execute('DELETE FROM competitions')

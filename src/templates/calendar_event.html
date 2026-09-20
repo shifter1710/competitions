@@ -33,7 +33,14 @@
         </div>
         {% if event.url %}
         <p class="mt-1 mb-0">
-            Ссылка: <a href="{{ event.url }}" target="_blank" rel="noopener">{{ event.url }}</a>
+            Ссылка:
+            {# Устоявшиеся значения могли быть сохранены без проверки схемы:
+               безопасную ссылку рисуем <a>, прочие — обычным текстом. #}
+            {%- if event.url.startswith(('http://', 'https://')) -%}
+            <a href="{{ event.url }}" target="_blank" rel="noopener">{{ event.url }}</a>
+            {%- else -%}
+            {{ event.url }}
+            {%- endif -%}
         </p>
         {% endif %}
     </div>
