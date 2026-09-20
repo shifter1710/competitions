@@ -1,0 +1,111 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Сопоставление данных — создание студента{% endblock admin_title %}
+{% block admin_description %}
+    Карточка студента создаётся из данных источника и сразу привязывается к нему.
+    Данные источника (снимок в записи, профиль аккаунта) при этом не изменяются.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<a class="btn btn-outline-secondary mb-3" href="{{ back_url }}">← К сопоставлению</a>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        {% if source == 'record' %}
+        <h5 class="card-title mb-3">Источник — запись №{{ record_id }}</h5>
+        <table class="table table-sm table-striped align-middle mb-0">
+            <tbody>
+                <tr><th style="width: 40%">ФИО</th><td>{{ record.student_name }}</td></tr>
+                <tr><th>Пол</th><td>{{ record.student_sex or '—' }}</td></tr>
+                <tr><th>Институт</th><td>{{ record.institute or '—' }}</td></tr>
+                <tr><th>Группа</th><td>{{ record.group or '—' }}</td></tr>
+                <tr><th>Курс</th><td>{{ record.course if record.course is not none else '—' }}</td></tr>
+                <tr><th>Вид спорта</th><td>{{ record.sport }}</td></tr>
+                <tr><th>Дата</th><td>{{ format_date_range(record.date, record.date_to) }}</td></tr>
+                <tr><th>Уровень соревнований</th><td>{{ record.level }}</td></tr>
+                <tr><th>Название соревнований</th><td>{{ record.name }}</td></tr>
+                <tr><th>Место</th><td>{{ record.position }}</td></tr>
+            </tbody>
+        </table>
+        {% else %}
+        <h5 class="card-title mb-3">Источник — аккаунт {{ user.username }} (профиль атлета)</h5>
+        <table class="table table-sm table-striped align-middle mb-0">
+            <tbody>
+                <tr><th style="width: 40%">ФИО</th><td>{{ user.profile_data.student_name or '—' }}</td></tr>
+                <tr><th>Пол</th><td>{{ user.profile_data.student_sex or '—' }}</td></tr>
+                <tr><th>Институт</th><td>{{ user.profile_data.institute or '—' }}</td></tr>
+                <tr><th>Группа</th><td>{{ user.profile_data.group or '—' }}</td></tr>
+                <tr><th>Курс</th><td>{{ user.profile_data.course or '—' }}</td></tr>
+                <tr><th>Псевдонимы ФИО аккаунта</th>
+                    <td>{% if user.name_aliases %}{{ user.name_aliases | join(', ') }}{% else %}—{% endif %}</td></tr>
+            </tbody>
+        </table>
+        {% endif %}
+    </div>
+</div>
+
+{# Поля — как у карточки студента (Phase 1), предзаполнены данными источника. #}
+<div class="card shadow-sm">
+    <div class="card-body">
+        <form action="{% if source == 'record' %}/admin/people/reconcile/create{% else %}/admin/people/reconcile/users/create{% endif %}"
+              class="row g-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="back" value="{{ back_url }}">
+            {% if source == 'record' %}
+            <input type="hidden" name="record_id" value="{{ record_id }}">
+            {% else %}
+            <input type="hidden" name="user_id" value="{{ user_id }}">
+            {% endif %}
+            <div class="col-md-4">
+                <label class="form-label" for="reconcile-full-name">ФИО</label>
+                <input class="form-control" id="reconcile-full-name" list="student-names-list" name="full_name"
+                       required type="text" value="{{ form.full_name }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="reconcile-sex">Пол</label>
+                <select class="form-select" id="reconcile-sex" name="sex">
+                    <option value="" {% if not form.sex %}selected{% endif %}>не указан</option>
+                    <option value="М" {% if form.sex == 'М' %}selected{% endif %}>М</option>
+                    <option value="Ж" {% if form.sex == 'Ж' %}selected{% endif %}>Ж</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="reconcile-institute">Институт</label>
+                <input class="form-control" id="reconcile-institute" name="institute" type="text"
+                       value="{{ form.institute }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="reconcile-group">Группа</label>
+                <input class="form-control" id="reconcile-group" name="group" type="text"
+                       value="{{ form.group_name }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="reconcile-course">Курс</label>
+                <input class="form-control" id="reconcile-course" name="course" type="text"
+                       value="{{ form.course }}">
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Создать и привязать</button>
+                <a class="btn btn-outline-secondary" href="{{ back_url }}">Отмена</a>
+                {% if source == 'record' %}
+                <div class="form-text ui-hint">
+                    Поля предзаполнены данными записи. Созданный студент сразу привяжется
+                    к записи №{{ record_id }}; сама запись (снимок данных в ней) при этом не изменится.
+                </div>
+                {% else %}
+                <div class="form-text ui-hint">
+                    Поля предзаполнены данными профиля. Псевдонимы ФИО аккаунта не переносятся —
+                    студент получает только данные профиля. Созданный студент сразу привяжется к аккаунту.
+                </div>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</div>
+
+{# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
+   (script.js): на странице достаточно пустого datalist с этим id. #}
+<datalist id="student-names-list"></datalist>
+
+{% endblock admin_content %}

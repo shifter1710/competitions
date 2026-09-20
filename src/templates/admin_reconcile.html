@@ -1,0 +1,154 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Сопоставление данных{% endblock admin_title %}
+{% block admin_description %}
+    Привязка существующих записей о соревнованиях и аккаунтов атлетов к карточкам
+    студентов. Сами записи при привязке не изменяются.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+{# Сводка и вкладки общие для обеих вкладок раздела (Phase 2): связь —
+   ТОЛЬКО student_ref_id, кандидаты — предложения, ничего не делается само. #}
+<div class="text-muted mb-2">
+    Записей о соревнованиях: {{ counters.records_total }}, из них без студента:
+    <strong>{{ counters.records_unlinked }}</strong>.
+    Аккаунтов атлетов: {{ counters.athlete_users_total }}, из них без студента:
+    <strong>{{ counters.athlete_users_unlinked }}</strong>.
+</div>
+
+<ul class="nav nav-pills mb-3">
+    <li class="nav-item">
+        <a class="nav-link active" href="/admin/people/reconcile">Записи без студента
+            <span class="badge text-bg-light border">{{ counters.records_unlinked }}</span></a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/admin/people/reconcile/users">Аккаунты атлетов без студента
+            <span class="badge text-bg-light border">{{ counters.athlete_users_unlinked }}</span></a>
+    </li>
+</ul>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        {# Поиск — GET-форма (паттерн страниц людей и журнала аудита). #}
+        <form action="/admin/people/reconcile" class="d-flex flex-wrap gap-2 mb-3" method="get">
+            <input aria-label="Поиск по ФИО" autocomplete="off" class="form-control" name="q"
+                   placeholder="часть ФИО" type="search" value="{{ q }}">
+            <button class="btn btn-outline-primary" type="submit">Показать</button>
+            <a class="btn btn-outline-secondary" href="/admin/people/reconcile">Сброс</a>
+        </form>
+
+        {% if records %}
+        {# Чекбоксы строк ссылаются на форму массовой привязки через
+           form="reconcile-bulk-form" (паттерн calendar_event.html):
+           вложенных форм внутри таблицы нет. #}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col"></th>
+                        <th scope="col">Запись</th>
+                        <th scope="col">Кандидаты</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in records %}
+                    <tr>
+                        <td>
+                            <input aria-label="Выбрать запись №{{ record.id }}" class="form-check-input"
+                                   form="reconcile-bulk-form" name="record_ids[]" type="checkbox"
+                                   value="{{ record.id }}">
+                        </td>
+                        <td>
+                            <div>#{{ record.id }} <strong>{{ record.student_name }}</strong></div>
+                            <div class="small text-muted">
+                                {{ record.student_sex or '—' }} · {{ record.institute or '—' }} ·
+                                {{ record['group'] or '—' }} · курс {{ record.course or '—' }}
+                            </div>
+                            <div class="small text-muted">
+                                {{ record.sport }} · {{ format_date_range(record.date, record.date_to) }} · {{ record.name }}
+                            </div>
+                        </td>
+                        <td>
+                            {% if record.candidates %}
+                            {% for candidate in record.candidates %}
+                            <div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
+                                <a href="/admin/people/{{ candidate.student_id }}">{{ candidate.full_name }}</a>
+                                <span class="text-muted">
+                                    #{{ candidate.student_id }} · {{ candidate.institute or '—' }} ·
+                                    {{ candidate.group_name or '—' }}
+                                </span>
+                                {% if candidate.match_type == 'alias' %}
+                                <span class="badge text-bg-light border"
+                                      title="Совпадение по псевдониму «{{ candidate.alias_name }}»">псевдоним</span>
+                                {% else %}
+                                <span class="badge text-bg-secondary">ФИО</span>
+                                {% endif %}
+                                <form action="/admin/people/reconcile/link" method="post">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <input type="hidden" name="record_ids[]" value="{{ record.id }}">
+                                    <input type="hidden" name="student_id" value="{{ candidate.student_id }}">
+                                    <input type="hidden" name="back" value="{{ back_url }}">
+                                    <button class="btn btn-sm btn-outline-primary" type="submit">Привязать</button>
+                                </form>
+                            </div>
+                            {% endfor %}
+                            {% else %}
+                            <span class="small text-muted">Подходящих студентов не найдено.</span>
+                            {% endif %}
+                            <a class="btn btn-sm btn-outline-secondary mt-2"
+                               href="/admin/people/reconcile/create?record_id={{ record.id }}&amp;back={{ back_url | urlencode }}">Создать студента из записи</a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <form action="/admin/people/reconcile/link" class="d-flex flex-column flex-sm-row gap-2 mt-3"
+              id="reconcile-bulk-form" method="post"
+              onsubmit="return confirm('Привязать выбранные записи к выбранному студенту?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="back" value="{{ back_url }}">
+            <select aria-label="Студент" class="form-select" name="student_id" required>
+                <option disabled selected value="">Выберите студента</option>
+                {% for student in active_students %}
+                <option value="{{ student.id }}">
+                    {{ student.full_name }} (#{{ student.id }}, {{ student.institute or '—' }}, {{ student.group_name or '—' }})
+                </option>
+                {% endfor %}
+            </select>
+            <button class="btn btn-primary btn-sm" type="submit">Привязать выбранные</button>
+        </form>
+        <div class="form-text ui-hint">
+            Привязка выполняется целиком: если хотя бы одна выбранная запись уже привязана, не изменится ничего.
+        </div>
+
+        <div class="text-muted mt-3 mb-2">
+            Всего по фильтру: {{ total }}; страница {{ page }} из {{ pages }}
+            (по {{ page_size }} на страницу).
+        </div>
+        {% if pages > 1 %}
+        <nav aria-label="Страницы записей без студента">
+            <ul class="pagination justify-content-center mb-0">
+                <li class="page-item {% if not prev_url %}disabled{% endif %}">
+                    {% if prev_url %}<a class="page-link" href="{{ prev_url }}" aria-label="Предыдущая">«</a>
+                    {% else %}<span class="page-link" aria-hidden="true">«</span>{% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">Стр. {{ page }} из {{ pages }}</span></li>
+                <li class="page-item {% if not next_url %}disabled{% endif %}">
+                    {% if next_url %}<a class="page-link" href="{{ next_url }}" aria-label="Следующая">»</a>
+                    {% else %}<span class="page-link" aria-hidden="true">»</span>{% endif %}
+                </li>
+            </ul>
+        </nav>
+        {% endif %}
+        {% elif q %}
+        <div class="text-muted">По запросу «{{ q }}» непривязанных записей не найдено.</div>
+        {% else %}
+        <div class="text-muted">Всё сопоставлено: записей без студента нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock admin_content %}

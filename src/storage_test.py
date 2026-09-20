@@ -2095,3 +2095,354 @@ def test_manual_entry_still_works_on_db_with_students(tmp_path):
     assert saved.student_name == 'Иванов Иван Иванович'
     row = adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = 1').fetchone()
     assert row['student_ref_id'] is None
+
+
+# ---- Сопоставление данных (Student Identity v1, Phase 2) ----
+
+
+def make_athlete_user(
+    adapter: SQLiteAdapter, username: str, profile: dict | None = None, aliases: list[str] = ()
+) -> int:
+    """Аккаунт атлета с профилем и псевдонимами; возвращает id."""
+    adapter.create_user(username, 'scrypt$x', 'athlete')
+    user = adapter.get_user(username)
+    if profile:
+        adapter.set_profile(user['id'], profile)
+    for alias in aliases:
+        adapter.add_name_alias(user['id'], alias)
+    return user['id']
+
+
+def test_reconciliation_counters(adapter):
+    assert adapter.count_student_reconciliation() == {
+        'records_total': 0,
+        'records_linked': 0,
+        'records_unlinked': 0,
+        'athlete_users_total': 0,
+        'athlete_users_linked': 0,
+        'athlete_users_unlinked': 0,
+    }
+
+    adapter.save_competitions(
+        [
+            make_competition('Иванов Иван', datetime(2026, 1, 10)),
+            make_competition('Петров Пётр', datetime(2026, 2, 10)),
+        ]
+    )
+    student_id = adapter.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    anna_id = make_athlete_user(adapter, 'anna')
+    boris_id = make_athlete_user(adapter, 'boris')
+    adapter.create_user('chief', 'scrypt$x', 'admin')
+
+    assert adapter.count_student_reconciliation() == {
+        'records_total': 2,
+        'records_linked': 0,
+        'records_unlinked': 2,
+        'athlete_users_total': 2,
+        'athlete_users_linked': 0,
+        'athlete_users_unlinked': 2,
+    }
+
+    count, error = adapter.link_competitions([1], student_id)
+    assert (count, error) == (1, None)
+    linked, error = adapter.link_user(anna_id, student_id)
+    assert (linked, error) == (1, None)
+
+    assert adapter.count_student_reconciliation() == {
+        'records_total': 2,
+        'records_linked': 1,
+        'records_unlinked': 1,
+        'athlete_users_total': 2,
+        'athlete_users_linked': 1,
+        'athlete_users_unlinked': 1,
+    }
+    assert boris_id
+
+
+def test_unlinked_competitions_list_pagination_search_and_ordering(adapter):
+    """Порядок — ФИО, затем дата, затем id; поиск — подстрока ФИО;
+    привязанные записи в список не попадают."""
+    adapter.save_competitions(
+        [
+            make_competition('Петров Пётр', datetime(2026, 3, 1)),
+            make_competition('Иванов Иван', datetime(2026, 2, 10)),
+            make_competition('Иванов Иван', datetime(2026, 1, 5)),
+            make_competition('Иванов Иван', datetime(2026, 1, 5)),  # дубль-строка в реестре
+            make_competition('Иванов Пётр', datetime(2026, 4, 1)),
+        ]
+    )
+    assert [row['id'] for row in adapter.list_unlinked_competitions()] == [3, 4, 2, 5, 1]
+
+    # Пагинация: limit/offset по тому же порядку
+    assert [row['id'] for row in adapter.list_unlinked_competitions(limit=2, offset=0)] == [3, 4]
+    assert [row['id'] for row in adapter.list_unlinked_competitions(limit=2, offset=2)] == [2, 5]
+    assert [row['id'] for row in adapter.list_unlinked_competitions(limit=2, offset=4)] == [1]
+    assert adapter.list_unlinked_competitions(limit=2, offset=6) == []
+
+    # Поиск — подстрока ФИО
+    assert [row['id'] for row in adapter.list_unlinked_competitions(search='Иванов')] == [3, 4, 2, 5]
+    assert [row['id'] for row in adapter.list_unlinked_competitions(search='Петров Пётр')] == [1]
+    assert adapter.list_unlinked_competitions(search='Неттаков') == []
+    assert adapter.count_unlinked_competitions() == 5
+    assert adapter.count_unlinked_competitions(search='Иванов') == 4
+
+    # Привязанная запись исчезает из списка и счётчика
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    adapter.link_competitions([3], student_id)
+    assert [row['id'] for row in adapter.list_unlinked_competitions()] == [4, 2, 5, 1]
+    assert adapter.count_unlinked_competitions() == 4
+
+    row = adapter.list_unlinked_competitions(limit=1)[0]
+    assert set(row) == {
+        'id',
+        'student_name',
+        'student_sex',
+        'institute',
+        'group',
+        'course',
+        'sport',
+        'date',
+        'date_to',
+        'name',
+        'level',
+        'position',
+        'review_status',
+    }
+    assert row['student_name'] == 'Иванов Иван'
+    assert row['date'].startswith('2026-01-05')
+
+
+def test_find_student_candidates_exact_full_name_and_alias(adapter):
+    """Точное совпадение (strip, регистр важен — как легаси sha256(ФИО))
+    по full_name или псевдониму; full_name приоритетнее псевдонима."""
+    student_id = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+    adapter.add_student_alias(student_id, 'Иванов И.И.')
+
+    full = adapter.find_student_candidates('Иванов Иван Иванович')
+    assert full == [
+        {
+            'student_id': student_id,
+            'full_name': 'Иванов Иван Иванович',
+            'sex': 'М',
+            'institute': 'ИСИ',
+            'group_name': 'ПГС-101',
+            'course': '2',
+            'match_type': 'full_name',
+            'alias_name': None,
+        }
+    ]
+
+    # Совпадение по псевдониму — та же карточка, но с match_type/alias_name
+    by_alias = adapter.find_student_candidates('Иванов И.И.')
+    assert by_alias[0]['student_id'] == student_id
+    assert by_alias[0]['match_type'] == 'alias'
+    assert by_alias[0]['alias_name'] == 'Иванов И.И.'
+
+    # strip и пустая строка
+    assert adapter.find_student_candidates('  Иванов И.И.  ')[0]['student_id'] == student_id
+    assert adapter.find_student_candidates('   ') == []
+
+    # Точность и регистр: подстрока/другой регистр не совпадают
+    assert adapter.find_student_candidates('Иванов') == []
+    assert adapter.find_student_candidates('иванов и.и.') == []
+    assert adapter.find_student_candidates('ИВАНОВ ИВАН ИВАНОВИЧ') == []
+
+
+def test_find_student_candidates_exclude_inactive_and_list_namesakes(adapter):
+    # Неактивная карточка — не кандидат (ни по ФИО, ни по псевдониму)
+    inactive_id = adapter.create_student('Сидоров Сидор Сидорович', 'М', '', '', '')
+    adapter.add_student_alias(inactive_id, 'Сидоров С.С.')
+    adapter.set_student_active(inactive_id, False)
+    assert adapter.find_student_candidates('Сидоров Сидор Сидорович') == []
+    assert adapter.find_student_candidates('Сидоров С.С.') == []
+
+    # Полные тёзки — отдельные карточки, обе в кандидатах
+    first = adapter.create_student('Козлов Кирилл Кириллович', 'М', 'ИСИ', 'ПГС-101', '1')
+    second = adapter.create_student('Козлов Кирилл Кириллович', 'М', 'ИМИ', 'СБ-202', '2')
+    candidates = adapter.find_student_candidates('Козлов Кирилл Кириллович')
+    assert [candidate['student_id'] for candidate in candidates] == [first, second]
+    assert len({candidate['institute'] for candidate in candidates}) == 2
+
+
+def test_link_competitions_atomic_rejects_already_linked(adapter):
+    """Массовая привязка — «всё или ничего»: при частично занятом наборе
+    не меняется НИ одна запись."""
+    adapter.save_competitions(
+        [
+            make_competition('Иванов Иван', datetime(2026, 1, 10)),
+            make_competition('Иванов Иван', datetime(2026, 2, 10)),
+        ]
+    )
+    first = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    second = adapter.create_student('Другой Студент', 'Ж', '', '', '')
+
+    count, error = adapter.link_competitions([1], first)
+    assert (count, error) == (1, None)
+
+    count, error = adapter.link_competitions([1, 2], second)
+    assert (count, error) == (0, 'already_linked')
+    refs = {
+        row['id']: row['student_ref_id']
+        for row in adapter.connection.execute('SELECT id, student_ref_id FROM competitions')
+    }
+    assert refs == {1: first, 2: None}
+
+    # Повторная привязка той же записи — тоже already_linked
+    assert adapter.link_competitions([1], first) == (0, 'already_linked')
+
+
+def test_link_competitions_rejects_inactive_missing_student_and_records(adapter):
+    adapter.save_competitions([make_competition('Иванов Иван', datetime(2026, 1, 10))])
+    inactive_id = adapter.create_student('Неактивный', 'М', '', '', '')
+    adapter.set_student_active(inactive_id, False)
+    active_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+
+    # Карточка проверяется первой: не существует / неактивна
+    assert adapter.link_competitions([1], inactive_id) == (0, 'student_inactive')
+    assert adapter.link_competitions([1], 999999) == (0, 'student_not_found')
+    # Затем записи: не существует / пустой набор
+    assert adapter.link_competitions([999999], active_id) == (0, 'records_not_found')
+    assert adapter.link_competitions([], active_id) == (0, 'records_not_found')
+    # Ничего не изменилось
+    row = adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = 1').fetchone()
+    assert row['student_ref_id'] is None
+
+    # Дубликаты id в наборе схлопываются
+    assert adapter.link_competitions([1, 1], active_id) == (1, None)
+
+
+def test_unlink_and_relink_competition_return_old_ref(adapter):
+    adapter.save_competitions([make_competition('Иванов Иван', datetime(2026, 1, 10))])
+    first = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    second = adapter.create_student('Новый Студент', 'Ж', '', '', '')
+
+    assert adapter.unlink_competition(999999) is None
+    assert adapter.unlink_competition(1) is None  # связи и так нет
+
+    count, error = adapter.link_competitions([1], first)
+    assert (count, error) == (1, None)
+    assert adapter.relink_competition(1, second) == (first, None)
+    assert (
+        adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = 1').fetchone()['student_ref_id']
+        == second
+    )
+    assert adapter.unlink_competition(1) == second
+
+    # Relink разрешён и без текущей связи — работает как привязка
+    assert adapter.relink_competition(1, first) == (None, None)
+
+    adapter.set_student_active(second, False)
+    assert adapter.relink_competition(1, second) == (None, 'student_inactive')
+    assert adapter.relink_competition(1, 999999) == (None, 'student_not_found')
+    assert adapter.relink_competition(999999, first) == (None, 'records_not_found')
+
+
+def test_user_link_validates_role_and_null_state(adapter):
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    other_student = adapter.create_student('Другой', 'Ж', '', '', '')
+    anna_id = make_athlete_user(adapter, 'anna')
+    adapter.create_user('chief', 'scrypt$x', 'admin')
+    chief_id = adapter.get_user('chief')['id']
+
+    assert adapter.link_user(999999, student_id) == (0, 'user_not_found')
+    assert adapter.link_user(chief_id, student_id) == (0, 'user_not_athlete')
+    assert adapter.link_user(anna_id, 999999) == (0, 'student_not_found')
+
+    inactive_id = adapter.create_student('Спящий', 'М', '', '', '')
+    adapter.set_student_active(inactive_id, False)
+    assert adapter.link_user(anna_id, inactive_id) == (0, 'student_inactive')
+
+    assert adapter.link_user(anna_id, student_id) == (1, None)
+    assert adapter.link_user(anna_id, student_id) == (0, 'user_already_linked')
+    assert adapter.link_user(anna_id, other_student) == (0, 'user_already_linked')
+
+    # Два аккаунта атлета МОГУТ смотреть на одну карточку
+    boris_id = make_athlete_user(adapter, 'boris')
+    assert adapter.link_user(boris_id, student_id) == (1, None)
+
+    assert adapter.unlink_user(anna_id) == student_id
+    assert adapter.unlink_user(anna_id) is None
+    assert adapter.unlink_user(999999) is None
+
+    assert adapter.relink_user(boris_id, other_student) == (student_id, None)
+    assert adapter.relink_user(999999, other_student) == (None, 'user_not_found')
+    assert adapter.relink_user(chief_id, other_student) == (None, 'user_not_athlete')
+    assert adapter.relink_user(boris_id, 999999) == (None, 'student_not_found')
+    adapter.set_student_active(other_student, False)
+    assert adapter.relink_user(boris_id, other_student) == (None, 'student_inactive')
+
+
+def test_reconciliation_ops_keep_snapshots_and_legacy_keys(adapter):
+    """Привязки меняют ТОЛЬКО student_ref_id: строки записей и пользователей
+    байт-в-байт совпадают до и после (кроме самой ссылки)."""
+    adapter.save_competitions([make_competition('Иванов Иван', datetime(2026, 1, 10))])
+    student_id = adapter.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    anna_id = make_athlete_user(
+        adapter,
+        'anna',
+        profile={'student_name': 'Иванов Иван', 'student_sex': 'М', 'institute': 'ИСИ'},
+        aliases=['Иванов И.И.'],
+    )
+
+    competition_before = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
+    user_before = adapter.connection.execute('SELECT * FROM users WHERE id = ?', (anna_id,)).fetchone()
+
+    adapter.link_competitions([1], student_id)
+    adapter.link_user(anna_id, student_id)
+    adapter.relink_competition(1, student_id)
+    adapter.unlink_competition(1)
+    adapter.unlink_user(anna_id)
+
+    competition_after = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
+    user_after = adapter.connection.execute('SELECT * FROM users WHERE id = ?', (anna_id,)).fetchone()
+
+    def without_ref(row):
+        return tuple(value for key, value in zip(row.keys(), tuple(row)) if key != 'student_ref_id')
+
+    assert without_ref(competition_after) == without_ref(competition_before)
+    assert without_ref(user_after) == without_ref(user_before)
+    # Легаси-ключ и снимки не тронуты даже в связанном состоянии
+    adapter.link_competitions([1], student_id)
+    adapter.link_user(anna_id, student_id)
+    competition_linked = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
+    user_linked = adapter.connection.execute('SELECT * FROM users WHERE id = ?', (anna_id,)).fetchone()
+    assert competition_linked['student_id'] == competition_before['student_id']
+    assert competition_linked['student_name'] == competition_before['student_name']
+    assert user_linked['name_aliases'] == user_before['name_aliases']
+    assert user_linked['profile_data'] == user_before['profile_data']
+
+
+def test_linked_records_and_users_queries(adapter):
+    adapter.save_competitions(
+        [
+            make_competition('Старое ФИО', datetime(2026, 1, 10)),
+            make_competition('Старое ФИО', datetime(2026, 2, 20)),
+            make_competition('Чужой', datetime(2026, 3, 30)),
+        ]
+    )
+    student_id = adapter.create_student('Новое ФИО', 'М', '', '', '')
+    anna_id = make_athlete_user(adapter, 'anna')
+    boris_id = make_athlete_user(adapter, 'boris')
+    adapter.link_competitions([1, 2], student_id)
+    adapter.link_user(anna_id, student_id)
+    adapter.link_user(boris_id, student_id)
+    adapter.set_user_active(boris_id, False)
+
+    assert adapter.linked_records_count(student_id) == 2
+    records = adapter.list_linked_records(student_id)
+    # Свежие сверху; student_name — снимок записи, а не ФИО карточки
+    assert [record['id'] for record in records] == [2, 1]
+    assert records[0]['student_name'] == 'Старое ФИО'
+    assert records[0]['sport'] == 'Бег'
+    assert records[0]['name'] == 'Кубок'
+    assert set(records[0]) == {'id', 'student_name', 'sport', 'date', 'date_to', 'name'}
+    # Лимит: показывается не больше limit записей
+    assert len(adapter.list_linked_records(student_id, limit=1)) == 1
+
+    users = adapter.linked_athlete_users(student_id)
+    assert [(user['id'], user['username'], user['active']) for user in users] == [
+        (anna_id, 'anna', 1),
+        (boris_id, 'boris', 0),
+    ]
+    assert adapter.linked_records_count(999999) == 0
+    assert adapter.linked_athlete_users(999999) == []

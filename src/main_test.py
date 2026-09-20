@@ -6901,3 +6901,794 @@ def test_admin_person_non_numeric_id_returns_400(people_client: SanicTestClient)
 
     _, response = people_client.post('/admin/people/1/alias/abc/delete', headers=headers, data=csrf_for(headers))
     assert response.status == 400
+
+
+# --- Сопоставление данных (Student Identity v1, Phase 2). ---
+# Полные сценарии на реальном SQLite-адаптере (паттерн people_client):
+# привязки записей/аккаунтов к карточкам, аудит и главная гарантия —
+# runtime (кабинет атлета, отчёты) не замечает student_ref_id.
+
+
+@pytest.fixture
+def reconcile_client(client: SanicTestClient, tmp_path):
+    storage = SQLiteAdapter(str(tmp_path / 'reconcile.sqlite3'))
+    storage.create_user(settings.auth_admin_username, 'hash', 'admin')
+    # Атлет для проверок кабинета (athlete_headers использует логин sportik).
+    storage.create_user('sportik', 'hash', 'athlete')
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+def save_reconcile_record(storage, name: str, date: datetime, position: int = 1) -> int:
+    """Одна одобренная запись реестра; возвращает её id.
+
+    Легаси-ключ личности — sha256(ФИО), как в реальных данных.
+    """
+    storage.save_competitions(
+        [
+            Competition(
+                student_id=sha256(name.encode()).hexdigest(),
+                student_name=name,
+                student_sex='М',
+                institute='ИСИ',
+                group='ПГС-101',
+                course=2,
+                sport='Бег',
+                date=date,
+                level='внутривузовские',
+                name='Кубок',
+                position=position,
+                extra_data={},
+            )
+        ]
+    )
+    row = storage.connection.execute('SELECT MAX(id) AS id FROM competitions').fetchone()
+    return row['id']
+
+
+def record_ref(storage, record_id: int):
+    row = storage.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    return row['student_ref_id'] if row else 'missing'
+
+
+def user_ref(storage, user_id: int):
+    row = storage.connection.execute('SELECT student_ref_id FROM users WHERE id = ?', (user_id,)).fetchone()
+    return row['student_ref_id'] if row else 'missing'
+
+
+def audit_details(storage, action: str) -> list[dict]:
+    events = storage.get_audit_events(limit=100)
+    return [json.loads(event['details']) for event in events if event['action'] == action]
+
+
+def test_reconcile_pages_require_admin(reconcile_client: SanicTestClient):
+    _, response = reconcile_client.get('/admin/people/reconcile', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = reconcile_client.get('/admin/people/reconcile/users', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = reconcile_client.get('/admin/people/reconcile', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    _, response = reconcile_client.post('/admin/people/reconcile/link', data={'record_ids[]': ['1']})
+    assert response.status == 401
+
+    _, response = reconcile_client.post('/admin/people/reconcile/users/link', data={'user_id': '1'})
+    assert response.status == 401
+
+
+def test_reconcile_route_priority_over_student_id(reconcile_client: SanicTestClient):
+    """/admin/people/reconcile — статический маршрут, а не id карточки."""
+    _, response = reconcile_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Записи без студента' in response.text
+
+    _, response = reconcile_client.get('/admin/people/reconcile/users', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Аккаунты атлетов без студента' in response.text
+
+
+def test_reconcile_records_tab_renders_and_paginates(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    ivanov_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))
+
+    _, response = reconcile_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert response.status == 200
+    # Сводка счётчиков: всего/без студента по записям и аккаунтам
+    assert 'Записей о соревнованиях: 2' in response.text
+    assert 'Аккаунтов атлетов: 1' in response.text
+    assert '<strong>2</strong>' in response.text
+    assert '<strong>1</strong>' in response.text
+    # Запись и кандидаты: точное совпадение ФИО — карточка Иванова
+    assert 'Иванов Иван' in response.text
+    assert f'<a href="/admin/people/{student_id}">Иванов Иван</a>' in response.text
+    assert 'Подходящих студентов не найдено.' in response.text
+    assert 'Создать студента из записи' in response.text
+    # Возврат для форм — текущая страница без поиска
+    assert 'value="/admin/people/reconcile?page=1"' in response.text
+
+    # Пагинация в стиле журнала аудита: 55 записей «Бегун» — две страницы
+    for index in range(55):
+        save_reconcile_record(storage, f'Бегун Бежит {index:02d}', datetime(2026, 3, 1))
+    _, response = reconcile_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert 'страница 1 из 2' in response.text
+    assert 'Всего по фильтру: 57' in response.text
+    assert '/admin/people/reconcile?page=2' in response.text
+
+    # Страница 2: хвост «Бегунов» + Иванов и Петров (алфавит), первой страницы тут нет
+    _, response = reconcile_client.get('/admin/people/reconcile?page=2', headers=get_auth_headers())
+    assert 'страница 2 из 2' in response.text
+    assert 'Бегун Бежит 00' not in response.text
+    assert 'Иванов Иван' in response.text
+    assert f'#{ivanov_id}' in response.text
+
+    # Поиск сохраняется в ссылках пагинации
+    _, response = reconcile_client.get(
+        '/admin/people/reconcile?q=%D0%91%D0%B5%D0%B3%D1%83%D0%BD', headers=get_auth_headers()
+    )
+    assert 'страница 1 из 2' in response.text
+    assert 'q=%D0%91%D0%B5%D0%B3%D1%83%D0%BD&amp;page=2' in response.text
+
+    # Пустые состояния: поиск без результата и полностью пустой раздел
+    _, response = reconcile_client.get('/admin/people/reconcile?q=%D0%9D%D0%B5%D1%82', headers=get_auth_headers())
+    assert 'непривязанных записей не найдено' in response.text
+
+    storage.connection.execute('UPDATE competitions SET student_ref_id = 1')
+    storage.connection.commit()
+    _, response = reconcile_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert 'Всё сопоставлено: записей без студента нет.' in response.text
+
+
+def test_reconcile_records_tab_does_not_autolink(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+
+    _, response = reconcile_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert response.status == 200
+
+    # Кандидаты — только предложения: страница ничего не связывает сама
+    assert record_ref(storage, record_id) is None
+    user = storage.get_user('sportik')
+    assert user_ref(storage, user['id']) is None
+
+
+def test_reconcile_single_link_via_candidate(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_ids[]': [str(record_id)],
+            'student_id': str(student_id),
+            'back': '/admin/people/reconcile',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/reconcile?')
+    assert 'Запись №1 привязана к студенту «Иванов Иван».' in location
+
+    assert record_ref(storage, record_id) == student_id
+    # Снимок записи и легаси-ключ не тронуты
+    row = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert row['student_name'] == 'Иванов Иван'
+    assert row['student_id'] == sha256('Иванов Иван'.encode()).hexdigest()
+    assert audit_details(storage, 'competition_linked_to_student') == [
+        {'record_id': record_id, 'old_ref': None, 'new_ref': student_id, 'student_id': student_id}
+    ]
+
+
+def test_reconcile_bulk_link_single_audit_event(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    first = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    second = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 2, 10))
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_ids[]': [str(first), str(second)],
+            'student_id': str(student_id),
+            'back': '/admin/people/reconcile',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Привязано записей: 2 — студент «Иванов Иван».' in location
+
+    assert record_ref(storage, first) == student_id
+    assert record_ref(storage, second) == student_id
+    # Ровно одно событие на всю массовую привязку
+    assert audit_details(storage, 'student_records_bulk_linked') == [
+        {'student_id': student_id, 'record_ids': [first, second], 'count': 2}
+    ]
+    assert audit_details(storage, 'competition_linked_to_student') == []
+
+
+def test_reconcile_bulk_rejects_partially_linked(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    first_student = storage.create_student('Первый', 'М', '', '', '')
+    second_student = storage.create_student('Второй', 'Ж', '', '', '')
+    first = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    second = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 2, 10))
+    storage.link_competitions([first], first_student)
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_ids[]': [str(first), str(second)],
+            'student_id': str(second_student),
+            'back': '/admin/people/reconcile',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Ничего не привязано: часть выбранных записей уже привязана. Обновите список и повторите.' in location
+    # Всё или ничего: вторая запись не связана, первая осталась у прежнего студента
+    assert record_ref(storage, first) == first_student
+    assert record_ref(storage, second) is None
+    assert audit_details(storage, 'student_records_bulk_linked') == []
+
+    # Одиночная привязка занятой записи — свой текст
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_ids[]': [str(first)],
+            'student_id': str(second_student),
+            'back': '/admin/people/reconcile',
+        },
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert 'Запись №1 уже привязана к студенту.' in location
+    assert record_ref(storage, first) == first_student
+
+
+def test_reconcile_link_validation_errors(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.create_student('Иванов Иван', 'М', '', '', '')
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    headers = get_auth_headers()
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={**csrf_for(headers), 'student_id': '1', 'back': '/admin/people/reconcile'},
+        allow_redirects=False,
+    )
+    assert 'Не выбрано ни одной записи.' in unquote_plus(response.headers['location'])
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={**csrf_for(headers), 'record_ids[]': ['1'], 'back': '/admin/people/reconcile'},
+        allow_redirects=False,
+    )
+    assert 'Выберите студента.' in unquote_plus(response.headers['location'])
+
+    # Неактивная карточка — привязка запрещена с понятным текстом
+    inactive = storage.create_student('Спящий Студент', 'М', '', '', '')
+    storage.set_student_active(inactive, False)
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_ids[]': ['1'],
+            'student_id': str(inactive),
+            'back': '/admin/people/reconcile',
+        },
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert 'Студент «Спящий Студент» неактивен: привязка возможна только к активным студентам.' in location
+    assert record_ref(storage, 1) is None
+
+    # Неизвестная карточка
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={**csrf_for(headers), 'record_ids[]': ['1'], 'student_id': '999999', 'back': '/x'},
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert 'Студент не найден.' in location
+    # Недоверенный back заменён вкладкой сопоставления
+    assert location.startswith('/admin/people/reconcile?')
+
+
+def test_reconcile_create_from_record(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    headers = get_auth_headers()
+
+    _, response = reconcile_client.get(
+        f'/admin/people/reconcile/create?record_id={record_id}&back=/admin/people/reconcile',
+        headers=headers,
+    )
+    assert response.status == 200
+    assert 'Источник — запись №1' in response.text
+    assert 'value="Иванов Иван"' in response.text
+    assert 'создан, запись №1 привязана' in response.text or 'сразу привяжется' in response.text
+    assert 'Сама запись' not in response.text or 'не изменится' in response.text
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/create',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_id': str(record_id),
+            'back': '/admin/people/reconcile',
+            'full_name': 'Иванов Иван',
+            'sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Студент «Иванов Иван» создан, запись №1 привязана к нему.' in location
+
+    student = storage.get_student_by_id(1)
+    assert student['full_name'] == 'Иванов Иван'
+    assert record_ref(storage, record_id) == 1
+    # Снимок записи не переписан
+    row = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert row['student_name'] == 'Иванов Иван'
+    assert row['institute'] == 'ИСИ'
+    assert audit_details(storage, 'student_created') == [
+        {'student_id': 1, 'full_name': 'Иванов Иван', 'source': 'reconciliation-record'}
+    ]
+    assert audit_details(storage, 'competition_linked_to_student')[0]['record_id'] == record_id
+
+    # Гонка: запись уже связали — студент НЕ создаётся, запись не трогаем
+    another = storage.create_student('Другой', 'Ж', '', '', '')
+    storage.unlink_competition(record_id)
+    assert storage.link_competitions([record_id], another) == (1, None)
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/create',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_id': str(record_id),
+            'back': '/admin/people/reconcile',
+            'full_name': 'Ещё Студент',
+            'sex': '',
+            'institute': '',
+            'group': '',
+            'course': '',
+        },
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert 'Запись №1 уже привязана к студенту.' in location
+    assert record_ref(storage, record_id) == another
+    # Новая карточка не создана: в базе по-прежнему «Другой» и исходный студент
+    assert [student['full_name'] for student in storage.list_students()] == ['Другой', 'Иванов Иван']
+
+    # Окно гонки между проверкой и привязкой: карточка уже создана — она
+    # остаётся, запись не меняется, flash объясняет (симуляция подменой ответа
+    # хранилища на already_linked). Запись на момент запроса свободна.
+    storage.unlink_competition(record_id)
+    original_link = storage.link_competitions
+    storage.link_competitions = lambda record_ids, student_id: (0, 'already_linked')
+    try:
+        _, response = reconcile_client.post(
+            '/admin/people/reconcile/create',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'record_id': str(record_id),
+                'back': '/admin/people/reconcile',
+                'full_name': 'Гонка Гонщиков',
+                'sex': '',
+                'institute': '',
+                'group': '',
+                'course': '',
+            },
+            allow_redirects=False,
+        )
+    finally:
+        storage.link_competitions = original_link
+    location = unquote_plus(response.headers['location'])
+    assert 'Студент «Гонка Гонщиков» создан, но запись №1 уже была привязана другим действием.' in location
+    assert location.startswith('/admin/people/3?')
+    # Запись в окне гонки не была тронута этим запросом
+    assert record_ref(storage, record_id) is None
+    assert storage.get_student_by_id(3)['full_name'] == 'Гонка Гонщиков'
+
+    # GET-ошибки: неизвестная запись и уже привязанная
+    _, response = reconcile_client.get(
+        '/admin/people/reconcile/create?record_id=999999&back=/admin/people/reconcile',
+        headers=headers,
+        allow_redirects=False,
+    )
+    assert 'Запись не найдена.' in unquote_plus(response.headers['location'])
+
+    storage.link_competitions([record_id], another)
+    _, response = reconcile_client.get(
+        f'/admin/people/reconcile/create?record_id={record_id}&back=/admin/people/reconcile',
+        headers=headers,
+        allow_redirects=False,
+    )
+    assert 'Запись №1 уже привязана к студенту.' in unquote_plus(response.headers['location'])
+
+
+def test_reconcile_create_from_user_profile(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    user = storage.get_user('sportik')
+    storage.set_profile(
+        user['id'],
+        {'student_name': 'Спортсменов Спорт', 'student_sex': 'М', 'institute': 'ИСИ', 'group': 'СБ-101', 'course': '1'},
+    )
+    storage.add_name_alias(user['id'], 'Спортсменов С.С.')
+    headers = get_auth_headers()
+
+    # Вкладка аккаунтов: карточка с профилем и предупреждением о псевдонимах
+    _, response = reconcile_client.get('/admin/people/reconcile/users', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'sportik' in response.text
+    assert 'Спортсменов Спорт' in response.text
+    assert 'Псевдонимы ФИО аккаунта' in response.text
+    assert 'Спортсменов С.С.' in response.text
+    assert 'не копирует псевдонимы аккаунта студенту' in response.text
+
+    _, response = reconcile_client.get(
+        f'/admin/people/reconcile/users/create?user_id={user["id"]}&back=/admin/people/reconcile/users',
+        headers=headers,
+    )
+    assert response.status == 200
+    assert 'Источник — аккаунт sportik (профиль атлета)' in response.text
+    assert 'value="Спортсменов Спорт"' in response.text
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/create',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'user_id': str(user['id']),
+            'back': '/admin/people/reconcile/users',
+            'full_name': 'Спортсменов Спорт',
+            'sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'СБ-101',
+            'course': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Студент «Спортсменов Спорт» создан, аккаунт sportik привязан к нему.' in location
+
+    assert user_ref(storage, user['id']) == 1
+    # Псевдонимы аккаунта НЕ перенесены в student_aliases и остались у аккаунта
+    assert storage.list_student_aliases(1) == []
+    assert storage.get_name_aliases(user['id']) == ['Спортсменов С.С.']
+    assert audit_details(storage, 'student_created') == [
+        {'student_id': 1, 'full_name': 'Спортсменов Спорт', 'source': 'reconciliation-user'}
+    ]
+    assert audit_details(storage, 'user_linked_to_student') == [
+        {'user_id': user['id'], 'username': 'sportik', 'old_ref': None, 'new_ref': 1}
+    ]
+
+    # Повторное создание из уже привязанного аккаунта — ошибка без новой карточки
+    _, response = reconcile_client.get(
+        f'/admin/people/reconcile/users/create?user_id={user["id"]}&back=/admin/people/reconcile/users',
+        headers=headers,
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert 'Аккаунт sportik уже привязан к студенту.' in location
+    assert len(storage.list_students()) == 1
+
+
+def test_reconcile_user_link_unlink_relink(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    user = storage.get_user('sportik')
+    admin_user = storage.get_user(settings.auth_admin_username)
+    first = storage.create_student('Иванов Иван', 'М', '', '', '')
+    second = storage.create_student('Новый ФИО', 'Ж', '', '', '')
+    headers = get_auth_headers()
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'user_id': str(user['id']),
+            'student_id': str(first),
+            'back': '/admin/people/reconcile/users',
+        },
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert 'Аккаунт sportik привязан к студенту «Иванов Иван».' in location
+
+    # Повторная привязка и не-атлет
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'user_id': str(user['id']),
+            'student_id': str(second),
+            'back': '/admin/people/reconcile/users',
+        },
+        allow_redirects=False,
+    )
+    assert 'Аккаунт sportik уже привязан к студенту.' in unquote_plus(response.headers['location'])
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'user_id': str(admin_user['id']),
+            'student_id': str(first),
+            'back': '/admin/people/reconcile/users',
+        },
+        allow_redirects=False,
+    )
+    assert 'Пользователь не является атлетом.' in unquote_plus(response.headers['location'])
+    assert user_ref(storage, admin_user['id']) is None
+
+    # Перепривязка и отвязка
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/relink',
+        headers=headers,
+        data={**csrf_for(headers), 'user_id': str(user['id']), 'student_id': str(second)},
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/admin/people/{second}?')
+    assert 'Аккаунт sportik перепривязан на студента «Новый ФИО».' in location
+    assert user_ref(storage, user['id']) == second
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/unlink',
+        headers=headers,
+        data={**csrf_for(headers), 'user_id': str(user['id'])},
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/admin/people/{second}?')
+    assert 'Аккаунт sportik отвязан от студента «Новый ФИО».' in location
+    assert user_ref(storage, user['id']) is None
+
+    assert audit_details(storage, 'user_linked_to_student') == [
+        {'user_id': user['id'], 'username': 'sportik', 'old_ref': None, 'new_ref': first}
+    ]
+    assert audit_details(storage, 'user_relinked_to_student') == [
+        {'user_id': user['id'], 'username': 'sportik', 'old_ref': first, 'new_ref': second}
+    ]
+    assert audit_details(storage, 'user_unlinked_from_student') == [
+        {'user_id': user['id'], 'username': 'sportik', 'old_ref': second, 'new_ref': None}
+    ]
+
+
+def test_reconcile_record_unlink_and_relink(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    first = storage.create_student('Иванов Иван', 'М', '', '', '')
+    second = storage.create_student('Новый ФИО', 'Ж', '', '', '')
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    storage.link_competitions([record_id], first)
+    headers = get_auth_headers()
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/unlink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': str(record_id)},
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/admin/people/{first}?')
+    assert 'Запись №1 отвязана от студента «Иванов Иван».' in location
+    assert record_ref(storage, record_id) is None
+    assert audit_details(storage, 'competition_unlinked_from_student') == [{'record_id': record_id, 'old_ref': first}]
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/relink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': str(record_id), 'student_id': str(second)},
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/admin/people/{second}?')
+    assert 'Запись №1 перепривязана на студента «Новый ФИО».' in location
+    assert record_ref(storage, record_id) == second
+    assert audit_details(storage, 'competition_relinked') == [
+        {'record_id': record_id, 'old_ref': None, 'new_ref': second, 'student_id': second}
+    ]
+
+    # Неизвестные цели
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/unlink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': '999999'},
+        allow_redirects=False,
+    )
+    assert 'Запись не найдена.' in unquote_plus(response.headers['location'])
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/relink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': str(record_id), 'student_id': '999999'},
+        allow_redirects=False,
+    )
+    assert 'Студент не найден.' in unquote_plus(response.headers['location'])
+
+
+def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    other = storage.create_student('Другой Студент', 'Ж', '', '', '')
+
+    _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Связанные данные' in response.text
+    assert 'Привязанных записей пока нет.' in response.text
+    assert 'Аккаунтов атлетов нет.' in response.text
+
+    first = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    second = save_reconcile_record(storage, 'Старое ФИО', datetime(2026, 2, 10))
+    storage.link_competitions([first, second], student_id)
+    sportik = storage.get_user('sportik')
+    storage.create_user('backuper', 'hash', 'athlete')
+    backuper = storage.get_user('backuper')
+    storage.link_user(sportik['id'], student_id)
+    storage.link_user(backuper['id'], student_id)
+
+    _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
+    assert 'Записи о соревнованиях' in response.text
+    # ФИО в записи — снимок записи, а не актуальное ФИО карточки
+    assert 'Старое ФИО' in response.text
+    assert 'Отвязать' in response.text
+    assert 'Перепривязать' in response.text
+    # Предупреждение о двух аккаунтах
+    assert 'привязано 2 аккаунта атлета' in response.text
+    assert 'sportik' in response.text
+    assert 'backuper' in response.text
+    # Перепривязка предлагает всех активных, кроме текущего студента
+    assert f'/admin/people/{other}' not in response.text or 'Другой Студент' not in response.text
+
+    # Больше 50 записей — показываются первые 50 с припиской
+    for index in range(51):
+        save_reconcile_record(storage, f'Бегун Бежит {index:02d}', datetime(2026, 3, 1))
+    ids = [row['id'] for row in storage.connection.execute('SELECT id FROM competitions WHERE student_ref_id IS NULL')]
+    storage.link_competitions(ids, student_id)
+    _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
+    assert '…и ещё 3 записей (показаны первые 50).' in response.text
+
+
+def test_reconcile_link_keeps_athlete_cabinet_unchanged(reconcile_client: SanicTestClient):
+    """Runtime-совместимость: кабинет атлета считает записи по легаси
+    sha256(ФИО) из профиля — привязка student_ref_id ничего не меняет."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    own_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    alien_id = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))
+
+    # Один и тот же cookie на оба запроса: иначе отличается csrf-мета страницы
+    athlete = athlete_headers()
+    _, before = reconcile_client.get('/', headers=athlete)
+    assert before.status == 200
+    assert 'Иванов Иван' in before.text
+    assert 'Петров Пётр' not in before.text
+
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    assert storage.link_competitions([own_id, alien_id], student_id) == (2, None)
+    assert storage.link_user(sportik['id'], student_id) == (1, None)
+
+    _, after = reconcile_client.get('/', headers=athlete)
+    assert after.status == 200
+    assert after.text == before.text
+
+    # Отчёт администратора тоже не изменился от привязок
+    _, report_before = reconcile_client.get('/report?slice=student', headers=get_auth_headers())
+    storage.unlink_competition(own_id)
+    storage.unlink_competition(alien_id)
+    _, report_after = reconcile_client.get('/report?slice=student', headers=get_auth_headers())
+    assert report_before.text == report_after.text
+
+
+def test_reconcile_endpoints_reject_missing_csrf(reconcile_client: SanicTestClient):
+    headers = get_auth_headers()
+    for url, data in (
+        ('/admin/people/reconcile/link', {'record_ids[]': ['1'], 'student_id': '1'}),
+        ('/admin/people/reconcile/unlink', {'record_id': '1'}),
+        ('/admin/people/reconcile/users/link', {'user_id': '1', 'student_id': '1'}),
+        ('/admin/people/reconcile/users/unlink', {'user_id': '1'}),
+    ):
+        _, response = reconcile_client.post(url, headers=headers, data=data, allow_redirects=False)
+        assert response.status == 403, url
+        assert 'CSRF' in response.text
+
+
+def test_reconcile_non_numeric_ids_return_400(reconcile_client: SanicTestClient):
+    _, response = reconcile_client.get('/admin/people/reconcile/create?record_id=abc', headers=get_auth_headers())
+    assert response.status == 400
+
+    _, response = reconcile_client.get('/admin/people/reconcile/users/create?user_id=abc', headers=get_auth_headers())
+    assert response.status == 400
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={**csrf_for(headers), 'record_ids[]': ['abc'], 'student_id': '1'},
+    )
+    assert response.status == 400
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={**csrf_for(headers), 'record_ids[]': ['1'], 'student_id': 'abc'},
+    )
+    assert response.status == 400
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/unlink', headers=headers, data={**csrf_for(headers), 'record_id': 'abc'}
+    )
+    assert response.status == 400
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/users/link',
+        headers=headers,
+        data={**csrf_for(headers), 'user_id': 'abc', 'student_id': '1'},
+    )
+    assert response.status == 400
+
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/relink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': '1', 'student_id': 'abc'},
+    )
+    assert response.status == 400
+
+
+def test_reconcile_links_in_admin_hub_and_people(reconcile_client: SanicTestClient):
+    storage = app.ctx.storage
+    _, response = reconcile_client.get('/admin', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Сопоставление данных' in response.text
+    assert 'href="/admin/people/reconcile"' in response.text
+
+    # Бейдж непривязанных записей — только когда они есть
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    _, response = reconcile_client.get('/admin/people', headers=get_auth_headers())
+    assert 'Сопоставление данных' in response.text
+    assert '<span class="badge text-bg-light border">1</span>' in response.text
+
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_competitions([record_id], student_id)
+    _, response = reconcile_client.get('/admin/people', headers=get_auth_headers())
+    assert 'badge text-bg-light border' not in response.text

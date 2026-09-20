@@ -110,6 +110,7 @@ login_failures: dict[str, list] = {}
 logger = logging.getLogger(__name__)
 
 AUDIT_PAGE_SIZE = 50
+RECONCILE_PAGE_SIZE = 50
 PRE_WIPE_ARCHIVES_SHOWN = 20
 
 BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
@@ -3692,6 +3693,7 @@ async def admin_people_page(request: Request):
             'students': students,
             'q': search,
             'total': total,
+            'reconcile_unlinked': storage.count_student_reconciliation()['records_unlinked'],
             **get_flash_args(request),
         },
     )
@@ -3721,6 +3723,627 @@ async def admin_person_create(request: Request):
     )
 
 
+# --- Сопоставление данных (Student Identity v1, Phase 2). ---
+#
+# Ручное заполнение стабильных связей student_ref_id у СУЩЕСТВУЮЩИХ записей
+# и аккаунтов атлетов. Кандидаты на странице — только ПРЕДЛОЖЕНИЯ, ничего
+# не связывается автоматически. Привязка меняет ТОЛЬКО student_ref_id:
+# снимки данных в записях, легаси-ключ sha256(ФИО), кабинет атлета,
+# отчёты, импорт/экспорт и календарь работают как раньше (Phase 3 не
+# начата). Регистрируется ДО /admin/people/<student_id>, чтобы статический
+# путь /admin/people/reconcile не разбирался как id карточки.
+
+
+def parse_reconcile_int(raw: str, label: str):
+    """Целое из строки формы/URL: (значение, None) или (None, ответ 400).
+
+    Пустая строка — тоже некорректный id (поле обязательное).
+    """
+    raw = (raw or '').strip()
+    if not raw:
+        return None, text(body=f'Invalid {label}', status=400)
+    try:
+        return int(raw), None
+    except ValueError:
+        return None, text(body=f'Invalid {label}', status=400)
+
+
+def reconcile_back_url(raw: str) -> str:
+    """Возврат внутрь раздела сопоставления: открытые редиректы исключены,
+    посторонние пути заменяются вкладкой записей."""
+    raw = (raw or '').strip()
+    if raw.startswith('/admin/people/reconcile'):
+        return raw
+    return '/admin/people/reconcile'
+
+
+def reconcile_student_error(storage: SQLiteAdapter, student_id: int, code: str) -> str:
+    """Flash-текст ошибки привязки по коду хранилища (карточка/активность)."""
+    student = storage.get_student_by_id(student_id)
+    if student is None:
+        return 'Студент не найден.'
+    if code == 'student_inactive':
+        return f'Студент «{student["full_name"]}» неактивен: привязка возможна только к активным студентам.'
+    return 'Студент не найден.'
+
+
+def reconcile_link_error(
+    storage: SQLiteAdapter,
+    record_ids: list[int],
+    student_id: int,
+    code: str,
+) -> str:
+    """Flash-текст ошибки привязки записей (одиночной и массовой)."""
+    if code in ('student_not_found', 'student_inactive'):
+        return reconcile_student_error(storage, student_id, code)
+    if code == 'records_not_found':
+        return 'Запись не найдена.'
+    if len(record_ids) == 1:
+        return f'Запись №{record_ids[0]} уже привязана к студенту.'
+    return 'Ничего не привязано: часть выбранных записей уже привязана. Обновите список и повторите.'
+
+
+def reconcile_create_url(*, record_id: int | None = None, user_id: int | None = None, back: str) -> str:
+    """URL страницы создания студента из записи/профиля с возвратом."""
+    params = {'back': back}
+    if record_id is not None:
+        params['record_id'] = record_id
+    if user_id is not None:
+        params['user_id'] = user_id
+    query = urlencode(params)
+    if record_id is not None:
+        return f'/admin/people/reconcile/create?{query}'
+    return f'/admin/people/reconcile/users/create?{query}'
+
+
+@app.get('/admin/people/reconcile')
+async def admin_reconcile_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    q = (get_param(dict(request.args), 'q') or '').strip()
+    try:
+        page = max(1, int(get_param(dict(request.args), 'page') or 1))
+    except ValueError:
+        page = 1
+
+    counters = storage.count_student_reconciliation()
+    total = storage.count_unlinked_competitions(search=q)
+    pages = max(1, -(-total // RECONCILE_PAGE_SIZE))
+    page = min(page, pages)
+    records = storage.list_unlinked_competitions(
+        search=q, limit=RECONCILE_PAGE_SIZE, offset=(page - 1) * RECONCILE_PAGE_SIZE
+    )
+    # Кандидаты — только для текущей страницы (точное совпадение ФИО).
+    for record in records:
+        record['candidates'] = storage.find_student_candidates(record['student_name'])
+        # Даты — datetime для format_date_range в шаблоне.
+        record['date'] = datetime.fromisoformat(record['date']) if record['date'] else None
+        record['date_to'] = datetime.fromisoformat(record['date_to']) if record['date_to'] else None
+    active_students = [student for student in storage.list_students() if student['active']]
+
+    query = urlencode({'q': q}) if q else ''
+
+    def page_url(page_number: int) -> str:
+        return (
+            f'/admin/people/reconcile?{query}&page={page_number}'
+            if query
+            else f'/admin/people/reconcile?page={page_number}'
+        )
+
+    return await render(
+        template_name=jinja_env.get_template('admin_reconcile.html'),
+        context={
+            'request': request,
+            'counters': counters,
+            'q': q,
+            'records': records,
+            'active_students': active_students,
+            'page': page,
+            'pages': pages,
+            'total': total,
+            'page_size': RECONCILE_PAGE_SIZE,
+            'back_url': page_url(page),
+            'prev_url': page_url(page - 1) if page > 1 else None,
+            'next_url': page_url(page + 1) if page < pages else None,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/people/reconcile/users')
+async def admin_reconcile_users_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    storage = get_storage(request.app)
+    counters = storage.count_student_reconciliation()
+    users = storage.list_unlinked_athlete_users()
+    # Кандидаты — по ФИО из профиля аккаунта; псевдонимы аккаунта НЕ участвуют.
+    for user in users:
+        user['candidates'] = storage.find_student_candidates(user['profile_data'].get('student_name') or '')
+
+    return await render(
+        template_name=jinja_env.get_template('admin_reconcile_users.html'),
+        context={
+            'request': request,
+            'counters': counters,
+            'users': users,
+            'back_url': '/admin/people/reconcile/users',
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/people/reconcile/link')
+async def admin_reconcile_link(request: Request):
+    """Привязка записей к карточке: одна точка для одиночной (кнопка
+    кандидата) и массовой (галочки + список студентов) привязки."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    raw_ids = [value for value in request.form.getlist('record_ids[]') if str(value).strip()]
+    numeric_ids: list[int] = []
+    for raw_id in raw_ids:
+        numeric_id, id_error = parse_reconcile_int(str(raw_id), 'record id')
+        if id_error is not None:
+            return id_error
+        numeric_ids.append(numeric_id)
+
+    back = reconcile_back_url(get_form_value(request, 'back'))
+    if not numeric_ids:
+        return build_redirect_with_message(error='Не выбрано ни одной записи.', url=back)
+    student_id_raw = get_form_value(request, 'student_id').strip()
+    if not student_id_raw:
+        return build_redirect_with_message(error='Выберите студента.', url=back)
+    student_id, id_error = parse_reconcile_int(student_id_raw, 'student id')
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    count, error = storage.link_competitions(numeric_ids, student_id)
+    if error is not None:
+        return build_redirect_with_message(
+            error=reconcile_link_error(storage, numeric_ids, student_id, error), url=back
+        )
+
+    student = storage.get_student_by_id(student_id)
+    full_name = student['full_name'] if student else ''
+    if len(numeric_ids) == 1 and count == 1:
+        log_audit_event(
+            request,
+            'competition_linked_to_student',
+            {'record_id': numeric_ids[0], 'old_ref': None, 'new_ref': student_id, 'student_id': student_id},
+        )
+        message = f'Запись №{numeric_ids[0]} привязана к студенту «{full_name}».'
+    else:
+        # Одна запись аудита на всю массовую привязку.
+        log_audit_event(
+            request,
+            'student_records_bulk_linked',
+            {'student_id': student_id, 'record_ids': numeric_ids, 'count': count},
+        )
+        message = f'Привязано записей: {count} — студент «{full_name}».'
+    return build_redirect_with_message(message=message, url=back)
+
+
+@app.get('/admin/people/reconcile/create')
+async def admin_reconcile_create_page(request: Request):
+    """Создание карточки из записи: поля предзаполнены снимком записи."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    record_id, id_error = parse_reconcile_int(get_param(dict(request.args), 'record_id') or '', 'record id')
+    if id_error is not None:
+        return id_error
+    back = reconcile_back_url(get_param(dict(request.args), 'back') or '')
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(record_id)
+    found, student_ref = storage.get_competition_student_ref(record_id)
+    if record is None or not found:
+        return build_redirect_with_message(error='Запись не найдена.', url=back)
+    if student_ref is not None:
+        return build_redirect_with_message(
+            error=f'Запись №{record_id} уже привязана к студенту.',
+            url=back,
+        )
+
+    return await render(
+        template_name=jinja_env.get_template('admin_reconcile_create.html'),
+        context={
+            'request': request,
+            'source': 'record',
+            'record': record,
+            'record_id': record_id,
+            'form': {
+                'full_name': record.student_name,
+                'sex': record.student_sex or '',
+                'institute': record.institute or '',
+                'group_name': record.group or '',
+                'course': '' if record.course is None else str(record.course),
+            },
+            'back_url': back,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/people/reconcile/create')
+async def admin_reconcile_create_record(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    record_id, id_error = parse_reconcile_int(get_form_value(request, 'record_id'), 'record id')
+    if id_error is not None:
+        return id_error
+    back = reconcile_back_url(get_form_value(request, 'back'))
+    form, form_error = parse_student_form(request)
+    if form_error is not None:
+        return build_redirect_with_message(
+            error=form_error,
+            url=reconcile_create_url(record_id=record_id, back=back),
+        )
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(record_id)
+    found, student_ref = storage.get_competition_student_ref(record_id)
+    if record is None or not found:
+        return build_redirect_with_message(error='Запись не найдена.', url=back)
+    if student_ref is not None:
+        return build_redirect_with_message(
+            error=f'Запись №{record_id} уже привязана к студенту.',
+            url=back,
+        )
+
+    student_id = storage.create_student(
+        form['full_name'],
+        form['sex'],
+        form['institute'],
+        form['group_name'],
+        form['course'],
+    )
+    log_audit_event(
+        request,
+        'student_created',
+        {'student_id': student_id, 'full_name': form['full_name'], 'source': 'reconciliation-record'},
+    )
+    _, link_error = storage.link_competitions([record_id], student_id)
+    if link_error is not None:
+        # Гонка: карточка уже создана (и остаётся), запись связал кто-то другой.
+        if link_error == 'already_linked':
+            message = (
+                f'Студент «{form["full_name"]}» создан, но запись №{record_id} уже была привязана другим действием.'
+            )
+        else:
+            message = f'Студент «{form["full_name"]}» создан, но запись №{record_id} не найдена.'
+        return build_redirect_with_message(message=message, url=f'/admin/people/{student_id}')
+    log_audit_event(
+        request,
+        'competition_linked_to_student',
+        {'record_id': record_id, 'old_ref': None, 'new_ref': student_id, 'student_id': student_id},
+    )
+    return build_redirect_with_message(
+        message=f'Студент «{form["full_name"]}» создан, запись №{record_id} привязана к нему.',
+        url=f'/admin/people/{student_id}',
+    )
+
+
+@app.post('/admin/people/reconcile/unlink')
+async def admin_reconcile_unlink(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    record_id, id_error = parse_reconcile_int(get_form_value(request, 'record_id'), 'record id')
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    found, student_ref = storage.get_competition_student_ref(record_id)
+    if not found:
+        return build_redirect_with_message(error='Запись не найдена.', url='/admin/people/reconcile')
+    if student_ref is None:
+        return build_redirect_with_message(
+            error=f'Запись №{record_id} не привязана к студенту.',
+            url='/admin/people/reconcile',
+        )
+
+    old_ref = storage.unlink_competition(record_id)
+    if old_ref is None:
+        return build_redirect_with_message(
+            error=f'Запись №{record_id} не привязана к студенту.',
+            url='/admin/people/reconcile',
+        )
+    student = storage.get_student_by_id(old_ref)
+    full_name = student['full_name'] if student else ''
+    log_audit_event(
+        request,
+        'competition_unlinked_from_student',
+        {'record_id': record_id, 'old_ref': old_ref},
+    )
+    return build_redirect_with_message(
+        message=f'Запись №{record_id} отвязана от студента «{full_name}».',
+        url=f'/admin/people/{old_ref}',
+    )
+
+
+@app.post('/admin/people/reconcile/relink')
+async def admin_reconcile_relink(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    record_id, id_error = parse_reconcile_int(get_form_value(request, 'record_id'), 'record id')
+    if id_error is not None:
+        return id_error
+    student_id, id_error = parse_reconcile_int(get_form_value(request, 'student_id'), 'student id')
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    old_ref, error = storage.relink_competition(record_id, student_id)
+    if error is not None:
+        if error == 'records_not_found':
+            return build_redirect_with_message(error='Запись не найдена.', url='/admin/people/reconcile')
+        if error in ('student_not_found', 'student_inactive'):
+            # Возврат к карточке, где кнопка: прежняя связь записи ещё цела.
+            _, current_ref = storage.get_competition_student_ref(record_id)
+            url = f'/admin/people/{current_ref}' if current_ref else '/admin/people/reconcile'
+            return build_redirect_with_message(error=reconcile_student_error(storage, student_id, error), url=url)
+
+    student = storage.get_student_by_id(student_id)
+    full_name = student['full_name'] if student else ''
+    log_audit_event(
+        request,
+        'competition_relinked',
+        {'record_id': record_id, 'old_ref': old_ref, 'new_ref': student_id, 'student_id': student_id},
+    )
+    return build_redirect_with_message(
+        message=f'Запись №{record_id} перепривязана на студента «{full_name}».',
+        url=f'/admin/people/{student_id}',
+    )
+
+
+@app.get('/admin/people/reconcile/users/create')
+async def admin_reconcile_user_create_page(request: Request):
+    """Создание карточки из профиля аккаунта атлета: псевдонимы аккаунта
+    НЕ переносятся — у карточки будут только данные профиля."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    user_id, id_error = parse_reconcile_int(get_param(dict(request.args), 'user_id') or '', 'user id')
+    if id_error is not None:
+        return id_error
+    back = reconcile_back_url(get_param(dict(request.args), 'back') or '')
+
+    storage = get_storage(request.app)
+    user = storage.get_unlinked_athlete_user(user_id)
+    if user is None:
+        legacy_user = storage.get_user_by_id(user_id)
+        if legacy_user is None:
+            return build_redirect_with_message(error='Пользователь не найден.', url=back)
+        if legacy_user['role'] != 'athlete':
+            return build_redirect_with_message(error='Пользователь не является атлетом.', url=back)
+        return build_redirect_with_message(
+            error=f'Аккаунт {legacy_user["username"]} уже привязан к студенту.',
+            url=back,
+        )
+
+    profile = user['profile_data']
+    return await render(
+        template_name=jinja_env.get_template('admin_reconcile_create.html'),
+        context={
+            'request': request,
+            'source': 'user',
+            'user': user,
+            'user_id': user_id,
+            'form': {
+                'full_name': str(profile.get('student_name') or ''),
+                'sex': str(profile.get('student_sex') or ''),
+                'institute': str(profile.get('institute') or ''),
+                'group_name': str(profile.get('group') or ''),
+                'course': str(profile.get('course') or ''),
+            },
+            'back_url': back,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/people/reconcile/users/create')
+async def admin_reconcile_create_user(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    user_id, id_error = parse_reconcile_int(get_form_value(request, 'user_id'), 'user id')
+    if id_error is not None:
+        return id_error
+    back = reconcile_back_url(get_form_value(request, 'back'))
+    form, form_error = parse_student_form(request)
+    if form_error is not None:
+        return build_redirect_with_message(
+            error=form_error,
+            url=reconcile_create_url(user_id=user_id, back=back),
+        )
+
+    storage = get_storage(request.app)
+    user = storage.get_unlinked_athlete_user(user_id)
+    if user is None:
+        legacy_user = storage.get_user_by_id(user_id)
+        if legacy_user is None:
+            return build_redirect_with_message(error='Пользователь не найден.', url=back)
+        if legacy_user['role'] != 'athlete':
+            return build_redirect_with_message(error='Пользователь не является атлетом.', url=back)
+        return build_redirect_with_message(
+            error=f'Аккаунт {legacy_user["username"]} уже привязан к студенту.',
+            url=back,
+        )
+
+    student_id = storage.create_student(
+        form['full_name'],
+        form['sex'],
+        form['institute'],
+        form['group_name'],
+        form['course'],
+    )
+    log_audit_event(
+        request,
+        'student_created',
+        {'student_id': student_id, 'full_name': form['full_name'], 'source': 'reconciliation-user'},
+    )
+    _, link_error = storage.link_user(user_id, student_id)
+    if link_error is not None:
+        if link_error == 'user_already_linked':
+            message = (
+                f'Студент «{form["full_name"]}» создан, но аккаунт {user["username"]} уже был '
+                'привязан другим действием.'
+            )
+        else:
+            message = f'Студент «{form["full_name"]}» создан, но аккаунт {user["username"]} недоступен для привязки.'
+        return build_redirect_with_message(message=message, url=f'/admin/people/{student_id}')
+    log_audit_event(
+        request,
+        'user_linked_to_student',
+        {'user_id': user_id, 'username': user['username'], 'old_ref': None, 'new_ref': student_id},
+    )
+    return build_redirect_with_message(
+        message=f'Студент «{form["full_name"]}» создан, аккаунт {user["username"]} привязан к нему.',
+        url=f'/admin/people/{student_id}',
+    )
+
+
+@app.post('/admin/people/reconcile/users/link')
+async def admin_reconcile_user_link(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    user_id, id_error = parse_reconcile_int(get_form_value(request, 'user_id'), 'user id')
+    if id_error is not None:
+        return id_error
+    back = reconcile_back_url(get_form_value(request, 'back'))
+    student_id_raw = get_form_value(request, 'student_id').strip()
+    if not student_id_raw:
+        return build_redirect_with_message(error='Выберите студента.', url=back)
+    student_id, id_error = parse_reconcile_int(student_id_raw, 'student id')
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    _, error = storage.link_user(user_id, student_id)
+    if error is not None:
+        if error == 'user_not_found':
+            return build_redirect_with_message(error='Пользователь не найден.', url=back)
+        if error == 'user_not_athlete':
+            return build_redirect_with_message(error='Пользователь не является атлетом.', url=back)
+        if error == 'user_already_linked':
+            user = storage.get_user_by_id(user_id)
+            username = user['username'] if user else ''
+            return build_redirect_with_message(
+                error=f'Аккаунт {username} уже привязан к студенту.',
+                url=back,
+            )
+        return build_redirect_with_message(error=reconcile_student_error(storage, student_id, error), url=back)
+
+    user = storage.get_user_by_id(user_id)
+    username = user['username'] if user else ''
+    student = storage.get_student_by_id(student_id)
+    full_name = student['full_name'] if student else ''
+    log_audit_event(
+        request,
+        'user_linked_to_student',
+        {'user_id': user_id, 'username': username, 'old_ref': None, 'new_ref': student_id},
+    )
+    return build_redirect_with_message(
+        message=f'Аккаунт {username} привязан к студенту «{full_name}».',
+        url=back,
+    )
+
+
+@app.post('/admin/people/reconcile/users/unlink')
+async def admin_reconcile_user_unlink(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    user_id, id_error = parse_reconcile_int(get_form_value(request, 'user_id'), 'user id')
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    user = storage.get_user_by_id(user_id)
+    if user is None:
+        return build_redirect_with_message(error='Пользователь не найден.', url='/admin/people/reconcile/users')
+    old_ref = storage.unlink_user(user_id)
+    if old_ref is None:
+        return build_redirect_with_message(
+            error=f'Аккаунт {user["username"]} не привязан к студенту.',
+            url='/admin/people/reconcile/users',
+        )
+    student = storage.get_student_by_id(old_ref)
+    full_name = student['full_name'] if student else ''
+    log_audit_event(
+        request,
+        'user_unlinked_from_student',
+        {'user_id': user_id, 'username': user['username'], 'old_ref': old_ref, 'new_ref': None},
+    )
+    return build_redirect_with_message(
+        message=f'Аккаунт {user["username"]} отвязан от студента «{full_name}».',
+        url=f'/admin/people/{old_ref}',
+    )
+
+
+@app.post('/admin/people/reconcile/users/relink')
+async def admin_reconcile_user_relink(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    user_id, id_error = parse_reconcile_int(get_form_value(request, 'user_id'), 'user id')
+    if id_error is not None:
+        return id_error
+    student_id, id_error = parse_reconcile_int(get_form_value(request, 'student_id'), 'student id')
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    old_ref, error = storage.relink_user(user_id, student_id)
+    if error is not None:
+        if error == 'user_not_found':
+            return build_redirect_with_message(error='Пользователь не найден.', url='/admin/people/reconcile/users')
+        if error == 'user_not_athlete':
+            return build_redirect_with_message(
+                error='Пользователь не является атлетом.',
+                url='/admin/people/reconcile/users',
+            )
+        return build_redirect_with_message(
+            error=reconcile_student_error(storage, student_id, error), url=f'/admin/people/{student_id}'
+        )
+
+    user = storage.get_user_by_id(user_id)
+    username = user['username'] if user else ''
+    student = storage.get_student_by_id(student_id)
+    full_name = student['full_name'] if student else ''
+    log_audit_event(
+        request,
+        'user_relinked_to_student',
+        {'user_id': user_id, 'username': username, 'old_ref': old_ref, 'new_ref': student_id},
+    )
+    return build_redirect_with_message(
+        message=f'Аккаунт {username} перепривязан на студента «{full_name}».',
+        url=f'/admin/people/{student_id}',
+    )
+
+
 @app.get('/admin/people/<student_id>')
 async def admin_person_card(request: Request, student_id: str):
     auth_error = require_admin(request)
@@ -3734,12 +4357,21 @@ async def admin_person_card(request: Request, student_id: str):
     student = storage.get_student_by_id(numeric_id)
     if student is None:
         return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    linked_records = storage.list_linked_records(numeric_id, limit=50)
+    for record in linked_records:
+        # Даты — datetime для format_date_range в шаблоне.
+        record['date'] = datetime.fromisoformat(record['date']) if record['date'] else None
+        record['date_to'] = datetime.fromisoformat(record['date_to']) if record['date_to'] else None
     return await render(
         template_name=jinja_env.get_template('admin_person.html'),
         context={
             'request': request,
             'student': student,
             'aliases': storage.list_student_aliases(numeric_id),
+            'linked_records_count': storage.linked_records_count(numeric_id),
+            'linked_records': linked_records,
+            'linked_users': storage.linked_athlete_users(numeric_id),
+            'active_students': [item for item in storage.list_students() if item['active']],
             **get_flash_args(request),
         },
     )

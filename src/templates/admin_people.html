@@ -21,7 +21,16 @@
                 <button class="btn btn-outline-primary" type="submit">Показать</button>
                 <a class="btn btn-outline-secondary" href="/admin/people">Сброс</a>
             </form>
-            <button class="btn btn-primary align-self-sm-start" data-bs-target="#student-create-modal" data-bs-toggle="modal" type="button">+ Добавить студента</button>
+            <div class="d-flex flex-wrap gap-2 align-items-sm-center">
+                {# Бейдж с числом непривязанных записей — только когда они есть. #}
+                <a class="btn btn-outline-secondary align-self-sm-start" href="/admin/people/reconcile">
+                    Сопоставление данных
+                    {% if reconcile_unlinked %}
+                    <span class="badge text-bg-light border">{{ reconcile_unlinked }}</span>
+                    {% endif %}
+                </a>
+                <button class="btn btn-primary align-self-sm-start" data-bs-target="#student-create-modal" data-bs-toggle="modal" type="button">+ Добавить студента</button>
+            </div>
         </div>
 
         {% if q %}
