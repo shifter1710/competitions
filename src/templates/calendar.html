@@ -174,7 +174,7 @@
             {% endif %}
             <span class="calendar-comp-row__count">участников: <strong>{{ event.participant_count }}</strong></span>
             <span class="calendar-comp-row__count">без результата: <strong>{{ event.no_result_count }}</strong></span>
-            {% if event.url %}
+            {% if event.url and event.url.startswith(('http://', 'https://')) %}
             <a class="calendar-comp-row__open" href="{{ event.url }}" target="_blank" rel="noopener"
                 aria-label="Ссылка на соревнование" title="Ссылка на соревнование">
                 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"

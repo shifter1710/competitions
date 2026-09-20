@@ -54,6 +54,12 @@ app = Sanic('SIBADI_competitions')
 app.config.REQUEST_MAX_SIZE = 10 * 1024 * 1024
 app.config.REQUEST_TIMEOUT = 60
 app.config.RESPONSE_TIMEOUT = 60
+# Ровно один доверенный proxy-хоп (nginx): приложение наружу напрямую не
+# публикуется — deploy/nginx и docker-compose. nginx выставляет
+# X-Forwarded-For через $proxy_add_x_forwarded_for, поэтому реальный IP
+# клиента — всегда ПОСЛЕДНЯЯ запись заголовка, и клиент её подделать не
+# может (свои поддельные значения nginx дописывает перед ней).
+app.config.PROXIES_COUNT = 1
 
 app.static(
     uri='/static',
@@ -81,6 +87,19 @@ WIPE_MODES = ('scope', 'date')
 WIPE_CONFIRM_PHRASE = 'УДАЛИТЬ'
 
 INSECURE_SECRET_VALUES = {'', 'change-me', 'replace-with-random-string'}
+# Слабые пароли посева учёток (M3): дефолты settings.py и заглушки .env.example.
+WEAK_BOOTSTRAP_PASSWORDS = INSECURE_SECRET_VALUES | {'change-me-editor', 'change-me-viewer'}
+# Имена переменных окружения для сообщений об ошибке старта (без значений!).
+BOOTSTRAP_PASSWORD_ENV_VARS = {
+    ADMIN_ROLE: 'AUTH_ADMIN_PASSWORD',
+    EDITOR_ROLE: 'AUTH_EDITOR_PASSWORD',
+    VIEWER_ROLE: 'AUTH_VIEWER_PASSWORD',
+}
+BOOTSTRAP_USERNAME_ENV_VARS = {
+    ADMIN_ROLE: 'AUTH_ADMIN_USERNAME',
+    EDITOR_ROLE: 'AUTH_EDITOR_USERNAME',
+    VIEWER_ROLE: 'AUTH_VIEWER_USERNAME',
+}
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 180
 LOGIN_LOCKOUT_SECONDS = 180
@@ -231,15 +250,37 @@ def seed_levels(storage: SQLiteAdapter):
             storage.create_level(name)
 
 
-def seed_users(storage: SQLiteAdapter):
-    env_accounts = [
-        (settings.auth_admin_username, settings.auth_admin_password, ADMIN_ROLE),
-        (settings.auth_editor_username, settings.auth_editor_password, EDITOR_ROLE),
-        (settings.auth_viewer_username, settings.auth_viewer_password, VIEWER_ROLE),
+def env_bootstrap_accounts() -> list[tuple[str, str, str]]:
+    """Аккаунты, сеемые из AUTH_*-переменных: (роль, логин, пароль).
+
+    admin и editor всегда настроены дефолтами; viewer с пустым логином
+    или паролем не создаётся вовсе.
+    """
+    accounts = [
+        (ADMIN_ROLE, settings.auth_admin_username, settings.auth_admin_password),
+        (EDITOR_ROLE, settings.auth_editor_username, settings.auth_editor_password),
+        (VIEWER_ROLE, settings.auth_viewer_username, settings.auth_viewer_password),
     ]
-    for username, password, role in env_accounts:
-        if username and password and storage.get_user(username) is None:
+    return [(role, username, password) for role, username, password in accounts if username and password]
+
+
+def seed_users(storage: SQLiteAdapter):
+    for role, username, password in env_bootstrap_accounts():
+        if storage.get_user(username) is None:
             storage.create_user(username, hash_password(password), role)
+
+
+def find_weak_bootstrap_accounts(storage: SQLiteAdapter) -> list[str]:
+    """Роли, чья учётка БУДЕТ посеяна из окружения со слабым паролем (M3).
+
+    Посев не перезаписывает существующие учётки, поэтому слабый пароль в
+    .env опасен только пока учётки с таким логином ещё нет.
+    """
+    return [
+        role
+        for role, username, password in env_bootstrap_accounts()
+        if password in WEAK_BOOTSTRAP_PASSWORDS and storage.get_user(username) is None
+    ]
 
 
 @app.before_server_start
@@ -248,6 +289,20 @@ async def init_storage(app: Sanic, _):
         raise RuntimeError('AUTH_SECRET_KEY is not configured: set it to a random value in the environment or .env')
     if app.ctx.storage is None:
         app.ctx.storage = SQLiteAdapter(settings.database_path)
+    if not Sanic.test_mode:
+        # Отказ старта вместо посева учёток со слабым паролем (M3) или с
+        # недопустимым логином (L8). В сообщении — только имена переменных
+        # окружения, значения (пароли) не раскрываются и не логируются.
+        weak_roles = find_weak_bootstrap_accounts(app.ctx.storage)
+        if weak_roles:
+            weak_vars = ', '.join(BOOTSTRAP_PASSWORD_ENV_VARS[role] for role in weak_roles)
+            raise RuntimeError(f'{weak_vars} is not configured: set a strong unique password in .env')
+        for role, username, _password in env_bootstrap_accounts():
+            if app.ctx.storage.get_user(username) is None and username_error(username):
+                raise RuntimeError(
+                    f'{BOOTSTRAP_USERNAME_ENV_VARS[role]} contains characters '
+                    'that are not allowed in logins (: or control characters)'
+                )
     seed_levels(app.ctx.storage)
     seed_users(app.ctx.storage)
 
@@ -417,6 +472,17 @@ def login_is_locked(ip: str) -> bool:
 
 def clear_login_failures(ip: str):
     login_failures.pop(ip, None)
+
+
+def username_error(username: str) -> str | None:
+    """Недопустимые символы логина (L8): None — логин корректен.
+
+    Двоеточие ломает разбор подписанной cookie «логин:роль:время:версия»,
+    управляющие символы (включая DEL) в логине не нужны вовсе.
+    """
+    if ':' in username or any(ord(char) < 32 or ord(char) == 127 for char in username):
+        return 'Логин не может содержать двоеточие и управляющие символы'
+    return None
 
 
 def request_is_secure(request: Request) -> bool:
@@ -804,6 +870,11 @@ def parse_checkbox(request: Request, key: str) -> bool:
     return checkbox_to_bool(get_form_value(request, key))
 
 
+def is_http_url(value: str) -> bool:
+    """Ссылка строго со схемой http/https (без прочих схем вроде javascript:)."""
+    return bool(re.fullmatch(r'https?://\S+', value))
+
+
 def parse_custom_field_value(raw_value, field: CustomField) -> str:
     if isna(raw_value):
         raw_value = ''
@@ -819,7 +890,7 @@ def parse_custom_field_value(raw_value, field: CustomField) -> str:
     if field.field_type == 'date':
         return datetime.strptime(value, settings.date_format).strftime(settings.date_format)
     if field.field_type == 'url':
-        if not re.fullmatch(r'https?://\S+', value):
+        if not is_http_url(value):
             raise ValueError(f'Поле "{field.label}" должно быть ссылкой (http:// или https://)')
         return value
     return value
@@ -1216,7 +1287,9 @@ async def login_page(request: Request):
 
 @app.post('/login')
 async def login(request: Request):
-    if login_is_locked(request.ip):
+    # client_ip учитывает PROXIES_COUNT=1: за nginx это реальный IP клиента
+    # (последняя запись X-Forwarded-For), а не адрес прокси.
+    if login_is_locked(request.client_ip):
         return text(body='Слишком много неудачных попыток входа. Повторите позже', status=LOGIN_REJECT_STATUS)
 
     username = str(get_form_value(request, 'username')).strip()
@@ -1224,7 +1297,7 @@ async def login(request: Request):
 
     user = authenticate_user(request, username, password)
     if user is None:
-        register_login_failure(request.ip)
+        register_login_failure(request.client_ip)
         log_audit_event(request, 'login_failed', username=username)
         response = await render(
             template_name=jinja_env.get_template('login.html'),
@@ -1236,7 +1309,7 @@ async def login(request: Request):
         response.status = 401
         return response
 
-    clear_login_failures(request.ip)
+    clear_login_failures(request.client_ip)
     log_audit_event(
         request,
         'login_success',
@@ -1471,13 +1544,18 @@ def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
         date_from, date_to = parse_date_value(get_form_value(request, 'date'), manual_input=True)
     except ValueError as exc:
         return {}, str(exc)
+    url = clean_str(get_form_value(request, 'url'))
+    # Ссылка календаря рендерится как href: принимаем только http/https,
+    # прочие схемы (javascript:, data:, vbscript:) — отказ.
+    if url and not is_http_url(url):
+        return {}, 'Ссылка должна начинаться с http:// или https://'
     return {
         'name': name,
         'date': date_from,
         'date_to': date_to,
         'level': clean_str(get_form_value(request, 'level')),
         'sport': clean_str(get_form_value(request, 'sport')),
-        'url': clean_str(get_form_value(request, 'url')),
+        'url': url,
     }, None
 
 
@@ -3067,7 +3145,14 @@ async def delete_competition(request: Request, record_id: str):
         return text(body='Invalid record id', status=400)
 
     storage = get_storage(request.app)
-    storage.delete_competition(numeric_id)
+    # Удаление записи тянет за собой её вложения (M4): сначала транзакция БД
+    # (строки вложений + запись), затем файлы — тот же порядок, что у
+    # perform_wipe. Файлы удаляются best-effort: остаток каталога — только
+    # предупреждение в лог, БД уже согласована.
+    storage.delete_competition_with_attachments(numeric_id)
+    remove_attachment_record_dirs([numeric_id])
+    if (files_dir() / str(numeric_id)).exists():
+        logger.warning('Attachment directory of record %s still exists after record deletion', numeric_id)
     return redirect(to='/')
 
 
@@ -3194,6 +3279,9 @@ async def create_user(request: Request):
     role = get_form_value(request, 'role').strip()
     if not username:
         return build_redirect_with_message(error='Имя пользователя обязательно', url='/admin/users')
+    invalid_username_message = username_error(username)
+    if invalid_username_message:
+        return build_redirect_with_message(error=invalid_username_message, url='/admin/users')
     if role not in USER_ROLES:
         return build_redirect_with_message(error='Недопустимая роль', url='/admin/users')
     if len(password) < MIN_PASSWORD_LENGTH:
