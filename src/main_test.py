@@ -6640,3 +6640,264 @@ def test_calendar_event_edit_redirects_back_to_event_page(client: SanicTestClien
         assert response.headers['location'] == '/calendar'
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
+
+
+# --- Карточки студентов (Student Identity v1, Phase 1 — фундамент). ---
+# Полные сценарии — на реальном SQLite-адаптере (паттерн reports_client):
+# валидация, редиректы, flash-сообщения и аудит проверяются вместе с данными.
+
+
+@pytest.fixture
+def people_client(client: SanicTestClient, tmp_path):
+    storage = SQLiteAdapter(str(tmp_path / 'people.sqlite3'))
+    storage.create_user(settings.auth_admin_username, 'hash', 'admin')
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+def create_person(client: SanicTestClient, **overrides) -> object:
+    headers = get_auth_headers()
+    data = {
+        **csrf_for(headers),
+        'full_name': 'Иванов Иван Иванович',
+        'sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': '2',
+        **overrides,
+    }
+    _, response = client.post('/admin/people', headers=headers, data=data, allow_redirects=False)
+    return response
+
+
+def test_admin_people_requires_admin(client: SanicTestClient):
+    _, response = client.get('/admin/people', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = client.get('/admin/people', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    _, response = client.post('/admin/people', data={'full_name': 'Кто-то'})
+    assert response.status == 401
+
+
+def test_admin_people_create_and_card_flow(people_client: SanicTestClient):
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Студентов пока нет.' in response.text
+
+    response = create_person(people_client)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Студент «Иванов Иван Иванович» добавлен.' in location
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Иванов Иван Иванович' in response.text
+    assert 'ИСИ' in response.text
+    assert 'ПГС-101' in response.text
+    assert 'Псевдонимов пока нет.' in response.text
+
+    # Поиск: найденная карточка и счётчик «Найдено: N из M»
+    _, response = people_client.get('/admin/people?q=Иванов', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Найдено: 1 из 1' in response.text
+    _, response = people_client.get('/admin/people?q=Неттакова', headers=get_auth_headers())
+    assert 'По запросу «Неттакова» ничего не найдено.' in response.text
+
+
+def test_admin_people_create_requires_full_name(people_client: SanicTestClient):
+    response = create_person(people_client, full_name='   ')
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Укажите ФИО студента.' in location
+
+    response = create_person(people_client, sex='Оно')
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'admin_error' in location
+
+    # Ни одна из попыток не создала карточку
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert 'Студентов пока нет.' in response.text
+
+
+def test_admin_person_edit_updates_fields(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/1/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'full_name': 'Иванов Иван Ильич',
+            'sex': '',
+            'institute': 'ИМИ',
+            'group': 'СБ-202',
+            'course': '3',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Данные студента «Иванов Иван Ильич» сохранены.' in location
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Иванов Иван Ильич' in response.text
+    assert 'СБ-202' in response.text
+    assert 'ПГС-101' not in response.text
+
+
+def test_admin_person_toggle_active(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'помечен неактивным' in unquote_plus(response.headers['location'])
+
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert 'неактивен' in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'снова активен' in unquote_plus(response.headers['location'])
+
+
+def test_admin_person_alias_add_and_remove(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+
+    _, response = people_client.post(
+        '/admin/people/1/alias', headers=headers, data={**csrf_for(headers), 'name': ''}, allow_redirects=False
+    )
+    assert 'admin_error' in unquote_plus(response.headers['location'])
+
+    _, response = people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Псевдоним «Иванов И.И.» добавлен.' in unquote_plus(response.headers['location'])
+
+    _, response = people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Псевдоним «Иванов И.И.» уже есть у этого студента.' in location
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Иванов И.И.' in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/alias/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Псевдоним «Иванов И.И.» удалён.' in unquote_plus(response.headers['location'])
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Псевдонимов пока нет.' in response.text
+
+
+def test_student_admin_actions_write_audit(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+
+    create_person(people_client)
+    people_client.post(
+        '/admin/people/1/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'full_name': 'Иванов Иван Иванович',
+            'sex': 'Ж',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+        },
+        allow_redirects=False,
+    )
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    people_client.post('/admin/people/1/alias/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    events = [(event['action'], json.loads(event['details'])) for event in storage.get_audit_events(limit=20)]
+    actions = [action for action, _ in events]
+    assert actions == [
+        'student_alias_removed',
+        'student_alias_added',
+        'student_activated',
+        'student_deactivated',
+        'student_updated',
+        'student_created',
+    ]
+
+    by_action = dict(reversed(events))
+    assert by_action['student_created'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    # Diff — только изменённые поля, old→new
+    assert by_action['student_updated']['changed'] == {'sex': {'old': 'М', 'new': 'Ж'}}
+    assert by_action['student_deactivated'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    assert by_action['student_activated'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    assert by_action['student_alias_added'] == {'student_id': 1, 'name': 'Иванов И.И.'}
+    assert by_action['student_alias_removed'] == {'student_id': 1, 'alias_id': 1, 'name': 'Иванов И.И.'}
+
+
+def test_admin_person_endpoints_reject_missing_csrf(people_client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people', headers=headers, data={'full_name': 'Без токена'}, allow_redirects=False
+    )
+    assert response.status == 403
+    assert 'CSRF' in response.text
+
+
+def test_admin_person_unknown_id_redirects(people_client: SanicTestClient):
+    _, response = people_client.get('/admin/people/999999', headers=get_auth_headers(), allow_redirects=False)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Студент не найден.' in location
+
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/999999/edit',
+        headers=headers,
+        data={**csrf_for(headers), 'full_name': 'Никто'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Студент не найден.' in unquote_plus(response.headers['location'])
+
+
+def test_admin_person_non_numeric_id_returns_400(people_client: SanicTestClient):
+    _, response = people_client.get('/admin/people/abc', headers=get_auth_headers())
+    assert response.status == 400
+
+    headers = get_auth_headers()
+    _, response = people_client.post('/admin/people/abc/active', headers=headers, data=csrf_for(headers))
+    assert response.status == 400
+
+    _, response = people_client.post('/admin/people/1/alias/abc/delete', headers=headers, data=csrf_for(headers))
+    assert response.status == 400

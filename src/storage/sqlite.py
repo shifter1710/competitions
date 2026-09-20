@@ -331,6 +331,38 @@ class SQLiteAdapter:
                 )
                 '''
             )
+            # Карточки студентов (Student Identity v1, Phase 1 — фундамент):
+            # актуальные данные и псевдонимы ФИО. Пока НИКАК не связаны с
+            # записями и аккаунтами (student_ref_id всегда NULL, авто-связей
+            # нет), легаси-идентичность sha256(ФИО) не меняется. merged_into_id
+            # зарезервирована и не пишется/не читается.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS students (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    full_name TEXT NOT NULL,
+                    sex TEXT,
+                    institute TEXT,
+                    group_name TEXT,
+                    course TEXT,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    merged_into_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS student_aliases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (student_id, name)
+                )
+                '''
+            )
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
@@ -343,6 +375,10 @@ class SQLiteAdapter:
                 self.connection.execute('ALTER TABLE users ADD COLUMN last_login_at TEXT')
             if 'last_seen_at' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN last_seen_at TEXT')
+            # Student Identity v1 (Phase 1): стабильная ссылка аккаунта на
+            # карточку студента; существующие учётки НЕ мигрируются (NULL).
+            if 'student_ref_id' not in user_columns:
+                self.connection.execute('ALTER TABLE users ADD COLUMN student_ref_id INTEGER')
             self.connection.commit()
 
     def _migrate_competitions_columns(self, columns: set[str]) -> None:
@@ -362,6 +398,11 @@ class SQLiteAdapter:
         # существующие записи не трогаются — колонка рядом с date (НАЧАЛО).
         if 'date_to' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN date_to TEXT')
+        # Student Identity v1, Phase 1 (фундамент): стабильная ссылка записи
+        # на карточку студента. Существующие записи НЕ мигрируются — колонка
+        # остаётся NULL, легаси-ключ student_id (sha256 ФИО) не меняется.
+        if 'student_ref_id' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN student_ref_id INTEGER')
 
     def _migrate_custom_fields_columns(self):
         """№24 (docs/feedback-live.md): колонка link_target у кастомных полей.
@@ -2234,6 +2275,126 @@ class SQLiteAdapter:
                 )
             self.connection.commit()
             return cursor.rowcount
+
+    # ---- Карточки студентов (Student Identity v1, Phase 1 — фундамент) ----
+    #
+    # Карточка — АКТУАЛЬНЫЕ данные студента (ФИО, пол, институт, группа,
+    # курс) и его псевдонимы ФИО. В Phase 1 карточки живут отдельно: записи
+    # соревнований и аккаунты НЕ связаны с ними (student_ref_id не пишется),
+    # импорт/отчёты/merge работают по легаси-ключу sha256(ФИО) как раньше.
+    # Физического удаления студентов нет — только active=0.
+
+    def create_student(
+        self,
+        full_name: str,
+        sex: str,
+        institute: str,
+        group_name: str,
+        course: str,
+    ) -> int:
+        """Создать карточку студента; возвращает id новой строки."""
+        with self._lock:
+            now = datetime.utcnow().isoformat()
+            cursor = self.connection.execute(
+                'INSERT INTO students (full_name, sex, institute, group_name, course, active, created_at, updated_at) '
+                'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+                (full_name, sex, institute, group_name, course, now, now),
+            )
+            self.connection.commit()
+            return cursor.lastrowid
+
+    def get_student_by_id(self, student_id: int) -> dict | None:
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
+                'created_at, updated_at FROM students WHERE id = ?',
+                (student_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_students(self, search: str = '') -> list[dict]:
+        """Все карточки: активные сверху, по алфавиту; search — подстрока ФИО
+        (LIKE, как фильтр ФИО в отчётах)."""
+        with self._lock:
+            params: list[object] = []
+            where = ''
+            if search:
+                where = 'WHERE full_name LIKE ?'
+                params.append(f'%{search}%')
+            rows = self.connection.execute(
+                f'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
+                f'created_at, updated_at FROM students {where} ORDER BY active DESC, full_name ASC',
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_student(
+        self,
+        student_id: int,
+        full_name: str,
+        sex: str,
+        institute: str,
+        group_name: str,
+        course: str,
+    ) -> bool:
+        """Обновить актуальные данные карточки (updated_at меняется).
+        Возвращает False, если студента с таким id нет."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE students SET full_name = ?, sex = ?, institute = ?, group_name = ?, course = ?, '
+                'updated_at = ? WHERE id = ?',
+                (full_name, sex, institute, group_name, course, datetime.utcnow().isoformat(), student_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def set_student_active(self, student_id: int, active: bool) -> bool:
+        """Включить/выключить карточку (физического удаления нет)."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE students SET active = ? WHERE id = ?',
+                (int(active), student_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def add_student_alias(self, student_id: int, name: str) -> bool:
+        """Добавить псевдоним ФИО; False — пустое имя, нет такого студента
+        или дубль пары (student_id, name) по UNIQUE."""
+        name = name.strip()
+        if not name:
+            return False
+        with self._lock:
+            if self.get_student_by_id(student_id) is None:
+                return False
+            try:
+                self.connection.execute(
+                    'INSERT INTO student_aliases (student_id, name, created_at) VALUES (?, ?, ?)',
+                    (student_id, name, datetime.utcnow().isoformat()),
+                )
+                self.connection.commit()
+            except sqlite3.IntegrityError:
+                self.connection.rollback()
+                return False
+            return True
+
+    def remove_student_alias(self, student_id: int, alias_id: int) -> bool:
+        """Удалить псевдоним в пределах карточки: WHERE id = ? AND student_id = ?."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'DELETE FROM student_aliases WHERE id = ? AND student_id = ?',
+                (alias_id, student_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def list_student_aliases(self, student_id: int) -> list[dict]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, student_id, name, created_at FROM student_aliases WHERE student_id = ? ORDER BY id',
+                (student_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
     #

@@ -196,6 +196,9 @@ LINK_TARGETABLE_BASE_KEYS: Sequence[str] = (
 )
 USER_ROLES: Sequence[str] = (ADMIN_ROLE, EDITOR_ROLE, VIEWER_ROLE, ATHLETE_ROLE)
 MIN_PASSWORD_LENGTH = 6
+# Карточки студентов (Student Identity v1, Phase 1): допустимые значения
+# поля «Пол» — только М/Ж или пусто (не указан).
+STUDENT_SEX_OPTIONS: frozenset[str] = frozenset({'', 'М', 'Ж'})
 ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024
 ATTACHMENT_EXTENSIONS = {
     'pdf': 'application/pdf',
@@ -3620,6 +3623,253 @@ async def add_user_alias(request: Request, user_id: str):
         },
     )
     return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту', url='/admin/users')
+
+
+# --- Карточки студентов (Student Identity v1, Phase 1 — фундамент). ---
+#
+# Отдельная таблица актуальных данных студента (ФИО/пол/институт/группа/курс)
+# и его псевдонимов ФИО. В Phase 1 карточки живут ИЗОЛИРОВАННО: записи
+# соревнований, аккаунты, импорт, отчёты и merge про них не знают
+# (student_ref_id не пишется, авто-создания/авто-связей нет). Правка карточки
+# меняет ТОЛЬКО актуальные «профильные» данные, исторические записи не
+# перезаписываются.
+
+
+def parse_student_form(request: Request) -> tuple[dict, str | None]:
+    """Поля карточки студента из формы. None-ошибка — текст для редиректа.
+
+    Поле формы группы называется «group» (HTML-конвенция) и маппится в
+    group_name хранилища. Все значения — свободный текст со strip().
+    """
+    full_name = get_form_value(request, 'full_name').strip()
+    sex = get_form_value(request, 'sex').strip()
+    institute = get_form_value(request, 'institute').strip()
+    group_name = get_form_value(request, 'group').strip()
+    course = get_form_value(request, 'course').strip()
+    if not full_name:
+        return {}, 'Укажите ФИО студента.'
+    if sex not in STUDENT_SEX_OPTIONS:
+        return {}, 'Пол может быть «М», «Ж» или не указан.'
+    return {
+        'full_name': full_name,
+        'sex': sex,
+        'institute': institute,
+        'group_name': group_name,
+        'course': course,
+    }, None
+
+
+def student_field_changes(student: dict, form: dict) -> dict:
+    """Diff изменённых полей карточки для аудита: поле → {old, new}."""
+    return {
+        field: {'old': student[field], 'new': form[field]}
+        for field in ('full_name', 'sex', 'institute', 'group_name', 'course')
+        if student[field] != form[field]
+    }
+
+
+def resolve_student_id(request: Request, student_id: str):
+    """Числовой id карточки из URL: (id, None) или (None, ответ 400)."""
+    try:
+        return int(student_id), None
+    except ValueError:
+        return None, text(body='Invalid student id', status=400)
+
+
+@app.get('/admin/people')
+async def admin_people_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    search = (get_param(dict(request.args), 'q') or '').strip()
+    students = storage.list_students(search=search)
+    total = len(storage.list_students())
+    return await render(
+        template_name=jinja_env.get_template('admin_people.html'),
+        context={
+            'request': request,
+            'students': students,
+            'q': search,
+            'total': total,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/people')
+async def admin_person_create(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    form, form_error = parse_student_form(request)
+    if form_error is not None:
+        return build_redirect_with_message(error=form_error, url='/admin/people')
+
+    storage = get_storage(request.app)
+    student_id = storage.create_student(
+        form['full_name'],
+        form['sex'],
+        form['institute'],
+        form['group_name'],
+        form['course'],
+    )
+    log_audit_event(request, 'student_created', {'student_id': student_id, 'full_name': form['full_name']})
+    return build_redirect_with_message(
+        message=f'Студент «{form["full_name"]}» добавлен.',
+        url=f'/admin/people/{student_id}',
+    )
+
+
+@app.get('/admin/people/<student_id>')
+async def admin_person_card(request: Request, student_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    numeric_id, id_error = resolve_student_id(request, student_id)
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    student = storage.get_student_by_id(numeric_id)
+    if student is None:
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    return await render(
+        template_name=jinja_env.get_template('admin_person.html'),
+        context={
+            'request': request,
+            'student': student,
+            'aliases': storage.list_student_aliases(numeric_id),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/people/<student_id>/edit')
+async def admin_person_edit(request: Request, student_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    numeric_id, id_error = resolve_student_id(request, student_id)
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    student = storage.get_student_by_id(numeric_id)
+    if student is None:
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    form, form_error = parse_student_form(request)
+    if form_error is not None:
+        return build_redirect_with_message(error=form_error, url=f'/admin/people/{numeric_id}')
+
+    changes = student_field_changes(student, form)
+    if not storage.update_student(
+        numeric_id,
+        form['full_name'],
+        form['sex'],
+        form['institute'],
+        form['group_name'],
+        form['course'],
+    ):
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    log_audit_event(
+        request,
+        'student_updated',
+        {'student_id': numeric_id, 'full_name': form['full_name'], 'changed': changes},
+    )
+    return build_redirect_with_message(
+        message=f'Данные студента «{form["full_name"]}» сохранены.',
+        url=f'/admin/people/{numeric_id}',
+    )
+
+
+@app.post('/admin/people/<student_id>/active')
+async def admin_person_toggle_active(request: Request, student_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    numeric_id, id_error = resolve_student_id(request, student_id)
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    student = storage.get_student_by_id(numeric_id)
+    if student is None:
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+
+    deactivate = bool(student['active'])
+    storage.set_student_active(numeric_id, not deactivate)
+    if deactivate:
+        log_audit_event(request, 'student_deactivated', {'student_id': numeric_id, 'full_name': student['full_name']})
+        message = f'Студент «{student["full_name"]}» помечен неактивным.'
+    else:
+        log_audit_event(request, 'student_activated', {'student_id': numeric_id, 'full_name': student['full_name']})
+        message = f'Студент «{student["full_name"]}» снова активен.'
+    return build_redirect_with_message(message=message, url=f'/admin/people/{numeric_id}')
+
+
+@app.post('/admin/people/<student_id>/alias')
+async def admin_person_add_alias(request: Request, student_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    numeric_id, id_error = resolve_student_id(request, student_id)
+    if id_error is not None:
+        return id_error
+
+    name = get_form_value(request, 'name').strip()
+    if not name:
+        return build_redirect_with_message(error='Укажите псевдоним ФИО.', url=f'/admin/people/{numeric_id}')
+
+    storage = get_storage(request.app)
+    if storage.get_student_by_id(numeric_id) is None:
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    if not storage.add_student_alias(numeric_id, name):
+        return build_redirect_with_message(
+            error=f'Псевдоним «{name}» уже есть у этого студента.',
+            url=f'/admin/people/{numeric_id}',
+        )
+    log_audit_event(request, 'student_alias_added', {'student_id': numeric_id, 'name': name})
+    return build_redirect_with_message(
+        message=f'Псевдоним «{name}» добавлен.',
+        url=f'/admin/people/{numeric_id}',
+    )
+
+
+@app.post('/admin/people/<student_id>/alias/<alias_id>/delete')
+async def admin_person_remove_alias(request: Request, student_id: str, alias_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    numeric_id, id_error = resolve_student_id(request, student_id)
+    if id_error is not None:
+        return id_error
+    try:
+        numeric_alias_id = int(alias_id)
+    except ValueError:
+        return text(body='Invalid alias id', status=400)
+
+    storage = get_storage(request.app)
+    if storage.get_student_by_id(numeric_id) is None:
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    # Имя псевдонима нужно для сообщения и аудита — берём до удаления.
+    alias = next(
+        (item for item in storage.list_student_aliases(numeric_id) if item['id'] == numeric_alias_id),
+        None,
+    )
+    if alias is None:
+        return build_redirect_with_message(error='Псевдоним не найден.', url=f'/admin/people/{numeric_id}')
+
+    storage.remove_student_alias(numeric_id, numeric_alias_id)
+    log_audit_event(
+        request,
+        'student_alias_removed',
+        {'student_id': numeric_id, 'alias_id': numeric_alias_id, 'name': alias['name']},
+    )
+    return build_redirect_with_message(
+        message=f'Псевдоним «{alias["name"]}» удалён.',
+        url=f'/admin/people/{numeric_id}',
+    )
 
 
 @app.post('/admin/students/merge')

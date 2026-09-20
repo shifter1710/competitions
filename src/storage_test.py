@@ -1900,3 +1900,198 @@ def test_calendar_list_orders_chronologically_and_filters_by_sport(adapter):
     assert [event['name'] for event in adapter.list_calendar_events()] == ['Ранний', 'Поздний']
     assert [event['name'] for event in adapter.list_calendar_events(sport='Бег')] == ['Ранний']
     assert adapter.list_calendar_events(sport='Шахматы') == []
+
+
+# ---- Карточки студентов (Student Identity v1, Phase 1 — фундамент) ----
+
+
+def make_legacy_db_with_data(tmp_path):
+    """Легаси-база без таблиц студентов и колонок student_ref_id: записи
+    и пользователи с данными, которые миграция обязана сохранить."""
+    db_path = tmp_path / 'legacy-students.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE competitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            student_name TEXT NOT NULL,
+            student_sex TEXT NOT NULL,
+            institute TEXT NOT NULL,
+            "group" TEXT NOT NULL,
+            course INTEGER NOT NULL,
+            sport TEXT NOT NULL,
+            date TEXT NOT NULL,
+            level TEXT NOT NULL,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        '''
+    )
+    connection.execute(
+        '''
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        '''
+    )
+    connection.execute(
+        'INSERT INTO competitions (student_id, student_name, student_sex, institute, "group", course, '
+        "sport, date, level, name, position, created_at) VALUES ('hash-1', 'Иванов Иван', 'М', 'ИСИ', "
+        "'ПГС-101', 2, 'Бег', '2026-01-10T00:00:00', 'внутривузовские', 'Кубок', 1, '2026-01-11T00:00:00')"
+    )
+    connection.execute(
+        "INSERT INTO users (username, password_hash, role, active) VALUES ('anna', 'scrypt$x', 'athlete', 1)"
+    )
+    connection.commit()
+    connection.close()
+    return db_path
+
+
+def test_students_tables_created_for_legacy_db(tmp_path):
+    db_path = make_legacy_db_with_data(tmp_path)
+
+    adapter = SQLiteAdapter(str(db_path))
+    tables = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {'students', 'student_aliases'} <= tables
+
+    competition_columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
+    assert 'student_ref_id' in competition_columns
+    user_columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(users)')}
+    assert 'student_ref_id' in user_columns
+
+    # Данные легаси-базы не тронуты; новые колонки у существующих строк — NULL
+    competition_row = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
+    assert competition_row['student_name'] == 'Иванов Иван'
+    assert competition_row['student_ref_id'] is None
+    user_row = adapter.connection.execute('SELECT * FROM users WHERE username = \'anna\'').fetchone()
+    assert user_row['role'] == 'athlete'
+    assert user_row['student_ref_id'] is None
+
+
+def test_schema_reinit_idempotent_keeps_students(tmp_path):
+    db_path = str(tmp_path / 'reinit.sqlite3')
+    adapter = SQLiteAdapter(db_path)
+    student_id = adapter.create_student('Петров Пётр Петрович', 'М', 'ИМИ', 'СБ-202', '1')
+    adapter.add_student_alias(student_id, 'Петров П.П.')
+
+    adapter = SQLiteAdapter(db_path)
+    student = adapter.get_student_by_id(student_id)
+    assert student['full_name'] == 'Петров Пётр Петрович'
+    assert [alias['name'] for alias in adapter.list_student_aliases(student_id)] == ['Петров П.П.']
+
+    tables = [row[0] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+    assert tables.count('students') == 1
+    assert tables.count('student_aliases') == 1
+
+
+def test_student_crud_lifecycle(adapter):
+    first = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+    second = adapter.create_student('Абрамов Артём Артёмович', '', '', '', '')
+
+    student = adapter.get_student_by_id(first)
+    assert student['full_name'] == 'Иванов Иван Иванович'
+    assert student['sex'] == 'М'
+    assert student['group_name'] == 'ПГС-101'
+    assert student['active'] == 1
+    assert student['merged_into_id'] is None
+    assert student['created_at'] == student['updated_at']
+    assert adapter.get_student_by_id(999999) is None
+
+    # Список: активные сверху, внутри — по алфавиту
+    adapter.set_student_active(second, False)
+    names = [item['full_name'] for item in adapter.list_students()]
+    assert names == ['Иванов Иван Иванович', 'Абрамов Артём Артёмович']
+
+    # Правка меняет данные и updated_at, но не created_at
+    created_at = student['created_at']
+    assert adapter.update_student(first, 'Иванов Иван Иванович', '', 'ИСИ', 'ПГС-102', '3')
+    updated = adapter.get_student_by_id(first)
+    assert updated['institute'] == 'ИСИ'
+    assert updated['group_name'] == 'ПГС-102'
+    assert updated['course'] == '3'
+    assert updated['created_at'] == created_at
+    assert updated['updated_at'] >= created_at
+    assert adapter.update_student(999999, 'Никто', '', '', '', '') is False
+
+    assert adapter.set_student_active(second, True)
+    assert adapter.get_student_by_id(second)['active'] == 1
+    assert adapter.set_student_active(999999, False) is False
+
+    # Поиск — подстрока ФИО (как фильтр ФИО отчётов)
+    assert [item['id'] for item in adapter.list_students(search='Иванов')] == [first]
+    assert adapter.list_students(search='Неттакого') == []
+
+
+def test_student_duplicate_full_name_allowed(adapter):
+    """Полные тёзки — отдельные карточки: проверки уникальности ФИО нет."""
+    first = adapter.create_student('Сидоров Сидор Сидорович', 'М', 'ИСИ', 'ПГС-101', '1')
+    second = adapter.create_student('Сидоров Сидор Сидорович', 'М', 'ИСИ', 'ПГС-101', '1')
+    assert first != second
+    assert len(adapter.list_students()) == 2
+
+
+def test_student_alias_add_remove_and_per_student_duplicate_rejected(adapter):
+    student_id = adapter.create_student('Иванов Иван Иванович', 'М', '', '', '')
+
+    assert adapter.add_student_alias(student_id, 'Иванов И.И.')
+    assert adapter.add_student_alias(student_id, '  Иванов И.И.  ') is False  # дубль после strip
+    assert adapter.add_student_alias(student_id, '   ') is False  # пустое имя
+    assert adapter.add_student_alias(999999, 'Призрак') is False  # нет такого студента
+
+    aliases = adapter.list_student_aliases(student_id)
+    assert [alias['name'] for alias in aliases] == ['Иванов И.И.']
+
+    assert adapter.remove_student_alias(student_id, aliases[0]['id'])
+    assert adapter.list_student_aliases(student_id) == []
+    assert adapter.remove_student_alias(student_id, aliases[0]['id']) is False
+
+
+def test_student_alias_same_name_for_different_students_allowed(adapter):
+    """Одно написание ФИО может быть псевдонимом у разных карточек
+    (UNIQUE — только на пару student_id+name)."""
+    first = adapter.create_student('Иванов Иван Иванович', 'М', '', '', '')
+    second = adapter.create_student('Иванов Иван Иванович', 'М', '', '', '')
+
+    assert adapter.add_student_alias(first, 'Иванов И.И.')
+    assert adapter.add_student_alias(second, 'Иванов И.И.')
+    assert len(adapter.list_student_aliases(first)) == 1
+    assert len(adapter.list_student_aliases(second)) == 1
+
+
+def test_student_update_does_not_touch_competitions(adapter):
+    """Правка карточки студента не меняет записи реестра (включая
+    student_ref_id): строка competitions байт-в-байт та же до и после."""
+    adapter.save_competitions([make_competition('Иванов Иван', datetime(2026, 2, 1))])
+    student_id = adapter.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+
+    before = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
+    assert before is not None
+    assert before['student_ref_id'] is None
+
+    adapter.update_student(student_id, 'Иванов Иван Иванович', 'Ж', 'ИМИ', 'СБ-202', '4')
+    adapter.set_student_active(student_id, False)
+    adapter.add_student_alias(student_id, 'Иванов И.И.')
+    adapter.remove_student_alias(student_id, 1)
+
+    after = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
+    assert tuple(after) == tuple(before)
+    assert after['student_ref_id'] is None
+
+
+def test_manual_entry_still_works_on_db_with_students(tmp_path):
+    """Регрессия: ручной ввод/импорт работают в базе с таблицей студентов —
+    nullable-колонка student_ref_id остаётся незадействованной."""
+    adapter = SQLiteAdapter(str(tmp_path / 'with-students.sqlite3'))
+    adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+
+    adapter.save_competitions([make_competition('Иванов Иван Иванович', datetime(2026, 3, 1))])
+    saved = adapter.get_competitions()[0]
+    assert saved.student_name == 'Иванов Иван Иванович'
+    row = adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = 1').fetchone()
+    assert row['student_ref_id'] is None

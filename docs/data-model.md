@@ -1,10 +1,13 @@
 # Модель данных: текущее состояние
 
-> Снимок актуален на **2026-09-20**, ревизия **88ce6d7** (ветка
-> `feature/security-bundle`). Документ описывает **CURRENT STATE** — как база
-> устроена и работает прямо сейчас, а не целевую архитектуру. История того,
-> почему так решили, — в [data-model-decisions.md](data-model-decisions.md);
-> этот документ — справочник «что есть».
+> Снимок актуален на **2026-09-20**, ветка **`feature/student-foundation`**
+> (Student Identity v1, Phase 1 — фундамент «Студентов»; см. раздел
+> «Личность: легаси и новое (Phase 1)»). Документ описывает **CURRENT STATE** —
+> как база устроена и работает прямо сейчас, а не целевую архитектуру. История
+> того, почему так решили, — в [data-model-decisions.md](data-model-decisions.md);
+> этот документ — справочник «что есть». Производственная база до деплоя этой
+> ветки остаётся на ревизии **88ce6d7** (таблиц «Студентов» в проде ещё нет —
+> они появятся при первом старте новой ревизии, см. «Миграции»).
 
 Цель: новый инженер должен найти здесь ответ на любой вопрос о текущей схеме
 и данных, не читая код. Все примеры синтетические.
@@ -28,7 +31,9 @@
   накатанных `ALTER TABLE ADD COLUMN`.
 - Объёмы прод-снимка (2026-09-20, только чтение): competitions 14, users 7,
   attachments 5, audit_log 207, calendar_events 2, catalog_values 22,
-  levels 2, custom_fields 2, field_settings 10, import_queue 0.
+  levels 2, custom_fields 2, field_settings 10, import_queue 0
+  (таблиц `students`/`student_aliases` в проде ещё нет — до деплоя
+  `feature/student-foundation`).
 
 ## ER-диаграмма
 
@@ -46,13 +51,17 @@ erDiagram
     competitions ||--o{ attachments : "record_id (логическая)"
     competitions ||--o{ import_queue : "matched_record_id (логическая)"
     catalog_values ||--o{ catalog_values : "parent_id (FK объявлен, не enforced)"
+    students ||--o{ student_aliases : "student_id (логическая)"
 ```
 
 Отдельная прикладная связь, которой нет в SQL:
 `competitions.student_id = sha256(ФИО)`, где ФИО берутся из
 `users.profile_data.student_name` и `users.name_aliases`. Хеши считаются
 на лету (в приложении), в БД не хранятся — подробнее в разделе
-«Как устроена личность сегодня».
+«Как устроена личность сегодня». Зарезервированные колонки
+`competitions.student_ref_id` и `users.student_ref_id` на карточки
+`students.id` в Phase 1 не пишутся (всегда NULL) — см. раздел
+«Личность: легаси и новое (Phase 1)».
 
 ## Таблицы
 
@@ -86,6 +95,7 @@ erDiagram
 | `review_status` | TEXT NOT NULL DEFAULT `'approved'` | `approved` / `pending` / `rejected` |
 | `owner_id` | INTEGER NULL | логический FK `users.id`; обнуляется при удалении аккаунта |
 | `review_comment` | TEXT NOT NULL DEFAULT `''` | комментарий модератора при отклонении |
+| `student_ref_id` | INTEGER NULL | логический FK `students.id`; **зарезервирована (Phase 1), всегда NULL** |
 
 Кто создаёт строки (везде через модель `Competition`):
 
@@ -113,6 +123,7 @@ erDiagram
 | `name_aliases` | TEXT NOT NULL DEFAULT `'[]'` | JSON-массив ФИО открытым текстом; список только растёт |
 | `last_login_at` | TEXT NULL | последний успешный вход |
 | `last_seen_at` | TEXT NULL | активность; обновляется не чаще раза в 60 с (троттлинг) |
+| `student_ref_id` | INTEGER NULL | логический FK `students.id`; **зарезервирована (Phase 1), всегда NULL** |
 
 Кто создаёт строки: посев при старте из `AUTH_*`-переменных окружения
 (`seed_users`; viewer опционален — при пустых переменных не создаётся)
@@ -237,6 +248,9 @@ erDiagram
   (accepted/skipped/replaced, с diff);
 - `catalog_value_renamed` / `catalog_value_deleted` — справочники;
 - `calendar_event_deleted` — удаление события календаря;
+- `student_created` / `student_updated` (с diff old→new) /
+  `student_deactivated` / `student_activated` / `student_alias_added` /
+  `student_alias_removed` — карточки студентов (Phase 1);
 - `field_settings_changed` — настройки базовых полей;
 - `db_wiped` / `pre_wipe_archive_created` — очистка базы и страховочный
   архив перед ней;
@@ -279,6 +293,47 @@ erDiagram
 Разбирают очередь admin-роуты; любое действие доступно только при
 `status = 'pending'`, иначе 409.
 
+### 11. `students` — карточки студентов (Phase 1)
+
+Таблица-фундамент «Student Identity v1, Phase 1»: стабильный id и
+АКТУАЛЬНЫЕ данные студента. В Phase 1 карточки живут изолированно — записи
+реестра и аккаунты с ними не связаны (`student_ref_id` не пишется),
+на существующие workflow не влияют.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | стабильный идентификатор студента |
+| `full_name` | TEXT NOT NULL | актуальное ФИО; дубликаты у разных карточек РАЗРЕШЕНЫ (тёзки) |
+| `sex` | TEXT NULL | `М` / `Ж` / пусто (не указан) |
+| `institute` | TEXT NULL | актуальный институт (свободный текст) |
+| `group_name` | TEXT NULL | актуальная группа (свободный текст) |
+| `course` | TEXT NULL | актуальный курс (свободный текст) |
+| `active` | INTEGER NOT NULL DEFAULT 1 | деактивация вместо удаления; физического DELETE нет |
+| `merged_into_id` | INTEGER NULL | **зарезервирована** на будущее (слияние карточек); не пишется и не читается |
+| `created_at` | TEXT NOT NULL | UTC |
+| `updated_at` | TEXT NOT NULL | UTC; меняется при правке данных |
+
+Кто создаёт строки: только admin — `POST /admin/people` (раздел
+«Студенты», `/admin/people`). Никаких авто-созданий из импорта или записей
+нет. Правка карточки не перезаписывает исторические записи о соревнованиях.
+
+### 12. `student_aliases` — псевдонимы ФИО карточки (Phase 1)
+
+Другие написания ФИО конкретного студента, встречающиеся в записях и
+импорте. Отдельная таблица от `users.name_aliases` (псевдонимы привязки
+кабинета атлета) и пока никуда, кроме карточки, не подставляются.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `student_id` | INTEGER NOT NULL | логический FK `students.id` |
+| `name` | TEXT NOT NULL | вариант написания ФИО |
+| `created_at` | TEXT NOT NULL | UTC |
+| `UNIQUE (student_id, name)` | | дубль у ТОГО ЖЕ студента невозможен; одно имя у разных студентов — можно |
+
+Кто создаёт строки: только admin — `POST /admin/people/<id>/alias`.
+Удаление — `POST /admin/people/<id>/alias/<alias_id>/delete`.
+
 ## Как устроена личность сегодня
 
 Отдельной сущности «студент»/«атлет» в базе **нет**. Человек в системе —
@@ -311,6 +366,39 @@ Merge (admin, смена фамилии): переписывает `student_id` 
 отображаемое `student_name`) у записей со старым хешем и дописывает новое
 ФИО в `name_aliases` затронутых аккаунтов. Список псевдонимов только
 растёт — ничего не удаляется.
+
+## Личность: легаси и новое (Phase 1)
+
+Переходное состояние «Student Identity v1, Phase 1» (фундамент): в схеме
+появились карточки студентов, но ВСЕ рабочие workflow пока работают только
+на легаси-идентичности.
+
+**Легаси (действующая):**
+
+- `competitions.student_id = sha256(strip(ФИО))` — единственный рабочий ключ
+  личности: авторизация кабинета атлета, merge, импорт/дедупликация, отчёты
+  и выгрузки считают его, как раньше; поведение не изменилось.
+
+**Новое (фундамент, пока изолированное):**
+
+- `students.id` — стабильный идентификатор студента (карточка с актуальными
+  данными: ФИО, пол, институт, группа, курс + псевдонимы ФИО в
+  `student_aliases`);
+- `competitions.student_ref_id` и `users.student_ref_id` — nullable-колонки
+  стабильной связи записи/аккаунта с карточкой; **в Phase 1 всегда NULL**:
+  существующие записи и аккаунты НЕ мигрированы, авто-создания и
+  авто-связывания карточек нет, ни один запрос их не читает и не пишет;
+- `students.merged_into_id` — зарезервирована на будущее, не пишется и не
+  читается.
+
+Управление карточками — только admin (`/admin/people`): создание, правка,
+деактивация (физического удаления студентов нет), псевдонимы ФИО. Правка
+карточки меняет ТОЛЬКО актуальные данные — исторические записи о
+соревнованиях, отчёты и выгрузки не переписываются; для переноса записей со
+старого ФИО на новое по-прежнему используется merge.
+
+Очистка базы (`wipe`) записи студентов не трогает; резервные копии
+покрывают новые таблицы автоматически (копируется файл БД целиком).
 
 ## Импорт Excel и дедупликация
 
@@ -353,15 +441,16 @@ Merge (admin, смена фамилии): переписывает `student_id` 
 схемы; всё идемпотентно. Полный список накатываемых изменений:
 
 - `competitions`: `+extra_data`, `+review_status`, `+owner_id`,
-  `+review_comment`, `+date_to`;
+  `+review_comment`, `+date_to`, `+student_ref_id` (Phase 1, всегда NULL);
 - `custom_fields`: `+link_target`;
 - `catalog_values`: реструктуризация в `parent_id`-схему — единственная
   пересборка таблицы (данные копируются, легаси-таблица дропается);
 - `users`: `+pwd_ver`, `+profile_data`, `+name_aliases`, `+last_login_at`,
-  `+last_seen_at`;
+  `+last_seen_at`, `+student_ref_id` (Phase 1, всегда NULL);
 - новые таблицы целиком через `CREATE TABLE IF NOT EXISTS`
   (`attachments`, `levels`, `catalog_values`, `users`, `audit_log`,
-  `calendar_events`, `field_settings`, `import_queue`);
+  `calendar_events`, `field_settings`, `import_queue`, `students`,
+  `student_aliases` — последние две с Phase 1);
 - populate-шаги: дефолты `field_settings`, наполнение справочников из
   записей — `INSERT OR IGNORE`.
 
@@ -375,7 +464,8 @@ Merge (admin, смена фамилии): переписывает `student_id` 
    инициалы.** Проектирование — отдельным циклом после фиксации текущего
    состояния (этот документ).
 2. Нужна ли отдельная сущность «студент» со стабильным ID вместо
-   `sha256(ФИО)`.
+   `sha256(ФИО)` (Phase 1 заложила фундамент — таблицу `students` и
+   зарезервированные `student_ref_id`; вопрос полной миграции открыт).
 3. Нормализация ключа личности (регистр, ё/е, пробелы) — менять ли и что
    делать с историческими данными.
 4. Как различать тёзок (одинаковые ФИО разных людей).
