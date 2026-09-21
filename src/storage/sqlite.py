@@ -2304,6 +2304,32 @@ class SQLiteAdapter:
             self.connection.commit()
             return cursor.lastrowid
 
+    def create_students(self, students: Sequence[tuple[str, str, str, str, str]]) -> list[int]:
+        """Массовое создание карточек ОДНОЙ транзакцией (импорт, Phase 2.5).
+
+        Паттерн import_competitions: блокировка держится всю вставку, строки
+        вставляются построчно (нужен lastrowid каждой), сбой на любой строке
+        откатывает всё — «либо все, либо ничего». Возвращает id новых строк
+        в порядке входных строк.
+        """
+        with self._lock:
+            try:
+                now = datetime.utcnow().isoformat()
+                ids: list[int] = []
+                for full_name, sex, institute, group_name, course in students:
+                    cursor = self.connection.execute(
+                        'INSERT INTO students '
+                        '(full_name, sex, institute, group_name, course, active, created_at, updated_at) '
+                        'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+                        (full_name, sex, institute, group_name, course, now, now),
+                    )
+                    ids.append(cursor.lastrowid)
+                self.connection.commit()
+                return ids
+            except BaseException:
+                self.connection.rollback()
+                raise
+
     def get_student_by_id(self, student_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(

@@ -2036,6 +2036,45 @@ def test_student_duplicate_full_name_allowed(adapter):
     assert len(adapter.list_students()) == 2
 
 
+def test_create_students_batch_returns_ids_in_order(adapter):
+    """Массовое создание (Phase 2.5, импорт): id — в порядке входных строк."""
+    ids = adapter.create_students(
+        [
+            ('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2'),
+            ('Петров Пётр Петрович', 'Ж', '', '', ''),
+            ('Сидоров Сидор Сидорович', '', 'ИМИ', 'СБ-202', '1'),
+        ]
+    )
+    assert len(ids) == 3
+    assert len(set(ids)) == 3
+    stored = [adapter.get_student_by_id(student_id) for student_id in ids]
+    assert [student['full_name'] for student in stored] == [
+        'Иванов Иван Иванович',
+        'Петров Пётр Петрович',
+        'Сидоров Сидор Сидорович',
+    ]
+    assert stored[0]['group_name'] == 'ПГС-101'
+    assert stored[1]['institute'] == ''
+    assert stored[2]['active'] == 1
+    assert adapter.create_students([]) == []
+
+
+def test_create_students_atomic_rollback_on_failure(adapter):
+    """Сбой любой строки откатывает весь батч: «либо все, либо ничего»."""
+    adapter.create_student('Существующий Студент', 'М', '', '', '')
+    with pytest.raises(sqlite3.IntegrityError):
+        adapter.create_students(
+            [
+                ('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2'),
+                # NULL full_name — нарушение NOT NULL: батч должен откатиться.
+                (None, '', '', '', ''),
+                ('Петров Пётр Петрович', 'М', 'ИСИ', 'ПГС-102', '1'),
+            ]
+        )
+    names = [student['full_name'] for student in adapter.list_students()]
+    assert names == ['Существующий Студент']
+
+
 def test_student_alias_add_remove_and_per_student_duplicate_rejected(adapter):
     student_id = adapter.create_student('Иванов Иван Иванович', 'М', '', '', '')
 

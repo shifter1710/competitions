@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import json
 import re
+import time
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
@@ -31,6 +32,7 @@ from src.main import group_calendar_events_by_month
 from src.main import normalize_position
 from src.main import parse_date_value
 from src.main import split_import_competitions
+from src.main import student_import_sessions
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
@@ -7692,3 +7694,927 @@ def test_reconcile_links_in_admin_hub_and_people(reconcile_client: SanicTestClie
     storage.link_competitions([record_id], student_id)
     _, response = reconcile_client.get('/admin/people', headers=get_auth_headers())
     assert 'badge text-bg-light border' not in response.text
+
+
+# --- Импорт студентов из Excel (Student Identity v1, Phase 2.5). ---
+# Полные сценарии на реальном SQLite-адаптере (паттерн reconcile_client):
+# предпросмотр ничего не пишет в БД, создание — только явным подтверждением,
+# импорт трогает только students + audit_log, справочники только читаются.
+
+
+@pytest.fixture
+def student_import_client(client: SanicTestClient, tmp_path):
+    storage = SQLiteAdapter(str(tmp_path / 'student_import.sqlite3'))
+    storage.create_user(settings.auth_admin_username, 'hash', 'admin')
+    storage.create_user('sportik', 'hash', 'athlete')
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    student_import_sessions.clear()
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+        student_import_sessions.clear()
+
+
+def upload_student_xlsx(
+    client: SanicTestClient,
+    rows: list[dict],
+    *,
+    role: str = 'admin',
+    filename: str = 'students.xlsx',
+    columns: list[str] | None = None,
+):
+    """Загрузить файл импорта студентов; ответ — редирект (без перехода)."""
+    df = pd.DataFrame(rows, columns=columns) if columns else pd.DataFrame(rows)
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+    headers = get_auth_headers(role=role)
+    _, response = client.post(
+        '/admin/people/import',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                filename,
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    return response
+
+
+def import_session_token(response) -> str:
+    """Токен staging-сессии из редиректа загрузки."""
+    return response.headers['location'].rsplit('/', 1)[-1]
+
+
+def post_import_action(client: SanicTestClient, token: str, suffix: str, data: dict | None = None):
+    headers = get_auth_headers()
+    _, response = client.post(
+        f'/admin/people/import/preview/{token}/{suffix}',
+        headers=headers,
+        data={**csrf_for(headers), **(data or {})},
+        allow_redirects=False,
+    )
+    return response
+
+
+def get_preview(client: SanicTestClient, token: str):
+    _, response = client.get(f'/admin/people/import/preview/{token}', headers=get_auth_headers(), allow_redirects=False)
+    return response
+
+
+def students_snapshot(storage) -> list[tuple]:
+    rows = storage.connection.execute(
+        'SELECT id, full_name, sex, institute, group_name, course FROM students ORDER BY id'
+    ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def catalog_snapshot(storage) -> list[tuple]:
+    rows = storage.connection.execute(
+        'SELECT id, category, value, parent_id, active FROM catalog_values ORDER BY id'
+    ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def seed_catalog(storage, institute: str, group: str) -> None:
+    storage.add_catalog_value('institute', institute)
+    storage.ensure_catalog_pair(institute, group)
+
+
+def test_student_import_pages_require_admin(student_import_client: SanicTestClient):
+    _, response = student_import_client.get('/admin/people/import', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+    _, response = student_import_client.get('/admin/people/import/template', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+    _, response = student_import_client.get('/admin/people/import', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+    _, response = student_import_client.post('/admin/people/import', data={'full_name': 'X'})
+    assert response.status == 401
+
+
+def test_student_import_template_headers_only(student_import_client: SanicTestClient):
+    _, response = student_import_client.get('/admin/people/import/template', headers=get_auth_headers())
+    assert response.status == 200
+    assert response.headers['content-type'].startswith(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    assert response.headers['content-disposition'].startswith('attachment; filename="Шаблон_студенты_')
+    assert get_xlsx_headers(response.body) == ['ФИО', 'Пол', 'Институт', 'Группа', 'Курс']
+    # Только заголовки: ни одной строки данных
+    assert len(get_xlsx_rows(response.body)) == 1
+
+
+def test_student_import_instruction_page_renders(student_import_client: SanicTestClient):
+    _, response = student_import_client.get('/admin/people/import', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Как заполнить файл' in response.text
+    assert 'Скачать шаблон (xlsx)' in response.text
+    assert 'В шаблоне — только заголовки колонок.' in response.text
+    assert 'Обязательное поле — только ФИО' in response.text
+    assert 'Если институт не указан, он определится автоматически по группе из справочника.' in response.text
+    assert 'Лишние колонки в файле игнорируются.' in response.text
+    assert 'Ничего не сохраняется, пока вы не подтвердите строки' in response.text
+    assert 'action="/admin/people/import"' in response.text
+    # Обычная форма, а не AJAX-форма импорта записей
+    assert 'import-form' not in response.text
+    # Кнопка входа в раздел — на странице списка студентов
+    _, response = student_import_client.get('/admin/people', headers=get_auth_headers())
+    assert 'href="/admin/people/import">Импорт из Excel' in response.text
+
+
+def test_student_import_upload_rejects_bad_files(student_import_client: SanicTestClient, monkeypatch):
+    headers = get_auth_headers()
+
+    _, response = student_import_client.post(
+        '/admin/people/import', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Выберите файл.' in unquote_plus(response.headers['location'])
+
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Тестов'}], filename='students.csv')
+    assert response.status == 302
+    assert 'Файл должен быть в формате .xlsx.' in unquote_plus(response.headers['location'])
+
+    file_obj = BytesIO(b'this is not an excel file at all')
+    _, response = student_import_client.post(
+        '/admin/people/import',
+        headers=headers,
+        data=csrf_for(headers),
+        files={'file': ('broken.xlsx', file_obj.getvalue(), 'application/octet-stream')},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Не удалось прочитать файл. Проверьте, что это не повреждённый .xlsx.' in unquote_plus(
+        response.headers['location']
+    )
+
+    response = upload_student_xlsx(student_import_client, [{'Имя': 'Тестов', 'Пол': 'М'}])
+    assert response.status == 302
+    assert 'В файле нет обязательной колонки «ФИО». Скачайте шаблон и заполните его.' in unquote_plus(
+        response.headers['location']
+    )
+
+    response = upload_student_xlsx(student_import_client, [], columns=['ФИО', 'Пол', 'Институт', 'Группа', 'Курс'])
+    assert response.status == 302
+    assert 'В файле нет строк с данными.' in unquote_plus(response.headers['location'])
+
+    monkeypatch.setattr('src.main.STUDENT_IMPORT_MAX_ROWS', 3)
+    rows = [{'ФИО': f'Студентов Студент {index:02d}'} for index in range(4)]
+    response = upload_student_xlsx(student_import_client, rows)
+    assert response.status == 302
+    assert 'В файле больше 3 строк. Разбейте список на части.' in unquote_plus(response.headers['location'])
+
+    assert student_import_sessions == {}
+
+
+def test_student_import_upload_success_unknown_columns_and_single_session(
+    student_import_client: SanicTestClient,
+):
+    storage = app.ctx.storage
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван', 'Комментарий': 'прим.'}])
+    assert response.status == 302
+    assert response.headers['location'].startswith('/admin/people/import/preview/')
+    token = import_session_token(response)
+
+    _, page = student_import_client.get(f'/admin/people/import/preview/{token}', headers=get_auth_headers())
+    assert page.status == 200
+    assert 'Неизвестные колонки файла игнорируются: Комментарий.' in page.text
+    assert 'Иванов Иван' in page.text
+    # Загрузка ничего не создала и в БД не писала
+    assert students_snapshot(storage) == []
+    assert audit_details(storage, 'student_created') == []
+
+    # Одна сессия на админа: новая загрузка заменяет прежнюю
+    second = upload_student_xlsx(student_import_client, [{'ФИО': 'Петров Пётр'}])
+    second_token = import_session_token(second)
+    assert second_token != token
+    response = get_preview(student_import_client, token)
+    assert response.status == 302
+    assert 'Время сессии предпросмотра истекло. Загрузите файл заново.' in unquote_plus(response.headers['location'])
+    page = get_preview(student_import_client, second_token)
+    assert page.status == 200
+    assert 'Петров Пётр' in page.text
+
+
+def test_student_import_preview_row_normalization(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {
+                'ФИО': '  Иванов Иван  ',
+                'Пол': None,
+                'Институт': None,
+                'Группа': None,
+                'Курс': 2.0,
+            },
+            {'ФИО': 'Петров Пётр', 'Пол': 'Муж', 'Институт': 'ИСИ', 'Группа': 'ПГС-101', 'Курс': '3'},
+            {'ФИО': '   ', 'Пол': '', 'Институт': '', 'Группа': '', 'Курс': ''},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert page.status == 200
+    # Счётчики категорий: одна новая, две ошибочные
+    assert 'Всего строк: 3 · новые: 1 · требуют решения: 0 · ошибочные: 2' in page.text
+    assert '>Новые' in page.text and '>Ошибочные' in page.text
+    assert 'Пол должен быть «М» или «Ж».' in page.text
+    assert 'Пустое ФИО.' in page.text
+    # strip значений, NaN → пустые, курс 2.0 → «2»
+    assert '<strong>Иванов Иван</strong>' in page.text
+    assert '>2</td>' in page.text
+    # Кнопка завершения задизейблена, пока есть неразобранные строки
+    assert 'Кнопка «Завершить импорт» станет активной' in page.text
+    assert 'disabled>Завершить импорт</button>' in page.text
+    # Правка — bootstrap-collapse по data-атрибутам + мини-формы действий
+    assert f'action="/admin/people/import/preview/{token}/row/2/create"' in page.text
+    assert f'action="/admin/people/import/preview/{token}/row/2/skip"' in page.text
+    assert 'data-bs-target="#import-row-2-edit"' in page.text
+    assert 'data-bs-toggle="collapse"' in page.text
+    assert 'Сохранить правку' in page.text
+    assert 'placeholder="например, 2"' in page.text
+
+
+def test_student_import_infile_duplicates_flagged_and_both_creatable(
+    student_import_client: SanicTestClient,
+):
+    storage = app.ctx.storage
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван', 'Пол': 'М', 'Институт': 'ИСИ', 'Группа': 'ПГС-101', 'Курс': '2'},
+            {'ФИО': 'иванов иван', 'Пол': 'Ж', 'Институт': 'ИМИ', 'Группа': 'СБ-202', 'Курс': '1'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    # Обе строки — «Требуют решения» с перечнем строк группы дублей
+    assert 'Всего строк: 2 · новые: 0 · требуют решения: 2' in page.text
+    assert 'Одинаковые ФИО в файле: строки 2, 3' in page.text
+
+    # Полные тёзки — разные люди: обе строки создаются явно и раздельно
+    first = post_import_action(student_import_client, token, 'row/2/create')
+    assert first.status == 302
+    assert 'Строка 2: студент «Иванов Иван» создан.' in unquote_plus(first.headers['location'])
+    second = post_import_action(student_import_client, token, 'row/3/create')
+    assert second.status == 302
+    snapshot = students_snapshot(storage)
+    assert [(row[1], row[2], row[4]) for row in snapshot] == [
+        ('Иванов Иван', 'М', 'ПГС-101'),
+        ('иванов иван', 'Ж', 'СБ-202'),
+    ]
+
+
+def test_student_import_catalog_autofill_by_group(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    seed_catalog(storage, 'ИСИ', 'ПГС-101')
+
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван', 'Группа': 'пгс-101'}])
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert page.status == 200
+    assert 'ИСИ' in page.text
+    assert 'определён по группе' in page.text
+    assert 'title="Институт определён по группе из справочника"' in page.text
+    assert 'ПГС-101' in page.text
+    assert 'Институт не определён' not in page.text
+
+    # Создаётся ровно то, что показано: институт автозаполнен, группа канонична
+    created = post_import_action(student_import_client, token, 'row/2/create')
+    assert created.status == 302
+    snapshot = students_snapshot(storage)
+    assert snapshot[0][3] == 'ИСИ'
+    assert snapshot[0][4] == 'ПГС-101'
+
+
+def test_student_import_catalog_warnings(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    seed_catalog(storage, 'ИСИ', 'ПГС-101')
+    seed_catalog(storage, 'ИМИ', 'ПГС-101')  # то же имя группы в двух институтах
+    seed_catalog(storage, 'ИМИ', 'ТД-303')
+
+    # Неизвестная группа: предупреждение, значения не меняются
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван', 'Группа': 'ХЗ-999'}])
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Институт не определён: группа отсутствует в справочнике или относится к нескольким институтам' in page.text
+    assert 'определён по группе' not in page.text
+    assert 'ХЗ-999' in page.text
+
+    # Неоднозначная группа (два института): то же предупреждение
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Петров Пётр', 'Группа': 'ПГС-101'}])
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Институт не определён: группа отсутствует в справочнике или относится к нескольким институтам' in page.text
+
+    # Группа из другого института: предупреждение, значения НЕ переписываются
+    response = upload_student_xlsx(
+        student_import_client,
+        [{'ФИО': 'Сидоров Сидор', 'Институт': 'ИСИ', 'Группа': 'ТД-303'}],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Требует внимания: группа относится к другому институту' in page.text
+    assert 'ИСИ' in page.text and 'ТД-303' in page.text
+    assert 'ИМИ' not in page.text  # институт строки не заменён владельцем группы
+
+    # Только институт: канонизация по справочнику (без бейджа автозаполнения)
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Козлов Кирилл', 'Институт': 'иси'}])
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'ИСИ' in page.text
+    assert 'определён по группе' not in page.text
+
+
+def test_student_import_catalog_tables_never_written(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    seed_catalog(storage, 'ИСИ', 'ПГС-101')
+    seed_catalog(storage, 'ИМИ', 'ТД-303')
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван', 'Институт': 'НОВЫЙ ИНСТИТУТ', 'Группа': 'НОВАЯ-ГРУППА'},
+            {'ФИО': 'Петров Пётр', 'Группа': 'НЕИЗВЕСТНАЯ-ГРУППА'},
+            {'ФИО': 'Сидоров Сидор', 'Институт': 'ИСИ', 'Группа': 'ТД-303'},
+        ],
+    )
+    token = import_session_token(response)
+    # Снимки после загрузки (посев уровней при старте приложения не должен
+    # попадать в сравнение): дальше предпросмотр/создание/завершение.
+    before = catalog_snapshot(storage)
+    levels_before = [
+        tuple(row) for row in storage.connection.execute('SELECT id, name, active FROM levels ORDER BY id').fetchall()
+    ]
+
+    assert get_preview(student_import_client, token).status == 200
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert bulk.status == 302
+    assert 'Создано студентов: 3.' in unquote_plus(bulk.headers['location'])
+    finish = post_import_action(student_import_client, token, 'finish')
+    assert finish.status == 302
+
+    # Инвариант Phase 2.5: импорт студентов не пишет в справочники НИЧЕГО
+    assert catalog_snapshot(storage) == before
+    levels_after = [
+        tuple(row) for row in storage.connection.execute('SELECT id, name, active FROM levels ORDER BY id').fetchall()
+    ]
+    assert levels_after == levels_before
+
+
+def test_student_import_candidates_matching_rules(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    ivanov = storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    twin = storage.create_student('Иванов Иван', 'Ж', 'ИМИ', 'СБ-202', '1')
+    storage.add_student_alias(ivanov, 'Иванов И.И.')
+    # Неактивная карточка кандидатом быть не должна
+    inactive = storage.create_student('Петров Пётр', 'М', '', '', '')
+    storage.set_student_active(inactive, False)
+
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'ИВАНОВ ИВАН'},  # точное совпадение без учёта регистра — тёзки обе
+            {'ФИО': 'Иванов И.И.'},  # совпадение по псевдониму
+            {'ФИО': 'петров пётр'},  # неактивная карточка не кандидат
+            {'ФИО': 'Иваноф Иван'},  # опечатка — не кандидат
+        ],
+    )
+    token = import_session_token(response)
+    before = students_snapshot(storage)
+    page = get_preview(student_import_client, token)
+    assert page.status == 200
+    assert 'Всего строк: 4 · новые: 2 · требуют решения: 2 · ошибочные: 0' in page.text
+    assert f'<a href="/admin/people/{ivanov}">Иванов Иван</a>' in page.text
+    assert f'<a href="/admin/people/{twin}">Иванов Иван</a>' in page.text
+    assert '>псевдоним</span>' in page.text
+    assert 'Совпадений с существующими студентами нет.' in page.text
+    assert 'Петров Пётр</a>' not in page.text
+    # Мини-форма кандидата: использовать существующего по строке предпросмотра
+    assert (
+        f'action="/admin/people/import/preview/{token}/row/2/use-existing"' in page.text
+        and f'name="student_id" value="{ivanov}"' in page.text
+        and f'Использовать существующего #{ivanov}</button>' in page.text
+    )
+
+    # Предпросмотр не создаёт и не меняет ничего
+    assert students_snapshot(storage) == before
+
+
+def test_student_import_bulk_create_atomic(student_import_client: SanicTestClient, monkeypatch):
+    storage = app.ctx.storage
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван', 'Пол': 'М'},
+            {'ФИО': 'Петров Пётр', 'Пол': 'Ж'},
+        ],
+    )
+    token = import_session_token(response)
+
+    # Сбой в середине батча (NOT NULL) откатывает всё: ничего не вставлено
+    real_create_students = storage.create_students
+
+    def failing_create_students(students):
+        broken = list(students)
+        broken.insert(1, (None, '', '', '', ''))
+        return real_create_students(broken)
+
+    monkeypatch.setattr(storage, 'create_students', failing_create_students)
+    _, response = student_import_client.post(
+        f'/admin/people/import/preview/{token}/bulk-create',
+        headers=get_auth_headers(),
+        data=csrf_for(get_auth_headers()),
+        allow_redirects=False,
+    )
+    assert response.status == 500
+    assert students_snapshot(storage) == []
+    monkeypatch.undo()
+
+    # После сбоя строки остались неразобранными — повтор проходит
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert bulk.status == 302
+    assert 'Создано студентов: 2.' in unquote_plus(bulk.headers['location'])
+    assert len(students_snapshot(storage)) == 2
+
+
+def test_student_import_bulk_cancelled_when_candidate_appeared(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван', 'Пол': 'М'}])
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Всего строк: 1 · новые: 1' in page.text
+
+    # Между рендером и кликом появился студент с таким же ФИО
+    storage.create_student('Иванов Иван', 'Ж', '', '', '')
+
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert bulk.status == 302
+    location = unquote_plus(bulk.headers['location'])
+    assert 'Ничего не создано: у части строк появились совпадения с существующими студентами.' in location
+    assert 'Проверьте раздел «Требуют решение».' in location
+    # Ничего не создано (остался только вручную созданный), строка переквалифицировалась
+    assert len(students_snapshot(storage)) == 1
+    page = get_preview(student_import_client, token)
+    assert 'Всего строк: 1 · новые: 0 · требуют решения: 1' in page.text
+
+
+def test_student_import_bulk_creates_only_clean_rows_with_unresolved_candidates_left(
+    student_import_client: SanicTestClient,
+):
+    """D1 (QA): батч массового создания — ТОЛЬКО чистые A-строки; неразобранные
+    строки с кандидатами в батч не входят и отмены НЕ вызывают. Полная отмена —
+    только когда у ранее чистой строки кандидат появился между рендером и кликом
+    (второй сценарий)."""
+    storage = app.ctx.storage
+    existing = storage.create_student('Иванов Иван', 'М', '', '', '')
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван'},  # B: кандидат с самого рендера, НЕ разобрана
+            {'ФИО': 'Петров Пётр', 'Пол': 'М'},  # A: чистая
+            {'ФИО': 'Сидоров Сидор', 'Пол': 'Ж'},  # A: чистая
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Всего строк: 3 · новые: 2 · требуют решения: 1' in page.text
+    assert 'Создать 2 новых' in page.text
+
+    # Клик «Создать 2 новых»: чистые созданы, строка-кандидат не отменяет батч
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert bulk.status == 302
+    location = unquote_plus(bulk.headers['location'])
+    assert 'Создано студентов: 2.' in location
+    assert 'Ничего не создано' not in location
+    snapshot = students_snapshot(storage)
+    assert [row[1] for row in snapshot] == ['Иванов Иван', 'Петров Пётр', 'Сидоров Сидор']
+    page = get_preview(student_import_client, token)
+    assert 'Решено: создано 2 · использовано существующих 0 · пропущено 0' in page.text
+    assert 'Всего строк: 3 · новые: 0 · требуют решения: 1 · ошибочные: 0' in page.text
+    assert f'<a href="/admin/people/{existing}">Иванов Иван</a>' in page.text
+
+    # Второй сценарий: чистая строка ПОЛУЧИЛА кандидата после рендера — отмена всего
+    response = upload_student_xlsx(
+        student_import_client, [{'ФИО': 'Козлов Кирилл', 'Пол': 'М'}, {'ФИО': 'Орлов Олег', 'Пол': 'Ж'}]
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Создать 2 новых' in page.text
+    storage.create_student('Орлов Олег', 'М', '', '', '')
+
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert bulk.status == 302
+    location = unquote_plus(bulk.headers['location'])
+    assert 'Ничего не создано: у части строк появились совпадения с существующими студентами.' in location
+    # Ничего из этого файла не создано (в БД — только прежние 4 карточки);
+    # строка «Орлов» переквалифицировалась в «требуют решения», «Козлов»
+    # остался чистой (батч отменён целиком — повторный клик создаст её одну)
+    assert len(students_snapshot(storage)) == 4
+    page = get_preview(student_import_client, token)
+    assert 'Всего строк: 2 · новые: 1 · требуют решения: 1' in page.text
+
+
+def test_student_import_actions_on_error_row_rejected(student_import_client: SanicTestClient):
+    """N2: create/use-existing на ошибочной строке — точное сообщение об
+    ошибке строки (пропуск ошибочных остаётся доступен — см. skip-тесты)."""
+    response = upload_student_xlsx(student_import_client, [{'ФИО': '   ', 'Пол': 'Мужской'}])
+    token = import_session_token(response)
+
+    created = post_import_action(student_import_client, token, 'row/2/create')
+    assert created.status == 302
+    assert 'Строка 2 содержит ошибку — исправьте её.' in unquote_plus(created.headers['location'])
+
+    used = post_import_action(student_import_client, token, 'row/2/use-existing', {'student_id': '1'})
+    assert used.status == 302
+    assert 'Строка 2 содержит ошибку — исправьте её.' in unquote_plus(used.headers['location'])
+
+    assert len(students_snapshot(app.ctx.storage)) == 0
+
+
+def test_student_import_row_create_on_full_match(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    existing = storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван', 'Пол': 'Ж'}])
+    token = import_session_token(response)
+
+    created = post_import_action(student_import_client, token, 'row/2/create')
+    assert created.status == 302
+    assert 'Строка 2: студент «Иванов Иван» создан.' in unquote_plus(created.headers['location'])
+    snapshot = students_snapshot(storage)
+    assert len(snapshot) == 2
+    assert snapshot[-1][1] == 'Иванов Иван' and snapshot[-1][2] == 'Ж'
+    assert snapshot[-1][0] != existing
+    # Аудит создания — с источником импорта
+    created_events = audit_details(storage, 'student_created')
+    assert created_events == [{'student_id': snapshot[-1][0], 'full_name': 'Иванов Иван', 'source': 'excel-import'}]
+
+
+def test_student_import_use_existing_no_writes_no_links(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    existing = storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'ИВАНОВ ИВАН'}])
+    token = import_session_token(response)
+
+    # Некорректный student_id — 400; несуществующий — flash-ошибка
+    assert post_import_action(student_import_client, token, 'row/2/use-existing', {'student_id': 'abc'}).status == 400
+    unknown = post_import_action(student_import_client, token, 'row/2/use-existing', {'student_id': '999'})
+    assert unknown.status == 302
+    assert 'Студент не найден.' in unquote_plus(unknown.headers['location'])
+
+    used = post_import_action(student_import_client, token, 'row/2/use-existing', {'student_id': str(existing)})
+    assert used.status == 302
+    assert f'Строка 2: использован существующий студент #{existing}.' in unquote_plus(used.headers['location'])
+
+    # Только пометка в сессии: ничего не создано, не связано, не записано в аудит
+    assert students_snapshot(storage) == [(existing, 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')]
+    assert audit_details(storage, 'student_created') == []
+    refs = storage.connection.execute('SELECT student_ref_id FROM competitions').fetchall()
+    assert [row['student_ref_id'] for row in refs] == [None]
+    page = get_preview(student_import_client, token)
+    assert f'<span class="badge text-bg-primary">использован #{existing}</span>' in page.text
+
+
+def test_student_import_skip_rows(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(
+        student_import_client,
+        [{'ФИО': 'Иванов Иван', 'Пол': 'М'}, {'ФИО': '   ', 'Пол': 'Мужской'}],
+    )
+    token = import_session_token(response)
+
+    skipped = post_import_action(student_import_client, token, 'row/2/skip')
+    assert skipped.status == 302
+    assert 'Строка 2 пропущена.' in unquote_plus(skipped.headers['location'])
+    # Ошибочную строку тоже можно пропустить (не блокирует завершение)
+    skipped_error = post_import_action(student_import_client, token, 'row/3/skip')
+    assert skipped_error.status == 302
+    assert 'Строка 3 пропущена.' in unquote_plus(skipped_error.headers['location'])
+
+    page = get_preview(student_import_client, token)
+    assert 'Решено: создано 0 · использовано существующих 0 · пропущено 2' in page.text
+    assert '<span class="badge text-bg-secondary">пропущен</span>' in page.text
+
+
+def test_student_import_edit_and_candidate_rerun(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    response = upload_student_xlsx(
+        student_import_client,
+        [{'ФИО': 'Иванов Иван', 'Пол': 'Муж'}, {'ФИО': 'Сидоров Сидор', 'Пол': 'М'}],
+    )
+    token = import_session_token(response)
+
+    # Некорректная правка: строка обновлена, но осталась ошибочной
+    edited = post_import_action(
+        student_import_client,
+        token,
+        'row/2/edit',
+        {'full_name': 'Иванов Иван', 'sex': 'Мужской', 'institute': '', 'group': '', 'course': ''},
+    )
+    assert edited.status == 302
+    assert 'Строка 2 обновлена, но данные некорректны: Пол должен быть «М» или «Ж».' in unquote_plus(
+        edited.headers['location']
+    )
+    page = get_preview(student_import_client, token)
+    assert 'ошибочные: 1' in page.text
+
+    # Исправление: строка снова валидна и попадает в «Требуют решения» (кандидат по ФИО)
+    fixed = post_import_action(
+        student_import_client,
+        token,
+        'row/2/edit',
+        {'full_name': 'Иванов Иван', 'sex': 'М', 'institute': '', 'group': '', 'course': '2'},
+    )
+    assert fixed.status == 302
+    assert 'Строка 2 обновлена.' in unquote_plus(fixed.headers['location'])
+    page = get_preview(student_import_client, token)
+    assert 'Всего строк: 2 · новые: 1 · требуют решения: 1 · ошибочные: 0' in page.text
+
+    # Смена ФИО на написание существующего студента переводит строку A→B
+    renamed = post_import_action(
+        student_import_client,
+        token,
+        'row/3/edit',
+        {'full_name': 'Иванов Иван', 'sex': 'М', 'institute': '', 'group': '', 'course': ''},
+    )
+    assert renamed.status == 302
+    page = get_preview(student_import_client, token)
+    assert 'Всего строк: 2 · новые: 0 · требуют решения: 2 · ошибочные: 0' in page.text
+
+
+def test_student_import_finish_flow_and_audit(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван', 'Пол': 'М', 'Институт': 'ИСИ', 'Группа': 'ПГС-101', 'Курс': '2'},
+            {'ФИО': 'Петров Пётр', 'Пол': 'Ж'},
+            {'ФИО': '   ', 'Пол': ''},
+        ],
+    )
+    token = import_session_token(response)
+
+    # Завершение недоступно, пока есть неразобранные строки
+    blocked = post_import_action(student_import_client, token, 'finish')
+    assert blocked.status == 302
+    assert 'Завершение недоступно: не разобрано строк: 2.' in unquote_plus(blocked.headers['location'])
+    # Сессия жива
+    assert get_preview(student_import_client, token).status == 200
+
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert 'Создано студентов: 2.' in unquote_plus(bulk.headers['location'])
+    post_import_action(student_import_client, token, 'row/4/skip')
+
+    finished = post_import_action(student_import_client, token, 'finish')
+    assert finished.status == 302
+    location = unquote_plus(finished.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Импорт завершён: создано 2, использовано существующих 0, пропущено 1.' in location
+
+    # Аудит: по событию student_created на строку + один итог импорта
+    created = audit_details(storage, 'student_created')
+    assert len(created) == 2
+    assert {event['source'] for event in created} == {'excel-import'}
+    completed = audit_details(storage, 'student_import_completed')
+    assert completed == [{'created': 2, 'reused_existing': 0, 'skipped': 1, 'errors': 0, 'total': 3}]
+
+    # Сессия удалена; карточки остались
+    assert token not in student_import_sessions
+    assert len(students_snapshot(storage)) == 2
+
+
+def test_student_import_discard(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    response = upload_student_xlsx(
+        student_import_client, [{'ФИО': 'Иванов Иван', 'Пол': 'М'}, {'ФИО': 'Петров Пётр', 'Пол': 'Ж'}]
+    )
+    token = import_session_token(response)
+    post_import_action(student_import_client, token, 'row/2/create')
+
+    discarded = post_import_action(student_import_client, token, 'discard')
+    assert discarded.status == 302
+    assert 'Импорт отменён. Созданные карточки (1) сохранены.' in unquote_plus(discarded.headers['location'])
+    assert token not in student_import_sessions
+    # Созданное подтверждением остаётся, итогового события нет
+    assert len(students_snapshot(storage)) == 1
+    assert audit_details(storage, 'student_import_completed') == []
+
+    # Отмена без созданного — короткое сообщение
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Сидоров Сидор'}])
+    token = import_session_token(response)
+    discarded = post_import_action(student_import_client, token, 'discard')
+    assert 'Импорт отменён.' in unquote_plus(discarded.headers['location'])
+    assert 'Созданные карточки' not in unquote_plus(discarded.headers['location'])
+    # Состояние БД не изменилось: остаётся только подтверждённая ранее карточка
+    snapshot = students_snapshot(storage)
+    assert len(snapshot) == 1
+    assert snapshot[0][1] == 'Иванов Иван'
+
+
+def test_student_import_sessions_access_control(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван'}])
+    token = import_session_token(response)
+
+    # Неизвестный токен
+    missing = get_preview(student_import_client, 'no-such-token')
+    assert missing.status == 302
+    assert 'Время сессии предпросмотра истекло. Загрузите файл заново.' in unquote_plus(missing.headers['location'])
+
+    # Просроченная сессия
+    student_import_sessions[token]['created_at'] = time.time() - (2 * 60 * 60 + 60)
+    expired = get_preview(student_import_client, token)
+    assert expired.status == 302
+    assert 'Время сессии предпросмотра истекло. Загрузите файл заново.' in unquote_plus(expired.headers['location'])
+    assert token not in student_import_sessions
+
+    # Чужая сессия (другой user_id) для текущего админа недоступна
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Петров Пётр'}])
+    token = import_session_token(response)
+    student_import_sessions[token]['user_id'] = 999
+    foreign = get_preview(student_import_client, token)
+    assert foreign.status == 302
+    assert 'Время сессии предпросмотра истекло. Загрузите файл заново.' in unquote_plus(foreign.headers['location'])
+
+
+def test_student_import_post_routes_reject_missing_csrf(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(
+        student_import_client,
+        [{'ФИО': 'Иванов Иван', 'Пол': 'М'}, {'ФИО': '   ', 'Пол': ''}],
+    )
+    token = import_session_token(response)
+    suffixes = [
+        'bulk-create',
+        'row/2/create',
+        'row/2/use-existing',
+        'row/2/skip',
+        'row/2/edit',
+        'finish',
+        'discard',
+    ]
+    for suffix in suffixes:
+        _, response = student_import_client.post(
+            f'/admin/people/import/preview/{token}/{suffix}',
+            headers=get_auth_headers(),
+            data={'full_name': 'X'},
+            allow_redirects=False,
+        )
+        assert response.status == 403, suffix
+        assert 'CSRF' in response.text
+
+    # Загрузка файла — тоже POST с CSRF
+    _, response = student_import_client.post('/admin/people/import', headers=get_auth_headers(), allow_redirects=False)
+    assert response.status == 403
+    assert 'CSRF' in response.text
+
+
+def test_student_import_action_roles(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван'}])
+    token = import_session_token(response)
+    editor_headers = get_auth_headers(role='editor')
+
+    _, response = student_import_client.get(f'/admin/people/import/preview/{token}', headers=editor_headers)
+    assert response.status == 403
+    for suffix in ('bulk-create', 'row/2/create', 'row/2/skip', 'finish', 'discard'):
+        _, response = student_import_client.post(
+            f'/admin/people/import/preview/{token}/{suffix}',
+            headers=editor_headers,
+            data={**csrf_for(editor_headers), 'student_id': '1'},
+            allow_redirects=False,
+        )
+        assert response.status == 403, suffix
+
+    # Без аутентификации — 401 (кроме GET — редирект в логин)
+    _, response = student_import_client.post(f'/admin/people/import/preview/{token}/finish', data={'csrf_token': 'x'})
+    assert response.status == 401
+    _, response = student_import_client.get(f'/admin/people/import/preview/{token}', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+
+def test_student_import_invalid_row_numbers(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван'}])
+    token = import_session_token(response)
+    for suffix in ('row/abc/create', 'row/2.5/create', 'row/999/create', 'row/-1/skip'):
+        _, response = student_import_client.post(
+            f'/admin/people/import/preview/{token}/{suffix}',
+            headers=get_auth_headers(),
+            data=csrf_for(get_auth_headers()),
+            allow_redirects=False,
+        )
+        assert response.status == 400, suffix
+
+
+def test_student_import_already_resolved_row_rejected(student_import_client: SanicTestClient):
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'Иванов Иван'}])
+    token = import_session_token(response)
+    assert post_import_action(student_import_client, token, 'row/2/skip').status == 302
+    repeated = post_import_action(student_import_client, token, 'row/2/create')
+    assert repeated.status == 302
+    assert 'Строка 2 уже разобрана.' in unquote_plus(repeated.headers['location'])
+    assert len(students_snapshot(app.ctx.storage)) == 0
+
+
+def test_student_import_xss_rendered_as_text(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    payload = '<script>alert("xss")</script>'
+    response = upload_student_xlsx(
+        student_import_client, [{'ФИО': payload, 'Институт': '<img src=x onerror=alert(1)>'}]
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert page.status == 200
+    # Значения файла рендерятся как текст: сырой payload в разметке отсутствует
+    assert payload not in page.text
+    assert '<img src=x onerror=' not in page.text
+    assert '&lt;script&gt;alert(' in page.text
+    assert '&lt;/script&gt;' in page.text
+    assert '&lt;img src=x onerror=alert(1)&gt;' in page.text
+
+    created = post_import_action(student_import_client, token, 'row/2/create')
+    assert created.status == 302
+    # Значение файла хранится как есть, но рендерится экранированным:
+    # flash с ФИО из файла отображается как текст (Jinja-экранирование)
+    stored = students_snapshot(storage)
+    assert stored[0][1] == payload
+    _, flashed = student_import_client.get(created.headers['location'], headers=get_auth_headers())
+    assert flashed.status == 200
+    assert payload not in flashed.text
+    assert '&lt;script&gt;alert(' in flashed.text
+    page = get_preview(student_import_client, token)
+    assert payload not in page.text
+
+
+def test_student_import_confirm_strings_numbers_only(student_import_client: SanicTestClient):
+    # Источник шаблона: confirm-строки содержат только счётчики, не значения файла
+    template_source = (Path(__file__).parent / 'templates' / 'admin_people_import_preview.html').read_text()
+    assert "confirm('Создать {{ new_count }} новых студентов?')" in template_source
+    assert (
+        "confirm('Отменить импорт? Неразобранные строки будут отброшены, уже созданные карточки останутся.')"
+        in template_source
+    )
+
+    response = upload_student_xlsx(student_import_client, [{'ФИО': 'ИМПОРТ-НЕ-В-КОНФИРМЕ Иванов', 'Пол': 'М'}])
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    confirms = re.findall(r'onsubmit="return confirm\((.*?)\)"', page.text)
+    assert confirms
+    for confirm_text in confirms:
+        assert 'ИМПОРТ-НЕ-В-КОНФИРМЕ' not in confirm_text
+
+
+def test_student_import_route_priority_over_student_id(student_import_client: SanicTestClient):
+    _, response = student_import_client.get('/admin/people/import', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Загрузка файла' in response.text
+    assert 'Студент не найден.' not in response.text
+
+    _, response = student_import_client.get('/admin/people/import/template', headers=get_auth_headers())
+    assert response.status == 200
+    assert response.headers['content-type'].startswith(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+
+def test_student_import_isolation_and_reconcile_compat(student_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+
+    response = upload_student_xlsx(
+        student_import_client,
+        [{'ФИО': 'Иванов Иван', 'Пол': 'М', 'Институт': 'ИСИ', 'Группа': 'ПГС-101', 'Курс': '2'}],
+    )
+    token = import_session_token(response)
+    # Снимок аккаунтов после загрузки: предпросмотр сам ничего не пишет;
+    # поля last_seen/посев учёток в сравнении не участвуют.
+    users_before = [
+        tuple(row)
+        for row in storage.connection.execute(
+            'SELECT id, username, role, active, student_ref_id FROM users ORDER BY id'
+        ).fetchall()
+    ]
+    post_import_action(student_import_client, token, 'row/2/create')
+    post_import_action(student_import_client, token, 'finish')
+
+    # Изоляция: записи и аккаунты не тронуты, student_ref_id остался NULL
+    record = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert record['student_ref_id'] is None
+    assert record['student_name'] == 'Иванов Иван'
+    users_after = [
+        tuple(row)
+        for row in storage.connection.execute(
+            'SELECT id, username, role, active, student_ref_id FROM users ORDER BY id'
+        ).fetchall()
+    ]
+    assert users_after == users_before
+
+    # Совместимость: импортированный студент — кандидат в сопоставлении
+    student_id = students_snapshot(storage)[0][0]
+    _, page = student_import_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert page.status == 200
+    assert f'<a href="/admin/people/{student_id}">Иванов Иван</a>' in page.text
