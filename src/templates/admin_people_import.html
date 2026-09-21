@@ -1,0 +1,44 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Импорт студентов{% endblock admin_title %}
+{% block admin_description %}
+    Загрузка списка студентов из Excel с предпросмотром: карточки создаются
+    только после подтверждения строк.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<a class="btn btn-outline-secondary mb-3" href="/admin/people">← К списку студентов</a>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Как заполнить файл</h3>
+        <ul class="mb-3">
+            <li>Обязательное поле — только ФИО; пол, институт, группу и курс можно оставить пустыми
+                и заполнить позже в карточке студента.</li>
+            <li>Если институт не указан, он определится автоматически по группе из справочника.</li>
+            <li>Лишние колонки в файле игнорируются.</li>
+            <li>Ничего не сохраняется, пока вы не подтвердите строки на странице предпросмотра.</li>
+        </ul>
+        <a class="btn btn-outline-primary" href="/admin/people/import/template">Скачать шаблон (xlsx)</a>
+        <div class="form-text ui-hint">В шаблоне — только заголовки колонок.</div>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h3 class="title mb-1">Загрузка файла</h3>
+        {# Обычная multipart-форма (без класса import-form — тот перехватывается
+           скриптом страницы записей для AJAX-загрузки соревнований). #}
+        <form action="/admin/people/import" class="mt-3" enctype="multipart/form-data" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="mb-3">
+                <input accept=".xlsx" aria-label="Файл .xlsx со списком студентов"
+                       class="form-control" name="file" required type="file">
+            </div>
+            <button class="btn btn-primary" type="submit">Загрузить и проверить</button>
+        </form>
+    </div>
+</div>
+
+{% endblock admin_content %}

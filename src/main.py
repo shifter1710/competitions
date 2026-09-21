@@ -200,6 +200,12 @@ MIN_PASSWORD_LENGTH = 6
 # Карточки студентов (Student Identity v1, Phase 1): допустимые значения
 # поля «Пол» — только М/Ж или пусто (не указан).
 STUDENT_SEX_OPTIONS: frozenset[str] = frozenset({'', 'М', 'Ж'})
+# Импорт студентов из Excel (Student Identity v1, Phase 2.5): колонки файла
+# (обязательна только «ФИО», остальные опциональны), лимит строк на файл и
+# TTL staging-сессии предпросмотра (см. student_import_sessions).
+STUDENT_IMPORT_COLUMNS: Sequence[str] = ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс')
+STUDENT_IMPORT_MAX_ROWS = 5000
+STUDENT_IMPORT_SESSION_TTL_SECONDS = 2 * 60 * 60
 ATTACHMENT_MAX_SIZE = 5 * 1024 * 1024
 ATTACHMENT_EXTENSIONS = {
     'pdf': 'application/pdf',
@@ -4342,6 +4348,681 @@ async def admin_reconcile_user_relink(request: Request):
         message=f'Аккаунт {username} перепривязан на студента «{full_name}».',
         url=f'/admin/people/{student_id}',
     )
+
+
+# --- Импорт студентов из Excel (Student Identity v1, Phase 2.5). ---
+#
+# Загрузка списка студентов с предпросмотром: файл разбирается в память
+# (staging-сессия), карточки создаются ТОЛЬКО явным подтверждением строк —
+# предпросмотр не пишет в БД ничего. Кандидаты — только ПРЕДЛОЖЕНИЯ:
+# точное совпадение с существующей карточкой не создаёт и не связывает
+# ничего автоматически. Импорт трогает ТОЛЬКО students + audit_log:
+# записи соревнований, аккаунты и student_ref_id не меняются, справочники
+# только читаются (подсказки института/группы), ничего в них не сеется.
+# Регистрируется ДО /admin/people/<student_id>, чтобы статические пути
+# /admin/people/import и /admin/people/import/template не разбирались
+# как id карточки.
+
+
+def normalize_import_course(value) -> str:
+    """Курс из ячейки Excel как строка: 2.0 → «2», NaN/None → «».
+
+    Числовые ячейки pandas отдаёт float'ами («2» в Excel → 2.0); целые
+    выводятся без дробной части, остальное (текст, нецелые) — как str().
+    """
+    if value is None or isna(value):
+        return ''
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else str(value)
+    return str(value).strip()
+
+
+def parse_student_import_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]:
+    """Разобранные строки файла импорта студентов + неизвестные колонки.
+
+    Возвращает строки staging: row_number = index + 2 (заголовок — строка 1)
+    и статус pending/error. Значения — clean_str (NaN → пустая строка), курс —
+    normalize_import_course. Ошибки строки: пустое ФИО, недопустимый Пол
+    (ошибка, а не молчаливая правка). Дубли ФИО в файле здесь НЕ помечаются
+    — группы пересчитываются при каждом использовании (правки строк меняют
+    их состав естественно).
+    """
+    columns = [str(column) for column in df.columns]
+    unknown_columns = [column for column in columns if column not in STUDENT_IMPORT_COLUMNS]
+    rows: list[dict] = []
+    for index, record in df.iterrows():
+        full_name = clean_str(record.get('ФИО'))
+        sex = clean_str(record.get('Пол'))
+        institute = clean_str(record.get('Институт'))
+        group = clean_str(record.get('Группа'))
+        course = normalize_import_course(record.get('Курс'))
+        error = None
+        if not full_name:
+            error = 'Пустое ФИО.'
+        elif sex not in STUDENT_SEX_OPTIONS:
+            error = 'Пол должен быть «М» или «Ж».'
+        rows.append(
+            {
+                'row_number': int(index) + 2,
+                'full_name': full_name,
+                'sex': sex,
+                'institute': institute,
+                'group': group,
+                'course': course,
+                'status': 'error' if error else 'pending',
+                'error': error,
+                'student_id': None,
+            }
+        )
+    return rows, unknown_columns
+
+
+def student_import_duplicate_rows(rows: Sequence[dict]) -> dict[int, list[int]]:
+    """Одинаковые ФИО в файле: номер строки → номера всех строк группы.
+
+    Группировка по casefold(strip(ФИО)); возвращаются только строки из групп
+    с БОЛЕЕ одной строкой. Каждому члену группы виден весь список строк.
+    """
+    by_name: dict[str, list[int]] = {}
+    for row in rows:
+        name = (row['full_name'] or '').strip()
+        if name:
+            by_name.setdefault(name.casefold(), []).append(row['row_number'])
+    return {row_number: numbers for numbers in by_name.values() if len(numbers) > 1 for row_number in numbers}
+
+
+def canonical_group_in_institute(storage: SQLiteAdapter, institute: str, group: str) -> str:
+    """Каноническое написание группы внутри института (уникальность группы —
+    по паре институт+группа); без изменений, если пара справочнику неизвестна."""
+    institute_row = storage.find_catalog_row('institute', institute)
+    if institute_row is None:
+        return group
+    canonical = storage.find_catalog_canonical('group', group, parent_id=institute_row['id'])
+    return canonical if canonical else group
+
+
+def student_catalog_group_hints(storage: SQLiteAdapter, hints: dict, group: str) -> dict:
+    """Институт не указан, группа указана: институт — из справочника, если
+    группа принадлежит ровно одному институту; иначе предупреждение без
+    изменения значений."""
+    institute_value = storage.find_unique_group_institute(group)
+    if not institute_value:
+        hints['warnings'].append(
+            'Институт не определён: группа отсутствует в справочнике или относится к нескольким институтам'
+        )
+        return hints
+    hints['institute'] = institute_value
+    hints['institute_autofilled'] = True
+    hints['group'] = canonical_group_in_institute(storage, institute_value, group)
+    return hints
+
+
+def student_catalog_pair_hints(storage: SQLiteAdapter, hints: dict, institute: str, group: str) -> dict:
+    """Институт и группа указаны: канонизация обоих по справочнику; группа,
+    однозначно принадлежащая ДРУГОМУ институту — предупреждение, значения
+    не переписываются."""
+    canonical_institute = storage.find_catalog_canonical('institute', institute)
+    if canonical_institute:
+        hints['institute'] = canonical_institute
+        hints['group'] = canonical_group_in_institute(storage, canonical_institute, group)
+    owner = storage.find_unique_group_institute(group)
+    if owner and owner.lower() != hints['institute'].lower():
+        hints['warnings'].append('Требует внимания: группа относится к другому институту')
+    return hints
+
+
+def student_catalog_hints(storage: SQLiteAdapter, institute: str, group: str) -> dict:
+    """Подсказки справочников для строки импорта студентов — ТОЛЬКО ЧТЕНИЕ.
+
+    Возвращает значения (возможно канонизированные по регистру), признак
+    автозаполнения института и предупреждения. Импорт студентов НИЧЕГО не
+    пишет в справочники (в отличие от импорта записей соревнований).
+    """
+    hints = {'institute': institute, 'group': group, 'institute_autofilled': False, 'warnings': []}
+
+    if not institute and group:
+        return student_catalog_group_hints(storage, hints, group)
+    if institute and group:
+        return student_catalog_pair_hints(storage, hints, institute, group)
+    if institute:
+        canonical_institute = storage.find_catalog_canonical('institute', institute)
+        if canonical_institute:
+            hints['institute'] = canonical_institute
+    return hints
+
+
+# Staging предпросмотра живёт в памяти (прецедент login_failures): в БД не
+# пишется НИЧЕГО до подтверждения строк. Приложение однопроцессное, поэтому
+# словарь процесса — корректное хранилище; рестарт просто теряет сессии
+# (безопасно — админ загрузит файл заново). Один файл на админа: новая
+# загрузка заменяет прежнюю сессию. ФИО из файла не логируются.
+student_import_sessions: dict[str, dict] = {}
+
+
+def sweep_student_import_sessions() -> None:
+    """Удалить просроченные сессии (TTL); вызывается при каждом обращении."""
+    now = time.time()
+    expired = [
+        token
+        for token, session in student_import_sessions.items()
+        if now - session['created_at'] > STUDENT_IMPORT_SESSION_TTL_SECONDS
+    ]
+    for token in expired:
+        student_import_sessions.pop(token, None)
+
+
+def get_student_import_session(request: Request, token: str):
+    """Сессия предпросмотра для запроса: (session, None) или (None, redirect).
+
+    Неизвестный/просроченный токен и чужая сессия — одно и то же поведение:
+    возврат на страницу загрузки с flash о истечении сессии.
+    """
+    sweep_student_import_sessions()
+    session = student_import_sessions.get(token)
+    if session is None or session['user_id'] != get_current_user_id(request):
+        return None, build_redirect_with_message(
+            error='Время сессии предпросмотра истекло. Загрузите файл заново.',
+            url='/admin/people/import',
+        )
+    return session, None
+
+
+def student_import_preview_url(token: str) -> str:
+    return f'/admin/people/import/preview/{token}'
+
+
+def student_import_row(session: dict, raw_row_number: str):
+    """Строка сессии по номеру из URL: (row, None) или (None, ответ 400)."""
+    row_number, error = parse_reconcile_int(raw_row_number, 'row number')
+    if error is not None:
+        return None, error
+    for row in session['rows']:
+        if row['row_number'] == row_number:
+            return row, None
+    return None, text(body='Invalid row number', status=400)
+
+
+def student_import_bulk_rows(session: dict) -> list[dict]:
+    """Строки массового создания: pending без дублей ФИО в файле и БЕЗ
+    кандидатов на момент последнего рендера предпросмотра (признак
+    had_candidates фиксируется контекстом предпросмотра) — ровно группа
+    «Новые». Неразобранные строки с кандидатами в батч НЕ входят и
+    отмену не вызывают; повторная проверка в bulk-create отменяет всё,
+    только если у «чистой» строки совпадения ПОЯВИЛИСЬ с момента рендера."""
+    duplicates = student_import_duplicate_rows(session['rows'])
+    return [
+        row
+        for row in session['rows']
+        if row['status'] == 'pending' and row['row_number'] not in duplicates and not row.get('had_candidates')
+    ]
+
+
+def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dict:
+    """Контекст предпросмотра. Всё производное (кандидаты, подсказки
+    справочников, группы дублей, категории, счётчики) пересчитывается при
+    каждом рендере; в сессии хранятся строки файла, решения и фиксируемый
+    рендером признак had_candidates (см. student_import_bulk_rows)."""
+    duplicates = student_import_duplicate_rows(session['rows'])
+    groups: dict[str, list[dict]] = {'new': [], 'review': [], 'error': [], 'resolved': []}
+    resolved_counts = {'created': 0, 'reused_existing': 0, 'skipped': 0}
+    pending = 0
+    for row in session['rows']:
+        status = row['status']
+        if status == 'pending':
+            pending += 1
+        elif status in resolved_counts:
+            resolved_counts[status] += 1
+        view = {**row, 'candidates': [], 'hints': None, 'duplicate_rows': duplicates.get(row['row_number'])}
+        if status == 'pending':
+            view['candidates'] = storage.find_student_candidates(row['full_name'])
+            view['hints'] = student_catalog_hints(storage, row['institute'], row['group'])
+            # Классификация рендера фиксируется в строке сессии: массовое
+            # создание (bulk-create) берёт только «чистые» строки (без
+            # кандидатов на момент предпросмотра) и отменяется целиком,
+            # только если у такой строки совпадения появились ПОЗЖЕ. После
+            # правки строки следующий рендер пересчитает признак естественно.
+            row['had_candidates'] = bool(view['candidates'])
+            category = 'review' if (view['candidates'] or view['duplicate_rows']) else 'new'
+        elif status == 'error':
+            category = 'error'
+        else:
+            category = 'resolved'
+        groups[category].append(view)
+    return {
+        'token': session['token'],
+        'filename': session['filename'],
+        'unknown_columns': session['unknown_columns'],
+        'groups': groups,
+        'total': len(session['rows']),
+        'pending': pending,
+        'new_count': len(groups['new']),
+        'review_count': len(groups['review']),
+        'error_count': len(groups['error']),
+        'resolved_count': len(groups['resolved']),
+        'created_count': resolved_counts['created'],
+        'reused_count': resolved_counts['reused_existing'],
+        'skipped_count': resolved_counts['skipped'],
+    }
+
+
+def student_import_counters(session: dict) -> dict[str, int]:
+    """Итоги сессии для аудита/сообщений: created/reused_existing/skipped/
+    errors/total (по статусам строк)."""
+    counters = {'created': 0, 'reused_existing': 0, 'skipped': 0, 'errors': 0}
+    for row in session['rows']:
+        if row['status'] == 'error':
+            counters['errors'] += 1
+        elif row['status'] in counters:
+            counters[row['status']] += 1
+    counters['total'] = len(session['rows'])
+    return counters
+
+
+def create_imported_student(request: Request, storage: SQLiteAdapter, row: dict) -> int:
+    """Создать карточку по строке импорта с подсказками справочников.
+
+    Создаётся ровно то, что показано в предпросмотре: институт/группа —
+    после канонизации и автозаполнения по группе (student_catalog_hints).
+    """
+    hints = student_catalog_hints(storage, row['institute'], row['group'])
+    student_id = storage.create_student(
+        row['full_name'],
+        row['sex'],
+        hints['institute'],
+        hints['group'],
+        row['course'],
+    )
+    row['status'] = 'created'
+    row['student_id'] = student_id
+    log_audit_event(
+        request,
+        'student_created',
+        {'student_id': student_id, 'full_name': row['full_name'], 'source': 'excel-import'},
+    )
+    return student_id
+
+
+@app.get('/admin/people/import')
+async def admin_student_import_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    return await render(
+        template_name=jinja_env.get_template('admin_people_import.html'),
+        context={
+            'request': request,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.get('/admin/people/import/template')
+async def export_student_import_template(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    df = pd.DataFrame(columns=list(STUDENT_IMPORT_COLUMNS))
+    buffer = BytesIO()
+    await asyncio.to_thread(df.to_excel, buffer, index=False)
+
+    now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
+    return raw(
+        buffer.getvalue(),
+        headers={
+            'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'content-disposition': f'attachment; filename="Шаблон_студенты_{now_str}.xlsx"',
+        },
+    )
+
+
+def student_import_upload_error(df: pd.DataFrame) -> str | None:
+    """Ошибки файла на уровне колонок/объёма; None — файл пригоден."""
+    if 'ФИО' not in {str(column) for column in df.columns}:
+        return 'В файле нет обязательной колонки «ФИО». Скачайте шаблон и заполните его.'
+    if len(df) > STUDENT_IMPORT_MAX_ROWS:
+        return f'В файле больше {STUDENT_IMPORT_MAX_ROWS} строк. Разбейте список на части.'
+    if df.empty:
+        return 'В файле нет строк с данными.'
+    return None
+
+
+def replace_student_import_session(user_id: int, token: str, session: dict) -> None:
+    """Сохранить новую сессию предпросмотра; прежняя сессия того же админа
+    заменяется (один файл на админа)."""
+    sweep_student_import_sessions()
+    for existing_token, existing in list(student_import_sessions.items()):
+        if existing['user_id'] == user_id:
+            student_import_sessions.pop(existing_token, None)
+    student_import_sessions[token] = session
+
+
+@app.post('/admin/people/import')
+async def admin_student_import_upload(request: Request):
+    """Загрузка файла: разбор → staging в памяти → предпросмотр.
+
+    Ошибки файла — возврат на страницу загрузки с flash; в БД не пишется
+    ничего.
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    upload_file = request.files.get('file')
+    if upload_file is None or not upload_file.body:
+        return build_redirect_with_message(error='Выберите файл.', url='/admin/people/import')
+    if not (upload_file.name or '').lower().endswith('.xlsx'):
+        return build_redirect_with_message(
+            error='Файл должен быть в формате .xlsx.',
+            url='/admin/people/import',
+        )
+
+    try:
+        df = await asyncio.to_thread(pd.read_excel, io=upload_file.body)
+    except Exception:
+        return build_redirect_with_message(
+            error='Не удалось прочитать файл. Проверьте, что это не повреждённый .xlsx.',
+            url='/admin/people/import',
+        )
+
+    upload_error = student_import_upload_error(df)
+    if upload_error is not None:
+        return build_redirect_with_message(error=upload_error, url='/admin/people/import')
+
+    rows, unknown_columns = await asyncio.to_thread(parse_student_import_rows, df)
+
+    token = secrets.token_urlsafe(16)
+    user_id = get_current_user_id(request)
+    replace_student_import_session(
+        user_id,
+        token,
+        {
+            'token': token,
+            'user_id': user_id,
+            'created_at': time.time(),
+            'filename': upload_file.name or '',
+            'unknown_columns': unknown_columns,
+            'rows': rows,
+        },
+    )
+    return redirect(student_import_preview_url(token))
+
+
+@app.get('/admin/people/import/preview/<token>')
+async def admin_student_import_preview(request: Request, token: str):
+    """Предпросмотр: НОЛЬ записей в БД — только чтение кандидатов/справочников."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+
+    context = student_import_preview_context(get_storage(request.app), session)
+    return await render(
+        template_name=jinja_env.get_template('admin_people_import_preview.html'),
+        context={
+            'request': request,
+            **context,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/bulk-create')
+async def admin_student_import_bulk_create(request: Request, token: str):
+    """Создать «новых» (pending без кандидатов и дублей на момент рендера)
+    одной транзакцией.
+
+    Неразобранные строки с кандидатами в батч не входят — их решает админ
+    по отдельности. Предпроверка: кандидаты каждой строки БАТЧА
+    пересчитываются на момент клика — если у любой «чистой» строки
+    появились совпадения с момента рендера, не создаётся ничего (строки
+    перейдут в «Требуют решения» при следующем рендере).
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+
+    storage = get_storage(request.app)
+    bulk_rows = student_import_bulk_rows(session)
+    # Повторная проверка на момент клика: совпадения появились у «чистой»
+    # строки (их не было при рендере) — отмена целиком.
+    if any(storage.find_student_candidates(row['full_name']) for row in bulk_rows):
+        return build_redirect_with_message(
+            error='Ничего не создано: у части строк появились совпадения с существующими студентами. '
+            'Проверьте раздел «Требуют решение».',
+            url=student_import_preview_url(token),
+        )
+
+    # Значения — как в предпросмотре: с канонизацией и автозаполнением
+    # института по группе (справочники при этом только читаются).
+    prepared = []
+    for row in bulk_rows:
+        hints = student_catalog_hints(storage, row['institute'], row['group'])
+        prepared.append((row['full_name'], row['sex'], hints['institute'], hints['group'], row['course']))
+    student_ids = await asyncio.to_thread(storage.create_students, prepared)
+    for row, student_id in zip(bulk_rows, student_ids):
+        row['status'] = 'created'
+        row['student_id'] = student_id
+        log_audit_event(
+            request,
+            'student_created',
+            {'student_id': student_id, 'full_name': row['full_name'], 'source': 'excel-import'},
+        )
+    return build_redirect_with_message(
+        message=f'Создано студентов: {len(student_ids)}.',
+        url=student_import_preview_url(token),
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/row/<row_number>/create')
+async def admin_student_import_row_create(request: Request, token: str, row_number: str):
+    """Явное создание одной строки. Разрешено и при 100% совпадении —
+    полные тёзки бывают; переспрашивать кандидатов не нужно (кнопку нажали
+    осознанно)."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+    row, row_error = student_import_row(session, row_number)
+    if row_error is not None:
+        return row_error
+    if row['status'] == 'error':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} содержит ошибку — исправьте её.',
+            url=student_import_preview_url(token),
+        )
+    if row['status'] != 'pending':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=student_import_preview_url(token),
+        )
+
+    storage = get_storage(request.app)
+    create_imported_student(request, storage, row)
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]}: студент «{row["full_name"]}» создан.',
+        url=student_import_preview_url(token),
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/row/<row_number>/use-existing')
+async def admin_student_import_row_use_existing(request: Request, token: str, row_number: str):
+    """Использовать существующую карточку: пометка ТОЛЬКО в сессии предпросмотра.
+
+    Ничего не создаётся и не связывается — записи и аккаунты не трогаются
+    (связи — отдельный ручной workflow сопоставления, Phase 2).
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+    row, row_error = student_import_row(session, row_number)
+    if row_error is not None:
+        return row_error
+    if row['status'] == 'error':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} содержит ошибку — исправьте её.',
+            url=student_import_preview_url(token),
+        )
+    if row['status'] != 'pending':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=student_import_preview_url(token),
+        )
+
+    student_id, id_error = parse_reconcile_int(get_form_value(request, 'student_id'), 'student id')
+    if id_error is not None:
+        return id_error
+    storage = get_storage(request.app)
+    if storage.get_student_by_id(student_id) is None:
+        return build_redirect_with_message(
+            error='Студент не найден.',
+            url=student_import_preview_url(token),
+        )
+
+    row['status'] = 'reused_existing'
+    row['student_id'] = student_id
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]}: использован существующий студент #{student_id}.',
+        url=student_import_preview_url(token),
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/row/<row_number>/skip')
+async def admin_student_import_row_skip(request: Request, token: str, row_number: str):
+    """Пропустить строку (в т.ч. ошибочную — как быстрый способ убрать её
+    из виду)."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+    row, row_error = student_import_row(session, row_number)
+    if row_error is not None:
+        return row_error
+    if row['status'] not in ('pending', 'error'):
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=student_import_preview_url(token),
+        )
+
+    row['status'] = 'skipped'
+    row['student_id'] = None
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]} пропущена.',
+        url=student_import_preview_url(token),
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/row/<row_number>/edit')
+async def admin_student_import_row_edit(request: Request, token: str, row_number: str):
+    """Правка строки в сессии. В отличие от очереди конфликтов импорта
+    записей, ФИО здесь редактируемо — им можно привести строку к написанию
+    существующего студента. Некорректные данные — строка становится
+    ошибочной; кандидаты/подсказки пересчитаются при следующем рендере."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+    row, row_error = student_import_row(session, row_number)
+    if row_error is not None:
+        return row_error
+    if row['status'] not in ('pending', 'error'):
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=student_import_preview_url(token),
+        )
+
+    row['full_name'] = get_form_value(request, 'full_name').strip()
+    row['sex'] = get_form_value(request, 'sex').strip()
+    row['institute'] = get_form_value(request, 'institute').strip()
+    row['group'] = get_form_value(request, 'group').strip()
+    row['course'] = get_form_value(request, 'course').strip()
+    error = None
+    if not row['full_name']:
+        error = 'Пустое ФИО.'
+    elif row['sex'] not in STUDENT_SEX_OPTIONS:
+        error = 'Пол должен быть «М» или «Ж».'
+    if error is not None:
+        row['status'] = 'error'
+        row['error'] = error
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} обновлена, но данные некорректны: {error}',
+            url=student_import_preview_url(token),
+        )
+    row['status'] = 'pending'
+    row['error'] = None
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]} обновлена.',
+        url=student_import_preview_url(token),
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/finish')
+async def admin_student_import_finish(request: Request, token: str):
+    """Завершить импорт: одно audit-событие с итогами, сессия удаляется.
+
+    Ошибочные строки завершению НЕ мешают (они учтены как errors) — блокируют
+    только неразобранные pending-строки.
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+
+    pending = sum(1 for row in session['rows'] if row['status'] == 'pending')
+    if pending:
+        return build_redirect_with_message(
+            error=f'Завершение недоступно: не разобрано строк: {pending}.',
+            url=student_import_preview_url(token),
+        )
+
+    counters = student_import_counters(session)
+    log_audit_event(request, 'student_import_completed', counters)
+    student_import_sessions.pop(token, None)
+    return build_redirect_with_message(
+        message=(
+            f'Импорт завершён: создано {counters["created"]}, '
+            f'использовано существующих {counters["reused_existing"]}, '
+            f'пропущено {counters["skipped"]}.'
+        ),
+        url='/admin/people',
+    )
+
+
+@app.post('/admin/people/import/preview/<token>/discard')
+async def admin_student_import_discard(request: Request, token: str):
+    """Отменить импорт: сессия удаляется без аудита. Уже созданные
+    подтверждением карточки остаются (создание было явным)."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    session, session_error = get_student_import_session(request, token)
+    if session_error is not None:
+        return session_error
+
+    created = sum(1 for row in session['rows'] if row['status'] == 'created')
+    student_import_sessions.pop(token, None)
+    if created:
+        return build_redirect_with_message(
+            message=f'Импорт отменён. Созданные карточки ({created}) сохранены.',
+            url='/admin/people',
+        )
+    return build_redirect_with_message(message='Импорт отменён.', url='/admin/people')
 
 
 @app.get('/admin/people/<student_id>')
