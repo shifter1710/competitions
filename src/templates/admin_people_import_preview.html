@@ -22,8 +22,13 @@
     <td>
         {% if row.hints and row.hints.institute %}{{ row.hints.institute }}{% else %}{{ row.institute or '—' }}{% endif %}
         {% if row.hints and row.hints.institute_autofilled %}
+        {% if row.hints.institute_source == 'file' %}
+        <span class="badge text-bg-light border"
+              title="Институт определён по группе из этого файла">определён по файлу</span>
+        {% else %}
         <span class="badge text-bg-light border"
               title="Институт определён по группе из справочника">определён по группе</span>
+        {% endif %}
         {% endif %}
     </td>
     <td>{% if row.hints and row.hints.group %}{{ row.hints.group }}{% else %}{{ row.group or '—' }}{% endif %}</td>

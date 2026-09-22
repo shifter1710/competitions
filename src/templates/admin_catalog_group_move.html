@@ -1,0 +1,41 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Перенос группы в другой институт{% endblock admin_title %}
+{% block admin_description %}
+    Явное админское действие: выполнение фиксируется в журнале аудита, отмена
+    на этом экране ничего не меняет.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">
+            Перенос группы: «{{ group_value }}» — «{{ old_institute }}» → «{{ target_institute }}»
+        </h5>
+        <p class="mb-2">
+            Будет обновлено: записей о соревнованиях — <strong>{{ records_count }}</strong>,
+            карточек студентов — <strong>{{ students_count }}</strong>.
+        </p>
+        <p class="text-muted">
+            Институт группы изменится в справочнике, в перечисленных записях о соревнованиях
+            и карточках студентов.
+        </p>
+
+        <form action="/admin/catalogs/group/{{ value_id }}/move" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="target_institute_id" value="{{ target_institute_id }}">
+            <div class="form-check mb-3">
+                <input class="form-check-input" id="move-confirm" name="confirm" required type="checkbox">
+                <label class="form-check-label" for="move-confirm">
+                    Да, перенести группу «{{ group_value }}» в институт «{{ target_institute }}»
+                    и обновить перечисленные данные
+                </label>
+            </div>
+            <button class="btn btn-success" type="submit">Перенести группу</button>
+            <a class="btn btn-outline-secondary" href="/admin/catalogs">Отмена</a>
+        </form>
+    </div>
+</div>
+
+{% endblock admin_content %}

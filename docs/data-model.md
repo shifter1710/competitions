@@ -242,13 +242,21 @@ erDiagram
 - `password_changed` — смена пароля;
 - `record_approved` (в т.ч. авто-подтверждение при правке модератора) /
   `record_rejected` — решения модерации;
+- `record_deleted` — удаление записи `{record_id, student_name}`
+  (2026-09-22, включая удаление участника со страницы события календаря);
 - `students_merged` — merge ФИО;
 - `alias_added` — привязка псевдонима;
 - `user_deleted` — удаление аккаунта;
 - `import_conflict_resolved` — решения по очереди импорта
   (accepted/skipped/replaced, с diff);
 - `catalog_value_renamed` / `catalog_value_deleted` — справочники;
+- `catalog_group_moved` — перенос группы в другой институт `{group,
+  old_institute, new_institute, students_updated, competitions_updated,
+  group_id}` (2026-09-22);
 - `calendar_event_deleted` — удаление события календаря;
+- `calendar_regulation_uploaded` `{event_id, event_name, filename,
+  replaced}` / `calendar_regulation_deleted` `{event_id, event_name,
+  filename}` — файл положения события календаря (2026-09-22);
 - `student_created` / `student_updated` (с diff old→new) /
   `student_deactivated` / `student_activated` / `student_alias_added` /
   `student_alias_removed` — карточки студентов (Phase 1);
@@ -281,12 +289,17 @@ erDiagram
 | `sport` | TEXT NOT NULL DEFAULT `''` | |
 | `url` | TEXT NOT NULL DEFAULT `''` | только `http://` или `https://` (с 88ce6d7) |
 | `created_at` | TEXT NOT NULL | |
+| `regulation_filename` | TEXT NULL | исходное имя файла положения для скачивания (2026-09-22) |
+| `regulation_stored_name` | TEXT NULL | служебное имя файла в `data/files/calendar/<id>/`; обе NULL = файла нет |
 
 Участники события **вычисляются**: JOIN записей реестра по пресету
 `(name, date, COALESCE(date_to, ''))` против `competitions`. Добавление
 участника создаёт обычную `approved`-запись с пресетом события
 (`position = 0`, «ждёт результата»). Удаление события заблокировано, если
-по пресету уже есть совпавшие записи.
+по пресету уже есть совпавшие записи. К событию можно прикрепить один файл
+положения (PDF/JPEG/PNG до 5 МБ; скачивание — все не-атлеты, управление —
+модераторы; см. docs/data-model-decisions.md «Файл положения события
+календаря»); при удалении события файл удаляется вместе с ним.
 
 ### 10. `import_queue` — очередь конфликтов импорта
 
@@ -317,7 +330,7 @@ sha256(ФИО).
 | `full_name` | TEXT NOT NULL | актуальное ФИО; дубликаты у разных карточек РАЗРЕШЕНЫ (тёзки) |
 | `sex` | TEXT NULL | `М` / `Ж` / пусто (не указан) |
 | `institute` | TEXT NULL | актуальный институт (свободный текст) |
-| `group_name` | TEXT NULL | актуальная группа (свободный текст) |
+| `group_name` | TEXT NULL | актуальная группа (свободный текст); с 2026-09-22 `institute` карточек с точной парой институт+группа обновляется переносом группы в другой институт |
 | `course` | TEXT NULL | актуальный курс (свободный текст) |
 | `active` | INTEGER NOT NULL DEFAULT 1 | деактивация вместо удаления; физического DELETE нет |
 | `merged_into_id` | INTEGER NULL | **зарезервирована** на будущее (слияние карточек); не пишется и не читается |
@@ -532,6 +545,8 @@ Merge (admin, смена фамилии): переписывает `student_id` 
   пересборка таблицы (данные копируются, легаси-таблица дропается);
 - `users`: `+pwd_ver`, `+profile_data`, `+name_aliases`, `+last_login_at`,
   `+last_seen_at`, `+student_ref_id` (Phase 1; с Phase 2 наполняется вручную через сопоставление);
+- `calendar_events`: `+regulation_filename`, `+regulation_stored_name`
+  (2026-09-22, файл положения события; обе NULL = файла нет);
 - новые таблицы целиком через `CREATE TABLE IF NOT EXISTS`
   (`attachments`, `levels`, `catalog_values`, `users`, `audit_log`,
   `calendar_events`, `field_settings`, `import_queue`, `students`,

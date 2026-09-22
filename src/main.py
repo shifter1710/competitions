@@ -1722,6 +1722,12 @@ async def calendar_event_page(request: Request, event_id: str):
             'no_result_count': no_result_count,
             'shown_count': len(participants),
             'can_write': user_can_write(request),
+            # Кнопка удаления участника — только admin (роут /competition/<id>/delete
+            # админский): без флага кнопка в шаблоне не рисовалась вовсе.
+            'is_admin': user_is_admin(request),
+            # Управление файлом положения — модераторы (admin/editor);
+            # can_write сюда не годится: он включает атлета.
+            'can_manage': user_is_moderator(request),
             'result_filter': result_filter,
             'result_filter_options': CALENDAR_RESULT_FILTERS,
             'sport_options': storage.list_catalog('sport'),
@@ -1811,12 +1817,125 @@ async def delete_calendar_event(request: Request, event_id: str):
         )
 
     storage.delete_calendar_event(numeric_id)
+    # Файл положения живёт вне БД: каталог события удаляется вместе с ним
+    # (best-effort — как каталоги вложений записей).
+    shutil.rmtree(calendar_regulation_dir(numeric_id), ignore_errors=True)
     log_audit_event(
         request,
         'calendar_event_deleted',
         {'event_id': numeric_id, 'name': event['name'], 'date': event['date']},
     )
     return redirect(to='/calendar')
+
+
+# Файл положения события календаря (решение 2026-09-22): один файл на событие
+# (PDF/JPEG/PNG до 5 МБ, та же валидация, что у вложений), колонки
+# calendar_events.regulation_* + файл в data/files/calendar/<event_id>/.
+# Скачивание — все не-атлеты (как страница события), замена/удаление —
+# модераторы.
+
+
+@app.get('/calendar/<event_id>/regulation')
+async def download_calendar_regulation(request: Request, event_id: str):
+    # Права — как у страницы события: аноним перенаправляется на вход
+    # middleware, атлету страница события недоступна — файл тоже.
+    if user_is_athlete(request):
+        return text(body='Forbidden', status=403)
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    filename = event.get('regulation_filename') or ''
+    stored_name = event.get('regulation_stored_name') or ''
+    if not filename or not stored_name:
+        return text(body='Regulation not found', status=404)
+    file_path = regulation_source_path(event['id'], stored_name)
+    if not file_path.is_file():
+        return text(body='Not Found', status=404)
+
+    extension = Path(filename).suffix.lower().lstrip('.')
+    return raw(
+        await asyncio.to_thread(file_path.read_bytes),
+        headers={
+            'content-type': ATTACHMENT_EXTENSIONS.get(extension, 'application/octet-stream'),
+            'content-disposition': f'attachment; filename="{filename}"',
+        },
+    )
+
+
+@app.post('/calendar/<event_id>/regulation')
+async def upload_calendar_regulation(request: Request, event_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    back_url = f'/calendar/{event["id"]}'
+    upload_file = request.files.get('regulation')
+    if upload_file is None or not upload_file.body:
+        return build_redirect_with_message(error='Выберите файл.', url=back_url)
+    if len(upload_file.body) > ATTACHMENT_MAX_SIZE:
+        return build_redirect_with_message(error='Файл больше 5 МБ', url=back_url)
+    filename = (upload_file.name or 'regulation').rsplit('/', 1)[-1]
+    content_type = detect_attachment_type(upload_file.body, filename)
+    if content_type is None:
+        return build_redirect_with_message(error='Допустимы только PDF, JPEG и PNG', url=back_url)
+
+    # Порядок как у вложений: сначала новый файл на диск, затем колонки БД,
+    # затем best-effort удаление прежнего файла (БД уже согласована).
+    extension = Path(filename).suffix.lower().lstrip('.') or 'bin'
+    stored_name = f'{uuid.uuid4().hex}.{extension}'
+    event_dir = calendar_regulation_dir(event['id'])
+    event_dir.mkdir(parents=True, exist_ok=True)
+    (event_dir / stored_name).write_bytes(upload_file.body)
+
+    old_stored_name = event.get('regulation_stored_name') or ''
+    get_storage(request.app).set_calendar_regulation(event['id'], filename, stored_name)
+
+    if old_stored_name:
+        try:
+            regulation_source_path(event['id'], old_stored_name).unlink(missing_ok=True)
+        except OSError:
+            logger.warning('Failed to remove old regulation file of event %s', event['id'], exc_info=True)
+
+    log_audit_event(
+        request,
+        'calendar_regulation_uploaded',
+        {
+            'event_id': event['id'],
+            'event_name': event['name'],
+            'filename': filename,
+            'replaced': bool(old_stored_name),
+        },
+    )
+    return build_redirect_with_message(message='Положение обновлено', url=back_url)
+
+
+@app.post('/calendar/<event_id>/regulation/delete')
+async def delete_calendar_regulation(request: Request, event_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    back_url = f'/calendar/{event["id"]}'
+    filename = event.get('regulation_filename') or ''
+    stored_name = event.get('regulation_stored_name') or ''
+    if not stored_name:
+        return build_redirect_with_message(error='Положение не прикреплено.', url=back_url)
+
+    get_storage(request.app).clear_calendar_regulation(event['id'])
+    shutil.rmtree(calendar_regulation_dir(event['id']), ignore_errors=True)
+    log_audit_event(
+        request,
+        'calendar_regulation_deleted',
+        {'event_id': event['id'], 'event_name': event['name'], 'filename': filename},
+    )
+    return build_redirect_with_message(message='Положение удалено.', url=back_url)
 
 
 @app.get('/admin')
@@ -2256,6 +2375,7 @@ async def admin_catalogs_page(request: Request):
             'request': request,
             'sport_values': build_catalog_entries(storage, 'sport'),
             'institute_tree': storage.list_catalog_tree(),
+            'institute_options': build_institute_options(storage),
             'admin_levels': [
                 {**level, 'records_count': storage.count_records_using('level', level['name'])}
                 for level in storage.list_levels()
@@ -2542,6 +2662,129 @@ async def rename_catalog_value(request: Request, category: str, value_id: str):
     message = f'«{row["value"]}» → «{new_name}»'
     message += f': обновлено записей — {records_updated}' if update_records else ' (записи не тронуты)'
     return build_redirect_with_message(message=message, url='/admin/catalogs')
+
+
+def build_institute_options(storage: SQLiteAdapter) -> list[dict]:
+    """Активные институты плоским списком id+значение (форма переноса группы)."""
+    return [{'id': row['id'], 'value': row['value']} for row in storage.list_catalog_all('institute') if row['active']]
+
+
+def resolve_group_move_target(request: Request, value_id: str, target_institute_id: str):
+    """Группа и целевой институт переноса: ((group, target), None) или
+    (None, redirect с ошибкой на /admin/catalogs)."""
+    try:
+        numeric_group_id = int(value_id)
+        numeric_target_id = int(target_institute_id)
+    except (TypeError, ValueError):
+        return None, text(body='Invalid value id', status=400)
+    storage = get_storage(request.app)
+    group = storage.get_catalog_value(numeric_group_id)
+    if group is None or group['category'] != GROUP_CATEGORY or not group.get('parent_id'):
+        return None, build_redirect_with_message(error='Группа или институт не найдены', url='/admin/catalogs')
+    target = storage.get_catalog_value(numeric_target_id)
+    if target is None or target['category'] != 'institute':
+        return None, build_redirect_with_message(error='Группа или институт не найдены', url='/admin/catalogs')
+    if target['id'] == group['parent_id']:
+        return None, build_redirect_with_message(
+            error='Группа уже относится к выбранному институту',
+            url='/admin/catalogs',
+        )
+    conflict = storage.find_catalog_row(GROUP_CATEGORY, group['value'], parent_id=target['id'])
+    if conflict is not None:
+        return None, build_redirect_with_message(
+            error=(
+                f'В институте «{target["value"]}» уже есть группа «{group["value"]}» '
+                '— переименуйте одну из групп перед переносом'
+            ),
+            url='/admin/catalogs',
+        )
+    return (group, target), None
+
+
+@app.get('/admin/catalogs/group/<value_id>/move')
+async def catalog_group_move_page(request: Request, value_id: str):
+    """Перенос группы в другой институт (решение 2026-09-22), шаг 2 без JS:
+    страница-подтверждение со счётчиками затрагиваемых данных и галочкой."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    target_institute_id = (get_param(dict(request.args), 'target_institute_id') or '').strip()
+    if not target_institute_id:
+        return build_redirect_with_message(error='Выберите институт для переноса', url='/admin/catalogs')
+    resolved, error = resolve_group_move_target(request, value_id, target_institute_id)
+    if error is not None:
+        return error
+    group, target = resolved
+
+    storage = get_storage(request.app)
+    old_institute = storage.get_catalog_value(group['parent_id'])
+    if old_institute is None:
+        return build_redirect_with_message(error='Группа или институт не найдены', url='/admin/catalogs')
+
+    return await render(
+        template_name=jinja_env.get_template('admin_catalog_group_move.html'),
+        context={
+            'request': request,
+            'value_id': group['id'],
+            'group_value': group['value'],
+            'old_institute': old_institute['value'],
+            'target_institute': target['value'],
+            'target_institute_id': target['id'],
+            'records_count': storage.count_records_using('group', group['value'], parent_value=old_institute['value']),
+            'students_count': storage.count_students_using_group_pair(group['value'], old_institute['value']),
+        },
+    )
+
+
+@app.post('/admin/catalogs/group/<value_id>/move')
+async def catalog_group_move(request: Request, value_id: str):
+    """Выполнение переноса группы: справочник + записи + карточки студентов
+    одной транзакцией в storage; подтверждение — обязательной галочкой."""
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    target_institute_id = get_form_value(request, 'target_institute_id').strip()
+    resolved, error = resolve_group_move_target(request, value_id, target_institute_id)
+    if error is not None:
+        return error
+    group, target = resolved
+
+    # Без галочки — назад на страницу подтверждения, ничего не меняя.
+    back_url = f'/admin/catalogs/group/{value_id}/move?target_institute_id={target_institute_id}'
+    if not checkbox_to_bool(get_form_value(request, 'confirm')):
+        return redirect(to=back_url)
+
+    storage = get_storage(request.app)
+    old_institute = storage.get_catalog_value(group['parent_id'])
+    if old_institute is None:
+        return build_redirect_with_message(error='Группа или институт не найдены', url='/admin/catalogs')
+    try:
+        counts = storage.move_catalog_group(group['id'], target['id'])
+    except ValueError as exc:
+        return build_redirect_with_message(error=str(exc), url='/admin/catalogs')
+
+    log_audit_event(
+        request,
+        'catalog_group_moved',
+        {
+            'group': group['value'],
+            'old_institute': old_institute['value'],
+            'new_institute': target['value'],
+            'students_updated': counts['students_updated'],
+            'competitions_updated': counts['competitions_updated'],
+            'group_id': group['id'],
+        },
+    )
+    return build_redirect_with_message(
+        message=(
+            f'Группа «{group["value"]}» перенесена: «{old_institute["value"]}» → «{target["value"]}»; '
+            f'обновлено записей — {counts["competitions_updated"]}, '
+            f'карточек студентов — {counts["students_updated"]}'
+        ),
+        url='/admin/catalogs',
+    )
 
 
 def ru_plural(number: int, one: str, few: str, many: str) -> str:
@@ -3155,6 +3398,8 @@ async def delete_competition(request: Request, record_id: str):
         return text(body='Invalid record id', status=400)
 
     storage = get_storage(request.app)
+    # ФИО до удаления — в аудит удаления записи (после удаления взять неоткуда).
+    student_name = storage.get_competition_student_name(numeric_id)
     # Удаление записи тянет за собой её вложения (M4): сначала транзакция БД
     # (строки вложений + запись), затем файлы — тот же порядок, что у
     # perform_wipe. Файлы удаляются best-effort: остаток каталога — только
@@ -3163,6 +3408,7 @@ async def delete_competition(request: Request, record_id: str):
     remove_attachment_record_dirs([numeric_id])
     if (files_dir() / str(numeric_id)).exists():
         logger.warning('Attachment directory of record %s still exists after record deletion', numeric_id)
+    log_audit_event(request, 'record_deleted', {'record_id': numeric_id, 'student_name': student_name})
     return redirect(to='/')
 
 
@@ -3420,6 +3666,17 @@ def attachments_dir() -> Path:
     base = Path(settings.data_folder) / 'files'
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def calendar_regulation_dir(event_id: int) -> Path:
+    """Каталог файла положения события: data/files/calendar/<event_id>
+    (общий корень data/files — вложения и положения бэкапятся вместе)."""
+    return Path(settings.data_folder) / 'files' / 'calendar' / str(event_id)
+
+
+def regulation_source_path(event_id: int, stored_name: str) -> Path:
+    """Путь к файлу положения события на диске по служебному имени."""
+    return calendar_regulation_dir(event_id) / stored_name
 
 
 def detect_attachment_type(body: bytes, filename: str) -> str | None:
@@ -4377,12 +4634,29 @@ def normalize_import_course(value) -> str:
     return str(value).strip()
 
 
+def normalize_student_sex(value: str) -> str | None:
+    """Пол из ячейки Excel в каноническом виде: '' → '', м/м → «М», ж/ж → «Ж».
+
+    upper() в Python работает с кириллицей («м» → «М»); латинские m/M не
+    совпадают с кириллическими «М»/«Ж» и отвергаются естественно. Всё
+    остальное — None (ошибка строки, а не молчаливая правка).
+    """
+    if value == '':
+        return ''
+    if value.upper() == 'М':
+        return 'М'
+    if value.upper() == 'Ж':
+        return 'Ж'
+    return None
+
+
 def parse_student_import_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]:
     """Разобранные строки файла импорта студентов + неизвестные колонки.
 
     Возвращает строки staging: row_number = index + 2 (заголовок — строка 1)
     и статус pending/error. Значения — clean_str (NaN → пустая строка), курс —
-    normalize_import_course. Ошибки строки: пустое ФИО, недопустимый Пол
+    normalize_import_course, пол — normalize_student_sex (регистр «м»/«ж»
+    приводится к «М»/«Ж»). Ошибки строки: пустое ФИО, недопустимый Пол
     (ошибка, а не молчаливая правка). Дубли ФИО в файле здесь НЕ помечаются
     — группы пересчитываются при каждом использовании (правки строк меняют
     их состав естественно).
@@ -4392,14 +4666,14 @@ def parse_student_import_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]:
     rows: list[dict] = []
     for index, record in df.iterrows():
         full_name = clean_str(record.get('ФИО'))
-        sex = clean_str(record.get('Пол'))
+        sex = normalize_student_sex(clean_str(record.get('Пол')))
         institute = clean_str(record.get('Институт'))
         group = clean_str(record.get('Группа'))
         course = normalize_import_course(record.get('Курс'))
         error = None
         if not full_name:
             error = 'Пустое ФИО.'
-        elif sex not in STUDENT_SEX_OPTIONS:
+        elif sex is None:
             error = 'Пол должен быть «М» или «Ж».'
         rows.append(
             {
@@ -4431,6 +4705,27 @@ def student_import_duplicate_rows(rows: Sequence[dict]) -> dict[int, list[int]]:
     return {row_number: numbers for numbers in by_name.values() if len(numbers) > 1 for row_number in numbers}
 
 
+def student_file_group_institutes(rows: Sequence[dict]) -> dict[str, list[dict]]:
+    """Карта группа → институты из строк файла импорта (по самой сессии).
+
+    Ключ — casefold(strip(группа)); значение — институты этой группы,
+    уникальные по casefold, в порядке появления (сохраняется первое
+    написание). Строки без группы или института не участвуют; статус строки
+    не важен — карта строится из ВСЕХ строк сессии при каждом рендере,
+    поэтому правка строки-«донора» меняет подсказки остальных естественно.
+    """
+    institutes: dict[str, list[dict]] = {}
+    for row in rows:
+        group = (row['group'] or '').strip()
+        institute = (row['institute'] or '').strip()
+        if not group or not institute:
+            continue
+        bucket = institutes.setdefault(group.casefold(), [])
+        if not any(item['cf'] == institute.casefold() for item in bucket):
+            bucket.append({'cf': institute.casefold(), 'raw': institute})
+    return institutes
+
+
 def canonical_group_in_institute(storage: SQLiteAdapter, institute: str, group: str) -> str:
     """Каноническое написание группы внутри института (уникальность группы —
     по паре институт+группа); без изменений, если пара справочнику неизвестна."""
@@ -4441,10 +4736,36 @@ def canonical_group_in_institute(storage: SQLiteAdapter, institute: str, group: 
     return canonical if canonical else group
 
 
-def student_catalog_group_hints(storage: SQLiteAdapter, hints: dict, group: str) -> dict:
-    """Институт не указан, группа указана: институт — из справочника, если
-    группа принадлежит ровно одному институту; иначе предупреждение без
-    изменения значений."""
+def student_catalog_group_hints(
+    storage: SQLiteAdapter,
+    hints: dict,
+    group: str,
+    file_groups: dict[str, list[dict]] | None = None,
+) -> dict:
+    """Институт не указан, группа указана: институт — из ТЕКУЩЕГО файла
+    (file_groups, если группа встречается в нём ровно с одним институтом),
+    иначе из справочника (если группа принадлежит ровно одному институту);
+    иначе предупреждение без изменения значений.
+
+    Файл важнее справочника: импорт списков одной группы обычно идёт из
+    файла факультета. Расхождение со справочником — предупреждение, значение
+    остаётся файловым.
+    """
+    file_entry = (file_groups or {}).get(group.casefold())
+    if file_entry is not None:
+        if len(file_entry) > 1:
+            hints['warnings'].append('Институт не определён: в файле группа относится к разным институтам')
+            return hints
+        raw_institute = file_entry[0]['raw']
+        institute_value = storage.find_catalog_canonical('institute', raw_institute) or raw_institute
+        hints['institute'] = institute_value
+        hints['institute_autofilled'] = True
+        hints['institute_source'] = 'file'
+        hints['group'] = canonical_group_in_institute(storage, institute_value, group)
+        catalog_owner = storage.find_unique_group_institute(group)
+        if catalog_owner and catalog_owner.casefold() != institute_value.casefold():
+            hints['warnings'].append('Требует внимания: справочник относит группу к другому институту')
+        return hints
     institute_value = storage.find_unique_group_institute(group)
     if not institute_value:
         hints['warnings'].append(
@@ -4453,6 +4774,7 @@ def student_catalog_group_hints(storage: SQLiteAdapter, hints: dict, group: str)
         return hints
     hints['institute'] = institute_value
     hints['institute_autofilled'] = True
+    hints['institute_source'] = 'catalog'
     hints['group'] = canonical_group_in_institute(storage, institute_value, group)
     return hints
 
@@ -4471,17 +4793,29 @@ def student_catalog_pair_hints(storage: SQLiteAdapter, hints: dict, institute: s
     return hints
 
 
-def student_catalog_hints(storage: SQLiteAdapter, institute: str, group: str) -> dict:
+def student_catalog_hints(
+    storage: SQLiteAdapter,
+    institute: str,
+    group: str,
+    file_groups: dict[str, list[dict]] | None = None,
+) -> dict:
     """Подсказки справочников для строки импорта студентов — ТОЛЬКО ЧТЕНИЕ.
 
     Возвращает значения (возможно канонизированные по регистру), признак
-    автозаполнения института и предупреждения. Импорт студентов НИЧЕГО не
-    пишет в справочники (в отличие от импорта записей соревнований).
+    автозаполнения института (institute_source: 'file' — из текущего файла,
+    'catalog' — из справочника) и предупреждения. Импорт студентов НИЧЕГО
+    не пишет в справочники (в отличие от импорта записей соревнований).
     """
-    hints = {'institute': institute, 'group': group, 'institute_autofilled': False, 'warnings': []}
+    hints = {
+        'institute': institute,
+        'group': group,
+        'institute_autofilled': False,
+        'institute_source': None,
+        'warnings': [],
+    }
 
     if not institute and group:
-        return student_catalog_group_hints(storage, hints, group)
+        return student_catalog_group_hints(storage, hints, group, file_groups=file_groups)
     if institute and group:
         return student_catalog_pair_hints(storage, hints, institute, group)
     if institute:
@@ -4563,6 +4897,9 @@ def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dic
     каждом рендере; в сессии хранятся строки файла, решения и фиксируемый
     рендером признак had_candidates (см. student_import_bulk_rows)."""
     duplicates = student_import_duplicate_rows(session['rows'])
+    # Карта группа → институты текущего файла строится один раз на рендер —
+    # и предпросмотр, и создание используют один и тот же источник данных.
+    file_groups = student_file_group_institutes(session['rows'])
     groups: dict[str, list[dict]] = {'new': [], 'review': [], 'error': [], 'resolved': []}
     resolved_counts = {'created': 0, 'reused_existing': 0, 'skipped': 0}
     pending = 0
@@ -4575,7 +4912,7 @@ def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dic
         view = {**row, 'candidates': [], 'hints': None, 'duplicate_rows': duplicates.get(row['row_number'])}
         if status == 'pending':
             view['candidates'] = storage.find_student_candidates(row['full_name'])
-            view['hints'] = student_catalog_hints(storage, row['institute'], row['group'])
+            view['hints'] = student_catalog_hints(storage, row['institute'], row['group'], file_groups)
             # Классификация рендера фиксируется в строке сессии: массовое
             # создание (bulk-create) берёт только «чистые» строки (без
             # кандидатов на момент предпросмотра) и отменяется целиком,
@@ -4618,13 +4955,19 @@ def student_import_counters(session: dict) -> dict[str, int]:
     return counters
 
 
-def create_imported_student(request: Request, storage: SQLiteAdapter, row: dict) -> int:
+def create_imported_student(
+    request: Request,
+    storage: SQLiteAdapter,
+    row: dict,
+    file_groups: dict[str, list[dict]] | None = None,
+) -> int:
     """Создать карточку по строке импорта с подсказками справочников.
 
     Создаётся ровно то, что показано в предпросмотре: институт/группа —
-    после канонизации и автозаполнения по группе (student_catalog_hints).
+    после канонизации и автозаполнения по группе (student_catalog_hints,
+    с той же картой группа→институты текущего файла — file_groups).
     """
-    hints = student_catalog_hints(storage, row['institute'], row['group'])
+    hints = student_catalog_hints(storage, row['institute'], row['group'], file_groups)
     student_id = storage.create_student(
         row['full_name'],
         row['sex'],
@@ -4799,10 +5142,12 @@ async def admin_student_import_bulk_create(request: Request, token: str):
         )
 
     # Значения — как в предпросмотре: с канонизацией и автозаполнением
-    # института по группе (справочники при этом только читаются).
+    # института по группе (справочники при этом только читаются). Карта
+    # группа→институты — та же функция от строк сессии, что и в рендере.
+    file_groups = student_file_group_institutes(session['rows'])
     prepared = []
     for row in bulk_rows:
-        hints = student_catalog_hints(storage, row['institute'], row['group'])
+        hints = student_catalog_hints(storage, row['institute'], row['group'], file_groups)
         prepared.append((row['full_name'], row['sex'], hints['institute'], hints['group'], row['course']))
     student_ids = await asyncio.to_thread(storage.create_students, prepared)
     for row, student_id in zip(bulk_rows, student_ids):
@@ -4845,7 +5190,7 @@ async def admin_student_import_row_create(request: Request, token: str, row_numb
         )
 
     storage = get_storage(request.app)
-    create_imported_student(request, storage, row)
+    create_imported_student(request, storage, row, student_file_group_institutes(session['rows']))
     return build_redirect_with_message(
         message=f'Строка {row["row_number"]}: студент «{row["full_name"]}» создан.',
         url=student_import_preview_url(token),

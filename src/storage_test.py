@@ -963,6 +963,183 @@ def test_import_after_rename_with_update_does_not_resurrect_old_value(adapter):
     assert 'региональные' in adapter.get_level_names(include_inactive=True)
 
 
+# --- Перенос группы в другой институт (решение 2026-09-22) ---
+
+
+def _catalog_ids(adapter):
+    isi = adapter.find_catalog_row('institute', 'ИСИ')
+    fma = adapter.find_catalog_row('institute', 'ФМА')
+    group = adapter.find_catalog_row('group', 'ПГС-101', parent_id=isi['id'])
+    return isi, fma, group
+
+
+def test_count_students_using_group_pair(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.create_student('Студентов Студент', 'М', 'ИСИ', 'ПГС-101', '2')
+    adapter.create_student('Другов Друг', 'Ж', 'ФМА', 'ПГС-101', '1')
+    adapter.create_student('Пустов Пуст', 'Ж', '', 'ПГС-101', '3')
+
+    assert adapter.count_students_using_group_pair('ПГС-101', 'ИСИ') == 1
+    assert adapter.count_students_using_group_pair('ПГС-101', 'ФМА') == 1
+    assert adapter.count_students_using_group_pair('ПГС-101', 'АДИ') == 0
+    assert adapter.count_students_using_group_pair('', 'ИСИ') == 0
+    assert adapter.count_students_using_group_pair('ПГС-101', '') == 0
+
+
+def test_move_catalog_group_updates_hierarchy_records_and_students(adapter):
+    """Счастливый путь: справочник + записи + карточки одной транзакцией.
+    Цель — институт БЕЗ одноимённой группы (иначе конфликт). Отбор — точная
+    пара институт+группа: одноимённая группа другого института и карточки
+    без института не затрагиваются."""
+    moved = make_competition('Переносимой Перенос', datetime(2026, 1, 1))  # ИСИ / ПГС-101
+    same_name_other = make_competition('Другой Друг', datetime(2026, 1, 2))  # ФМА / ПГС-101
+    same_name_other.institute = 'ФМА'
+    adapter.save_competitions([moved, same_name_other])
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-101')  # одноимённая группа в другом институте
+    adapter.add_catalog_value('institute', 'АДИ')  # цель переноса — без ПГС-101
+    adapter.create_student('Студентов Студент', 'М', 'ИСИ', 'ПГС-101', '2')
+    adapter.create_student('Другов Друг', 'Ж', 'ФМА', 'ПГС-101', '1')
+    adapter.create_student('Пустов Пуст', 'Ж', '', 'ПГС-101', '3')
+
+    isi, _, group = _catalog_ids(adapter)
+    adi = adapter.find_catalog_row('institute', 'АДИ')
+    counts = adapter.move_catalog_group(group['id'], adi['id'])
+
+    assert counts == {'students_updated': 1, 'competitions_updated': 1}
+    # Иерархия: группа теперь под АДИ; у ИСИ групп нет, ФМА не тронута
+    tree = {inst['value']: {item['value'] for item in inst['groups']} for inst in adapter.list_catalog_tree()}
+    assert tree == {'АДИ': {'ПГС-101'}, 'ИСИ': set(), 'ФМА': {'ПГС-101'}}
+    # Записи: переносимая — АДИ, одноимённая чужая осталась в ФМА
+    pairs = {(comp.institute, comp.group) for comp in adapter.get_competitions()}
+    assert pairs == {('АДИ', 'ПГС-101'), ('ФМА', 'ПГС-101')}
+    # Карточки: переносимая — АДИ, остальные не тронуты
+    by_name = {row['full_name']: row['institute'] for row in adapter.list_students()}
+    assert by_name['Студентов Студент'] == 'АДИ'
+    assert by_name['Другов Друг'] == 'ФМА'
+    assert by_name['Пустов Пуст'] == ''
+    # Счётчики пар после переноса
+    assert adapter.count_students_using_group_pair('ПГС-101', 'АДИ') == 1
+
+
+def test_move_catalog_group_duplicate_in_target_rolls_back(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ПГС-101')  # конфликт имени в цели
+    adapter.save_competitions([make_competition('Переносимой Перенос', datetime(2026, 1, 1))])
+    adapter.create_student('Студентов Студент', 'М', 'ИСИ', 'ПГС-101', '2')
+
+    isi, fma, group = _catalog_ids(adapter)
+    catalog_before = adapter.connection.execute(
+        'SELECT id, category, value, parent_id FROM catalog_values ORDER BY id'
+    ).fetchall()
+    students_before = adapter.connection.execute(
+        'SELECT id, institute, group_name FROM students ORDER BY id'
+    ).fetchall()
+
+    with pytest.raises(ValueError, match='уже есть'):
+        adapter.move_catalog_group(group['id'], fma['id'])
+
+    assert (
+        catalog_before
+        == adapter.connection.execute(
+            'SELECT id, category, value, parent_id FROM catalog_values ORDER BY id'
+        ).fetchall()
+    )
+    assert (
+        students_before
+        == adapter.connection.execute('SELECT id, institute, group_name FROM students ORDER BY id').fetchall()
+    )
+    assert adapter.get_competitions()[0].institute == 'ИСИ'
+
+
+def test_move_catalog_group_rejects_unknown_and_same_institute(adapter):
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ТД-303')
+    isi, fma, group = _catalog_ids(adapter)
+
+    # Тот же институт
+    with pytest.raises(ValueError, match='уже относится'):
+        adapter.move_catalog_group(group['id'], isi['id'])
+    # Неизвестная группа
+    with pytest.raises(ValueError, match='не найдены'):
+        adapter.move_catalog_group(999999, fma['id'])
+    # Цель — не институт
+    td = adapter.find_catalog_row('group', 'ТД-303', parent_id=fma['id'])
+    with pytest.raises(ValueError, match='не найдены'):
+        adapter.move_catalog_group(group['id'], td['id'])
+    # Цель не существует
+    with pytest.raises(ValueError, match='не найдены'):
+        adapter.move_catalog_group(group['id'], 999999)
+    # «Группа» без родителя (id института как группа)
+    with pytest.raises(ValueError, match='не найдены'):
+        adapter.move_catalog_group(isi['id'], fma['id'])
+
+
+def test_move_catalog_group_hidden_group_movable(adapter):
+    """Скрытая группа переносится: активность — свойство видимости, не прав."""
+    adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
+    adapter.ensure_catalog_pair('ФМА', 'ТД-303')
+    isi, fma, group = _catalog_ids(adapter)
+    adapter.hide_catalog_value(group['id'])
+
+    counts = adapter.move_catalog_group(group['id'], fma['id'])
+
+    assert counts == {'students_updated': 0, 'competitions_updated': 0}
+    moved_row = adapter.get_catalog_value(group['id'])
+    assert moved_row['parent_id'] == fma['id'] and moved_row['active'] == 0
+    # Дерево показывает и скрытые группы: ПГС-101 теперь под ФМА (скрыта)
+    tree = {inst['value']: {item['value'] for item in inst['groups']} for inst in adapter.list_catalog_tree()}
+    assert tree == {'ИСИ': set(), 'ФМА': {'ПГС-101', 'ТД-303'}}
+    assert 'ПГС-101' not in adapter.get_group_options_by_institute().get('ФМА', [])
+
+
+# --- Файл положения события календаря: миграция калонок regulation_* ---
+
+
+def test_calendar_events_regulation_columns_migrated(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / 'legacy-calendar.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            date_to TEXT,
+            level TEXT NOT NULL DEFAULT '',
+            sport TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        '''
+    )
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, level, sport, url, created_at) '
+        "VALUES ('Кросс', '2026-06-25', 'внутривузовские', 'Бег', '', '2026-01-01T00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_events)').fetchall()}
+    assert {'regulation_filename', 'regulation_stored_name'} <= columns
+    # Существующее событие: обе колонки NULL = файла нет, данные не тронуты
+    event = adapter.get_calendar_event(1)
+    assert event['name'] == 'Кросс'
+    assert event['regulation_filename'] is None
+    assert event['regulation_stored_name'] is None
+
+    adapter.set_calendar_regulation(1, 'p.pdf', 'abc.pdf')
+    event = adapter.get_calendar_event(1)
+    assert (event['regulation_filename'], event['regulation_stored_name']) == ('p.pdf', 'abc.pdf')
+
+    adapter.clear_calendar_regulation(1)
+    event = adapter.get_calendar_event(1)
+    assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
+
+
 # --- Присутствие пользователей: last_login_at / last_seen_at (№17) ---
 
 

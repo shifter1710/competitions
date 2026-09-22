@@ -182,6 +182,12 @@ class InlineComboBox {
         }
     }
 
+    // Строковый обработчик Enter/Escape (capture-фаза на <tr>) спрашивает
+    // виджет, открыт ли список: открытое меню работает в два шага.
+    isOpen() {
+        return this.open;
+    }
+
     select(value) {
         this.input.value = value;
         this.close();
@@ -411,6 +417,12 @@ class FioResolver {
         this.onSelect(athlete);
     }
 
+    // См. InlineComboBox.isOpen: строковый обработчик Enter/Escape в
+    // capture-фазе не трогает строку, пока открыт список резолвера.
+    isOpen() {
+        return this.open;
+    }
+
     destroy() {
         clearTimeout(this.closeTimer);
         clearTimeout(this.throttleTimer);
@@ -428,6 +440,9 @@ class Main {
         this.isAthlete = document.body.dataset.role === "athlete";
         this.activeComboBoxes = [];
         this.activeFioResolvers = [];
+        // Защита от двойного сабмита инлайн-правки/новой строки (см. save*Edit).
+        this.inlineSaving = false;
+        this.newRowSaving = false;
         this.initializeDomReferences();
         this.createInstances();
         this.hangEvents();
@@ -1605,15 +1620,23 @@ class Main {
         this.linkRowCombos(row);
         this.attachFioResolver(row);
         this.inlineKeydownHandler = (event) => {
+            if (this.hasOpenRowDropdown()) {
+                return;
+            }
             if (event.key === "Escape") {
                 event.preventDefault();
+                event.stopPropagation();
                 this.cancelInlineEdit();
             } else if (event.key === "Enter" && event.target.tagName !== "SELECT") {
                 event.preventDefault();
+                event.stopPropagation();
                 this.saveInlineEdit();
             }
         };
-        row.addEventListener("keydown", this.inlineKeydownHandler);
+        // Capture-фаза: обработчик строки срабатывает ДО виджетов поля
+        // (datepicker перехватывает Esc, комбобоксы/резолвер — Enter/Esc в
+        // target-фазе), иначе Enter/Escape до строки не доходили вовсе.
+        row.addEventListener("keydown", this.inlineKeydownHandler, true);
         const firstInput = row.querySelector("[data-edit-key]");
         if (firstInput) {
             firstInput.focus();
@@ -1621,7 +1644,7 @@ class Main {
     }
 
     saveInlineEdit() {
-        if (!this.inlineEditRow || !this.inlineEditRecordId) {
+        if (!this.inlineEditRow || !this.inlineEditRecordId || this.inlineSaving) {
             return;
         }
         const fieldTypes = this.getCustomFieldTypes();
@@ -1634,6 +1657,9 @@ class Main {
             formData.append(name, input.value);
         });
 
+        // Защита от повторного Enter и двойного клика по «✓»: один запрос
+        // на одно сохранение, флаг снимается в onSuccess/onError.
+        this.inlineSaving = true;
         this.makeRequest({
             url: `/competition/${this.inlineEditRecordId}`,
             options: {
@@ -1641,10 +1667,14 @@ class Main {
                 body: formData,
             },
             onSuccess: () => {
+                this.inlineSaving = false;
                 alert("Запись успешно обновлена");
                 this.refreshCurrentContent();
             },
-            onError: (message) => alert(message || "Ошибка сохранения записи")
+            onError: (message) => {
+                this.inlineSaving = false;
+                alert(message || "Ошибка сохранения записи");
+            }
         });
     }
 
@@ -1654,7 +1684,7 @@ class Main {
         }
         const row = this.inlineEditRow;
         if (this.inlineKeydownHandler) {
-            row.removeEventListener("keydown", this.inlineKeydownHandler);
+            row.removeEventListener("keydown", this.inlineKeydownHandler, true);
             this.inlineKeydownHandler = null;
         }
         this.destroyRowDatePickers(this.inlineDatePickers);
@@ -1674,6 +1704,16 @@ class Main {
         return Boolean(this.inlineEditRow || this.newEditRow);
     }
 
+    // Открытый выпадающий список (комбобокс или резолвер ФИО) работает в два
+    // шага: Enter выбирает вариант, Esc закрывает список. Пока список открыт,
+    // строковый обработчик Enter/Escape строку не сохраняет и не отменяет.
+    hasOpenRowDropdown() {
+        return (
+            this.activeComboBoxes.some((combo) => combo.isOpen()) ||
+            this.activeFioResolvers.some((resolver) => resolver.isOpen())
+        );
+    }
+
     buildRowActionsCell(cell, saveClassName) {
         const saveButton = document.createElement("button");
         saveButton.type = "button";
@@ -1690,15 +1730,21 @@ class Main {
 
     bindRowKeyboardNavigation(row, saveAction, cancelAction) {
         const handler = (event) => {
+            if (this.hasOpenRowDropdown()) {
+                return;
+            }
             if (event.key === "Escape") {
                 event.preventDefault();
+                event.stopPropagation();
                 cancelAction();
             } else if (event.key === "Enter" && event.target.tagName !== "SELECT") {
                 event.preventDefault();
+                event.stopPropagation();
                 saveAction();
             }
         };
-        row.addEventListener("keydown", handler);
+        // Capture-фаза — та же причина, что у инлайн-правки (см. startInlineEdit).
+        row.addEventListener("keydown", handler, true);
         return handler;
     }
 
@@ -1767,7 +1813,7 @@ class Main {
     }
 
     saveNewRowEdit() {
-        if (!this.newEditRow) {
+        if (!this.newEditRow || this.newRowSaving) {
             return;
         }
         const fieldTypes = this.getCustomFieldTypes();
@@ -1780,6 +1826,8 @@ class Main {
             formData.append(name, input.value);
         });
 
+        // Защита от повторного Enter и двойного клика по «✓» (см. saveInlineEdit).
+        this.newRowSaving = true;
         this.makeRequest({
             url: "/competition",
             options: {
@@ -1787,10 +1835,14 @@ class Main {
                 body: formData,
             },
             onSuccess: () => {
+                this.newRowSaving = false;
                 alert("Запись успешно добавлена");
                 this.refreshCurrentContent();
             },
-            onError: (message) => alert(message || "Ошибка добавления записи")
+            onError: (message) => {
+                this.newRowSaving = false;
+                alert(message || "Ошибка добавления записи");
+            }
         });
     }
 
@@ -1800,7 +1852,7 @@ class Main {
         }
         const row = this.newEditRow;
         if (this.newRowKeydownHandler) {
-            row.removeEventListener("keydown", this.newRowKeydownHandler);
+            row.removeEventListener("keydown", this.newRowKeydownHandler, true);
             this.newRowKeydownHandler = null;
         }
         this.destroyRowDatePickers(this.newRowDatePickers);
@@ -2773,6 +2825,9 @@ class ParticipantsPage {
         this.editingRow = null;
         this.editingBackup = null;
         this.keydownHandler = null;
+        this.activeFioResolver = null;
+        // Защита от двойного сабмита правки участника (см. saveEdit).
+        this.participantSaving = false;
         this.attachAddFormResolver();
         this.table.addEventListener("click", (event) => this.handleClick(event));
     }
@@ -2915,7 +2970,7 @@ class ParticipantsPage {
         cancelButton.title = "Отмена";
         actionsCell.append(saveButton, cancelButton);
 
-        new FioResolver(fioInput, (athlete) => {
+        this.activeFioResolver = new FioResolver(fioInput, (athlete) => {
             const mapping = {sex: sexInput, institute: instituteInput, group: groupInput, course: courseInput};
             Object.entries(mapping).forEach(([athleteKey, input]) => {
                 const value = athlete[athleteKey];
@@ -2926,20 +2981,29 @@ class ParticipantsPage {
         });
 
         this.keydownHandler = (keyEvent) => {
+            // Открытый список резолвера работает в два шага (Enter — выбор,
+            // Esc — закрытие): строку в это время не сохраняем и не отменяем.
+            if (this.activeFioResolver && this.activeFioResolver.isOpen()) {
+                return;
+            }
             if (keyEvent.key === "Escape") {
                 keyEvent.preventDefault();
+                keyEvent.stopPropagation();
                 this.cancelEdit();
             } else if (keyEvent.key === "Enter" && keyEvent.target.tagName !== "SELECT") {
                 keyEvent.preventDefault();
+                keyEvent.stopPropagation();
                 this.saveEdit();
             }
         };
-        row.addEventListener("keydown", this.keydownHandler);
+        // Capture-фаза: обработчик строки срабатывает раньше резолвера ФИО
+        // (иначе его Enter/Esc в target-фазе съедали клавиши строки).
+        row.addEventListener("keydown", this.keydownHandler, true);
         fioInput.focus();
     }
 
     saveEdit() {
-        if (!this.editingRow) {
+        if (!this.editingRow || this.participantSaving) {
             return;
         }
         const recordId = this.editingRow.dataset.recordId;
@@ -2951,10 +3015,19 @@ class ParticipantsPage {
         ["date", "level", "name", "sport"].forEach((key) => {
             formData.append(key, this.table.dataset[`event${key.charAt(0).toUpperCase()}${key.slice(1)}`] || "");
         });
+        // Защита от повторного Enter и двойного клика по «✓» (тот же паттерн,
+        // что у saveInlineEdit/saveNewRowEdit): один запрос на одно сохранение.
+        this.participantSaving = true;
         this.request(`/competition/${recordId}`, {
             body: formData,
-            onSuccess: () => window.location.reload(),
-            onError: (message) => alert(message || "Ошибка сохранения записи"),
+            onSuccess: () => {
+                this.participantSaving = false;
+                window.location.reload();
+            },
+            onError: (message) => {
+                this.participantSaving = false;
+                alert(message || "Ошибка сохранения записи");
+            }
         });
     }
 
@@ -2963,8 +3036,12 @@ class ParticipantsPage {
             return;
         }
         if (this.keydownHandler) {
-            this.editingRow.removeEventListener("keydown", this.keydownHandler);
+            this.editingRow.removeEventListener("keydown", this.keydownHandler, true);
             this.keydownHandler = null;
+        }
+        if (this.activeFioResolver) {
+            this.activeFioResolver.destroy();
+            this.activeFioResolver = null;
         }
         this.editingRow.innerHTML = this.editingBackup;
         this.editingRow = null;
@@ -2975,7 +3052,9 @@ class ParticipantsPage {
     // реестра (с правами роли: эндпоинт админский, кнопка видна только
     // админу). После удаления страница перечитается, счётчики обновятся.
     deleteParticipant(recordId, studentName) {
-        const message = studentName ? `Удалить запись «${studentName}»?` : "Удалить запись?";
+        const message = studentName
+            ? `Удалить участника «${studentName}»? Будет удалена запись о соревновании вместе с результатом и вложениями — действие необратимо.`
+            : "Удалить участника? Действие необратимо.";
         if (!confirm(message)) {
             return;
         }
