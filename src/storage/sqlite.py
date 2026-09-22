@@ -298,10 +298,21 @@ class SQLiteAdapter:
                     level TEXT NOT NULL DEFAULT '',
                     sport TEXT NOT NULL DEFAULT '',
                     url TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    regulation_filename TEXT,
+                    regulation_stored_name TEXT
                 )
                 '''
             )
+            # Файл положения события (решение 2026-09-22): один файл на событие,
+            # обе колонки NULL = файла нет. Аддитивная миграция легаси-таблицы.
+            calendar_columns = {
+                row['name'] for row in self.connection.execute('PRAGMA table_info(calendar_events)').fetchall()
+            }
+            if 'regulation_filename' not in calendar_columns:
+                self.connection.execute('ALTER TABLE calendar_events ADD COLUMN regulation_filename TEXT')
+            if 'regulation_stored_name' not in calendar_columns:
+                self.connection.execute('ALTER TABLE calendar_events ADD COLUMN regulation_stored_name TEXT')
             # Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md
             # «Реестр полей: лёгкая версия сейчас, полная запланирована»):
             # настройки ТИПА и ОБЯЗАТЕЛЬНОСТИ базовых полей. Дефолты отражают
@@ -2006,6 +2017,82 @@ class SQLiteAdapter:
             ).fetchone()
             return row['total']
 
+    def count_students_using_group_pair(self, group: str, institute: str) -> int:
+        """Сколько карточек студентов содержат пару институт+группа
+        (счётчик для подтверждения переноса группы между институтами)."""
+        group = group.strip()
+        institute = institute.strip()
+        if not group or not institute:
+            return 0
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT COUNT(*) AS total FROM students WHERE institute = ? AND group_name = ?',
+                (institute, group),
+            ).fetchone()
+            return row['total']
+
+    def move_catalog_group(self, group_id: int, target_institute_id: int) -> dict:
+        """Перенести группу в другой институт одной транзакцией.
+
+        Решение 2026-09-22 (docs/data-model-decisions.md «Перенос группы в
+        другой институт»): в отличие от переименования, карточки студентов
+        обновляются ВМЕСТЕ с записями — перенос чинит неверную привязку
+        (группа ошибочно числилась за старым институтом), а актуальные
+        данные карточки обязаны совпадать со справочником.
+
+        Отбор строк — по точной паре строк (институт+группа), как у
+        переименования/count_records_using: одноимённые группы других
+        институтов и строки без института не затрагиваются. Возвращает
+        {'students_updated', 'competitions_updated'}. Ошибки (группа/
+        институт не найдены, тот же институт, конфликт имени в целевом
+        институте) — ValueError без изменений.
+        """
+        with self._lock:
+            try:
+                group_row = self.connection.execute(
+                    "SELECT id, value, parent_id FROM catalog_values WHERE id = ? AND category = 'group'",
+                    (group_id,),
+                ).fetchone()
+                if group_row is None or group_row['parent_id'] is None:
+                    raise ValueError('Группа или институт не найдены')
+                target = self.connection.execute(
+                    "SELECT id, value FROM catalog_values WHERE id = ? AND category = 'institute'",
+                    (target_institute_id,),
+                ).fetchone()
+                if target is None:
+                    raise ValueError('Группа или институт не найдены')
+                if target['id'] == group_row['parent_id']:
+                    raise ValueError('Группа уже относится к выбранному институту')
+                conflict = self.find_catalog_row('group', group_row['value'], parent_id=target['id'])
+                if conflict is not None:
+                    raise ValueError('В целевом институте уже есть такая группа')
+                old_parent = self.connection.execute(
+                    'SELECT value FROM catalog_values WHERE id = ?',
+                    (group_row['parent_id'],),
+                ).fetchone()
+                if old_parent is None:
+                    raise ValueError('Группа или институт не найдены')
+                self.connection.execute(
+                    'UPDATE catalog_values SET parent_id = ? WHERE id = ?',
+                    (target['id'], group_id),
+                )
+                competitions_cursor = self.connection.execute(
+                    'UPDATE competitions SET institute = ? WHERE institute = ? AND "group" = ?',
+                    (target['value'], old_parent['value'], group_row['value']),
+                )
+                students_cursor = self.connection.execute(
+                    'UPDATE students SET institute = ?, updated_at = ? WHERE institute = ? AND group_name = ?',
+                    (target['value'], datetime.utcnow().isoformat(), old_parent['value'], group_row['value']),
+                )
+                self.connection.commit()
+                return {
+                    'students_updated': students_cursor.rowcount,
+                    'competitions_updated': competitions_cursor.rowcount,
+                }
+            except BaseException:
+                self.connection.rollback()
+                raise
+
     def get_competition_review(self, record_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
@@ -2013,6 +2100,15 @@ class SQLiteAdapter:
                 (record_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    def get_competition_student_name(self, record_id: int) -> str:
+        """ФИО записи по id (для аудита удаления); нет записи — пустая строка."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT student_name FROM competitions WHERE id = ?',
+                (record_id,),
+            ).fetchone()
+            return row['student_name'] if row else ''
 
     def set_competition_review(
         self,
@@ -2836,10 +2932,29 @@ class SQLiteAdapter:
     def get_calendar_event(self, event_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, name, date, date_to, level, sport, url, created_at' ' FROM calendar_events WHERE id = ?',
+                'SELECT id, name, date, date_to, level, sport, url, created_at, '
+                'regulation_filename, regulation_stored_name FROM calendar_events WHERE id = ?',
                 (event_id,),
             ).fetchone()
             return dict(row) if row else None
+
+    def set_calendar_regulation(self, event_id: int, filename: str, stored_name: str) -> None:
+        """Прикрепить/заменить файл положения события (колонки + имя файла)."""
+        with self._lock:
+            self.connection.execute(
+                'UPDATE calendar_events SET regulation_filename = ?, regulation_stored_name = ? WHERE id = ?',
+                (filename, stored_name, event_id),
+            )
+            self.connection.commit()
+
+    def clear_calendar_regulation(self, event_id: int) -> None:
+        """Отвязать файл положения события (обе колонки в NULL)."""
+        with self._lock:
+            self.connection.execute(
+                'UPDATE calendar_events SET regulation_filename = NULL, regulation_stored_name = NULL WHERE id = ?',
+                (event_id,),
+            )
+            self.connection.commit()
 
     def update_calendar_event(
         self,

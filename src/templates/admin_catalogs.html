@@ -148,6 +148,21 @@
                                                 <button class="btn btn-sm btn-outline-success" type="submit">Показать</button>
                                             </form>
                                             {% endif %}
+                                            {# Перенос группы в другой институт (решение 2026-09-22):
+                                               шаг 1 — выбор института, шаг 2 — страница-подтверждение.
+                                               Форма показывается, только если есть другой активный институт. #}
+                                            {% set move_targets = institute_options | rejectattr('id', 'equalto', institute.id) | list %}
+                                            {% if move_targets %}
+                                            <form action="/admin/catalogs/group/{{ group.id }}/move" class="d-flex gap-1" method="get">
+                                                <select aria-label="Институт для переноса" class="form-select form-select-sm" name="target_institute_id" required>
+                                                    <option value="" selected disabled>Институт…</option>
+                                                    {% for option in move_targets %}
+                                                    <option value="{{ option.id }}">{{ option.value }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                                <button class="btn btn-sm btn-outline-primary text-nowrap" type="submit">Перенести…</button>
+                                            </form>
+                                            {% endif %}
                                             {% if not group.records_count %}
                                             <form action="/admin/catalogs/group/{{ group.id }}/delete" method="post">
                                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">

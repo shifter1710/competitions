@@ -109,6 +109,49 @@
 </section>
 {% endif %}
 
+{# Файл положения события (решение 2026-09-22): скачивание — все
+   не-атлеты, управление — модераторы. Обычные multipart-формы без
+   .import-form (этот класс перехватывается script.js). #}
+{% if event.regulation_filename or can_manage %}
+<section class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Положение о соревновании</h3>
+        {% if event.regulation_filename %}
+        <div class="text-muted small mb-2">Файл: {{ event.regulation_filename }}</div>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <a class="btn btn-outline-primary" href="/calendar/{{ event.id }}/regulation">Скачать положение</a>
+            {% if can_manage %}
+            <form action="/calendar/{{ event.id }}/regulation" class="d-flex flex-wrap gap-2 align-items-center"
+                  enctype="multipart/form-data" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <input accept=".pdf,.png,.jpg,.jpeg" aria-label="Файл положения" class="form-control" name="regulation"
+                    required type="file">
+                <button class="btn btn-outline-secondary" type="submit">Заменить</button>
+            </form>
+            <form action="/calendar/{{ event.id }}/regulation/delete" method="post"
+                  onsubmit="return confirm('Удалить положение? Файл будет удалён безвозвратно.')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-outline-danger" type="submit">Удалить</button>
+            </form>
+            {% endif %}
+        </div>
+        {% else %}
+        <p class="text-muted mb-2">Положение не прикреплено.</p>
+        {% if can_manage %}
+        <form action="/calendar/{{ event.id }}/regulation" class="d-flex flex-wrap gap-2 align-items-center"
+              enctype="multipart/form-data" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input accept=".pdf,.png,.jpg,.jpeg" aria-label="Файл положения" class="form-control" name="regulation"
+                required type="file">
+            <button class="btn btn-outline-primary" type="submit">Прикрепить положение</button>
+            <span class="form-text ui-hint">PDF, JPEG или PNG, до 5 МБ.</span>
+        </form>
+        {% endif %}
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
 <div class="table-meta d-flex flex-wrap align-items-center gap-3 mb-2">
     <label class="d-flex align-items-center gap-2 mb-0">
         Показать:

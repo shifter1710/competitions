@@ -2751,6 +2751,230 @@ def test_catalog_rename_forbidden_for_non_admin(client: SanicTestClient):
     assert response.status == 403
 
 
+# ---- Перенос группы в другой институт (решение 2026-09-22) ----
+
+
+def group_move_mock():
+    """Иерархия для переноса: группа 11 «ПГС-101» в институте 1 «ИСИ»,
+    целевой институт 2 «ФМА». find_catalog_row (конфликт в цели) — None."""
+    catalog = {
+        1: {'id': 1, 'category': 'institute', 'value': 'ИСИ', 'parent_id': None, 'active': 1},
+        2: {'id': 2, 'category': 'institute', 'value': 'ФМА', 'parent_id': None, 'active': 1},
+        11: {'id': 11, 'category': 'group', 'value': 'ПГС-101', 'parent_id': 1, 'active': 1},
+    }
+    app.ctx.storage.get_catalog_value.side_effect = catalog.get
+    app.ctx.storage.find_catalog_row.return_value = None
+    app.ctx.storage.count_records_using.return_value = 4
+    app.ctx.storage.count_students_using_group_pair.return_value = 2
+    app.ctx.storage.move_catalog_group.reset_mock()
+    app.ctx.storage.move_catalog_group.return_value = {'students_updated': 2, 'competitions_updated': 4}
+
+
+def reset_group_move_mock():
+    app.ctx.storage.get_catalog_value.side_effect = None
+    app.ctx.storage.get_catalog_value.return_value = None
+    app.ctx.storage.find_catalog_row.return_value = None
+    app.ctx.storage.count_records_using.return_value = 0
+    app.ctx.storage.count_students_using_group_pair.return_value = 0
+    app.ctx.storage.move_catalog_group.reset_mock()
+
+
+def test_catalog_group_move_confirmation_page(client: SanicTestClient):
+    group_move_mock()
+    headers = get_auth_headers()
+    try:
+        _, response = client.get('/admin/catalogs/group/11/move?target_institute_id=2', headers=headers)
+        assert response.status == 200
+        body = response.body.decode()
+        assert 'Перенос группы: «ПГС-101» — «ИСИ» → «ФМА»' in body
+        assert 'записей о соревнованиях — <strong>4</strong>' in body
+        assert 'карточек студентов — <strong>2</strong>' in body
+        assert 'Институт группы изменится в справочнике, в перечисленных записях о соревнованиях' in body
+        assert 'Да, перенести группу «ПГС-101» в институт «ФМА»' in body
+        assert 'name="confirm"' in body
+        assert 'Перенести группу</button>' in body
+        assert 'href="/admin/catalogs">Отмена' in body
+        # Страница только читает — перенос не выполняется
+        app.ctx.storage.move_catalog_group.assert_not_called()
+    finally:
+        reset_group_move_mock()
+
+
+def test_catalog_group_move_post_without_confirm_changes_nothing(client: SanicTestClient):
+    group_move_mock()
+    headers = get_auth_headers()
+    try:
+        _, response = client.post(
+            '/admin/catalogs/group/11/move',
+            headers=headers,
+            data={**csrf_for(headers), 'target_institute_id': '2'},  # без confirm
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert response.headers['location'].startswith('/admin/catalogs/group/11/move')
+        assert 'admin_error' not in response.headers['location']
+        app.ctx.storage.move_catalog_group.assert_not_called()
+    finally:
+        reset_group_move_mock()
+
+
+def test_catalog_group_move_executes_and_writes_audit(client: SanicTestClient):
+    group_move_mock()
+    app.ctx.storage.add_audit_event.reset_mock()
+    headers = get_auth_headers()
+    try:
+        _, response = client.post(
+            '/admin/catalogs/group/11/move',
+            headers=headers,
+            data={**csrf_for(headers), 'target_institute_id': '2', 'confirm': 'on'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        location = unquote_plus(response.headers['location'])
+        assert 'admin_error' not in location
+        assert 'Группа «ПГС-101» перенесена: «ИСИ» → «ФМА»; обновлено записей — 4, карточек студентов — 2' in location
+        app.ctx.storage.move_catalog_group.assert_called_once_with(11, 2)
+
+        audit_call = app.ctx.storage.add_audit_event.call_args
+        assert audit_call[1]['action'] == 'catalog_group_moved'
+        details = json.loads(audit_call[1]['details'])
+        assert details == {
+            'group': 'ПГС-101',
+            'old_institute': 'ИСИ',
+            'new_institute': 'ФМА',
+            'students_updated': 2,
+            'competitions_updated': 4,
+            'group_id': 11,
+        }
+    finally:
+        reset_group_move_mock()
+
+
+def test_catalog_group_move_validations(client: SanicTestClient):
+    group_move_mock()
+    headers = get_auth_headers()
+    try:
+        # Тот же институт — ошибка
+        _, response = client.post(
+            '/admin/catalogs/group/11/move',
+            headers=headers,
+            data={**csrf_for(headers), 'target_institute_id': '1', 'confirm': 'on'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'Группа уже относится к выбранному институту' in unquote_plus(response.headers['location'])
+
+        # В целевом институте уже есть такая группа — ошибка с подсказкой
+        app.ctx.storage.find_catalog_row.return_value = {
+            'id': 12,
+            'category': 'group',
+            'value': 'ПГС-101',
+            'parent_id': 2,
+            'active': 1,
+        }
+        _, response = client.post(
+            '/admin/catalogs/group/11/move',
+            headers=headers,
+            data={**csrf_for(headers), 'target_institute_id': '2', 'confirm': 'on'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert (
+            'В институте «ФМА» уже есть группа «ПГС-101» — переименуйте одну из групп перед переносом'
+            in unquote_plus(response.headers['location'])
+        )
+        app.ctx.storage.find_catalog_row.return_value = None
+
+        # Неизвестный целевой институт
+        _, response = client.post(
+            '/admin/catalogs/group/11/move',
+            headers=headers,
+            data={**csrf_for(headers), 'target_institute_id': '999', 'confirm': 'on'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'Группа или институт не найдены' in unquote_plus(response.headers['location'])
+
+        # GET без параметра цели
+        _, response = client.get('/admin/catalogs/group/11/move', headers=headers, allow_redirects=False)
+        assert response.status == 302
+        assert 'Выберите институт для переноса' in unquote_plus(response.headers['location'])
+
+        app.ctx.storage.move_catalog_group.assert_not_called()
+    finally:
+        reset_group_move_mock()
+
+
+def test_catalog_group_move_forbidden_for_non_admin(client: SanicTestClient):
+    editor_headers = get_auth_headers(role='editor')
+    _, response = client.get('/admin/catalogs/group/11/move?target_institute_id=2', headers=editor_headers)
+    assert response.status == 403
+    _, response = client.post(
+        '/admin/catalogs/group/11/move',
+        headers=editor_headers,
+        data={**csrf_for(editor_headers), 'target_institute_id': '2', 'confirm': 'on'},
+    )
+    assert response.status == 403
+
+
+def test_admin_catalogs_page_shows_group_move_form(client: SanicTestClient):
+    """Форма переноса в списке групп: активные институты кроме текущего."""
+    app.ctx.storage.list_catalog_tree.return_value = [
+        {
+            'id': 1,
+            'category': 'institute',
+            'value': 'ИСИ',
+            'parent_id': None,
+            'active': 1,
+            'records_count': 3,
+            'groups': [
+                {'id': 11, 'category': 'group', 'value': 'ПГС-101', 'parent_id': 1, 'active': 1, 'records_count': 2}
+            ],
+        },
+        {
+            'id': 2,
+            'category': 'institute',
+            'value': 'ФМА',
+            'parent_id': None,
+            'active': 1,
+            'records_count': 0,
+            'groups': [],
+        },
+        {
+            'id': 3,
+            'category': 'institute',
+            'value': 'АРХ',
+            'parent_id': None,
+            'active': 0,  # скрытый институт не предлагается
+            'records_count': 0,
+            'groups': [],
+        },
+    ]
+    app.ctx.storage.list_catalog_all.side_effect = lambda category: (
+        [
+            {'id': 1, 'category': 'institute', 'value': 'ИСИ', 'parent_id': None, 'active': 1},
+            {'id': 2, 'category': 'institute', 'value': 'ФМА', 'parent_id': None, 'active': 1},
+            {'id': 3, 'category': 'institute', 'value': 'АРХ', 'parent_id': None, 'active': 0},
+        ]
+        if category == 'institute'
+        else []
+    )
+    try:
+        _, response = client.get('/admin/catalogs', headers=get_auth_headers())
+        assert response.status == 200
+        body = response.body.decode()
+        assert 'action="/admin/catalogs/group/11/move"' in body
+        assert 'name="target_institute_id"' in body
+        assert '<option value="2">ФМА</option>' in body
+        assert '<option value="1">' not in body  # текущий институт не предлагается
+        assert '<option value="3">' not in body  # скрытый тоже
+        assert 'Перенести…</button>' in body
+    finally:
+        app.ctx.storage.list_catalog_tree.return_value = []
+        app.ctx.storage.list_catalog_all.side_effect = None
+        app.ctx.storage.list_catalog_all.return_value = []
+
+
 def test_old_level_rename_route_removed(client: SanicTestClient):
     # Старый POST /admin/levels/<id> (rename без каскада) удалён: UI переехал
     # на /admin/catalogs/<category>/<id>/rename. GET несуществующего пути — 404;
@@ -6500,6 +6724,281 @@ def test_calendar_event_page_invalid_id(client: SanicTestClient):
     assert response.status == 400
 
 
+def test_calendar_event_page_participant_delete_button_roles(client: SanicTestClient):
+    """Кнопка удаления участника на странице события — только admin
+    (эндпоинт /competition/<id>/delete админский)."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _participants_sample()
+    try:
+        _, response = client.get('/calendar/7', headers=get_auth_headers('admin'))
+        assert response.status == 200
+        assert 'participant-delete-button' in response.body.decode()
+
+        # Editor: правка есть, удаления нет
+        _, response = client.get('/calendar/7', headers=get_auth_headers('editor'))
+        body = response.body.decode()
+        assert 'participant-edit-button' in body
+        assert 'participant-delete-button' not in body
+
+        # Viewer: колонки действий нет вовсе
+        _, response = client.get('/calendar/7', headers=get_auth_headers('viewer'))
+        assert 'participant-edit-button' not in response.body.decode()
+        assert 'participant-delete-button' not in response.body.decode()
+
+        # Athlete: страница события недоступна
+        _, response = client.get('/calendar/7', headers=athlete_headers())
+        assert response.status == 403
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+# ---- Файл положения события календаря (решение 2026-09-22) и аудит
+# удаления записи. Реальный SQLite-адаптер: колонки regulation_*, файлы в
+# data/files/calendar/<event_id>/ и записи аудита.
+
+
+@pytest.fixture
+def calendar_client(client: SanicTestClient, tmp_path, monkeypatch):
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    storage = SQLiteAdapter(str(tmp_path / 'calendar.sqlite3'))
+    storage.create_user(settings.auth_admin_username, 'hash', 'admin')
+    storage.create_user(settings.auth_editor_username, 'hash', 'editor')
+    if settings.auth_viewer_username:
+        storage.create_user(settings.auth_viewer_username, 'hash', 'viewer')
+    storage.create_user('sportik', 'hash', 'athlete')
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+def make_calendar_participant(name: str, event_name: str = 'Кросс СибАДИ', day: int = 25) -> Competition:
+    return Competition(
+        student_id=f'id-{name}',
+        student_name=name,
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 6, day),
+        level='внутривузовские',
+        name=event_name,
+        position=1,
+        extra_data={},
+    )
+
+
+def upload_regulation(client, headers, event_id, filename, payload):
+    _, response = client.post(
+        f'/calendar/{event_id}/regulation',
+        headers=headers,
+        data=csrf_for(headers),
+        files={'regulation': (filename, payload, 'application/octet-stream')},
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_calendar_regulation_upload_download_replace_delete(calendar_client: SanicTestClient, tmp_path):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс СибАДИ', '2026-06-25', None, 'внутривузовские', 'Бег', '')
+    admin = get_auth_headers('admin')
+
+    # Страница без файла модератору: заглушка + форма прикрепления
+    _, page = calendar_client.get(f'/calendar/{event_id}', headers=admin)
+    assert 'Положение о соревновании' in page.body.decode()
+    assert 'Положение не прикреплено.' in page.body.decode()
+    assert 'Прикрепить положение' in page.body.decode()
+    # viewer без файла секции не видит
+    _, page = calendar_client.get(f'/calendar/{event_id}', headers=get_auth_headers('viewer'))
+    assert 'Положение о соревновании' not in page.body.decode()
+
+    # Загрузка валидного PDF
+    pdf_bytes = b'%PDF-1.4 ' + b'0' * 32
+    response = upload_regulation(calendar_client, admin, event_id, 'polozhenie.pdf', pdf_bytes)
+    assert response.status == 302
+    assert 'Положение обновлено' in unquote_plus(response.headers['location'])
+    event = storage.get_calendar_event(event_id)
+    assert event['regulation_filename'] == 'polozhenie.pdf'
+    stored_files = list((tmp_path / 'files' / 'calendar' / str(event_id)).iterdir())
+    assert len(stored_files) == 1 and stored_files[0].name == event['regulation_stored_name']
+    assert audit_details(storage, 'calendar_regulation_uploaded') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кросс СибАДИ',
+            'filename': 'polozhenie.pdf',
+            'replaced': False,
+        }
+    ]
+
+    # Скачивание viewer'ом: оригинальное имя в content-disposition
+    _, response = calendar_client.get(
+        f'/calendar/{event_id}/regulation', headers=get_auth_headers('viewer'), allow_redirects=False
+    )
+    assert response.status == 200
+    assert response.body == pdf_bytes
+    assert response.headers['content-disposition'] == 'attachment; filename="polozhenie.pdf"'
+    assert response.headers['content-type'] == 'application/pdf'
+
+    # Замена: колонки обновлены, старый файл удалён
+    old_stored = event['regulation_stored_name']
+    png_bytes = b'\x89PNG\r\n\x1a\n' + b'1' * 16
+    response = upload_regulation(calendar_client, admin, event_id, 'новое.png', png_bytes)
+    assert response.status == 302
+    event = storage.get_calendar_event(event_id)
+    assert event['regulation_filename'] == 'новое.png'
+    assert not (tmp_path / 'files' / 'calendar' / str(event_id) / old_stored).exists()
+    # Журнал — свежие сверху: замена несёт replaced=True
+    replaced_events = audit_details(storage, 'calendar_regulation_uploaded')
+    assert len(replaced_events) == 2
+    assert replaced_events[0] == {
+        'event_id': event_id,
+        'event_name': 'Кросс СибАДИ',
+        'filename': 'новое.png',
+        'replaced': True,
+    }
+
+    # Удаление: колонки NULL, каталог файла удалён
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/regulation/delete',
+        headers=admin,
+        data=csrf_for(admin),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Положение удалено.' in unquote_plus(response.headers['location'])
+    event = storage.get_calendar_event(event_id)
+    assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
+    assert not (tmp_path / 'files' / 'calendar' / str(event_id)).exists()
+    assert audit_details(storage, 'calendar_regulation_deleted') == [
+        {'event_id': event_id, 'event_name': 'Кросс СибАДИ', 'filename': 'новое.png'}
+    ]
+
+    # Повторное удаление без файла — ошибка, не 500
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/regulation/delete',
+        headers=admin,
+        data=csrf_for(admin),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Положение не прикреплено.' in unquote_plus(response.headers['location'])
+
+
+def test_calendar_regulation_rejects_invalid_files(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', '')
+    admin = get_auth_headers('admin')
+
+    # Пустая отправка
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/regulation', headers=admin, data=csrf_for(admin), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Выберите файл.' in unquote_plus(response.headers['location'])
+
+    # Неизвестное расширение
+    response = upload_regulation(calendar_client, admin, event_id, 'notes.txt', b'hello')
+    assert response.status == 302
+    assert 'Допустимы только PDF, JPEG и PNG' in unquote_plus(response.headers['location'])
+
+    # Поддельная сигнатура
+    response = upload_regulation(calendar_client, admin, event_id, 'fake.pdf', b'not a pdf at all')
+    assert response.status == 302
+    assert 'Допустимы только PDF, JPEG и PNG' in unquote_plus(response.headers['location'])
+
+    # Больше 5 МБ
+    response = upload_regulation(calendar_client, admin, event_id, 'big.pdf', b'%PDF- ' + b'0' * (5 * 1024 * 1024))
+    assert response.status == 302
+    assert 'Файл больше 5 МБ' in unquote_plus(response.headers['location'])
+
+    event = storage.get_calendar_event(event_id)
+    assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
+    assert not (Path(settings.data_folder) / 'files' / 'calendar').exists()
+
+
+def test_calendar_regulation_access_rights(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', '')
+    admin = get_auth_headers('admin')
+    pdf_bytes = b'%PDF-1.4 ok'
+    assert upload_regulation(calendar_client, admin, event_id, 'p.pdf', pdf_bytes).status == 302
+
+    # Скачивание: viewer может, атлет — 403, аноним — редирект на вход
+    _, response = calendar_client.get(
+        f'/calendar/{event_id}/regulation', headers=get_auth_headers('viewer'), allow_redirects=False
+    )
+    assert response.status == 200
+    _, response = calendar_client.get(f'/calendar/{event_id}/regulation', headers=athlete_headers())
+    assert response.status == 403
+    _, response = calendar_client.get(f'/calendar/{event_id}/regulation', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    # Upload/delete — только модераторы: viewer POST → 403
+    viewer = get_auth_headers('viewer')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/regulation',
+        headers=viewer,
+        data=csrf_for(viewer),
+        files={'regulation': ('x.pdf', b'%PDF-1.4', 'application/pdf')},
+    )
+    assert response.status == 403
+    _, response = calendar_client.post(f'/calendar/{event_id}/regulation/delete', headers=viewer, data=csrf_for(viewer))
+    assert response.status == 403
+
+    # Без CSRF-токена POST отклоняется middleware
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/regulation', headers=admin, data={}, allow_redirects=False
+    )
+    assert response.status == 403
+
+    # Нет файла положения — скачивание 404
+    other = storage.create_calendar_event('Вторая', '2026-07-01', None, '', '', '')
+    _, response = calendar_client.get(
+        f'/calendar/{other}/regulation', headers=get_auth_headers('viewer'), allow_redirects=False
+    )
+    assert response.status == 404
+
+
+def test_calendar_event_deletion_removes_regulation_file(calendar_client: SanicTestClient, tmp_path):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', '')
+    admin = get_auth_headers('admin')
+    assert upload_regulation(calendar_client, admin, event_id, 'p.pdf', b'%PDF-1.4 ok').status == 302
+    regulation_dir = tmp_path / 'files' / 'calendar' / str(event_id)
+    assert regulation_dir.is_dir()
+
+    # У события нет участников — удаление доступно, каталог положения уходит тоже
+    _, response = calendar_client.post(f'/calendar/{event_id}/delete', headers=admin, data=csrf_for(admin))
+    assert response.status == 200
+    assert storage.get_calendar_event(event_id) is None
+    assert not regulation_dir.exists()
+
+
+def test_delete_competition_writes_record_deleted_audit(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.save_competitions([make_calendar_participant('Иванов Дмитрий Сергеевич')])
+    record_id = storage.connection.execute('SELECT id FROM competitions ORDER BY id').fetchone()['id']
+
+    admin = get_auth_headers('admin')
+    _, response = calendar_client.post(
+        f'/competition/{record_id}/delete', headers=admin, data=csrf_for(admin), allow_redirects=False
+    )
+    assert response.status == 302
+    assert response.headers['location'] == '/'
+    assert storage.get_competition_review(record_id) is None
+    assert audit_details(storage, 'record_deleted') == [
+        {'record_id': record_id, 'student_name': 'Иванов Дмитрий Сергеевич'}
+    ]
+
+
 def test_editor_adds_participant_as_registry_record(client: SanicTestClient):
     # Участник — ОБЫЧНАЯ запись реестра: пресет события (name/date/date_to,
     # уровень, спорт) копируется в запись; никаких FK (историчность —
@@ -8032,6 +8531,179 @@ def test_student_import_catalog_warnings(student_import_client: SanicTestClient)
     assert 'определён по группе' not in page.text
 
 
+def test_student_import_sex_normalized_to_canonical(student_import_client: SanicTestClient):
+    """Пол из файла приводится к «М»/«Ж» независимо от регистра (Задача 1):
+    «м»/«ж» — валидны и канонизируются, «муж» и латинское «m» — ошибка строки."""
+    storage = app.ctx.storage
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван', 'Пол': 'М'},
+            {'ФИО': 'Петров Пётр', 'Пол': 'м'},
+            {'ФИО': 'Сидорова Сидора', 'Пол': 'Ж'},
+            {'ФИО': 'Козлова Кира', 'Пол': 'ж'},
+            {'ФИО': 'Волков Вольдемар', 'Пол': ' м '},
+            {'ФИО': 'Павлов Павел', 'Пол': 'муж'},
+            {'ФИО': 'Латинов Латин', 'Пол': 'm'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert page.status == 200
+    assert 'Всего строк: 7 · новые: 5 · требуют решения: 0 · ошибочные: 2' in page.text
+    assert page.text.count('Пол должен быть «М» или «Ж».') == 2
+
+    # Предпросмотр показывает каноническое значение, создание сохраняет его
+    created = post_import_action(student_import_client, token, 'row/2/create')
+    assert created.status == 302
+    created = post_import_action(student_import_client, token, 'row/3/create')
+    assert created.status == 302
+    snapshot = {row[1]: row[2] for row in students_snapshot(storage)}
+    assert snapshot['Иванов Иван'] == 'М'
+    assert snapshot['Петров Пётр'] == 'М'
+
+
+def test_student_import_infile_group_institute_autofill(student_import_client: SanicTestClient):
+    """Группа→институт из ТЕКУЩЕГО файла (Задача 2): строки без института
+    получают институт строк-«доноров» того же файла + бейдж «определён по
+    файлу»; создаётся ровно то, что показано (в т.ч. через bulk-create)."""
+    storage = app.ctx.storage
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Доноров Донор', 'Институт': 'ИСИ', 'Группа': 'ПГС-101'},
+            {'ФИО': 'Пустов Пуст', 'Группа': 'ПГС-101'},
+            {'ФИО': 'Второв Втор', 'Группа': 'пгс-101'},  # другой регистр — та же группа
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert page.status == 200
+    assert page.text.count('определён по файлу') == 2
+    assert 'title="Институт определён по группе из этого файла"' in page.text
+    assert 'определён по группе</span>' not in page.text  # источник — файл, не справочник
+    assert 'Институт не определён' not in page.text
+
+    # Bulk-create создаёт ровно значения предпросмотра: институт донора файла
+    bulk = post_import_action(student_import_client, token, 'bulk-create')
+    assert bulk.status == 302
+    assert 'Создано студентов: 3.' in unquote_plus(bulk.headers['location'])
+    by_name = {row[1]: (row[3], row[4]) for row in students_snapshot(storage)}
+    assert by_name['Доноров Донор'] == ('ИСИ', 'ПГС-101')
+    assert by_name['Пустов Пуст'] == ('ИСИ', 'ПГС-101')
+    # Группы справочник не знает: написание строки сохраняется (канонизация
+    # группы — только через справочник, как и у прежнего пути подсказок)
+    assert by_name['Второв Втор'] == ('ИСИ', 'пгс-101')
+
+
+def test_student_import_infile_conflicting_institutes(student_import_client: SanicTestClient):
+    """Группа в файле у разных институтов: автозаполнения НЕТ, строка без
+    института получает предупреждение; явные строки (институт указан)
+    предупреждения о конфликте файла не получают."""
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Иванов Иван', 'Институт': 'ИСИ', 'Группа': 'ПГС-101'},
+            {'ФИО': 'Петров Пётр', 'Институт': 'ИМИ', 'Группа': 'ПГС-101'},
+            {'ФИО': 'Сидоров Сидор', 'Группа': 'ПГС-101'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'Институт не определён: в файле группа относится к разным институтам' in page.text
+    assert page.text.count('Институт не определён: в файле группа относится к разным институтам') == 1
+    assert 'определён по файлу' not in page.text
+    assert 'определён по группе' not in page.text
+
+
+def test_student_import_file_conflicts_with_catalog(student_import_client: SanicTestClient):
+    """Файл против справочника (правило 5): файл уникален, справочник
+    однозначен, значения расходятся — берётся файловое, предупреждение;
+    значения справочника не меняются (снимок ниже в ..._never_written)."""
+    storage = app.ctx.storage
+    seed_catalog(storage, 'ИСИ', 'ПГС-101')  # справочник: ПГС-101 → ИСИ
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Доноров Донор', 'Институт': 'ИМИ', 'Группа': 'ПГС-101'},
+            {'ФИО': 'Пустов Пуст', 'Группа': 'ПГС-101'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    # Строка без института: файловое значение + предупреждение о справочнике
+    assert page.text.count('Требует внимания: справочник относит группу к другому институту') == 1
+    assert 'определён по файлу' in page.text
+
+    created = post_import_action(student_import_client, token, 'row/3/create')
+    assert created.status == 302
+    by_name = {row[1]: (row[3], row[4]) for row in students_snapshot(storage)}
+    assert by_name['Пустов Пуст'] == ('ИМИ', 'ПГС-101')
+
+
+def test_student_import_infile_institute_case_variants_one_entry(student_import_client: SanicTestClient):
+    """Регистровые варианты института в файле — ОДНА запись карты: строка без
+    института автозаполняется первым написанием (или каноном справочника)."""
+    storage = app.ctx.storage
+    seed_catalog(storage, 'ИСИ', 'ТД-303')
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Доноров Донор', 'Институт': 'ИСИ', 'Группа': 'ТД-303'},
+            {'ФИО': 'Регистров Регистр', 'Институт': 'иси', 'Группа': 'ТД-303'},
+            {'ФИО': 'Пустов Пуст', 'Группа': 'тд-303'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'определён по файлу' in page.text
+    assert 'Институт не определён: в файле группа относится к разным институтам' not in page.text
+
+    created = post_import_action(student_import_client, token, 'row/4/create')
+    assert created.status == 302
+    by_name = {row[1]: (row[3], row[4]) for row in students_snapshot(storage)}
+    # каноническое написание института и группы из справочника
+    assert by_name['Пустов Пуст'] == ('ИСИ', 'ТД-303')
+
+
+def test_student_import_donor_edit_changes_autofill(student_import_client: SanicTestClient):
+    """Правка строки-«донора» меняет карту файла: на следующем рендере
+    автозаполнение строк без института следует новым данным сессии."""
+    response = upload_student_xlsx(
+        student_import_client,
+        [
+            {'ФИО': 'Доноров Донор', 'Институт': 'ИСИ', 'Группа': 'ПГС-101'},
+            {'ФИО': 'Пустов Пуст', 'Группа': 'ПГС-101'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_preview(student_import_client, token)
+    assert 'определён по файлу' in page.text
+
+    edited = post_import_action(
+        student_import_client,
+        token,
+        'row/2/edit',
+        data={
+            'full_name': 'Доноров Донор',
+            'sex': '',
+            'institute': 'ИМИ',
+            'group': 'ПГС-101',
+            'course': '',
+        },
+    )
+    assert edited.status == 302
+    page = get_preview(student_import_client, token)
+    assert page.text.count('определён по файлу') == 1  # только строка без института
+    body_around = page.text
+    # Создаётся строка без института — институт теперь ИМИ из правки донора
+    created = post_import_action(student_import_client, token, 'row/3/create')
+    assert created.status == 302
+    by_name = {row[1]: (row[3], row[4]) for row in students_snapshot(app.ctx.storage)}
+    assert by_name['Пустов Пуст'] == ('ИМИ', 'ПГС-101')
+    assert body_around.count('ИСИ') == 0
+
+
 def test_student_import_catalog_tables_never_written(student_import_client: SanicTestClient):
     storage = app.ctx.storage
     seed_catalog(storage, 'ИСИ', 'ПГС-101')
@@ -8042,6 +8714,10 @@ def test_student_import_catalog_tables_never_written(student_import_client: Sani
             {'ФИО': 'Иванов Иван', 'Институт': 'НОВЫЙ ИНСТИТУТ', 'Группа': 'НОВАЯ-ГРУППА'},
             {'ФИО': 'Петров Пётр', 'Группа': 'НЕИЗВЕСТНАЯ-ГРУППА'},
             {'ФИО': 'Сидоров Сидор', 'Институт': 'ИСИ', 'Группа': 'ТД-303'},
+            # Автозаполнение института из файла (Задача 2): донор + строка
+            # без института — тоже не должно сеять ничего в справочники.
+            {'ФИО': 'Доноров Донор', 'Институт': 'ФАЙЛ-ИНСТИТУТ', 'Группа': 'ФГ-1'},
+            {'ФИО': 'Пустов Пуст', 'Группа': 'ФГ-1'},
         ],
     )
     token = import_session_token(response)
@@ -8055,7 +8731,7 @@ def test_student_import_catalog_tables_never_written(student_import_client: Sani
     assert get_preview(student_import_client, token).status == 200
     bulk = post_import_action(student_import_client, token, 'bulk-create')
     assert bulk.status == 302
-    assert 'Создано студентов: 3.' in unquote_plus(bulk.headers['location'])
+    assert 'Создано студентов: 5.' in unquote_plus(bulk.headers['location'])
     finish = post_import_action(student_import_client, token, 'finish')
     assert finish.status == 302
 
