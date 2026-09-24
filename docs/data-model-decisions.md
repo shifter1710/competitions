@@ -522,3 +522,36 @@ Admin-only hard delete ошибочно созданной карточки — 
   карточку из поиска/импорта, но не является связью;
 - для используемых карточек остаётся деактивация; bulk-удаления, удаление
   из списков/поиска и автопоиск кандидатов на удаление НЕ добавлялись.
+
+## Event Model, Wave 1 P0/P1: схема и проводка participation-identity (2026-09-24)
+
+Фундамент целевой архитектуры «событие → участие» без изменения
+пользовательского поведения: колонки существуют и проводятся через
+storage, runtime их не читает.
+
+- **состав колонок `competitions`** (P0): `discipline TEXT NULL`,
+  `result TEXT NULL`, `calendar_event_id INTEGER NULL` — аддитивные
+  ALTER'ы, существующие строки NULL. Participation-identity будущих фаз =
+  (`calendar_event_id`, `student_ref_id`, `discipline`);
+- **`app_settings`** (P0): `key TEXT PRIMARY KEY, value TEXT NOT NULL` —
+  флаги миграций. Засеян `identity_mode='dual'` (подготовка Phase 3
+  dual-read); читателей флага в этой волне НЕТ — seed существует, но
+  ничего не переключает;
+- **индексы** (P0): `idx_competitions_calendar_event_id`,
+  `idx_competitions_student_ref_id` — обычные, не UNIQUE: уникальность
+  связи управляется приложением;
+- **backfill `calendar_event_id`** (P0): при каждом старте, тем же
+  предиктом, что подсчёт участников события (`name + date +
+  COALESCE(date_to, '')`). Правила: unique-only (линкуются только NULL-
+  строки с ровно одним совпадением), no-guess (0 или >1 совпадений —
+  остаётся NULL), already-linked не меняются. Естественная
+  идемпотентность: повторные старты линкуют только newly-unique NULL-
+  строки; счётчики — одна INFO-строка только при наличии NULL-строк;
+- **проводка (P1)**: `discipline`/`result`/`calendar_event_id` пишутся
+  INSERT'ом из модели (None → NULL), читаются общим SELECT и
+  `_row_to_competition`; `update_competition` правит только
+  `discipline`/`result` — `calendar_event_id` в SET НЕ входит (ссылка на
+  событие — управляемое поле будущих link/unlink P2, общий update её
+  сохраняет). Экспорт в Excel поля не отдаёт — контракт выгрузок
+  не меняется; payload очереди конфликтов сериализует поля как None,
+  легаси-payload без ключей валидируется (дефолт None).

@@ -11885,8 +11885,15 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         custom_fields=[],
     )
     competition.student_ref_id = 42
+    # Wave 1 P1: служебные поля participation-identity тоже не отдаются.
+    competition.discipline = 'Бег 100 м'
+    competition.result = '11.2'
+    competition.calendar_event_id = 7
     row = competition_to_export_row(competition, [])
     assert 'student_ref_id' not in row
+    assert 'discipline' not in row
+    assert 'result' not in row
+    assert 'calendar_event_id' not in row
     assert set(row) == {
         'Код студента',
         'ФИО',
@@ -11905,7 +11912,8 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
 def test_import_queue_payload_round_trip_with_ref_field(client: SanicTestClient):
     # Конфликт импорта записей: model_dump → payload → model_validate.
     # Новое None-поле не ломает round-trip (существующие записи в очереди
-    # без ключа тоже валидируются — поле имеет дефолт).
+    # без ключа тоже валидируются — поле имеет дефолт). Wave 1 P1: то же
+    # для discipline/result/calendar_event_id.
     competition = build_competition(
         {
             'ФИО': 'Тестов Тест Тестович',
@@ -11923,6 +11931,21 @@ def test_import_queue_payload_round_trip_with_ref_field(client: SanicTestClient)
     )
     payload = competition.model_dump(mode='json', by_alias=False)
     assert payload['student_ref_id'] is None
-    assert Competition.model_validate(payload).student_ref_id is None
-    legacy_payload = {key: value for key, value in payload.items() if key != 'student_ref_id'}
-    assert Competition.model_validate(legacy_payload).student_ref_id is None
+    assert payload['discipline'] is None
+    assert payload['result'] is None
+    assert payload['calendar_event_id'] is None
+    validated = Competition.model_validate(payload)
+    assert validated.student_ref_id is None
+    assert validated.discipline is None
+    assert validated.result is None
+    assert validated.calendar_event_id is None
+    legacy_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {'student_ref_id', 'discipline', 'result', 'calendar_event_id'}
+    }
+    legacy_validated = Competition.model_validate(legacy_payload)
+    assert legacy_validated.student_ref_id is None
+    assert legacy_validated.discipline is None
+    assert legacy_validated.result is None
+    assert legacy_validated.calendar_event_id is None
