@@ -2165,6 +2165,15 @@ class Main {
             return;
         }
 
+        // CTA «Добавить участие» из пустого состояния атлета живёт внутри
+        // content-wrapper и заменяется вместе с ним — поэтому ловится
+        // делегированием, а не прямой привязкой (как тулбар «+ Пустая строка»).
+        const emptyAddRowButton = event.target.closest(".empty-add-row-button");
+        if (emptyAddRowButton) {
+            this.startNewRowEdit();
+            return;
+        }
+
         const newRowSaveButton = event.target.closest(".new-row-save-button");
         if (newRowSaveButton) {
             this.saveNewRowEdit();
