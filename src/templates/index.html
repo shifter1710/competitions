@@ -160,7 +160,17 @@
         <option value="{{ value }}"></option>
         {% endfor %}
     </datalist>
-    {% if total_count %}
+    {# Атлет без единой записи (без фильтра): каркас таблицы рендерится
+       и вместе с ним CTA «Добавить участие» — первая запись создаётся
+       той же инлайн-строкой, что и остальные. admin/editor при пустом
+       реестре и фильтр без совпадений остаются в альтернативной ветке. #}
+    {% if total_count or (can_write and is_athlete and not index_is_filtered) %}
+    {% if not total_count %}
+    <div class="empty-add-row">
+        <div class="empty-content">У вас пока нет участий</div>
+        <button type="button" class="btn btn-success empty-add-row-button">Добавить участие</button>
+    </div>
+    {% endif %}
     <div class="table-card" data-table-view="index">
         <div class="table-scroll-hint">↔ Таблица шире экрана — листайте по горизонтали</div>
         <div class="table-responsive">
