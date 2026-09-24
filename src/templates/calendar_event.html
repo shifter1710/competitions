@@ -207,12 +207,14 @@
             {% if can_write %}
             {# Строка добавления участника (прототип 16 — раскрыта сверху):
                ФИО с резолвером, место опционально; название/даты/уровень/спорт
-               берутся из события на сервере. #}
+               берутся из события на сервере. Обязательность/тип полей — по
+               настройкам базовых полей (fs), ФИО всегда обязательное. #}
+            {% set fs = base_field_settings %}
             <tr class="row-new">
                 <td class="text-center text-muted">+</td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
-                        id="participant-fio" name="student_name" required autocomplete="off"
+                        id="participant-fio" name="student_name" required aria-label="ФИО" autocomplete="off"
                         placeholder="ФИО: поиск по первым буквам"
                         title="Известные атлеты и карточки студентов подскажут пол, институт, группу и курс">
                     {# Бейдж выбранной карточки: показывается при явном выборе Student
@@ -226,25 +228,39 @@
                     </div>
                 </td>
                 <td>
-                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
-                        id="participant-sex" name="student_sex" maxlength="1" placeholder="М/Ж">
+                    {# Пол — select: резолвер (script.js fill) пишет input.value,
+                       значения 'М'/'Ж' совпадают с option value. #}
+                    <select class="form-select form-select-sm" form="participant-add-form" id="participant-sex"
+                        name="student_sex" aria-label="Пол" {% if fs.student_sex.required %}required{% endif %}>
+                        <option value="">не указан</option>
+                        <option value="М">М</option>
+                        <option value="Ж">Ж</option>
+                    </select>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
-                        id="participant-institute" name="institute">
+                        id="participant-institute" name="institute" aria-label="Институт"
+                        {% if fs.institute.required %}required{% endif %}>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
-                        id="participant-group" name="group">
+                        id="participant-group" name="group" aria-label="Группа"
+                        {% if fs.group.required %}required{% endif %}>
                 </td>
                 <td>
-                    <input class="form-control form-control-sm" form="participant-add-form" type="number" min="1"
-                        step="1" id="participant-course" name="course" required>
+                    <input class="form-control form-control-sm" form="participant-add-form"
+                        {% if fs.course.value_type == 'number' %}type="number" min="1" step="1"
+                        {% else %}type="text" placeholder="например, 2"{% endif %}
+                        id="participant-course" name="course" aria-label="Курс"
+                        {% if fs.course.required %}required{% endif %}>
                 </td>
                 <td>
-                    <input class="form-control form-control-sm" form="participant-add-form" type="number" min="0"
-                        step="1" id="participant-position" name="position" placeholder="—"
-                        title="Место можно дописать позже">
+                    <input class="form-control form-control-sm" form="participant-add-form"
+                        {% if fs.position.value_type == 'number' %}type="number" min="0" step="1"
+                        {% else %}type="text"{% endif %} id="participant-position" name="position"
+                        aria-label="Место" placeholder="—"
+                        {% if not fs.position.required %}title="Место можно дописать позже"{% endif %}
+                        {% if fs.position.required %}required{% endif %}>
                 </td>
                 <td><span class="badge text-bg-light text-muted" title="Место можно дописать позже">ждёт результата</span>
                 </td>

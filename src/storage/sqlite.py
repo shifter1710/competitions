@@ -2733,6 +2733,77 @@ class SQLiteAdapter:
         )
         return candidates
 
+    def search_student_candidates(self, query: str, limit: int = 8) -> list[dict]:
+        """Подстрочный поиск активных карточек («Найти студента» в предпросмотре
+        импорта участников события) — ТОЛЬКО предложения.
+
+        Совпадение — ПОДСТРОКА query (strip + casefold) в full_name ИЛИ в любом
+        псевдониме карточки; одна строка на карточку (при обоих совпадениях —
+        match_type='full_name'). Порядок: совпадения по ФИО, затем по
+        псевдониму, внутри — по (full_name, id). Формат ответа — как у
+        find_student_candidates. Сравнение — в Python (lower() в SQLite не
+        берёт кириллицу); без fuzzy/ё-е/транслитерации. Пустой/пробельный
+        запрос → []. Не влияет на search_student_suggestions и
+        /api/athletes/search (точные кандидаты — find_student_candidates).
+        """
+        target = (query or '').strip().casefold()
+        if not target:
+            return []
+        with self._lock:
+            students = self.connection.execute(
+                'SELECT id, full_name, sex, institute, group_name, course '
+                'FROM students WHERE active = 1 ORDER BY full_name ASC, id ASC'
+            ).fetchall()
+            aliases = self.connection.execute(
+                '''
+                SELECT a.student_id, a.name
+                FROM student_aliases a
+                JOIN students s ON s.id = a.student_id
+                WHERE s.active = 1
+                ORDER BY a.student_id ASC, a.name ASC
+                '''
+            ).fetchall()
+        # Первый подходящий псевдоним карточки (порядок a.name ASC —
+        # детерминированный выбор, как в find_student_candidates).
+        matching_alias: dict[int, str] = {}
+        for row in aliases:
+            if row['student_id'] not in matching_alias and target in (row['name'] or '').strip().casefold():
+                matching_alias[row['student_id']] = (row['name'] or '').strip()
+        full_rows = []
+        alias_rows = []
+        for row in students:
+            if target in (row['full_name'] or '').strip().casefold():
+                full_rows.append(row)
+            elif row['id'] in matching_alias:
+                alias_rows.append(row)
+        candidates: list[dict] = [
+            {
+                'student_id': row['id'],
+                'full_name': row['full_name'],
+                'sex': row['sex'],
+                'institute': row['institute'],
+                'group_name': row['group_name'],
+                'course': row['course'],
+                'match_type': 'full_name',
+                'alias_name': None,
+            }
+            for row in full_rows
+        ]
+        candidates.extend(
+            {
+                'student_id': row['id'],
+                'full_name': row['full_name'],
+                'sex': row['sex'],
+                'institute': row['institute'],
+                'group_name': row['group_name'],
+                'course': row['course'],
+                'match_type': 'alias',
+                'alias_name': matching_alias[row['id']],
+            }
+            for row in alias_rows
+        )
+        return candidates[: int(limit)]
+
     def link_competitions(self, record_ids: Sequence[int], student_id: int) -> tuple[int, str | None]:
         """Атомарно привязать записи к карточке: либо все, либо ничего.
 

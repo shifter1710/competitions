@@ -4,11 +4,20 @@
    импорта студентов (admin_people_import_preview.html): таблица-группы,
    счётчики, тулбар из трёх форм, bootstrap-collapse для правок. Отличия
    ролей: страницы импорта — модераторы (admin/editor), ссылки на карточки
-   и создание карточек — только admin. #}
+   и создание карточек — только admin.
+
+   Сопоставление с карточкой НЕ блокирует импорт: «Готовы» — все валидные
+   строки без неразобранных дублей; карточка (единственный точный кандидат
+   или явный выбор) подбирается автоматически и видна первой строкой ячейки
+   «Замечания и кандидаты»; сбросить её можно кнопкой «Без карточки» —
+   участие добавится без связи, сопоставить можно позже. «Требуют решения» —
+   только неразобранные дубли файла. #}
 
 {# Строка таблицы предпросмотра. Макросу request/is_admin передаются явно:
-   макросы не видят контекст шаблона. #}
-{% macro candidate_line(candidate, row, token, request, is_admin, event) %}
+   макросы не видят контекст шаблона. search_result=True — строка из поиска
+   «Найти студента» (бейдж «ФИО» у результатов поиска не выводится, бейдж
+   «псевдоним» остаётся). #}
+{% macro candidate_line(candidate, row, token, request, is_admin, event, search_result=False) %}
 <div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
     {% if is_admin %}
     <a href="/admin/people/{{ candidate.student_id }}">{{ candidate.full_name }}</a>
@@ -22,7 +31,7 @@
     {% if candidate.match_type == 'alias' %}
     <span class="badge text-bg-light border"
           title="Совпадение по псевдониму «{{ candidate.alias_name }}»">псевдоним</span>
-    {% else %}
+    {% elif not search_result %}
     <span class="badge text-bg-secondary">ФИО</span>
     {% endif %}
     <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/select-student"
@@ -34,7 +43,33 @@
 </div>
 {% endmacro %}
 
-{% macro import_data_row(row, token, category, request, is_admin, event, custom_columns, custom_keys) %}
+{# Строка-подсказка личности: карточка, которая будет связана с участием.
+   origin='auto' — единственный точный кандидат подобрался автоматически,
+   origin='manual' — карточка выбрана явно (поиск/номер). #}
+{% macro identity_line(student, origin, is_admin) %}
+<div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
+    {% if is_admin %}
+    <a href="/admin/people/{{ student.id }}">{{ student.full_name }}</a>
+    {% else %}
+    <span>{{ student.full_name }}</span>
+    {% endif %}
+    <span class="small text-muted">
+        #{{ student.id }} · {{ student.institute or '—' }} ·
+        {{ student.group_name or '—' }} · курс {{ student.course or '—' }}
+    </span>
+    {% if origin == 'auto' %}
+    <span class="badge text-bg-primary">найден автоматически · карточка #{{ student.id }}</span>
+    {% else %}
+    <span class="badge text-bg-primary">выбрана вручную · карточка #{{ student.id }}</span>
+    {% endif %}
+    {% if student.match_type == 'alias' %}
+    <span class="badge text-bg-light border"
+          title="Совпадение по псевдониму «{{ student.alias_name }}»">псевдоним</span>
+    {% endif %}
+</div>
+{% endmacro %}
+
+{% macro import_data_row(row, token, category, request, is_admin, event, custom_columns, custom_keys, search_row=None, search_query='', search_results=(), search_truncated=False) %}
 <tr>
     <td class="text-muted">{{ row.row_number }}</td>
     <td>
@@ -100,55 +135,86 @@
         {% else %}
         <span class="badge text-bg-secondary">пропущен</span>
         {% endif %}
+        {% elif row.error or row.validation_error %}
+        {# Ошибочные строки: только текст ошибки, карточки не предлагаются. #}
         {% else %}
+        {# Подсказка личности — первой строкой ячейки. #}
+        {% if row.effective_student %}
+        {{ identity_line(row.effective_student, 'auto' if row.auto_preselected else 'manual', is_admin) }}
+        {% elif row.student_forced_none %}
+        <div class="small text-muted">Без карточки — участие будет без связи, сопоставить можно позже.</div>
+        {% elif row.candidates %}
         {% if row.candidates | length > 1 %}
-        <div class="badge text-bg-warning mb-1">несколько карточек с таким ФИО</div>
-        {% endif %}
-        {% if not row.candidates %}
-        <div class="small text-muted">Совпадений с активными карточками нет.</div>
-        {% if not row.error and not row.validation_error %}
-        <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/select-student"
-              class="d-flex flex-wrap gap-1 align-items-center mb-1" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <input aria-label="Номер карточки студента" class="form-control form-control-sm" min="1" name="student_id"
-                placeholder="№ карточки" required style="max-width: 110px;" type="number">
-            <button class="btn btn-sm btn-outline-primary" type="submit">Выбрать существующего</button>
-        </form>
-        {% endif %}
+        <div class="mb-1">
+            <span class="badge text-bg-warning">Найдено нескольких подходящих студентов</span>
+            <span class="small text-muted">— можно сопоставить позже.</span>
+        </div>
         {% endif %}
         {% for candidate in row.candidates %}
         {{ candidate_line(candidate, row, token, request, is_admin, event) }}
         {% endfor %}
-        {% if row.selected_not_candidate %}
-        <div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
-            <span>Карточка #{{ row.selected_not_candidate.id }} · {{ row.selected_not_candidate.full_name }}</span>
-            <span class="small text-muted">
-                {{ row.selected_not_candidate.institute or '—' }} ·
-                {{ row.selected_not_candidate.group_name or '—' }} ·
-                курс {{ row.selected_not_candidate.course or '—' }}
-            </span>
-            <span class="badge text-bg-primary">выбрана вручную</span>
-        </div>
+        {% else %}
+        <div class="small text-muted">Совпадений с активными карточками нет — можно сопоставить позже.</div>
         {% endif %}
+        {# Поиск/смена карточки — для всех pending не-error строк: карточку
+           выбирают поиском (подстрока по ФИО/псевдониму активных карточек),
+           а не вводом сырого номера. GET-форма на URL предпросмотра: collapse
+           открыт, когда find = номер этой строки. #}
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-1">
+            <button aria-expanded="{{ 'true' if search_row == row.row_number else 'false' }}"
+                    aria-controls="import-row-{{ row.row_number }}-search"
+                    class="btn btn-sm btn-outline-primary"
+                    data-bs-target="#import-row-{{ row.row_number }}-search"
+                    data-bs-toggle="collapse" type="button">{{ 'Сменить студента' if row.effective_student else 'Найти студента' }}</button>
+            {% if row.effective_student %}
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/clear-student"
+                  method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-sm btn-outline-secondary" type="submit"
+                        title="Участие будет добавлено без связи с карточкой — сопоставить можно позже">Без карточки</button>
+            </form>
+            {% endif %}
+            {% if is_admin %}
+            <button aria-expanded="false" aria-controls="import-row-{{ row.row_number }}-create"
+                    class="btn btn-sm btn-outline-secondary" data-bs-target="#import-row-{{ row.row_number }}-create"
+                    data-bs-toggle="collapse" type="button">Создать нового Student</button>
+            {% endif %}
+        </div>
+        <div class="collapse{{ ' show' if search_row == row.row_number else '' }}" id="import-row-{{ row.row_number }}-search">
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}"
+                  class="d-flex flex-wrap gap-1 align-items-center mb-1" method="get">
+                <input type="hidden" name="find" value="{{ row.row_number }}">
+                <input aria-label="Поиск студента" autocomplete="off" class="form-control form-control-sm"
+                       maxlength="100" name="q" placeholder="часть ФИО или псевдонима" type="search"
+                       value="{{ search_query if search_row == row.row_number else '' }}">
+                <button class="btn btn-sm btn-primary" type="submit">Искать</button>
+                <a class="small" href="/calendar/{{ event.id }}/participants/import/preview/{{ token }}">Сброс</a>
+            </form>
+            {% if search_row == row.row_number and search_query %}
+            {% if search_results %}
+            <div class="small text-muted mb-1">По запросу «{{ search_query }}» найдено: {{ search_results | length }}.</div>
+            {% for candidate in search_results %}
+            {{ candidate_line(candidate, row, token, request, is_admin, event, search_result=True) }}
+            {% endfor %}
+            {% if search_truncated %}
+            <div class="small text-muted">Показаны первые {{ search_results | length }} — уточните запрос.</div>
+            {% endif %}
+            {% else %}
+            <div class="small text-muted">По запросу «{{ search_query }}» ничего не найдено.</div>
+            {% endif %}
+            {% endif %}
+        </div>
         {% endif %}
     </td>
     <td class="text-end">
         {% if category != 'resolved' %}
         <div class="d-flex flex-wrap gap-2 justify-content-end">
-            {% if category == 'ready' %}
+            {% if category != 'error' %}
             <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/add"
                   method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <button class="btn btn-sm btn-outline-success" type="submit">Добавить</button>
             </form>
-            {% elif category == 'review' %}
-            {% if is_admin %}
-            <button aria-expanded="false" aria-controls="import-row-{{ row.row_number }}-create"
-                    class="btn btn-sm btn-outline-success" data-bs-target="#import-row-{{ row.row_number }}-create"
-                    data-bs-toggle="collapse" type="button">Создать нового Student и добавить участника</button>
-            {% else %}
-            <span class="form-text ui-hint">Создать карточку студента может только администратор.</span>
-            {% endif %}
             {% endif %}
             <button aria-expanded="false" aria-controls="import-row-{{ row.row_number }}-edit"
                     class="btn btn-sm btn-outline-secondary" data-bs-target="#import-row-{{ row.row_number }}-edit"
@@ -176,7 +242,9 @@
                         <label class="form-label" for="import-row-{{ row.row_number }}-full-name">ФИО</label>
                         <input class="form-control" id="import-row-{{ row.row_number }}-full-name"
                                name="full_name" required type="text" value="{{ row.full_name }}">
-                        <div class="form-text ui-hint">После правки ФИО карточки-кандидаты пересчитаются.</div>
+                        <div class="form-text">После правки ФИО кандидаты пересчитаются, а выбранная карточка или
+                            отметка «без карточки» сбросятся — при необходимости примите решение заново.
+                        </div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label" for="import-row-{{ row.row_number }}-sex">Пол</label>
@@ -220,7 +288,7 @@
                 </form>
             </div>
         </div>
-        {% if is_admin and category == 'review' %}
+        {% if is_admin and category != 'error' %}
         {# Создание карточки + связанного участника — одна операция, только
            admin. Форма предзаполнена значениями строки файла. #}
         <div class="collapse" id="import-row-{{ row.row_number }}-create">
@@ -288,6 +356,9 @@
     Решено: добавлено {{ added_count }} · пропущено {{ skipped_count }}
 </div>
 {% endif %}
+<div class="form-text ui-hint mb-3">
+    Сопоставление с карточкой студента необязательно — участие можно добавить без карточки и связать его позже.
+</div>
 
 {% if unknown_columns %}
 <div class="alert alert-warning">
@@ -305,7 +376,7 @@
    только с числами, значения файла в подтверждения не подставляются. #}
 <div class="d-flex flex-wrap gap-2 mb-2">
     <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/bulk-commit" method="post"
-          onsubmit="return confirm('Добавить {{ ready_count }} готовых участников?')">
+          onsubmit="return confirm('Добавить {{ ready_count }} готовых участников{% if unlinked_ready %} (без карточки — {{ unlinked_ready }}){% endif %}?')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <button class="btn btn-success" type="submit" {% if not ready_count %}disabled{% endif %}>Добавить
             {{ ready_count }} готовых</button>
@@ -352,7 +423,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Готовы к добавлению
                             <span class="badge text-bg-light border">{{ groups.ready | length }}</span></th>
                     </tr>
-                    {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
                 {% if groups.review %}
@@ -361,7 +432,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Требуют решения
                             <span class="badge text-bg-light border">{{ groups.review | length }}</span></th>
                     </tr>
-                    {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
                 {% if groups.error %}
@@ -370,7 +441,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Ошибочные
                             <span class="badge text-bg-light border">{{ groups.error | length }}</span></th>
                     </tr>
-                    {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
                 {% if groups.resolved %}
@@ -379,7 +450,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Решено
                             <span class="badge text-bg-light border">{{ groups.resolved | length }}</span></th>
                     </tr>
-                    {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
             </table>

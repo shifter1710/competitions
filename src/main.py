@@ -1740,6 +1740,9 @@ async def calendar_event_page(request: Request, event_id: str):
             'result_filter_options': CALENDAR_RESULT_FILTERS,
             'sport_options': storage.list_catalog('sport'),
             'level_options': storage.get_level_names(),
+            # Настройки полей для строки ручного добавления (required/тип
+            # Курса и Места — как в реестре; ФИО всегда обязательное).
+            'base_field_settings': get_base_field_settings(storage),
             **get_flash_args(request),
         },
     )
@@ -1988,12 +1991,31 @@ async def delete_calendar_regulation(request: Request, event_id: str):
 EVENT_PARTICIPANT_IMPORT_BASE_COLUMNS: Sequence[str] = ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Место')
 EVENT_PARTICIPANT_IMPORT_MAX_ROWS = 5000
 EVENT_IMPORT_SESSION_TTL_SECONDS = 2 * 60 * 60
+# Поиск карточки для строки предпросмотра («Найти студента»): лимит
+# результатов и максимальная длина запроса.
+EVENT_IMPORT_STUDENT_SEARCH_LIMIT = 8
+EVENT_IMPORT_STUDENT_SEARCH_QUERY_MAX_LENGTH = 100
 
 # Staging живёт в памяти (прецедент student_import_sessions): однопроцессное
 # приложение, рестарт просто теряет сессии — безопасно, файл загрузят заново.
 # Один файл на пользователя; сессия привязана к владельцу и событию; ФИО из
 # файла не логируются.
 event_import_sessions: dict[str, dict] = {}
+
+
+def event_import_custom_fields(custom_fields: Sequence[CustomField]) -> list[CustomField]:
+    """Custom-поля импорта участников события: активные с show_in_template,
+    КРОМЕ url-полей (ссылки уровня записи/события к снимку участия не
+    относятся). Признак — field_type, не label.
+
+    Сами url-поля в системе остаются (реестр, обычный импорт/экспорт,
+    link_target) — исключение касается только этого workflow. Фильтр
+    применяется на входе каждого пути (шаблон, разбор, предпросмотр, правки,
+    валидация, добавление) и обязан доходить до валидации
+    (build_event_participant_competition): иначе гипотетическое
+    ОБЯЗАТЕЛЬНОЕ url-поле заблокировало бы все строки импорта участников.
+    """
+    return [field for field in custom_fields if field.active and field.show_in_template and field.field_type != 'url']
 
 
 def event_participant_import_columns(custom_fields: Sequence[CustomField]) -> list[str]:
@@ -2052,6 +2074,10 @@ def parse_event_participant_rows(
                 'error': error,
                 # Явный выбор карточки админом (select-student/create-student).
                 'student_id': None,
+                # Явное решение «без карточки» (clear-student): подавляет
+                # автозаполнение единственным точным кандидатом — участие
+                # добавляется без связи, сопоставить можно позже.
+                'student_forced_none': False,
                 # Карточка, реально использованная добавленной записью.
                 'added_student_id': None,
             }
@@ -2166,18 +2192,23 @@ def event_participant_preset(event: dict) -> dict:
 
 
 def event_import_effective_student(storage: SQLiteAdapter, row: dict, candidates: Sequence[dict]) -> dict | None:
-    """Карточка для автозаполнения/связи: явный выбор админа, иначе
-    единственный точный кандидат.
+    """Карточка для автозаполнения/связи: явный выбор админа, иначе при
+    отсутствии решения «без карточки» — единственный точный кандидат.
 
-    Полные тёзки (≥2) и 0 кандидатов НЕ выбираются автоматически — строка
-    требует явного решения. Выбранная карточка проверяется на активность.
-    Возвращаемая карточка нормализована: id — в 'id' (у кандидатов
-    find_student_cards ключ 'student_id', у get_student_by_id — 'id').
+    Полные тёзки (≥2) и 0 кандидатов НЕ выбираются автоматически — участие
+    просто добавляется без связи (сопоставить можно позже). Явное решение
+    «без карточки» (student_forced_none, clear-student) подавляет
+    автозаполнение единственным кандидатом. Выбранная карточка проверяется
+    на активность. Возвращаемая карточка нормализована: id — в 'id' (у
+    кандидатов find_student_cards ключ 'student_id', у get_student_by_id —
+    'id').
     """
     if row.get('student_id') is not None:
         student = storage.get_student_by_id(row['student_id'])
         if student is not None and student['active']:
             return student
+        return None
+    if row.get('student_forced_none'):
         return None
     if len(candidates) == 1:
         candidate = dict(candidates[0])
@@ -2316,13 +2347,15 @@ def event_import_preview_context(
     groups: dict[str, list[dict]] = {'ready': [], 'review': [], 'error': [], 'resolved': []}
     resolved_counts = {'added': 0, 'skipped': 0}
     pending = 0
+    linked_ready = 0
+    unlinked_ready = 0
     for row in session['rows']:
         status = row['status']
         view = {
             **row,
             'candidates': [],
             'effective_student': None,
-            'selected_not_candidate': None,
+            'auto_preselected': False,
             'autofilled': [],
             'hints': None,
             'validation_error': None,
@@ -2336,11 +2369,7 @@ def event_import_preview_context(
             view['candidates'] = storage.find_student_candidates(row['full_name'])
             student = event_import_effective_student(storage, row, view['candidates'])
             view['effective_student'] = student
-            if student is not None and row.get('student_id') is not None:
-                # Явный выбор карточки вне списка кандидатов (по номеру) —
-                # показать отдельно, с текущими данными карточки.
-                if all(candidate['student_id'] != student['id'] for candidate in view['candidates']):
-                    view['selected_not_candidate'] = student
+            view['auto_preselected'] = student is not None and row.get('student_id') is None
             record, autofilled, hints = event_import_row_record(
                 storage, row, preset, student, custom_fields, file_groups
             )
@@ -2365,15 +2394,20 @@ def event_import_preview_context(
             # рендер пересчитает признаки естественно.
             row['had_student_id'] = student['id'] if student else None
             row['had_validation_error'] = bool(validation_error)
-            # «Готова» = карточка определена (явный выбор админа ИЛИ
-            # единственный точный кандидат), валидация прошла и нет
-            # не разобранной строки-дубля. Тёзки БЕЗ явного выбора и строки
-            # без кандидатов остаются «требуют решения» — авто-выбора нет.
+            # Сопоставление с карточкой НЕ блокирует импорт: «Готова» — любая
+            # валидная строка без не разобранной строки-дубля (карточка при
+            # этом может подобраться автоматически — единственный точный
+            # кандидат). «Требуют решения» — только неразобранные дубли,
+            # ошибочные — только ошибки валидации.
             blocked_by_duplicate = len(pending_duplicates.get(row['row_number'], [])) > 1
             if validation_error:
                 category = 'error'
-            elif student is not None and not blocked_by_duplicate:
+            elif not blocked_by_duplicate:
                 category = 'ready'
+                if student is None:
+                    unlinked_ready += 1
+                else:
+                    linked_ready += 1
             else:
                 category = 'review'
         elif status == 'error':
@@ -2399,6 +2433,10 @@ def event_import_preview_context(
         'resolved_count': len(groups['resolved']),
         'added_count': resolved_counts['added'],
         'skipped_count': resolved_counts['skipped'],
+        # Для confirm-текста bulk: сколько готовых строк уйдут со связью и
+        # сколько — без карточки.
+        'linked_ready': linked_ready,
+        'unlinked_ready': unlinked_ready,
     }
 
 
@@ -2407,17 +2445,17 @@ def event_import_bulk_rows(session: dict) -> list[dict]:
     момент последнего рендера предпросмотра — счётчик кнопки совпадает с
     числом вставляемых строк.
 
-    Признаки had_student_id/had_validation_error фиксирует контекст
-    предпросмотра; строки «Требуют решения» (тёзки без явного выбора,
-    0 кандидатов, не разобранные дубли файла) в батч НЕ входят и отмену не
-    вызывают — повторная проверка на момент клика отменяет всё, только если
-    состав «готовых» строк изменился."""
+    Признаки had_validation_error фиксирует контекст предпросмотра; строки
+    «Требуют решения» (не разобранные дубли файла) в батч НЕ входят и отмену
+    не вызывают — повторная проверка на момент клика отменяет всё, только
+    если состав «готовых» строк изменился. Сопоставление с карточкой
+    обязательным НЕ является: строка без карточки добавляется с
+    student_ref_id IS NULL."""
     pending_duplicates = event_import_pending_duplicates(session['rows'])
     return [
         row
         for row in session['rows']
         if row['status'] == 'pending'
-        and row.get('had_student_id') is not None
         and not row.get('had_validation_error')
         and len(pending_duplicates.get(row['row_number'], [])) <= 1
     ]
@@ -2467,7 +2505,8 @@ async def event_participants_import_page(request: Request, event_id: str):
 @app.get('/calendar/<event_id>/participants/import/template')
 async def export_event_participants_template(request: Request, event_id: str):
     """Пустой шаблон: ФИО|Пол|Институт|Группа|Курс|Место + активные
-    custom-поля с show_in_template. Без колонок события (пресет берётся из
+    custom-поля с show_in_template (кроме url-полей — см.
+    event_import_custom_fields). Без колонок события (пресет берётся из
     события) и без каких-либо данных."""
     auth_error = require_moderator(request)
     if auth_error is not None:
@@ -2476,7 +2515,7 @@ async def export_event_participants_template(request: Request, event_id: str):
     if error is not None:
         return error
 
-    custom_fields = get_storage(request.app).get_custom_fields()
+    custom_fields = event_import_custom_fields(get_storage(request.app).get_custom_fields())
     df = pd.DataFrame(columns=event_participant_import_columns(custom_fields))
     buffer = BytesIO()
     await asyncio.to_thread(df.to_excel, buffer, index=False)
@@ -2524,7 +2563,7 @@ async def event_participants_import_upload(request: Request, event_id: str):
     if upload_error is not None:
         return build_redirect_with_message(error=upload_error, url=back_url)
 
-    custom_fields = get_storage(request.app).get_custom_fields()
+    custom_fields = event_import_custom_fields(get_storage(request.app).get_custom_fields())
     rows, unknown_columns, custom_columns = await asyncio.to_thread(parse_event_participant_rows, df, custom_fields)
 
     token = secrets.token_urlsafe(16)
@@ -2545,9 +2584,44 @@ async def event_participants_import_upload(request: Request, event_id: str):
     return redirect(event_import_preview_url(event['id'], token))
 
 
+def event_import_row_search(
+    request: Request,
+    storage: SQLiteAdapter,
+    session: dict,
+) -> tuple[int | None, str, list[dict], bool]:
+    """Поиск карточки для строки предпросмотра (GET-параметры find/q).
+
+    Возвращает (номер строки, запрос, результаты, усечён ли список). Только
+    чтение: в сессию ничего не пишет и не влияет на had_student_id/bulk.
+    Некорректные find/q (нет параметра, не число, строка не существует/не
+    pending, пустой или слишком длинный запрос) молча игнорируются — обычный
+    предпросмотр без блока поиска.
+    """
+    raw_find = request.args.get('find', '')
+    if not raw_find:
+        return None, '', [], False
+    row_number, error = parse_reconcile_int(raw_find, 'row number')
+    if error is not None:
+        return None, '', [], False
+    row = next((row for row in session['rows'] if row['row_number'] == row_number), None)
+    if row is None or row['status'] != 'pending':
+        return None, '', [], False
+
+    query = request.args.get('q', '').strip()
+    if not query or len(query) > EVENT_IMPORT_STUDENT_SEARCH_QUERY_MAX_LENGTH:
+        return row_number, '', [], False
+    results = storage.search_student_candidates(query, limit=EVENT_IMPORT_STUDENT_SEARCH_LIMIT)
+    truncated = len(results) >= EVENT_IMPORT_STUDENT_SEARCH_LIMIT
+    return row_number, query, results, truncated
+
+
 @app.get('/calendar/<event_id>/participants/import/preview/<token>')
 async def event_participants_import_preview(request: Request, event_id: str, token: str):
-    """Предпросмотр: НОЛЬ записей в БД — только чтение кандидатов/справочников."""
+    """Предпросмотр: НОЛЬ записей в БД — только чтение кандидатов/справочников.
+
+    GET-параметры find/q — поиск карточки для конкретной строки («Найти
+    студента»): только чтение, в сессию ничего не пишет и не влияет на
+    bulk-логику; некорректные find/q молча игнорируются."""
     auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
@@ -2559,13 +2633,20 @@ async def event_participants_import_preview(request: Request, event_id: str, tok
         return session_error
 
     storage = get_storage(request.app)
-    context = event_import_preview_context(storage, event, session, storage.get_custom_fields())
+    search_row, search_query, search_results, search_truncated = event_import_row_search(request, storage, session)
+    context = event_import_preview_context(
+        storage, event, session, event_import_custom_fields(storage.get_custom_fields())
+    )
     return await render(
         template_name=jinja_env.get_template('calendar_event_import_preview.html'),
         context={
             'request': request,
             'is_admin': user_is_admin(request),
             **context,
+            'search_row': search_row,
+            'search_query': search_query,
+            'search_results': search_results,
+            'search_truncated': search_truncated,
             **get_flash_args(request),
         },
     )
@@ -2621,8 +2702,38 @@ async def event_import_row_select_student(request: Request, event_id: str, token
         )
 
     row['student_id'] = student_id
+    row['student_forced_none'] = False
     return build_redirect_with_message(
-        message=f'Строка {row["row_number"]}: выбрана карточка #{student_id}.',
+        message=f'Строка {row["row_number"]}: выбрана карточка #{student_id} — {student["full_name"]}.',
+        url=event_import_preview_url(event['id'], token),
+    )
+
+
+@app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/clear-student')
+async def event_import_row_clear_student(request: Request, event_id: str, token: str, row_number: str):
+    """Сбросить карточку строки: участие будет добавлено без связи.
+
+    Явное решение «без карточки» (подавляет автозаполнение единственным
+    точным кандидатом): пометка ТОЛЬКО в сессии предпросмотра, категория
+    пересчитается при следующем рендере; запись появится в сопоставлении
+    (/admin/people/reconcile) и её можно связать с карточкой позже.
+    """
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    event, session, row, error = resolve_event_import_row(request, event_id, token, row_number)
+    if error is not None:
+        return error
+    if row['status'] != 'pending':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=event_import_preview_url(event['id'], token),
+        )
+
+    row['student_id'] = None
+    row['student_forced_none'] = True
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]}: карточка сброшена — участие будет добавлено без связи.',
         url=event_import_preview_url(event['id'], token),
     )
 
@@ -2657,8 +2768,10 @@ async def event_import_row_edit(request: Request, event_id: str, token: str, row
 
     Некорректные данные — строка становится ошибочной; после правки ФИО
     кандидаты и автозаполнение пересчитаются при следующем рендере (строка
-    мигрирует между группами естественно). Явный выбор карточки
-    сохраняется — его можно поменять отдельным действием.
+    мигрирует между группами естественно). Изменённое ФИО сбрасывает ОБА
+    решения по карточке — явный выбор и «без карточки» (оба относились к
+    прежнему ФИО и могли устареть): для нового ФИО кандидаты подбираются
+    заново, решение принимают отдельным действием.
     """
     auth_error = require_moderator(request)
     if auth_error is not None:
@@ -2673,17 +2786,25 @@ async def event_import_row_edit(request: Request, event_id: str, token: str, row
         )
 
     storage = get_storage(request.app)
-    row['full_name'] = get_form_value(request, 'full_name').strip()
+    custom_fields = event_import_custom_fields(storage.get_custom_fields())
+    # Правка ФИО сбрасывает явный выбор карточки и решение «без карточки»:
+    # оба решения относятся к прежнему ФИО и могли стать ошибочными
+    # (устаревшее молчаливо переносить нельзя). Кандидаты и автозаполнение
+    # пересчитаются при следующем рендере.
+    new_name = get_form_value(request, 'full_name').strip()
+    if new_name.casefold() != (row['full_name'] or '').casefold():
+        row['student_id'] = None
+        row['student_forced_none'] = False
+    row['full_name'] = new_name
     row['sex'] = get_form_value(request, 'sex').strip()
     row['institute'] = get_form_value(request, 'institute').strip()
     row['group'] = get_form_value(request, 'group').strip()
     row['course'] = get_form_value(request, 'course').strip()
     row['position'] = get_form_value(request, 'position').strip()
     # Все импортируемые custom-поля (в т.ч. отсутствовавшие в файле —
-    # обязательное поле можно заполнить при правке).
-    for field in storage.get_custom_fields():
-        if field.show_in_template:
-            row['custom'][field.key] = get_form_value(request, f'custom__{field.key}').strip()
+    # обязательное поле можно заполнить при правке); url-поля сюда не входят.
+    for field in custom_fields:
+        row['custom'][field.key] = get_form_value(request, f'custom__{field.key}').strip()
     error = None
     if not row['full_name']:
         error = 'Пустое ФИО.'
@@ -2700,10 +2821,10 @@ async def event_import_row_edit(request: Request, event_id: str, token: str, row
             row,
             event_participant_preset(event),
             student,
-            storage.get_custom_fields(),
+            custom_fields,
             student_file_group_institutes(session['rows']),
         )
-        _, error = build_event_participant_competition(record, storage.get_custom_fields(), storage)
+        _, error = build_event_participant_competition(record, custom_fields, storage)
     if error is not None:
         row['status'] = 'error'
         row['error'] = error
@@ -2723,27 +2844,28 @@ def event_import_add_row_participation(
     request: Request, storage: SQLiteAdapter, event: dict, session: dict, row: dict
 ) -> str | None:
     """Добавить участие по строке с её текущей карточкой (явный выбор или
-    единственный кандидат). Возвращает текст ошибки или None.
+    единственный кандидат) — или без карточки, если её нет. Возвращает текст
+    ошибки или None.
 
     Кандидаты и валидация пересчитываются на момент клика — предпросмотр
     мог устареть. Вставка — обычным путём записи реестра (пресет события,
-    approved, student_ref_id выбранной карточки)."""
+    approved, student_ref_id подобранной карточки или NULL — сопоставить
+    можно позже)."""
     candidates = storage.find_student_candidates(row['full_name'])
     student = event_import_effective_student(storage, row, candidates)
-    if student is None:
-        return 'Сначала выберите карточку студента (или создайте новую).'
+    custom_fields = event_import_custom_fields(storage.get_custom_fields())
     record, _, _ = event_import_row_record(
         storage,
         row,
         event_participant_preset(event),
         student,
-        storage.get_custom_fields(),
+        custom_fields,
         student_file_group_institutes(session['rows']),
     )
-    competition, validation_error = build_event_participant_competition(record, storage.get_custom_fields(), storage)
+    competition, validation_error = build_event_participant_competition(record, custom_fields, storage)
     if validation_error is not None:
         return validation_error
-    competition.student_ref_id = student['id']
+    competition.student_ref_id = student['id'] if student else None
     ensure_catalog_values(storage, [competition])
     storage.save_competitions(
         [competition],
@@ -2751,12 +2873,12 @@ def event_import_add_row_participation(
         owner_id=get_current_user_id(request),
     )
     row['status'] = 'added'
-    row['student_id'] = student['id']
-    row['added_student_id'] = student['id']
+    row['student_id'] = student['id'] if student else None
+    row['added_student_id'] = student['id'] if student else None
     log_audit_event(
         request,
         'event_participant_imported',
-        {'event_id': event['id'], 'student_ref_id': student['id']},
+        {'event_id': event['id'], 'student_ref_id': row['added_student_id']},
     )
     return None
 
@@ -2853,10 +2975,16 @@ async def event_import_row_create_student(request: Request, event_id: str, token
         'group_name': hints['group'],
         'course': course,
     }
+    custom_fields = event_import_custom_fields(storage.get_custom_fields())
     record, _, _ = event_import_row_record(
-        storage, row, event_participant_preset(event), future_student, storage.get_custom_fields(), file_groups
+        storage,
+        row,
+        event_participant_preset(event),
+        future_student,
+        custom_fields,
+        file_groups,
     )
-    competition, validation_error = build_event_participant_competition(record, storage.get_custom_fields(), storage)
+    competition, validation_error = build_event_participant_competition(record, custom_fields, storage)
     if validation_error is not None:
         return build_redirect_with_message(
             error=f'Строка {row["row_number"]}: {validation_error}',
@@ -2878,6 +3006,7 @@ async def event_import_row_create_student(request: Request, event_id: str, token
     )
     row['status'] = 'added'
     row['student_id'] = student_id
+    row['student_forced_none'] = False
     row['added_student_id'] = student_id
     log_audit_event(
         request,
@@ -2895,12 +3024,14 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
     """Добавить «готовые» строки одной транзакцией.
 
     В батч входят ТОЛЬКО строки «Готовы к добавлению» на момент последнего
-    рендера (фиксированные признаки had_student_id/had_validation_error);
-    неразобранные строки в батч не входят. Предпроверка: кандидаты каждой
-    строки батча пересчитываются на момент клика — если состав «готовых»
-    изменился, не вставляется ничего (строки перейдут в правильные группы
-    при следующем рендере). Сбой вставки — откат всего батча вместе со
-    справочниками (import_competitions).
+    рендера (фиксированный признак had_validation_error); неразобранные
+    строки в батч не входят. Предпроверка: эффективная карточка каждой
+    строки батча пересчитывается на момент клика и сравнивается с
+    зафиксированной рендером (had_student_id — id или None) — если состав
+    «готовых» изменился, не вставляется ничего (строки перейдут в правильные
+    группы при следующем рендере). Строка без карточки добавляется с
+    student_ref_id IS NULL (сопоставить можно позже). Сбой вставки — откат
+    всего батча вместе со справочниками (import_competitions).
     """
     auth_error = require_moderator(request)
     if auth_error is not None:
@@ -2913,15 +3044,16 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
         return session_error
 
     storage = get_storage(request.app)
-    custom_fields = storage.get_custom_fields()
+    custom_fields = event_import_custom_fields(storage.get_custom_fields())
     bulk_rows = event_import_bulk_rows(session)
     file_groups = student_file_group_institutes(session['rows'])
     preset = event_participant_preset(event)
-    prepared: list[tuple[dict, Competition, dict]] = []
+    prepared: list[tuple[dict, Competition, dict | None]] = []
     for row in bulk_rows:
         candidates = storage.find_student_candidates(row['full_name'])
         student = event_import_effective_student(storage, row, candidates)
-        if student is None or student['id'] != row.get('had_student_id'):
+        actual_ref = student['id'] if student else None
+        if actual_ref != row.get('had_student_id'):
             return build_redirect_with_message(
                 error='Список карточек изменился — обновите страницу и проверьте строки.',
                 url=event_import_preview_url(event['id'], token),
@@ -2933,7 +3065,7 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
                 error=f'Строка {row["row_number"]}: {validation_error}',
                 url=event_import_preview_url(event['id'], token),
             )
-        competition.student_ref_id = student['id']
+        competition.student_ref_id = actual_ref
         prepared.append((row, competition, student))
 
     if prepared:
@@ -2944,12 +3076,12 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
         )
     for row, _, student in prepared:
         row['status'] = 'added'
-        row['student_id'] = student['id']
-        row['added_student_id'] = student['id']
+        row['student_id'] = student['id'] if student else None
+        row['added_student_id'] = student['id'] if student else None
         log_audit_event(
             request,
             'event_participant_imported',
-            {'event_id': event['id'], 'student_ref_id': student['id']},
+            {'event_id': event['id'], 'student_ref_id': row['added_student_id']},
         )
     return build_redirect_with_message(
         message=f'Добавлено участников из Excel: {len(prepared)}.',
