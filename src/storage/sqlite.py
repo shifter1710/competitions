@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime
@@ -12,6 +13,8 @@ from src.models.custom_field import CustomField
 from src.models.http.report_row import ReportSliceRow
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
+
+logger = logging.getLogger(__name__)
 
 # Справочники значений ведут себя как уровни: записи остаются свободным
 # текстом, справочник — только подсказки (docs/data-model-decisions.md,
@@ -68,13 +71,18 @@ COMPETITION_SELECT_SQL = '''
         extra_data,
         review_status,
         owner_id,
-        review_comment
+        review_comment,
+        discipline,
+        result,
+        calendar_event_id
     FROM competitions
     '''
 
 # Вставка записей соревнований: общий SQL для одиночного сохранения и импорта.
 # student_ref_id пишется только из модели (явный выбор/создание карточки
 # студента); по умолчанию поле None → NULL, существующие пути не меняются.
+# Wave 1 P1: discipline/result/calendar_event_id проводятся так же — None
+# → NULL, runtime поля не читает.
 COMPETITION_INSERT_SQL = '''
     INSERT INTO competitions (
         student_id,
@@ -94,8 +102,11 @@ COMPETITION_INSERT_SQL = '''
         review_status,
         owner_id,
         review_comment,
-        student_ref_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        student_ref_id,
+        discipline,
+        result,
+        calendar_event_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
 
 
@@ -125,6 +136,9 @@ def competition_insert_records(
             owner_id,
             '',
             item.student_ref_id,
+            item.discipline,
+            item.result,
+            item.calendar_event_id,
         )
         for item in competitions
     ]
@@ -395,6 +409,31 @@ class SQLiteAdapter:
             # карточку студента; существующие учётки НЕ мигрируются (NULL).
             if 'student_ref_id' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN student_ref_id INTEGER')
+            # Event Model, Wave 1 P0 (целевая архитектура): app_settings —
+            # флаги миграций. Seed identity_mode='dual' готовит Phase 3
+            # dual-read; в этой волне флаг никто не читает (паттерн seeding —
+            # как _populate_field_settings_defaults: PRIMARY KEY +
+            # INSERT OR IGNORE, повторные старты не дублируют).
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('identity_mode', 'dual')")
+            # Индексы ссылок participation-identity (Wave 1 P0): обычные,
+            # НЕ UNIQUE — уникальность связи управляется приложением.
+            # Колонки гарантированно существуют: _migrate_competitions_columns
+            # выше уже добавил недостающие.
+            self.connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_competitions_calendar_event_id ON competitions (calendar_event_id)'
+            )
+            self.connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_competitions_student_ref_id ON competitions (student_ref_id)'
+            )
+            self._backfill_competition_calendar_links()
             self.connection.commit()
 
     def _migrate_competitions_columns(self, columns: set[str]) -> None:
@@ -419,6 +458,16 @@ class SQLiteAdapter:
         # остаётся NULL, легаси-ключ student_id (sha256 ФИО) не меняется.
         if 'student_ref_id' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN student_ref_id INTEGER')
+        # Event Model, Wave 1 P0 (целевая архитектура): дисциплина, результат
+        # и явная ссылка на событие календаря — часть participation-identity
+        # будущих фаз (calendar_event_id, student_ref_id, discipline).
+        # Аддитивно: существующие строки NULL, runtime поля не читает.
+        if 'discipline' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN discipline TEXT')
+        if 'result' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN result TEXT')
+        if 'calendar_event_id' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN calendar_event_id INTEGER')
 
     def _migrate_custom_fields_columns(self):
         """№24 (docs/feedback-live.md): колонка link_target у кастомных полей.
@@ -648,6 +697,9 @@ class SQLiteAdapter:
                 'extra_data': json.loads(row['extra_data'] or '{}'),
                 'Статус проверки': row['review_status'],
                 'Комментарий проверки': row['review_comment'],
+                'discipline': row['discipline'],
+                'result': row['result'],
+                'calendar_event_id': row['calendar_event_id'],
             }
         )
 
@@ -1233,6 +1285,9 @@ class SQLiteAdapter:
         )
 
     def update_competition(self, record_id: str, competition: Competition):
+        # Wave 1 P1: discipline/result правятся общим update. calendar_event_id
+        # в SET НЕ входит: ссылка на событие — управляемое поле будущих
+        # link/unlink (P2), общий update записи её сохраняет.
         with self._lock:
             self.connection.execute(
                 '''
@@ -1250,7 +1305,9 @@ class SQLiteAdapter:
                     level = ?,
                     name = ?,
                     position = ?,
-                    extra_data = ?
+                    extra_data = ?,
+                    discipline = ?,
+                    result = ?
                 WHERE id = ?
                 ''',
                 (
@@ -1267,6 +1324,8 @@ class SQLiteAdapter:
                     competition.name,
                     competition.position,
                     json.dumps(competition.extra_data, ensure_ascii=False),
+                    competition.discipline,
+                    competition.result,
                     int(record_id),
                 ),
             )
@@ -1308,14 +1367,20 @@ class SQLiteAdapter:
             return row['total']
 
     def get_competitions_before(self, date_before: datetime) -> list[Competition]:
-        """Записи с датой соревнования ДО указанной (для архива перед очисткой)."""
+        """Записи с датой соревнования ДО указанной (для архива перед очисткой).
+
+        Wave 1 P1: три служебные колонки нужны общему _row_to_competition;
+        в сам xlsx-архив они НЕ попадают (competition_to_export_row
+        вырезает) — ограничение pre-wipe архива см. docs/data-model.md.
+        """
         with self._lock:
             rows = self.connection.execute(
                 '''
                 SELECT
                     id, student_id, student_name, student_sex, institute, "group", course,
                     sport, date, date_to, level, name, position, created_at, extra_data,
-                    review_status, owner_id, review_comment
+                    review_status, owner_id, review_comment,
+                    discipline, result, calendar_event_id
                 FROM competitions
                 WHERE date < ?
                 ORDER BY created_at ASC
@@ -3075,6 +3140,91 @@ class SQLiteAdapter:
             f' AND {alias}.date = e.date'
             f" AND COALESCE({alias}.date_to, '') = COALESCE(e.date_to, ''))"
         )
+
+    def _backfill_competition_calendar_links(self) -> dict[str, int]:
+        """Проставить calendar_event_id записям с однозначным пресетом.
+
+        Event Model, Wave 1 P0: единственная автоматическая связь
+        «запись → событие». Предикат — ровно семантика
+        _calendar_preset_match_sql (name + date + COALESCE(date_to, '')):
+        в UPDATE колонки записи пишутся полными именами
+        (competitions.<col>), алиас записи — имя таблицы.
+
+        Правила: линкуются ТОЛЬКО строки с calendar_event_id IS NULL,
+        у которых пресет совпадает ровно с одним событием (unique-only,
+        no-guess); уже связанные строки не трогаются. Один UPDATE
+        коррелированными подзапросами (без UPDATE...FROM), выполняется
+        внутри транзакции вызывающей стороны (вызов из _create_schema
+        до commit).
+
+        Возвращает счётчики: considered (NULL-строки до UPDATE), matched
+        (rowcount), unmatched (остаток = NULL без единственного события),
+        ambiguous (NULL-строки с более чем одним совпадением),
+        already_linked (строки со ссылкой до UPDATE).
+
+        В вырожденных легаси-базах без колонок name/date (как populate
+        справочников) backfill молчит и возвращает нули.
+        """
+        columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(competitions)').fetchall()}
+        if not {'name', 'date', 'date_to', 'calendar_event_id'} <= columns:
+            return {
+                'considered': 0,
+                'matched': 0,
+                'unmatched': 0,
+                'ambiguous': 0,
+                'already_linked': 0,
+            }
+        # Синхронно с _calendar_preset_match_sql: тот же предикат,
+        # алиас записи — полное имя таблицы competitions.
+        predicate = self._calendar_preset_match_sql('competitions')
+        considered = int(
+            self.connection.execute(
+                'SELECT COUNT(*) AS total FROM competitions WHERE calendar_event_id IS NULL'
+            ).fetchone()['total']
+        )
+        already_linked = int(
+            self.connection.execute(
+                'SELECT COUNT(*) AS total FROM competitions WHERE calendar_event_id IS NOT NULL'
+            ).fetchone()['total']
+        )
+        ambiguous = int(
+            self.connection.execute(
+                f'''
+                SELECT COUNT(*) AS total FROM competitions
+                WHERE calendar_event_id IS NULL
+                  AND (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) > 1
+                '''
+            ).fetchone()['total']
+        )
+        cursor = self.connection.execute(
+            f'''
+            UPDATE competitions
+            SET calendar_event_id = (
+                SELECT e.id FROM calendar_events e WHERE {predicate}
+            )
+            WHERE calendar_event_id IS NULL
+              AND (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) = 1
+            '''
+        )
+        matched = cursor.rowcount
+        counters = {
+            'considered': considered,
+            'matched': matched,
+            'unmatched': considered - matched - ambiguous,
+            'ambiguous': ambiguous,
+            'already_linked': already_linked,
+        }
+        # Молчание на свежей БД и повторных стартах (considered = 0):
+        # INFO-строка только когда было что линковать.
+        if considered > 0:
+            logger.info(
+                'calendar backfill: matched=%s unmatched=%s ambiguous=%s already_linked=%s',
+                matched,
+                counters['unmatched'],
+                ambiguous,
+                already_linked,
+            )
+        return counters
 
     def create_calendar_event(
         self,
