@@ -26,3 +26,9 @@ class Competition(Student):
     extra_data: dict[str, str] = Field(default_factory=dict)
     review_status: str = Field(default='approved', alias='Статус проверки')
     review_comment: str = Field(default='', alias='Комментарий проверки')
+    # Стабильная связь записи с карточкой студента (Student Identity v1).
+    # Пишется ТОЛЬКО при явном выборе/создании Student (ручное добавление
+    # участника события, импорт участников события); существующие записи
+    # остаются NULL. Runtime (авторизация атлета, отчёты, легаси-merge)
+    # по-прежнему работает по legacy-ключу sha256(ФИО) — Phase 3 не начата.
+    student_ref_id: int | None = Field(default=None)

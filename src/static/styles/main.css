@@ -973,6 +973,17 @@ select {
     white-space: nowrap;
 }
 
+/* Вариант-карточка студента в списке резолвера ФИО: две строки (имя +
+   бейдж «Student #N», затем мета «институт · группа · курс»). Перенос
+   строк нужен — длинные ФИО/подписи не должны обрезаться. */
+.combobox-option--student {
+    white-space: normal;
+}
+
+.combobox-option--student .combobox-option__meta {
+    color: var(--text-3);
+}
+
 /* Индикатор присутствия на /admin/users (№17): зелёная точка у «онлайн». */
 .presence-dot {
     display: inline-block;

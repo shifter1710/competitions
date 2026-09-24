@@ -73,6 +73,8 @@ COMPETITION_SELECT_SQL = '''
     '''
 
 # Вставка записей соревнований: общий SQL для одиночного сохранения и импорта.
+# student_ref_id пишется только из модели (явный выбор/создание карточки
+# студента); по умолчанию поле None → NULL, существующие пути не меняются.
 COMPETITION_INSERT_SQL = '''
     INSERT INTO competitions (
         student_id,
@@ -91,8 +93,9 @@ COMPETITION_INSERT_SQL = '''
         extra_data,
         review_status,
         owner_id,
-        review_comment
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        review_comment,
+        student_ref_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
 
 
@@ -121,6 +124,7 @@ def competition_insert_records(
             review_status,
             owner_id,
             '',
+            item.student_ref_id,
         )
         for item in competitions
     ]
@@ -1744,6 +1748,42 @@ class SQLiteAdapter:
             return {}
         return self._known_athletes().get(name, {})
 
+    def search_student_suggestions(self, query: str, limit: int = 8) -> list[dict]:
+        """Активные карточки студентов по подстроке ФИО (автодополнение).
+
+        В отличие от search_athletes источник — таблица students, поэтому
+        находятся и студенты БЕЗ истории участий (импорт в раздел Students).
+        Сравнение — подстрока на casefold в Python (lower() в SQLite не
+        берёт кириллицу, тот же подход, что _known_athletes). Порядок —
+        по алфавиту ФИО, затем по id; неактивные карточки не возвращаются.
+        """
+        query = (query or '').strip().casefold()
+        if not query:
+            return []
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT id, full_name, sex, institute, group_name, course '
+                'FROM students WHERE active = 1 ORDER BY full_name ASC, id ASC'
+            ).fetchall()
+        suggestions: list[dict] = []
+        for row in rows:
+            name = (row['full_name'] or '').strip()
+            if not name or query not in name.casefold():
+                continue
+            suggestions.append(
+                {
+                    'student_id': row['id'],
+                    'name': name,
+                    'sex': (row['sex'] or '').strip(),
+                    'institute': (row['institute'] or '').strip(),
+                    'group': (row['group_name'] or '').strip(),
+                    'course': '' if row['course'] is None else str(row['course']).strip(),
+                }
+            )
+            if len(suggestions) >= limit:
+                break
+        return suggestions
+
     _ATHLETE_FIELD_MAP: tuple[tuple[str, str], ...] = (
         ('student_sex', 'sex'),
         ('institute', 'institute'),
@@ -3043,6 +3083,8 @@ class SQLiteAdapter:
         Волна B (прототип 16): записи остаются обычными записями реестра
         (никаких FK), совпадение — тот же пресет, что и в счётчиках.
         Сначала с результатом, затем «ждут результата», внутри — по ФИО.
+        student_ref_id — для предпросмотра импорта участников (поиск уже
+        существующих участий той же карточки).
         """
         with self._lock:
             rows = self.connection.execute(
@@ -3054,7 +3096,8 @@ class SQLiteAdapter:
                     c.institute,
                     c."group" AS group_name,
                     c.course,
-                    c.position
+                    c.position,
+                    c.student_ref_id
                 FROM calendar_events e, competitions c
                 WHERE e.id = ? AND {self._calendar_preset_match_sql()}
                 ORDER BY

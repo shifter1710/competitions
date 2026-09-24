@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import json
 import re
+import sqlite3
 import time
 from datetime import datetime
 from hashlib import sha256
@@ -27,6 +28,8 @@ from src.main import competition_duplicate_key
 from src.main import competition_to_export_row
 from src.main import create_auth_cookie_value
 from src.main import decorate_calendar_event
+from src.main import EVENT_IMPORT_SESSION_TTL_SECONDS
+from src.main import event_import_sessions
 from src.main import format_date_range
 from src.main import group_calendar_events_by_month
 from src.main import normalize_position
@@ -154,6 +157,8 @@ def client() -> SanicTestClient:
     fake_storage.find_unique_group_institute.return_value = None
     # №23доп: резолвер атлета по умолчанию ничего не знает.
     fake_storage.search_athletes.return_value = []
+    # Карточки студентов в автодополнении (объединённый поиск) — по умолчанию пусты.
+    fake_storage.search_student_suggestions.return_value = []
     fake_storage.find_athlete_fields.return_value = {}
     fake_storage.get_group_options_by_institute.return_value = {}
     fake_storage.ensure_catalog_pair.return_value = None
@@ -6004,7 +6009,19 @@ def test_athletes_search_returns_variants_for_moderator(client: SanicTestClient)
     headers = get_auth_headers(role='editor')
     _, response = client.get('/api/athletes/search?q=Ива', headers=headers)
     assert response.status == 200
-    assert response.json == [{'name': 'Иванов Иван', 'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '1'}]
+    # Каждый вариант помечен kind и student_id (объединённый поиск:
+    # карточки Students + легаси-подсказки) — см. search_athletes.
+    assert response.json == [
+        {
+            'kind': 'legacy',
+            'student_id': None,
+            'sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '1',
+            'name': 'Иванов Иван',
+        }
+    ]
     args = app.ctx.storage.search_athletes.call_args[0]
     assert args[0] == 'Ива'
     app.ctx.storage.search_athletes.return_value = []
@@ -9294,3 +9311,1216 @@ def test_student_import_isolation_and_reconcile_compat(student_import_client: Sa
     _, page = student_import_client.get('/admin/people/reconcile', headers=get_auth_headers())
     assert page.status == 200
     assert f'<a href="/admin/people/{student_id}">Иванов Иван</a>' in page.text
+
+
+# --- Student-backed participant entry + импорт участников события. ---
+# Полные сценарии на реальном SQLite-адаптере (паттерн student_import_client):
+# автодополнение из карточек Students, запись student_ref_id при явном
+# выборе, Excel-импорт участников события с предпросмотром и явными
+# решениями (Excel > Student > пусто; карточка студента не мутируется).
+
+
+@pytest.fixture
+def event_import_client(client: SanicTestClient, tmp_path):
+    storage = SQLiteAdapter(str(tmp_path / 'event_import.sqlite3'))
+    storage.create_user(settings.auth_admin_username, 'hash', 'admin')
+    storage.create_user(settings.auth_editor_username, 'hash', 'editor')
+    storage.create_user(settings.auth_viewer_username or 'viewer', 'hash', 'viewer')
+    storage.create_user('sportik', 'hash', 'athlete')
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    student_import_sessions.clear()
+    event_import_sessions.clear()
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+        student_import_sessions.clear()
+        event_import_sessions.clear()
+
+
+def make_calendar_event(storage, **kwargs) -> int:
+    """Событие календаря с дефолтами синтетического «Забега 2026»."""
+    values = {
+        'name': 'Забег 2026',
+        'date': '2026-05-10T00:00:00',
+        'date_to': '2026-05-11T00:00:00',
+        'level': 'внутривузовские',
+        'sport': 'Бег',
+        'url': '',
+    }
+    values.update(kwargs)
+    return storage.create_calendar_event(**values)
+
+
+def upload_event_xlsx(
+    client: SanicTestClient,
+    event_id: int,
+    rows: list[dict],
+    *,
+    role: str = 'admin',
+    filename: str = 'participants.xlsx',
+    columns: list[str] | None = None,
+):
+    """Загрузить файл импорта участников события; ответ — редирект."""
+    df = pd.DataFrame(rows, columns=columns) if columns else pd.DataFrame(rows)
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+    headers = get_auth_headers(role=role)
+    _, response = client.post(
+        f'/calendar/{event_id}/participants/import',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                filename,
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    return response
+
+
+def post_event_import_action(
+    client: SanicTestClient,
+    event_id: int,
+    token: str,
+    suffix: str,
+    data: dict | None = None,
+    *,
+    role: str = 'admin',
+):
+    headers = get_auth_headers(role=role)
+    _, response = client.post(
+        f'/calendar/{event_id}/participants/import/preview/{token}/{suffix}',
+        headers=headers,
+        data={**csrf_for(headers), **(data or {})},
+        allow_redirects=False,
+    )
+    return response
+
+
+def get_event_preview(client: SanicTestClient, event_id: int, token: str, *, role: str = 'admin'):
+    _, response = client.get(
+        f'/calendar/{event_id}/participants/import/preview/{token}',
+        headers=get_auth_headers(role=role),
+        allow_redirects=False,
+    )
+    return response
+
+
+def event_records_snapshot(storage) -> list[tuple]:
+    rows = storage.connection.execute(
+        'SELECT student_name, student_sex, institute, "group", course, sport, date, date_to, level, name, '
+        'position, student_ref_id FROM competitions ORDER BY id'
+    ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+# --- Автодополнение из Students (Task A). ---
+
+
+def test_athletes_search_finds_student_without_history(event_import_client: SanicTestClient):
+    # Студент только импортирован в Students и никогда не участвовал —
+    # раньше источник (_known_athletes) его не знал вовсе.
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    _, response = event_import_client.get('/api/athletes/search?q=Иван', headers=get_auth_headers())
+    assert response.status == 200
+    assert response.json == [
+        {
+            'kind': 'student',
+            'student_id': student_id,
+            'name': 'Иванов Иван Иванович',
+            'sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group': 'ЭБ-241',
+            'course': '2',
+        }
+    ]
+
+
+def test_athletes_search_dedup_legacy_and_student_by_exact_name(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    save_reconcile_record(storage, 'Иванов Иван Иванович', datetime(2026, 1, 10))
+    _, response = event_import_client.get('/api/athletes/search?q=Иван', headers=get_auth_headers())
+    assert response.status == 200
+    # Точное совпадение ФИО (strip + casefold): карточка Student приоритетна,
+    # легаси-дубль не показывается. Слияния/авто-связи нет — только вид списка.
+    assert [item['kind'] for item in response.json] == ['student']
+
+    # Разные написания остаются обоими вариантами.
+    save_reconcile_record(storage, 'Иванов Иван Иванович (Ивано-Ивановск)', datetime(2026, 2, 1))
+    _, response = event_import_client.get('/api/athletes/search?q=Иванов Иван', headers=get_auth_headers())
+    kinds = [item['kind'] for item in response.json]
+    assert kinds.count('student') == 1
+    assert kinds.count('legacy') == 1
+
+
+def test_athletes_search_students_first_and_namesakes_distinct(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    first = storage.create_student('Сидоров Сидор Сидорович', 'М', 'ИСИ', 'ПГС-201', '1')
+    second = storage.create_student('Сидоров Сидор Сидорович', 'М', 'ИМИ', 'СБ-202', '2')
+    save_reconcile_record(storage, 'Абрамов Артём Артёмович', datetime(2026, 1, 10))
+    _, response = event_import_client.get('/api/athletes/search?q=ид', headers=get_auth_headers())
+    assert response.status == 200
+    # Оба тёзки различимы (id карточек), Students — раньше легаси-подсказок.
+    assert [item['student_id'] for item in response.json if item['kind'] == 'student'] == [first, second]
+    assert response.json[0]['kind'] == 'student'
+
+
+def test_athletes_search_inactive_student_not_offered(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    storage.set_student_active(student_id, False)
+    _, response = event_import_client.get('/api/athletes/search?q=Иван', headers=get_auth_headers())
+    assert response.status == 200
+    assert response.json == []
+
+
+def test_calendar_participant_add_writes_student_ref(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_ref_id': str(student_id),
+            'course': '2',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'] == f'/calendar/{event_id}'
+    record = storage.connection.execute(
+        'SELECT student_name, student_sex, institute, "group", student_ref_id FROM competitions'
+    ).fetchone()
+    # Снимок = значения формы (не карточки), связь — по явному выбору.
+    assert tuple(record) == ('Иванов Иван Иванович', '', '', '', student_id)
+
+    # Инлайн-правка записи (POST /competition/<id>) связь не сбрасывает.
+    record_id = storage.connection.execute('SELECT id FROM competitions').fetchone()['id']
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group': 'ЭБ-241',
+            'sport': 'Бег',
+            'date': '10.05.2026-11.05.2026',
+            'level': 'внутривузовские',
+            'name': 'Забег 2026',
+            'position': '1',
+            'course': '2',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    ref_after = storage.connection.execute(
+        'SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()['student_ref_id']
+    assert ref_after == student_id
+
+
+def test_calendar_participant_add_rejects_invalid_student_ref(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    storage.set_student_active(student_id, False)
+    headers = get_auth_headers()
+    for raw_ref in ('99999', str(student_id)):
+        _, response = event_import_client.post(
+            f'/calendar/{event_id}/participants',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'student_name': 'Иванов Иван Иванович',
+                'student_ref_id': raw_ref,
+                'course': '2',
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'Выбранная карточка студента не найдена или неактивна.' in unquote_plus(response.headers['location'])
+    assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 0
+
+
+def test_calendar_event_page_shows_import_button_and_ref_field(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'href="/calendar/%d/participants/import">Импортировать участников из Excel' % event_id in response.text
+    assert 'name="student_ref_id" value="" id="participant-student-ref"' in response.text
+    assert 'id="participant-student-badge"' in response.text
+    # viewer — страница события доступна, кнопки импорта нет.
+    _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers(role='viewer'))
+    assert response.status == 200
+    assert 'Импортировать участников из Excel' not in response.text
+
+
+# --- Импорт участников события (Task B): страницы/шаблон/загрузка. ---
+
+
+def test_event_import_pages_require_moderator(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/import', headers=get_auth_headers(role='viewer')
+    )
+    assert response.status == 403
+    _, response = event_import_client.get(f'/calendar/{event_id}/participants/import', headers=get_athlete_headers())
+    assert response.status == 403
+    _, response = event_import_client.get(f'/calendar/{event_id}/participants/import', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+    _, response = event_import_client.post(f'/calendar/{event_id}/participants/import', data={'x': '1'})
+    assert response.status == 401
+    # editor — доступен (импорт участников — модераторская операция).
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/import', headers=get_auth_headers(role='editor')
+    )
+    assert response.status == 200
+
+
+def test_event_import_upload_page_content(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    _, response = event_import_client.get(f'/calendar/{event_id}/participants/import', headers=get_auth_headers())
+    assert response.status == 200
+    assert '<h1 class="page-title mt-2">Импорт участников</h1>' in response.text
+    assert 'Соревнование: Забег 2026 · 10-11.05.2026' in response.text
+    assert 'href="/calendar/%d">← К соревнованию' % event_id in response.text
+    assert 'Обязательное поле — только ФИО' in response.text
+    assert 'пустые поля подтянутся из неё' in response.text
+    assert 'Лишние колонки в файле игнорируются.' in response.text
+    assert 'Ничего не добавляется, пока вы не подтвердите строки' in response.text
+    assert 'Скачать пустой шаблон (xlsx)' in response.text
+    assert 'action="/calendar/%d/participants/import"' % event_id in response.text
+    assert 'import-form' not in response.text
+    assert 'accept=".xlsx"' in response.text
+
+
+def test_event_import_template_headers_only(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_custom_field('discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    storage.create_custom_field('hidden_one', 'Скрытое', 'text', False, False, False, False, 1)
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/import/template', headers=get_auth_headers()
+    )
+    assert response.status == 200
+    assert response.headers['content-type'].startswith(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    assert response.headers['content-disposition'].startswith('attachment; filename="Шаблон_участники_')
+    # Базовые колонки + активное custom-поле с show_in_template; событие
+    # (название/дата/уровень/спорт) в шаблоне НЕ нужно — оно берётся из события.
+    assert get_xlsx_headers(response.body) == ['ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Место', 'Дисциплина']
+    assert len(get_xlsx_rows(response.body)) == 1
+
+
+def test_event_import_upload_rejects_bad_files(event_import_client: SanicTestClient, monkeypatch):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    headers = get_auth_headers()
+
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants/import', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Выберите файл.' in unquote_plus(response.headers['location'])
+
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Тестов'}], filename='participants.csv')
+    assert response.status == 302
+    assert 'Файл должен быть в формате .xlsx.' in unquote_plus(response.headers['location'])
+
+    file_obj = BytesIO(b'this is not an excel file at all')
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants/import',
+        headers=headers,
+        data=csrf_for(headers),
+        files={'file': ('broken.xlsx', file_obj.getvalue(), 'application/octet-stream')},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Не удалось прочитать файл. Проверьте, что это не повреждённый .xlsx.' in unquote_plus(
+        response.headers['location']
+    )
+
+    response = upload_event_xlsx(event_import_client, event_id, [{'Имя': 'Тестов', 'Пол': 'М'}])
+    assert response.status == 302
+    assert 'В файле нет обязательной колонки «ФИО». Скачайте шаблон и заполните его.' in unquote_plus(
+        response.headers['location']
+    )
+
+    response = upload_event_xlsx(
+        event_import_client, event_id, [], columns=['ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Место']
+    )
+    assert response.status == 302
+    assert 'В файле нет строк с данными.' in unquote_plus(response.headers['location'])
+
+    monkeypatch.setattr('src.main.EVENT_PARTICIPANT_IMPORT_MAX_ROWS', 3)
+    rows = [{'ФИО': f'Студентов Студент {index:02d}'} for index in range(4)]
+    response = upload_event_xlsx(event_import_client, event_id, rows)
+    assert response.status == 302
+    assert 'В файле больше 3 строк. Разбейте список на части.' in unquote_plus(response.headers['location'])
+
+    assert event_import_sessions == {}
+
+
+def test_event_import_upload_stages_session_and_writes_nothing(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': 'Иванов Иван Иванович', 'Комментарий': 'прим.'}],
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith(f'/calendar/{event_id}/participants/import/preview/')
+    token = import_session_token(response)
+
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    assert 'Неизвестные колонки файла игнорируются: Комментарий.' in page.text
+    assert 'Иванов Иван Иванович' in page.text
+    # Загрузка ничего не создала: ни записей, ни аудита.
+    assert event_records_snapshot(storage) == []
+    assert audit_details(storage, 'event_participant_imported') == []
+
+    # Одна сессия на пользователя: новая загрузка заменяет прежнюю.
+    second = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Петров Пётр Петрович'}])
+    second_token = import_session_token(second)
+    assert second_token != token
+    response = get_event_preview(event_import_client, event_id, token)
+    assert response.status == 302
+    assert 'Время сессии предпросмотра истекло. Загрузите файл заново.' in unquote_plus(response.headers['location'])
+    assert get_event_preview(event_import_client, event_id, second_token).status == 200
+
+    # Сессия привязана к событию: чужое событие — то же поведение.
+    other_event = make_calendar_event(storage, name='Другое')
+    response = get_event_preview(event_import_client, other_event, second_token)
+    assert response.status == 302
+    assert 'Время сессии предпросмотра истекло.' in unquote_plus(response.headers['location'])
+
+    # Сессия привязана к владельцу: другой пользователь не видит её.
+    response = get_event_preview(event_import_client, event_id, second_token, role='editor')
+    assert response.status == 302
+    assert 'Время сессии предпросмотра истекло.' in unquote_plus(response.headers['location'])
+
+
+# --- Разбор файла и матчинг кандидатов. ---
+
+
+def test_event_import_parsing_full_set_lowercase_sex_and_place(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {
+                'ФИО': 'Тестов Тест Тестович',
+                'Пол': 'м',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Курс': 2,
+                'Место': 1,
+            }
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    assert 'Тестов Тест Тестович' in page.text
+    assert 'готовы к добавлению: 0' in page.text
+    # Совпадений с карточками нет → строка требует решения.
+    assert 'Требуют решения' in page.text
+    assert 'Совпадений с активными карточками нет.' in page.text
+
+
+def test_event_import_parsing_rejects_invalid_values(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Бесполый Гражданин', 'Пол': 'X', 'Курс': 1},
+            {'ФИО': 'Некурсовый Гражданин', 'Курс': 'много'},
+            {'ФИО': 'Неместный Гражданин', 'Курс': 1, 'Место': 'первое'},
+            {'Курс': 1},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'ошибочные: 4' in page.text
+    assert 'Пол должен быть «М» или «Ж».' in page.text
+    assert 'Поле &#34;Курс&#34; должно быть числом' in page.text
+    assert 'Поле &#34;Место&#34; должно быть числом' in page.text
+    assert 'Пустое ФИО.' in page.text
+
+
+def test_event_import_matching_variants(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    storage.create_student('Петров Пётр Петрович', 'М', 'ИСИ', 'ПГС-101', '1')
+    storage.add_student_alias(2, 'Петя Петров')
+    storage.create_student('Сидоров Сидор Сидорович', 'М', '', '', '')
+    storage.create_student('Сидоров Сидор Сидорович', 'М', 'ИМИ', 'СБ-202', '3')
+
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович'},  # один кандидат → готова
+            {'ФИО': 'Петя Петров', 'Курс': 2},  # псевдоним → кандидат
+            {'ФИО': 'Сидоров Сидор Сидорович', 'Курс': 1},  # тёзки → требуют решения
+            {'ФИО': 'сидоров сидор сидорович', 'Курс': 1},  # тот же casefold — те же тёзки
+            {'ФИО': 'Козлов Козьма Козьмич', 'Курс': 1},  # 0 кандидатов → требуют решения
+            {'ФИО': 'Иванов Иван Иваныч', 'Курс': 1},  # опечатка — НЕ кандидат
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    # Иванов (1 кандидат) и Петя Петров (псевдоним, единственный) — готовы.
+    assert 'готовы к добавлению: 2' in page.text
+    assert 'требуют решения: 4' in page.text
+    # Тёзки: обе строки-регистра — 4 карточки в двух строках, каждая с кнопкой.
+    assert 'несколько карточек с таким ФИО' in page.text
+    # Кнопки выбора — у каждой карточки-кандидата каждой нерешённой строки
+    # (тёзки 2×2 + готовая строка Иванова + готовая строка «Пети»).
+    assert page.text.count('Выбрать карточку #') == 6
+    assert 'Совпадений с активными карточками нет.' in page.text
+    # Опечатка не даёт кандидата: у «Иваныча» тоже нет совпадений.
+    assert page.text.count('Совпадений с активными карточками нет.') == 2
+
+
+def test_event_import_autofill_priority_and_master_unchanged(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+
+    # Excel: группа пуста (возьмётся G-101 из карточки), курс 2 (перекроет
+    # карточку), место 1 (participation-specific, из Excel).
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': 'Иванов Иван Иванович', 'Группа': '', 'Курс': 2, 'Место': 1}],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'из карточки #1' in page.text
+
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert response.status == 302
+    assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    record = records[0]
+    assert record[0] == 'Иванов Иван Иванович'
+    assert record[1] == 'М'  # пол — из карточки (Excel пуст)
+    assert record[2] == 'ИСЭиУ'  # институт — из карточки
+    assert record[3] == 'G-101'  # группа — из карточки (Excel пуст)
+    assert record[4] == 2  # курс — ЯВНЫЙ Excel перекрыл карточку
+    assert record[10] == 1  # место — из Excel
+    assert record[11] == student_id
+
+    # Карточка-мастер не мутировалась: курс остался 1.
+    master = storage.get_student_by_id(student_id)
+    assert (master['sex'], master['institute'], master['group_name'], master['course']) == ('М', 'ИСЭиУ', 'G-101', '1')
+
+
+def test_event_import_place_empty_awaits_result(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Место': ''}])
+    token = import_session_token(response)
+    # Bulk берёт строки, зафиксированные рендером предпросмотра.
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    # Пустое место → position = 0 — та же семантика «ждёт результата»,
+    # что у ручного добавления участника события.
+    assert records[0][10] == 0
+
+
+def test_event_import_course_required_when_not_autofilled(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    # Карточка без курса: пусто и в файле, и в карточке → ошибка строки.
+    storage.create_student('Безкурсов Студент Студентович', 'М', '', '', '')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Безкурсов Студент Студентович'}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'ошибочные: 1' in page.text
+    assert 'Курс обязателен' in page.text
+
+
+def test_event_import_custom_fields(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_custom_field('discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    storage.create_custom_field('score', 'Очки', 'number', False, True, True, True, 1)
+    storage.create_custom_field('req', 'Обязательное', 'text', True, True, True, True, 2)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+
+    # Один Student, разные дисциплины — ДВЕ корректные записи; обязательное
+    # custom-поле пусто и нечисловое числовое поле → ошибки валидации строк.
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Дисциплина': '100 м', 'Место': 1, 'Очки': 10},
+            {'ФИО': 'Иванов Иван Иванович', 'Дисциплина': '200 м', 'Место': 3, 'Очки': 'шесть'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'ошибочные: 2' in page.text
+    assert 'Поле &#34;Обязательное&#34; обязательно' in page.text
+    # Числовое custom-поле — существующая семантика parse_custom_field_value
+    # (сырой ValueError, как у импорта записей и ручного ввода).
+    assert 'could not convert string to float' in page.text
+
+    # Правка строк: заполняем обязательное поле — обе уходят в «готовы».
+    for row_number in ('2', '3'):
+        response = post_event_import_action(
+            event_import_client,
+            event_id,
+            token,
+            f'row/{row_number}/edit',
+            {
+                'full_name': 'Иванов Иван Иванович',
+                'sex': 'М',
+                'institute': 'ИСЭиУ',
+                'group': 'G-101',
+                'course': '1',
+                'position': '1' if row_number == '2' else '3',
+                'custom__discipline': '100 м' if row_number == '2' else '200 м',
+                'custom__score': '10' if row_number == '2' else '6',
+                'custom__req': 'да',
+            },
+        )
+        assert response.status == 302
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 2' in page.text
+
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 2.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert len(records) == 2
+    assert all(record[11] == student_id for record in records)
+    extra_values = [
+        json.loads(row[0])
+        for row in storage.connection.execute('SELECT extra_data FROM competitions ORDER BY id').fetchall()
+    ]
+    assert [values.get('discipline') for values in extra_values] == ['100 м', '200 м']
+    assert [values.get('score') for values in extra_values] == ['10', '6']
+    assert all(values.get('req') == 'да' for values in extra_values)
+
+
+def test_event_import_duplicate_rows_warn_without_silent_drop(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},
+            {'ФИО': 'иванов иван иванович', 'Курс': '1'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    # Полное равенство снимка (casefold) → обе строки требуют решения,
+    # ничего не выбрасывается молча.
+    assert 'требуют решения: 2' in page.text
+    assert 'Одинаковые строки в файле: строки 2, 3' in page.text
+    assert 'готовы к добавлению: 0' in page.text
+    # Дубль не входит в bulk.
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 0.' in unquote_plus(response.headers['location'])
+    assert event_records_snapshot(storage) == []
+
+
+def test_event_import_existing_participation_is_informational(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    save_reconcile_record(storage, 'Иванов Иван Иванович', datetime(2026, 5, 10), position=5)
+    # Существующая запись — участник того же события (пресет совпадает).
+    storage.connection.execute(
+        "UPDATE competitions SET name = 'Забег 2026', date = '2026-05-10T00:00:00', "
+        "date_to = '2026-05-11T00:00:00', "
+        "sport = 'Бег', level = 'внутривузовские', student_ref_id = ?",
+        (student_id,),
+    )
+    storage.connection.commit()
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    # Не блокировка: строка «готова», участие показано рядом.
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'уже участвует: место 5' in page.text
+    # Несколько участий одного Student — нормальный случай: bulk проходит.
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
+    assert len(event_records_snapshot(storage)) == 2
+
+
+def test_event_import_row_actions_select_add_skip(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'Выбрать существующего' in page.text
+
+    # Явный выбор карточки по номеру → строка «готова», автозаполнение из неё.
+    response = post_event_import_action(
+        event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(student_id)}
+    )
+    assert 'Строка 2: выбрана карточка #%d.' % student_id in unquote_plus(response.headers['location'])
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'выбрана вручную' in page.text
+
+    # Несуществующая/неактивная карточка — отказ без изменений сессии.
+    response = post_event_import_action(
+        event_import_client, event_id, token, 'row/2/select-student', {'student_id': '99999'}
+    )
+    assert 'Студент не найден.' in unquote_plus(response.headers['location'])
+
+    # Добавление одной строки: участие + student_ref_id + аудит.
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/add')
+    assert 'Строка 2: участник добавлен.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][11] == student_id
+    assert records[0][2] == 'ИСЭиУ'  # автозаполнение из выбранной карточки
+    assert audit_details(storage, 'event_participant_imported') == [
+        {'event_id': event_id, 'student_ref_id': student_id}
+    ]
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'добавлен · карточка #%d' % student_id in re.sub(r'\s+', ' ', page.text)
+
+    # Повторное действие над разобранной строкой — отказ.
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/add')
+    assert 'Строка 2 уже разобрана.' in unquote_plus(response.headers['location'])
+    assert len(event_records_snapshot(storage)) == 1
+
+
+def test_event_import_row_skip_action(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Козлов Козьма Козьмич', 'Курс': 1}])
+    token = import_session_token(response)
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/skip')
+    assert 'Строка 2 пропущена.' in unquote_plus(response.headers['location'])
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'пропущен' in page.text
+    assert event_records_snapshot(storage) == []
+
+
+def test_event_import_row_create_student_admin_only(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': 'Ещё Один Студент', 'Пол': 'Ж', 'Институт': 'ИСИ', 'Группа': 'Т-100', 'Курс': 3, 'Место': 5}],
+    )
+    token = import_session_token(response)
+
+    # Editor: создание карточек — admin-only (конвенция Phase 1/2.5).
+    # Сессии предпросмотра привязаны к владельцу — у editor своя загрузка.
+    editor_response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': 'Ещё Один Студент', 'Пол': 'Ж', 'Институт': 'ИСИ', 'Группа': 'Т-100', 'Курс': 3, 'Место': 5}],
+        role='editor',
+    )
+    assert editor_response.status == 302
+    assert editor_response.headers['location'].startswith(f'/calendar/{event_id}/participants/import/preview/')
+    editor_token = import_session_token(editor_response)
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        editor_token,
+        'row/2/create-student',
+        {'full_name': 'Ещё Один Студент', 'sex': 'Ж', 'institute': 'ИСИ', 'group': 'Т-100', 'course': '3'},
+        role='editor',
+    )
+    assert response.status == 403
+    page = get_event_preview(event_import_client, event_id, editor_token, role='editor')
+    assert page.status == 200
+    assert 'Создать нового Student и добавить участника' not in page.text
+    assert 'Создать карточку студента может только администратор.' in page.text
+    assert 'href="/admin/people/' not in page.text
+    post_event_import_action(event_import_client, event_id, editor_token, 'discard', role='editor')
+
+    # Admin: одна операция «карточка + связанный участник».
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        token,
+        'row/2/create-student',
+        {'full_name': 'Ещё Один Студент', 'sex': 'Ж', 'institute': 'ИСИ', 'group': 'Т-100', 'course': '3'},
+    )
+    assert 'студент «Ещё Один Студент» создан, участник добавлен.' in unquote_plus(response.headers['location'])
+    new_student = storage.connection.execute("SELECT id FROM students WHERE full_name = 'Ещё Один Студент'").fetchone()[
+        'id'
+    ]
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][11] == new_student
+    assert records[0][10] == 5  # место — из Excel
+    assert {'student_id': new_student, 'full_name': 'Ещё Один Студент', 'source': 'event-participant-import'} in (
+        audit_details(storage, 'student_created')
+    )
+
+
+def test_event_import_bulk_commit_rechecks_candidates(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+
+    # Между рендером и кликом появился полный тёзка — состав «готовых»
+    # изменился: весь батч отменяется, ничего не вставляется.
+    storage.create_student('Иванов Иван Иванович', 'Ж', 'ИМИ', 'СБ-202', '3')
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Список карточек изменился — обновите страницу и проверьте строки.' in unquote_plus(
+        response.headers['location']
+    )
+    assert event_records_snapshot(storage) == []
+
+
+def test_event_import_bulk_commit_rollback_on_failure(event_import_client: SanicTestClient, monkeypatch):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    storage.create_student('Петров Пётр Петрович', 'Ж', 'ИСИ', 'ПГС-101', '2')
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},
+            {'ФИО': 'Петров Пётр Петрович', 'Курс': 2},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 2' in page.text
+
+    def failing_import(*args, **kwargs):
+        raise sqlite3.OperationalError('simulated failure')
+
+    monkeypatch.setattr(SQLiteAdapter, 'import_competitions', failing_import)
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert response.status == 500
+    monkeypatch.undo()
+    # Ни записи, ни справочники не изменились — откат всего батча.
+    assert event_records_snapshot(storage) == []
+
+
+def test_event_import_finish_and_discard(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},
+            {'ФИО': 'Козлов Козьма Козьмич', 'Курс': 1},
+        ],
+    )
+    token = import_session_token(response)
+
+    # Неразобранные строки блокируют завершение (ошибочные — нет).
+    response = post_event_import_action(event_import_client, event_id, token, 'finish')
+    assert 'Завершение недоступно: не разобрано строк: 2.' in unquote_plus(response.headers['location'])
+
+    # Bulk берёт строки, зафиксированные рендером предпросмотра.
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    response = post_event_import_action(event_import_client, event_id, token, 'row/3/skip')
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'Кнопка «Завершить импорт» станет активной' not in page.text
+    assert 'disabled>Завершить импорт' not in page.text
+
+    response = post_event_import_action(event_import_client, event_id, token, 'finish')
+    assert response.status == 302
+    assert response.headers['location'].startswith(f'/calendar/{event_id}')
+    assert 'Импорт завершён: добавлено 1, пропущено 1.' in unquote_plus(response.headers['location'])
+    completed = audit_details(storage, 'event_participants_import_completed')
+    assert completed == [
+        {
+            'event_id': event_id,
+            'event_name': 'Забег 2026',
+            'counters': {'added': 1, 'skipped': 1, 'errors': 0, 'total': 2},
+        }
+    ]
+    assert token not in event_import_sessions
+
+    # Discard: сессия удаляется, добавленные участники остаются.
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    response = post_event_import_action(event_import_client, event_id, token, 'discard')
+    assert 'Импорт отменён. Добавленные участники (1) сохранены.' in unquote_plus(response.headers['location'])
+    assert token not in event_import_sessions
+    assert len(event_records_snapshot(storage)) == 2
+
+
+def test_event_import_relations_event_preset(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(
+        storage,
+        name='Кросс весны',
+        date='2026-03-01T00:00:00',
+        date_to=None,
+        level='межвузовские',
+        sport='Лёгкая атлетика',
+    )
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Место': 2}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    record = records[0]
+    # Пресет события скопирован в запись (однодневное событие: date_to NULL).
+    assert record[5] == 'Лёгкая атлетика'
+    assert record[6] == '2026-03-01T00:00:00'
+    assert record[7] is None
+    assert record[8] == 'межвузовские'
+    assert record[9] == 'Кросс весны'
+    # Участник появился в списке события, счётчик обновился.
+    participants = storage.list_calendar_event_participants(event_id)
+    assert [participant['student_name'] for participant in participants] == ['Иванов Иван Иванович']
+
+
+def test_event_import_post_routes_require_csrf(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
+    token = import_session_token(response)
+    suffixes = (
+        'bulk-commit',
+        'finish',
+        'discard',
+        'row/2/skip',
+        'row/2/add',
+        'row/2/edit',
+        'row/2/select-student',
+        'row/2/create-student',
+    )
+    for suffix in suffixes:
+        _, response = event_import_client.post(
+            f'/calendar/{event_id}/participants/import/preview/{token}/{suffix}',
+            headers=get_auth_headers(),
+            data={},
+            allow_redirects=False,
+        )
+        assert response.status == 403, suffix
+    # И сама загрузка файла тоже.
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants/import', headers=get_auth_headers(), data={}, allow_redirects=False
+    )
+    assert response.status == 403
+    assert event_records_snapshot(storage) == []
+
+
+def test_event_import_unknown_token_redirects_to_upload(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = get_event_preview(event_import_client, event_id, 'no-such-token')
+    assert response.status == 302
+    assert 'Время сессии предпросмотра истекло. Загрузите файл заново.' in unquote_plus(response.headers['location'])
+
+
+def test_event_import_expired_session_swept(event_import_client: SanicTestClient, monkeypatch):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
+    token = import_session_token(response)
+    # TTL истёк: сессия выметается при следующем обращении.
+    event_import_sessions[token]['created_at'] -= EVENT_IMPORT_SESSION_TTL_SECONDS + 1
+    response = get_event_preview(event_import_client, event_id, token)
+    assert response.status == 302
+    assert 'Время сессии предпросмотра истекло.' in unquote_plus(response.headers['location'])
+    assert token not in event_import_sessions
+
+
+# --- Ремонтный цикл 1 (QA FAIL): квота легаси, явный выбор тёзки,
+# достижимые дубли, XSS превью. ---
+
+
+def test_athletes_search_legacy_not_displaced_by_full_student_limit(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    # Полный лимит совпадающих карточек (8 из 10) + легаси-человек без карточки.
+    for index in range(10):
+        storage.create_student(f'Сидоров Сидор {index:02d}', 'М', '', '', '')
+    save_reconcile_record(storage, 'Сидоркин Сидор Сидорович', datetime(2026, 1, 10))
+    _, response = event_import_client.get('/api/athletes/search?q=Сид', headers=get_auth_headers())
+    assert response.status == 200
+    kinds = [item['kind'] for item in response.json]
+    # Легаси НЕ вытесняется: у каждого вида своя квота (до 8), карточки —
+    # раньше; иначе на главной (клиент фильтрует карточки) список пустел бы.
+    assert kinds.count('student') == 8
+    assert kinds.count('legacy') == 1
+    assert kinds[0] == 'student'
+    assert kinds[-1] == 'legacy'
+    assert response.json[-1]['name'] == 'Сидоркин Сидор Сидорович'
+
+
+def test_event_import_selected_namesake_becomes_ready_and_bulk(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Сидоров Сидор Сидорович', 'М', 'ИСИ', 'ПГС-201', '1')
+    second = storage.create_student('Сидоров Сидор Сидорович', 'Ж', 'ИМИ', 'СБ-202', '2')
+
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Сидоров Сидор Сидорович', 'Курс': 1}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    # Тёзки без явного выбора → требуют решения, авто-выбора нет.
+    assert 'требуют решения: 1' in page.text
+    assert 'готовы к добавлению: 0' in page.text
+    assert 'Добавить 0 готовых' in page.text
+
+    # Явный выбор карточки → строка «готова», кнопка «Добавить» доступна.
+    response = post_event_import_action(
+        event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(second)}
+    )
+    assert 'Строка 2: выбрана карточка #%d.' % second in unquote_plus(response.headers['location'])
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'Добавить 1 готовых' in page.text
+
+    # Bulk вставляет ровно готовую строку — с выбранной карточкой.
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][11] == second
+    assert records[0][2] == 'ИМИ'  # автозаполнение из ВЫБРАННОЙ карточки тёзки
+
+
+def test_event_import_bulk_counter_matches_inserted_rows(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    storage.create_student('Сидоров Сидор Сидорович', 'М', 'ИСИ', 'ПГС-201', '1')
+    storage.create_student('Сидоров Сидор Сидорович', 'Ж', 'ИМИ', 'СБ-202', '2')
+
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},  # единственный кандидат → готова
+            {'ФИО': 'Сидоров Сидор Сидорович', 'Курс': 1},  # тёзки без выбора → решение
+            {'ФИО': 'Козлов Козьма Козьмич', 'Курс': 1},  # 0 кандидатов → решение
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'требуют решения: 2' in page.text
+    # Счётчик кнопки == числу строк батча: строки решений не попадают.
+    assert 'Добавить 1 готовых' in page.text
+
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][0] == 'Иванов Иван Иванович'
+    assert records[0][11] == student_id
+    # Неразобранные строки остались pending (не потеряны молча).
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'требуют решения: 2' in page.text
+
+
+def test_event_import_duplicate_addable_after_sibling_resolved(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},
+            {'ФИО': 'иванов иван иванович', 'Курс': '1'},
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    # Оба дубля не разобраны → требуют решения (создать обе нельзя вслепую).
+    assert 'требуют решения: 2' in page.text
+    assert 'Одинаковые строки в файле: строки 2, 3' in page.text
+
+    # Одну пропустили → вторая разблокирована и добавляема (§17:
+    # «оставить одну» достижима из UI).
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/skip')
+    assert 'Строка 2 пропущена.' in unquote_plus(response.headers['location'])
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'Добавить 1 готовых' in page.text
+    # Предупреждение о дубле остаётся информацией (строки 2, 3).
+    assert 'Одинаковые строки в файле: строки 2, 3' in page.text
+
+    response = post_event_import_action(event_import_client, event_id, token, 'row/3/add')
+    assert 'Строка 3: участник добавлен.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][11] == student_id
+
+    # «Создать обе»: свежая сессия — первую добавляем, вторая после этого
+    # разблокируется и тоже добавляется.
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},
+            {'ФИО': 'иванов иван иванович', 'Курс': '1'},
+        ],
+    )
+    token = import_session_token(response)
+    post_event_import_action(event_import_client, event_id, token, 'row/2/add')
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    response = post_event_import_action(event_import_client, event_id, token, 'row/3/add')
+    assert 'Строка 3: участник добавлен.' in unquote_plus(response.headers['location'])
+    assert len(event_records_snapshot(storage)) == 3
+
+
+def test_event_import_preview_xss_rendered_as_text(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    payload = '<script>alert("xss")</script>'
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': payload, 'Институт': '<img src=x onerror=alert(1)>', 'Курс': 1}],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert page.status == 200
+    # Значения файла рендерятся как текст: сырой payload в разметке отсутствует.
+    assert payload not in page.text
+    assert '<img src=x onerror=' not in page.text
+    assert '&lt;script&gt;alert(' in page.text
+    assert '&lt;/script&gt;' in page.text
+    assert '&lt;img src=x onerror=alert(1)&gt;' in page.text
+
+    # Flash с ФИО из файла (создание карточки) отображается как текст.
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        token,
+        'row/2/create-student',
+        {'full_name': payload, 'sex': '', 'institute': '', 'group': '', 'course': '1'},
+    )
+    assert response.status == 302
+    _, flashed = event_import_client.get(response.headers['location'], headers=get_auth_headers())
+    assert flashed.status == 200
+    assert payload not in flashed.text
+    assert '&lt;script&gt;alert(' in flashed.text
+
+
+# --- Обратная совместимость: экспорты/очередь/сопоставление. ---
+
+
+def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient):
+    # Служебная колонка не попадает в Excel-выгрузки: формат выгрузок —
+    # часть контракта импорта/экспорта (шаблон импорта записей её не знает).
+    competition = build_competition(
+        {
+            'ФИО': 'Тестов Тест Тестович',
+            'Пол': 'М',
+            'Институт': 'ИСИ',
+            'Группа': 'ПГС-101',
+            'Вид спорта': 'Бег',
+            'Дата': '15.03.2026',
+            'Уровень соревнований': 'внутривузовские',
+            'Название соревнований': 'Кубок',
+            'Место': 1,
+            'Курс': 2,
+        },
+        custom_fields=[],
+    )
+    competition.student_ref_id = 42
+    row = competition_to_export_row(competition, [])
+    assert 'student_ref_id' not in row
+    assert set(row) == {
+        'Код студента',
+        'ФИО',
+        'Пол',
+        'Институт',
+        'Группа',
+        'Курс',
+        'Вид спорта',
+        'Дата',
+        'Уровень соревнований',
+        'Название соревнований',
+        'Место',
+    }
+
+
+def test_import_queue_payload_round_trip_with_ref_field(client: SanicTestClient):
+    # Конфликт импорта записей: model_dump → payload → model_validate.
+    # Новое None-поле не ломает round-trip (существующие записи в очереди
+    # без ключа тоже валидируются — поле имеет дефолт).
+    competition = build_competition(
+        {
+            'ФИО': 'Тестов Тест Тестович',
+            'Пол': 'М',
+            'Институт': 'ИСИ',
+            'Группа': 'ПГС-101',
+            'Вид спорта': 'Бег',
+            'Дата': '15.03.2026',
+            'Уровень соревнований': 'внутривузовские',
+            'Название соревнований': 'Кубок',
+            'Место': 1,
+            'Курс': 2,
+        },
+        custom_fields=[],
+    )
+    payload = competition.model_dump(mode='json', by_alias=False)
+    assert payload['student_ref_id'] is None
+    assert Competition.model_validate(payload).student_ref_id is None
+    legacy_payload = {key: value for key, value in payload.items() if key != 'student_ref_id'}
+    assert Competition.model_validate(legacy_payload).student_ref_id is None
