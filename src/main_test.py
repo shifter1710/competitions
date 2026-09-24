@@ -9997,13 +9997,16 @@ def test_event_import_row_actions_select_add_skip(event_import_client: SanicTest
     response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
     token = import_session_token(response)
     page = get_event_preview(event_import_client, event_id, token)
-    assert 'Выбрать существующего' in page.text
+    assert 'Найти студента' in page.text
 
-    # Явный выбор карточки по номеру → строка «готова», автозаполнение из неё.
+    # Явный выбор карточки (поиск/POST select-student) → строка «готова»,
+    # автозаполнение из неё.
     response = post_event_import_action(
         event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(student_id)}
     )
-    assert 'Строка 2: выбрана карточка #%d.' % student_id in unquote_plus(response.headers['location'])
+    assert 'Строка 2: выбрана карточка #%d — Иванов Иван Иванович.' % student_id in unquote_plus(
+        response.headers['location']
+    )
     page = get_event_preview(event_import_client, event_id, token)
     assert 'готовы к добавлению: 1' in page.text
     assert 'выбрана вручную' in page.text
@@ -10325,7 +10328,9 @@ def test_event_import_selected_namesake_becomes_ready_and_bulk(event_import_clie
     response = post_event_import_action(
         event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(second)}
     )
-    assert 'Строка 2: выбрана карточка #%d.' % second in unquote_plus(response.headers['location'])
+    assert 'Строка 2: выбрана карточка #%d — Сидоров Сидор Сидорович.' % second in unquote_plus(
+        response.headers['location']
+    )
     page = get_event_preview(event_import_client, event_id, token)
     assert 'готовы к добавлению: 1' in page.text
     assert 'Добавить 1 готовых' in page.text
@@ -10459,6 +10464,426 @@ def test_event_import_preview_xss_rendered_as_text(event_import_client: SanicTes
     assert flashed.status == 200
     assert payload not in flashed.text
     assert '&lt;script&gt;alert(' in flashed.text
+
+
+# --- Event Participant Import UX v2: курс опционален (field_settings),
+# url-поля вне импорта участников, «Найти студента» вместо сырого № карточки. ---
+
+
+def test_event_import_course_optional_accepts_name_only_row(event_import_client: SanicTestClient):
+    """Курс опционален (настройка field_settings): строка только с ФИО
+    валидна и без курса в карточке Student, bulk проходит. Дефолт
+    (required) уже покрыт test_event_import_course_required_when_not_autofilled."""
+    storage = app.ctx.storage
+    storage.update_field_settings({'course': ('number', False)})
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович'}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'Курс обязателен' not in page.text
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][4] == 0  # пустой опциональный курс → 0 (как Место)
+    assert records[0][11] == student_id
+
+
+def test_event_import_course_optional_autofills_from_student(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.update_field_settings({'course': ('number', False)})
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '3')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович'}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    # Курс подтянут из карточки (Excel пуст) — автозаполнение не зависит от
+    # обязательности поля.
+    assert f'поля из карточки #{student_id}: Пол, Институт, Группа, Курс' in re.sub(r'\s+', ' ', page.text)
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert event_records_snapshot(storage)[0][4] == 3
+
+
+def test_event_import_course_optional_excel_overrides_student(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.update_field_settings({'course': ('number', False)})
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '3')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 5}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    # Явный Excel-курс не входит в автозаполненные из карточки поля.
+    assert f'поля из карточки #{student_id}: Пол, Институт, Группа, Курс' not in re.sub(r'\s+', ' ', page.text)
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    records = event_records_snapshot(storage)
+    assert records[0][4] == 5  # ЯВНЫЙ Excel-курс перекрыл карточку
+
+
+# --- Url-поля вне импорта участников события (UX v2). ---
+
+
+def test_event_import_excludes_url_custom_field(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    storage.create_custom_field('discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    storage.create_custom_field('link', 'Ссылка на соревнование', 'url', False, True, True, True, 1)
+
+    # Шаблон импорта участников: обычное custom-поле есть, url-поле — нет.
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/import/template', headers=get_auth_headers()
+    )
+    assert response.status == 200
+    header = get_xlsx_headers(response.body)
+    assert 'Дисциплина' in header
+    assert 'Ссылка на соревнование' not in header
+
+    # Файл с колонкой url-поля: колонка становится «неизвестной» → штатное
+    # предупреждение; строка валидна, значение не попадает ни в предпросмотр,
+    # ни в extra_data участия.
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {
+                'ФИО': 'Иванов Иван Иванович',
+                'Курс': 1,
+                'Дисциплина': '100 м',
+                'Ссылка на соревнование': 'https://sport.example.com/race',
+            }
+        ],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'Неизвестные колонки файла игнорируются: Ссылка на соревнование.' in page.text
+    assert 'https://sport.example.com/race' not in page.text
+    assert '<th>Ссылка на соревнование</th>' not in page.text
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    extra = json.loads(storage.connection.execute('SELECT extra_data FROM competitions').fetchone()[0])
+    assert extra == {'discipline': '100 м'}  # ключа url-поля нет
+
+    # Само url-поле остаётся в системе: список custom-полей админки.
+    _, fields_page = event_import_client.get('/admin/fields', headers=get_auth_headers())
+    assert fields_page.status == 200
+    assert 'Ссылка на соревнование' in fields_page.text
+
+
+def test_event_import_required_url_field_does_not_block_rows(event_import_client: SanicTestClient):
+    """КРИТИЧНО: фильтр доходит до валидации — ОБЯЗАТЕЛЬНОЕ url-поле не
+    блокирует строки импорта участников (в обычном реестре оно осталось бы
+    обязательным)."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_custom_field('link', 'Ссылка на соревнование', 'url', True, True, True, True, 0)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'Поле &#34;Ссылка на соревнование&#34; обязательно' not in page.text
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
+    extra = json.loads(storage.connection.execute('SELECT extra_data FROM competitions').fetchone()[0])
+    assert extra == {}
+
+
+def test_registry_import_and_export_keep_url_custom_field(client: SanicTestClient):
+    """Url-поля исключены ТОЛЬКО из импорта участников события: обычный
+    импорт записей валидирует и хранит их значения как раньше."""
+    url_field = CustomField(
+        field_id=1,
+        key='link',
+        label='Ссылка на соревнование',
+        field_type='url',
+        required=False,
+        show_in_table=True,
+        show_in_export=True,
+        show_in_template=True,
+    )
+    app.ctx.storage.get_custom_fields.return_value = [url_field]
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = upload_xlsx(client, [make_import_row(**{'Ссылка на соревнование': 'https://sport.example.com/race'})])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.extra_data == {'link': 'https://sport.example.com/race'}
+
+    # Читатели extra_data используют .get: участия из импорта участников
+    # события ключа url-поля не имеют — экспорт отдаёт пустое значение, а не
+    # падает.
+    competition = build_competition(make_import_row(), custom_fields=[])
+    row = competition_to_export_row(competition, [url_field])
+    assert row['Ссылка на соревнование'] == ''
+
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+
+
+# --- «Найти студента»: поиск карточки для строки предпросмотра (UX v2). ---
+
+
+def get_event_search(
+    client: SanicTestClient,
+    event_id: int,
+    token: str,
+    row_number: int,
+    query: str,
+    *,
+    role: str = 'admin',
+):
+    """GET предпросмотра с параметрами поиска find/q."""
+    _, response = client.get(
+        f'/calendar/{event_id}/participants/import/preview/{token}?{urlencode({"find": row_number, "q": query})}',
+        headers=get_auth_headers(role=role),
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_event_import_row_search_select_writes_student_ref(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    # Кнопка поиска есть, ручного ввода сырого номера карточки больше нет.
+    assert 'Найти студента' in page.text
+    assert '№ карточки' not in page.text
+    assert 'Выбрать существующего' not in page.text
+    assert 'type="number"' not in page.text
+
+    # Подстрока по ФИО (casefold); collapse открыт для найденной строки.
+    page = get_event_search(event_import_client, event_id, token, 2, 'иван')
+    assert page.status == 200
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'По запросу «иван» найдено: 1.' in collapsed
+    assert 'collapse show" id="import-row-2-search"' in collapsed
+    assert f'<a href="/admin/people/{student_id}">Иванов Иван Иванович</a>' in collapsed
+    assert f'#{student_id} · ИСЭиУ · G-101 · курс 1' in collapsed
+    assert f'Выбрать карточку #{student_id}' in collapsed
+    # Форма выбора результата — POST select-student с csrf (переиспользованный
+    # макрос); бейдж «ФИО» у результатов поиска не выводится.
+    assert '/row/2/select-student' in page.text
+    assert '>ФИО</span>' not in collapsed
+
+    # Регистр запроса не важен (casefold).
+    page = get_event_search(event_import_client, event_id, token, 2, 'ИВАНОВ иВАН')
+    assert 'По запросу «ИВАНОВ иВАН» найдено: 1.' in re.sub(r'\s+', ' ', page.text)
+
+    # Выбор результата поиска: строка «готова», участие получает student_ref_id.
+    response = post_event_import_action(
+        event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(student_id)}
+    )
+    assert 'Строка 2: выбрана карточка #%d — Иванов Иван Иванович.' % student_id in unquote_plus(
+        response.headers['location']
+    )
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    records = event_records_snapshot(storage)
+    assert len(records) == 1
+    assert records[0][11] == student_id
+
+
+def test_event_import_row_search_by_alias_and_namesakes(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    alias_id = storage.create_student('Николаев Николай Николаевич', 'М', 'ИСИ', 'ПГС-201', '1')
+    storage.add_student_alias(alias_id, 'Коля')
+    first = storage.create_student('Сидоров Сидор Сидорович', 'М', 'ИСИ', 'ПГС-201', '1')
+    second = storage.create_student('Сидоров Сидор Сидорович', 'Ж', 'ИМИ', 'СБ-202', '2')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+
+    # Подстрока псевдонима: бейдж «псевдоним» с исходным написанием в title.
+    page = get_event_search(event_import_client, event_id, token, 2, 'коля')
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'По запросу «коля» найдено: 1.' in collapsed
+    assert f'Выбрать карточку #{alias_id}' in collapsed
+    assert 'title="Совпадение по псевдониму «Коля»">псевдоним</span>' in collapsed
+
+    # Полные тёзки — два отдельных результата с разными карточками.
+    page = get_event_search(event_import_client, event_id, token, 2, 'сидоров')
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'По запросу «сидоров» найдено: 2.' in collapsed
+    assert f'#{first} · ИСИ · ПГС-201 · курс 1' in collapsed
+    assert f'#{second} · ИМИ · СБ-202 · курс 2' in collapsed
+
+
+def test_event_import_row_search_inactive_and_empty_result(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    storage.set_student_active(student_id, False)
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+    # Неактивная карточка не находится — пустой результат.
+    page = get_event_search(event_import_client, event_id, token, 2, 'иван')
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'По запросу «иван» ничего не найдено.' in collapsed
+    assert 'По запросу «иван» найдено' not in collapsed
+    assert f'Выбрать карточку #{student_id}' not in collapsed
+
+
+def test_event_import_row_search_limit_and_truncation(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    for index in range(9):
+        storage.create_student(f'Сидоров Сидор {index:02d}', 'М', 'ИСИ', 'ПГС-201', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+    page = get_event_search(event_import_client, event_id, token, 2, 'сидоров')
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    # Лимит 8 + признак усечения; 9-я карточка не показана.
+    assert 'По запросу «сидоров» найдено: 8.' in collapsed
+    assert 'Показаны первые 8 — уточните запрос.' in collapsed
+    assert 'Сидоров Сидор 08' not in collapsed
+    assert 'Сидоров Сидор 07' in collapsed
+
+
+def test_event_import_row_search_ignores_invalid_params(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+
+    # Пустой/пробельный q — не поиск: collapse доступен, блока результатов нет.
+    for query in ('', '   '):
+        page = get_event_search(event_import_client, event_id, token, 2, query)
+        assert page.status == 200
+        assert 'По запросу' not in page.text
+
+    # Несуществующая строка — параметр find игнорируется целиком.
+    page = get_event_search(event_import_client, event_id, token, 999, 'иван')
+    assert page.status == 200
+    assert 'По запросу' not in page.text
+    assert 'collapse show' not in page.text
+    # Не-число в find — то же молчаливое игнорирование (не 400).
+    _, page = event_import_client.get(
+        f'/calendar/{event_id}/participants/import/preview/{token}?find=abc&q=%D0%B8%D0%B2%D0%B0%D0%BD',
+        headers=get_auth_headers(),
+        allow_redirects=False,
+    )
+    assert page.status == 200
+    assert 'По запросу' not in page.text
+
+    # Разобранная (skipped) строка больше не ищется.
+    post_event_import_action(event_import_client, event_id, token, 'row/2/skip')
+    page = get_event_search(event_import_client, event_id, token, 2, 'иван')
+    assert page.status == 200
+    assert 'По запросу' not in page.text
+
+
+def test_event_import_row_search_available_to_editor(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(
+        event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}], role='editor'
+    )
+    token = import_session_token(response)
+    page = get_event_search(event_import_client, event_id, token, 2, 'иван', role='editor')
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'По запросу «иван» найдено: 1.' in collapsed
+    # Editor: ФИО результатом — текстом (без ссылки на карточку), выбор есть,
+    # создание карточки по-прежнему только admin.
+    assert f'<a href="/admin/people/{student_id}">' not in collapsed
+    assert f'Выбрать карточку #{student_id}' in collapsed
+    assert 'Создать нового Student и добавить участника' not in collapsed
+    assert 'Создать карточку студента может только администратор.' in collapsed
+
+
+def test_event_import_edit_full_name_resets_explicit_selection(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Новый Человек Человечович', 'Курс': 2}])
+    token = import_session_token(response)
+    post_event_import_action(
+        event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(student_id)}
+    )
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+
+    # Правка БЕЗ изменения ФИО (другой курс) — явный выбор сохраняется.
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        token,
+        'row/2/edit',
+        {
+            'full_name': 'Новый Человек Человечович',
+            'sex': 'М',
+            'institute': '',
+            'group': '',
+            'course': '3',
+            'position': '',
+        },
+    )
+    assert response.status == 302
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    assert event_import_sessions[token]['rows'][0]['student_id'] == student_id
+
+    # Правка с изменением ФИО (регистр не в счёт — casefold) — не сбрасывает.
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        token,
+        'row/2/edit',
+        {
+            'full_name': 'Новый Человек Человечович'.upper(),
+            'sex': 'М',
+            'institute': '',
+            'group': '',
+            'course': '3',
+            'position': '',
+        },
+    )
+    assert response.status == 302
+    assert event_import_sessions[token]['rows'][0]['student_id'] == student_id
+
+    # Реальное изменение ФИО — явный выбор сброшен: строка снова «требует
+    # решения», устаревшая связь не переносится молча.
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        token,
+        'row/2/edit',
+        {
+            'full_name': 'Другой Человек Человечович',
+            'sex': 'М',
+            'institute': '',
+            'group': '',
+            'course': '3',
+            'position': '',
+        },
+    )
+    assert response.status == 302
+    assert event_import_sessions[token]['rows'][0]['student_id'] is None
+    page = get_event_preview(event_import_client, event_id, token)
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'требуют решения: 1' in collapsed
+    assert 'готовы к добавлению: 0' in collapsed
+    assert 'выбрана вручную' not in collapsed
+    assert 'После правки ФИО кандидаты пересчитаются' in collapsed
+
+    # После сброса повторный поиск и выбор работают.
+    page = get_event_search(event_import_client, event_id, token, 2, 'иван')
+    assert 'По запросу «иван» найдено: 1.' in re.sub(r'\s+', ' ', page.text)
+    post_event_import_action(
+        event_import_client, event_id, token, 'row/2/select-student', {'student_id': str(student_id)}
+    )
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/add')
+    assert 'Строка 2: участник добавлен.' in unquote_plus(response.headers['location'])
+    records = event_records_snapshot(storage)
+    assert records[0][11] == student_id
 
 
 # --- Обратная совместимость: экспорты/очередь/сопоставление. ---

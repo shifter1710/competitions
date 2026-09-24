@@ -7,8 +7,10 @@
    и создание карточек — только admin. #}
 
 {# Строка таблицы предпросмотра. Макросу request/is_admin передаются явно:
-   макросы не видят контекст шаблона. #}
-{% macro candidate_line(candidate, row, token, request, is_admin, event) %}
+   макросы не видят контекст шаблона. search_result=True — строка из поиска
+   «Найти студента» (бейдж «ФИО» у результатов поиска не выводится, бейдж
+   «псевдоним» остаётся). #}
+{% macro candidate_line(candidate, row, token, request, is_admin, event, search_result=False) %}
 <div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
     {% if is_admin %}
     <a href="/admin/people/{{ candidate.student_id }}">{{ candidate.full_name }}</a>
@@ -22,7 +24,7 @@
     {% if candidate.match_type == 'alias' %}
     <span class="badge text-bg-light border"
           title="Совпадение по псевдониму «{{ candidate.alias_name }}»">псевдоним</span>
-    {% else %}
+    {% elif not search_result %}
     <span class="badge text-bg-secondary">ФИО</span>
     {% endif %}
     <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/select-student"
@@ -34,7 +36,7 @@
 </div>
 {% endmacro %}
 
-{% macro import_data_row(row, token, category, request, is_admin, event, custom_columns, custom_keys) %}
+{% macro import_data_row(row, token, category, request, is_admin, event, custom_columns, custom_keys, search_row=None, search_query='', search_results=(), search_truncated=False) %}
 <tr>
     <td class="text-muted">{{ row.row_number }}</td>
     <td>
@@ -107,13 +109,38 @@
         {% if not row.candidates %}
         <div class="small text-muted">Совпадений с активными карточками нет.</div>
         {% if not row.error and not row.validation_error %}
-        <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/select-student"
-              class="d-flex flex-wrap gap-1 align-items-center mb-1" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <input aria-label="Номер карточки студента" class="form-control form-control-sm" min="1" name="student_id"
-                placeholder="№ карточки" required style="max-width: 110px;" type="number">
-            <button class="btn btn-sm btn-outline-primary" type="submit">Выбрать существующего</button>
-        </form>
+        {# Карточку выбирают поиском (подстрока по ФИО/псевдониму активных
+           карточек), а не вводом сырого номера. GET-форма на URL предпросмотра:
+           collapse открыт, когда find = номер этой строки. #}
+        <button aria-expanded="{{ 'true' if search_row == row.row_number else 'false' }}"
+                aria-controls="import-row-{{ row.row_number }}-search"
+                class="btn btn-sm btn-outline-primary mb-1"
+                data-bs-target="#import-row-{{ row.row_number }}-search"
+                data-bs-toggle="collapse" type="button">Найти студента</button>
+        <div class="collapse{{ ' show' if search_row == row.row_number else '' }}" id="import-row-{{ row.row_number }}-search">
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}"
+                  class="d-flex flex-wrap gap-1 align-items-center mb-1" method="get">
+                <input type="hidden" name="find" value="{{ row.row_number }}">
+                <input aria-label="Поиск студента" autocomplete="off" class="form-control form-control-sm"
+                       maxlength="100" name="q" placeholder="часть ФИО или псевдонима" type="search"
+                       value="{{ search_query if search_row == row.row_number else '' }}">
+                <button class="btn btn-sm btn-primary" type="submit">Искать</button>
+                <a class="small" href="/calendar/{{ event.id }}/participants/import/preview/{{ token }}">Сброс</a>
+            </form>
+            {% if search_row == row.row_number and search_query %}
+            {% if search_results %}
+            <div class="small text-muted mb-1">По запросу «{{ search_query }}» найдено: {{ search_results | length }}.</div>
+            {% for candidate in search_results %}
+            {{ candidate_line(candidate, row, token, request, is_admin, event, search_result=True) }}
+            {% endfor %}
+            {% if search_truncated %}
+            <div class="small text-muted">Показаны первые {{ search_results | length }} — уточните запрос.</div>
+            {% endif %}
+            {% else %}
+            <div class="small text-muted">По запросу «{{ search_query }}» ничего не найдено.</div>
+            {% endif %}
+            {% endif %}
+        </div>
         {% endif %}
         {% endif %}
         {% for candidate in row.candidates %}
@@ -176,7 +203,9 @@
                         <label class="form-label" for="import-row-{{ row.row_number }}-full-name">ФИО</label>
                         <input class="form-control" id="import-row-{{ row.row_number }}-full-name"
                                name="full_name" required type="text" value="{{ row.full_name }}">
-                        <div class="form-text ui-hint">После правки ФИО карточки-кандидаты пересчитаются.</div>
+                        <div class="form-text">После правки ФИО кандидаты пересчитаются, а явно выбранная карточка
+                            сбросится — при необходимости выберите её заново.
+                        </div>
                     </div>
                     <div class="col-md-6">
                         <label class="form-label" for="import-row-{{ row.row_number }}-sex">Пол</label>
@@ -352,7 +381,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Готовы к добавлению
                             <span class="badge text-bg-light border">{{ groups.ready | length }}</span></th>
                     </tr>
-                    {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
                 {% if groups.review %}
@@ -361,7 +390,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Требуют решения
                             <span class="badge text-bg-light border">{{ groups.review | length }}</span></th>
                     </tr>
-                    {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
                 {% if groups.error %}
@@ -370,7 +399,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Ошибочные
                             <span class="badge text-bg-light border">{{ groups.error | length }}</span></th>
                     </tr>
-                    {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
                 {% if groups.resolved %}
@@ -379,7 +408,7 @@
                         <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Решено
                             <span class="badge text-bg-light border">{{ groups.resolved | length }}</span></th>
                     </tr>
-                    {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                    {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
                 </tbody>
                 {% endif %}
             </table>

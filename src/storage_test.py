@@ -2740,3 +2740,61 @@ def test_search_student_suggestions_exclude_inactive(adapter):
     inactive_id = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
     adapter.set_student_active(inactive_id, False)
     assert adapter.search_student_suggestions('Иванов') == []
+
+
+# --- «Найти студента»: подстрочный поиск карточек (предпросмотр импорта
+# участников события). ---
+
+
+def test_search_student_candidates_substring_priority_and_limit(adapter):
+    """Подстрока query (casefold) по full_name ИЛИ любому псевдониму; одна
+    запись на карточку (ФИО-совпадение приоритетнее псевдонима); порядок —
+    ФИО-совпадения, затем псевдонимные, внутри по (full_name, id); лимит;
+    пустой/пробельный запрос → []. Формат ответа — как у
+    find_student_candidates."""
+    ivanov = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    nikolaev = adapter.create_student('Николаев Николай Николаевич', 'Ж', 'ИСИ', 'ПГС-101', '1')
+    sidorov = adapter.create_student('Сидоров Сидор Сидорович', 'М', 'ИМИ', 'СБ-202', '3')
+    kolyadin = adapter.create_student('Колядин Коля Колядыч', 'М', '', '', '')
+    for student_id in (nikolaev, sidorov, kolyadin):
+        adapter.add_student_alias(student_id, 'Коля')
+
+    # Подстрока ФИО; метаданные — как у кандидатов find_student_candidates.
+    assert adapter.search_student_candidates('ванов ив') == [
+        {
+            'student_id': ivanov,
+            'full_name': 'Иванов Иван Иванович',
+            'sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group_name': 'ЭБ-241',
+            'course': '2',
+            'match_type': 'full_name',
+            'alias_name': None,
+        }
+    ]
+
+    # «Колядин» совпадает и по ФИО, и по псевдониму — ОДНА запись с
+    # match_type='full_name'; далее псевдонимные по (full_name, id).
+    matches = adapter.search_student_candidates('коля')
+    assert [(item['student_id'], item['match_type'], item['alias_name']) for item in matches] == [
+        (kolyadin, 'full_name', None),
+        (nikolaev, 'alias', 'Коля'),
+        (sidorov, 'alias', 'Коля'),
+    ]
+
+    # Лимит (дефолт 8) и явный лимит; пустой/пробельный запрос — не поиск.
+    for index in range(10):
+        adapter.create_student(f'Сидоров Сидор {index:02d}', 'М', '', '', '')
+    assert len(adapter.search_student_candidates('Сидоров')) == 8
+    assert len(adapter.search_student_candidates('Сидоров', limit=3)) == 3
+    assert adapter.search_student_candidates('') == []
+    assert adapter.search_student_candidates('   ') == []
+
+
+def test_search_student_candidates_exclude_inactive(adapter):
+    student_id = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    adapter.add_student_alias(student_id, 'Ваня')
+    adapter.set_student_active(student_id, False)
+    # Неактивная карточка не находится ни по ФИО, ни по псевдониму.
+    assert adapter.search_student_candidates('иван') == []
+    assert adapter.search_student_candidates('ваня') == []
