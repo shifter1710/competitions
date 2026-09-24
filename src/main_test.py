@@ -1368,6 +1368,120 @@ def test_index_athlete_filter_applies_to_own_records(athlete_index_client: Sanic
     assert get_index_counter(response.text) == (1, 1)
 
 
+# --- Пустое состояние атлета: первая запись создаётся прямо с главной. ---
+
+
+@pytest.fixture
+def blank_index_client(client: SanicTestClient, tmp_path) -> SanicTestClient:
+    """Реестр без единой записи (admin/editor/viewer сеются стартом приложения)."""
+    storage = SQLiteAdapter(str(tmp_path / 'index-blank.sqlite3'))
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+@pytest.fixture
+def athlete_empty_index_client(blank_index_client: SanicTestClient) -> SanicTestClient:
+    """Атлет sportik без записей: раньше главная не рендерила таблицу вовсе."""
+    app.ctx.storage.create_user('sportik', hash_password('sportik-pass-123'), 'athlete')
+    return blank_index_client
+
+
+def test_index_athlete_empty_renders_table_skeleton_and_cta(athlete_empty_index_client: SanicTestClient):
+    _, response = athlete_empty_index_client.get('/', headers=athlete_headers())
+
+    assert response.status == 200
+    # Каркас таблицы рендерится: шапка с колонками на месте, tbody пуст.
+    assert '<table class="table table-striped table-bordered interactive-table"' in response.text
+    assert '<thead class="table-dark">' in response.text
+    assert re.search(r'<tbody>\s*</tbody>', response.text)
+    # Пустое состояние атлета и CTA на первую запись (та же инлайн-строка).
+    assert 'У вас пока нет участий' in response.text
+    assert (
+        '<button type="button" class="btn btn-success empty-add-row-button">Добавить участие</button>' in response.text
+    )
+    # Тулбар «+ Пустая строка» и подсказка жестов сосуществуют с CTA.
+    assert 'add-empty-row-button' in response.text
+    assert 'table-gestures-hint' in response.text
+    # Прежний маркер пустого реестра и футер «Показано 0 из 0» не рендерятся.
+    assert 'Нет данных' not in response.text
+    assert 'Показано <strong>' not in response.text
+
+
+def test_index_athlete_empty_with_filter_keeps_plain_empty_state(athlete_empty_index_client: SanicTestClient):
+    # Фильтр без совпадений у атлета — прежняя ветка, без каркаса и CTA.
+    _, response = athlete_empty_index_client.get('/?' + urlencode({'name': 'Никого Нет'}), headers=athlete_headers())
+
+    assert response.status == 200
+    assert 'Записей с текущим фильтром не найдено' in response.text
+    assert 'interactive-table' not in response.text
+    assert 'empty-add-row-button' not in response.text
+    assert 'У вас пока нет участий' not in response.text
+
+
+@pytest.mark.parametrize('role', ['admin', 'editor'])
+def test_index_moderator_empty_registry_keeps_plain_empty_state(blank_index_client: SanicTestClient, role: str):
+    _, response = blank_index_client.get('/', headers=get_auth_headers(role=role))
+
+    assert response.status == 200
+    assert 'Нет данных' in response.text
+    assert 'interactive-table' not in response.text
+    assert 'empty-add-row-button' not in response.text
+    assert 'У вас пока нет участий' not in response.text
+
+
+def test_index_viewer_empty_registry_has_no_write_controls(blank_index_client: SanicTestClient):
+    storage = app.ctx.storage
+    # viewer сеётся из AUTH_VIEWER_*; в окружении без переменных — вручную.
+    if storage.get_user('viewer') is None:
+        storage.create_user('viewer', hash_password('viewer-pass-123'), 'viewer')
+    _, response = blank_index_client.get('/', headers=get_auth_headers(role='viewer'))
+
+    assert response.status == 200
+    assert 'Нет данных' in response.text
+    assert 'interactive-table' not in response.text
+    assert 'empty-add-row-button' not in response.text
+    assert 'add-empty-row-button' not in response.text
+    assert 'competition-edit-button' not in response.text
+
+
+def test_index_athlete_records_filter_no_match_keeps_plain_empty_state(
+    athlete_index_client: SanicTestClient,
+):
+    # У атлета есть записи, но фильтр отсекает их все: без каркаса/CTA,
+    # футер честно показывает «Показано 0 из 0».
+    _, response = athlete_index_client.get('/?' + urlencode({'sport': 'Плавание'}), headers=athlete_headers())
+
+    assert response.status == 200
+    assert 'Записей с текущим фильтром не найдено' in response.text
+    assert 'interactive-table' not in response.text
+    assert 'empty-add-row-button' not in response.text
+    assert get_index_counter(response.text) == (0, 0)
+
+
+def test_index_athlete_rejected_record_shows_review_comment(index_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.create_user('sportik', hash_password('sportik-pass-123'), 'athlete')
+    athlete_id = storage.get_user('sportik')['id']
+    storage.save_competitions(
+        [make_index_record('Атлетов Атлет', date=datetime(2025, 8, 1))],
+        review_status='pending',
+        owner_id=athlete_id,
+    )
+    record_id = int(storage.get_competitions_page(owner_id=athlete_id)[0].record_id)
+    storage.set_competition_review(record_id, 'rejected', 'Уточните дату соревнования')
+
+    _, response = index_client.get('/', headers=athlete_headers())
+
+    assert response.status == 200
+    # Комментарий модератора — в подсказке бейджа «отклонена» (регресс).
+    assert 'Уточните дату соревнования' in response.text
+    assert 'отклонена' in response.text
+
+
 def test_export_report_slice_xlsx_rows(reports_client: SanicTestClient):
     _, response = reports_client.get('/export/report?group_by=group', headers=get_auth_headers())
 
@@ -11771,8 +11885,15 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         custom_fields=[],
     )
     competition.student_ref_id = 42
+    # Wave 1 P1: служебные поля participation-identity тоже не отдаются.
+    competition.discipline = 'Бег 100 м'
+    competition.result = '11.2'
+    competition.calendar_event_id = 7
     row = competition_to_export_row(competition, [])
     assert 'student_ref_id' not in row
+    assert 'discipline' not in row
+    assert 'result' not in row
+    assert 'calendar_event_id' not in row
     assert set(row) == {
         'Код студента',
         'ФИО',
@@ -11791,7 +11912,8 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
 def test_import_queue_payload_round_trip_with_ref_field(client: SanicTestClient):
     # Конфликт импорта записей: model_dump → payload → model_validate.
     # Новое None-поле не ломает round-trip (существующие записи в очереди
-    # без ключа тоже валидируются — поле имеет дефолт).
+    # без ключа тоже валидируются — поле имеет дефолт). Wave 1 P1: то же
+    # для discipline/result/calendar_event_id.
     competition = build_competition(
         {
             'ФИО': 'Тестов Тест Тестович',
@@ -11809,6 +11931,21 @@ def test_import_queue_payload_round_trip_with_ref_field(client: SanicTestClient)
     )
     payload = competition.model_dump(mode='json', by_alias=False)
     assert payload['student_ref_id'] is None
-    assert Competition.model_validate(payload).student_ref_id is None
-    legacy_payload = {key: value for key, value in payload.items() if key != 'student_ref_id'}
-    assert Competition.model_validate(legacy_payload).student_ref_id is None
+    assert payload['discipline'] is None
+    assert payload['result'] is None
+    assert payload['calendar_event_id'] is None
+    validated = Competition.model_validate(payload)
+    assert validated.student_ref_id is None
+    assert validated.discipline is None
+    assert validated.result is None
+    assert validated.calendar_event_id is None
+    legacy_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {'student_ref_id', 'discipline', 'result', 'calendar_event_id'}
+    }
+    legacy_validated = Competition.model_validate(legacy_payload)
+    assert legacy_validated.student_ref_id is None
+    assert legacy_validated.discipline is None
+    assert legacy_validated.result is None
+    assert legacy_validated.calendar_event_id is None

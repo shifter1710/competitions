@@ -69,9 +69,12 @@ erDiagram
 ## Таблицы
 
 Общее: первичный ключ — `INTEGER PRIMARY KEY AUTOINCREMENT` (кроме
-`field_settings`, где ключ — текстовый). Явные индексы в схеме — только два
-частичных уникальных индекса `catalog_values` (см. ниже); остальных
-индексов нет.
+`field_settings` и `app_settings`, где ключ — текстовый). Явные индексы
+в схеме: два частичных уникальных индекса `catalog_values` (см. ниже)
+и два обычных индекса ссылок participation-identity у `competitions` —
+`idx_competitions_calendar_event_id`, `idx_competitions_student_ref_id`
+(Event Model, Wave 1 P0; не UNIQUE — уникальность связи управляется
+приложением); остальных индексов нет.
 
 ### 1. `competitions` — записи участий
 
@@ -99,6 +102,9 @@ erDiagram
 | `owner_id` | INTEGER NULL | логический FK `users.id`; обнуляется при удалении аккаунта |
 | `review_comment` | TEXT NOT NULL DEFAULT `''` | комментарий модератора при отклонении |
 | `student_ref_id` | INTEGER NULL | логический FK `students.id`; существующие строки — NULL. Наполняется вручную через сопоставление (Phase 2) и при явном выборе/создании карточки в новых записях — ручное добавление участника события и импорт участников события (см. «Личность: легаси и новое»); runtime её не читает |
+| `discipline` | TEXT NULL | дисциплина участия (Event Model, Wave 1 P0/P1 — фундамент целевой архитектуры); существующие строки — NULL, runtime поле не читает |
+| `result` | TEXT NULL | результат участия (Event Model, Wave 1 P0/P1); существующие строки — NULL, runtime поле не читает |
+| `calendar_event_id` | INTEGER NULL | логический FK `calendar_events.id` (Event Model, Wave 1 P0/P1). Проставляется стартовым backfill'ем по однозначному пресету (см. «Миграции») и в новых записях, если модель несёт значение; общий `update_competition` её сохраняет — управление ссылкой (link/unlink) планируется в P2. Не UNIQUE: одно событие — много участий |
 
 Кто создаёт строки (везде через модель `Competition`):
 
@@ -457,6 +463,21 @@ sha256(ФИО).
 удалении карточки (`POST /admin/people/<id>/delete`) её псевдонимы
 удаляются вместе с ней той же транзакцией.
 
+### 13. `app_settings` — флаги миграций (Event Model, Wave 1 P0)
+
+Точечное хранилище строковых флагов для переключения режимов работы
+приложения при поэтапной миграции.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `key` | TEXT PRIMARY KEY | имя флага |
+| `value` | TEXT NOT NULL | значение флага |
+
+Сеется при каждом старте `INSERT OR IGNORE` (повторные старты не меняют
+и не дублируют). Единственный ключ сейчас — `identity_mode = 'dual'`:
+подготовка Phase 3 dual-read (одновременное чтение легаси- и новой
+идентичности). **Читателей флага в коде пока нет** — он просто существует.
+
 ## Как устроена личность сегодня
 
 Отдельной сущности «студент»/«атлет» в базе **нет**. Человек в системе —
@@ -657,12 +678,43 @@ Merge (admin, смена фамилии): переписывает `student_id` 
   `+last_seen_at`, `+student_ref_id` (Phase 1; с Phase 2 наполняется вручную через сопоставление);
 - `calendar_events`: `+regulation_filename`, `+regulation_stored_name`
   (2026-09-22, файл положения события; обе NULL = файла нет);
+- Event Model, Wave 1 P0 (2026-09-24):
+  - `competitions`: `+discipline`, `+result`, `+calendar_event_id` —
+    аддитивно, существующие строки NULL;
+  - новые таблицы `app_settings` (раздел 13) c seed `identity_mode='dual'`;
+  - индексы `idx_competitions_calendar_event_id`,
+    `idx_competitions_student_ref_id`;
+  - стартовый backfill `calendar_event_id` (см. ниже);
 - новые таблицы целиком через `CREATE TABLE IF NOT EXISTS`
   (`attachments`, `levels`, `catalog_values`, `users`, `audit_log`,
   `calendar_events`, `field_settings`, `import_queue`, `students`,
-  `student_aliases` — последние две с Phase 1);
+  `student_aliases` — последние две с Phase 1; `app_settings` — Wave 1 P0);
 - populate-шаги: дефолты `field_settings`, наполнение справочников из
   записей — `INSERT OR IGNORE`.
+
+**Backfill `calendar_event_id`** (Wave 1 P0,
+`_backfill_competition_calendar_links`, тот же предикат, что у подсчёта
+участников события — `name + date + COALESCE(date_to, '')`):
+
+- линкуются ТОЛЬКО строки с `calendar_event_id IS NULL`, у которых пресет
+  совпадает ровно с ОДНИМ событием календаря (unique-only, no-guess);
+  совпадений 0 или >1 (`ambiguous`) → строка остаётся NULL;
+- уже связанные строки (`already_linked`) не трогаются — управление
+  ссылкой (link/unlink) планируется в P2;
+- один `UPDATE` коррелированными подзапросами, выполняется при каждом
+  старте до commit той же транзакцией `_create_schema`; естественная
+  идемпотентность: повторные старты линкуют только новые NULL-строки
+  с единственным совпадением;
+- счётчики (`considered`/`matched`/`unmatched`/`ambiguous`/
+  `already_linked`) пишутся одной INFO-строкой в лог только когда есть
+  NULL-строки для рассмотрения (свежая БД и повторные старты молчат).
+
+**Ограничение pre-wipe архива:** xlsx-архив, который приложение делает
+перед очисткой базы (`get_competitions_before`), НЕ переносит
+`calendar_event_id` (как и остальные служебные ссылки) — после
+восстановления из него связи со событиями придётся восстанавливать
+backfill'ем/явными связями. Полные бэкапы SQLite (файл БД целиком,
+`scripts/backup_sqlite.py`) переносят колонку без потерь.
 
 ## Открытые продуктовые вопросы
 

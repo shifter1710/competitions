@@ -2917,3 +2917,286 @@ def test_search_student_candidates_exclude_inactive(adapter):
     # Неактивная карточка не находится ни по ФИО, ни по псевдониму.
     assert adapter.search_student_candidates('иван') == []
     assert adapter.search_student_candidates('ваня') == []
+
+
+# ---- Event Model, Wave 1 P0/P1 (целевая архитектура) ----
+#
+# Фундамент participation-identity (calendar_event_id, student_ref_id,
+# discipline): колонки существуют и проводятся через storage, runtime их
+# не читает. Синтетические данные.
+
+
+def make_wave1_legacy_db(tmp_path):
+    """Легаси-база Wave 1: competitions без discipline/result/
+    calendar_event_id (полная схема до волны), calendar_events без
+    regulation-колонок; без строк — данные вставляет тест."""
+    db_path = tmp_path / 'legacy-wave1.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE competitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            student_name TEXT NOT NULL,
+            student_sex TEXT NOT NULL,
+            institute TEXT NOT NULL,
+            "group" TEXT NOT NULL,
+            course INTEGER NOT NULL,
+            sport TEXT NOT NULL,
+            date TEXT NOT NULL,
+            date_to TEXT,
+            level TEXT NOT NULL,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            extra_data TEXT NOT NULL DEFAULT '{}',
+            review_status TEXT NOT NULL DEFAULT 'approved',
+            owner_id INTEGER,
+            review_comment TEXT NOT NULL DEFAULT '',
+            student_ref_id INTEGER
+        )
+        '''
+    )
+    connection.execute(
+        '''
+        CREATE TABLE calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            date_to TEXT,
+            level TEXT NOT NULL DEFAULT '',
+            sport TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        '''
+    )
+    connection.commit()
+    connection.close()
+    return db_path
+
+
+LEGACY_ROW_COLUMNS = (
+    'student_id, student_name, student_sex, institute, "group", course, '
+    'sport, date, date_to, level, name, position, created_at, extra_data, '
+    'review_status, owner_id, review_comment, student_ref_id'
+)
+
+
+def insert_wave1_legacy_competition(db_path):
+    """Одна легаси-запись («Легаси Лев», «Кубок», 10.01.2026) — данные,
+    которые миграция обязана сохранить."""
+    row = (
+        'id-1',
+        'Легаси Лев',
+        'М',
+        'ИСИ',
+        'ПГС-101',
+        2,
+        'Бег',
+        '2026-01-10T00:00:00',
+        None,
+        'внутривузовские',
+        'Кубок',
+        1,
+        '2026-01-11T00:00:00',
+        '{}',
+        'approved',
+        None,
+        '',
+        None,
+    )
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        f'INSERT INTO competitions ({LEGACY_ROW_COLUMNS}) ' f'VALUES ({", ".join("?" for _ in row)})',
+        row,
+    )
+    connection.commit()
+    connection.close()
+    return row
+
+
+def test_wave1_fresh_db_schema(adapter):
+    # Свежая БД: три новые колонки, app_settings с identity_mode='dual',
+    # оба индекса ссылок (обычные, не UNIQUE).
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
+    assert {'discipline', 'result', 'calendar_event_id'} <= columns
+
+    settings_row = adapter.connection.execute("SELECT value FROM app_settings WHERE key = 'identity_mode'").fetchone()
+    assert settings_row is not None
+    assert settings_row['value'] == 'dual'
+    total = adapter.connection.execute('SELECT COUNT(*) AS total FROM app_settings').fetchone()
+    assert total['total'] == 1
+
+    indexes = {row['name'] for row in adapter.connection.execute('PRAGMA index_list(competitions)')}
+    assert {
+        'idx_competitions_calendar_event_id',
+        'idx_competitions_student_ref_id',
+    } <= indexes
+
+
+def test_wave1_migration_adds_columns_to_legacy_db(tmp_path):
+    db_path = make_wave1_legacy_db(tmp_path)
+    insert_wave1_legacy_competition(db_path)
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
+    assert {'discipline', 'result', 'calendar_event_id'} <= columns
+    tables = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert 'app_settings' in tables
+
+
+def test_wave1_migration_preserves_legacy_rows(tmp_path):
+    db_path = make_wave1_legacy_db(tmp_path)
+    row = insert_wave1_legacy_competition(db_path)
+
+    adapter = SQLiteAdapter(str(db_path))
+    stored = adapter.connection.execute(f'SELECT {LEGACY_ROW_COLUMNS} FROM competitions WHERE id = 1').fetchone()
+    assert tuple(stored) == row
+
+
+def test_wave1_legacy_rows_new_fields_null(tmp_path):
+    db_path = make_wave1_legacy_db(tmp_path)
+    insert_wave1_legacy_competition(db_path)
+
+    adapter = SQLiteAdapter(str(db_path))
+    raw = adapter.connection.execute(
+        'SELECT discipline, result, calendar_event_id FROM competitions WHERE id = 1'
+    ).fetchone()
+    assert raw['discipline'] is None
+    assert raw['result'] is None
+    assert raw['calendar_event_id'] is None
+
+    record = adapter.get_competitions()[0]
+    assert record.student_name == 'Легаси Лев'
+    assert record.discipline is None
+    assert record.result is None
+    assert record.calendar_event_id is None
+
+
+def test_wave1_reinit_idempotent(tmp_path):
+    db_path = str(tmp_path / 'wave1-reinit.sqlite3')
+    adapter = SQLiteAdapter(db_path)
+    event_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    record = make_competition('Легаси Лев', datetime(2026, 1, 10))
+    record.discipline = 'Бег 100 м'
+    record.result = '11.2'
+    record.calendar_event_id = event_id
+    adapter.save_competitions([record])
+
+    adapter = SQLiteAdapter(db_path)
+    stored = adapter.get_competitions()[0]
+    assert stored.discipline == 'Бег 100 м'
+    assert stored.result == '11.2'
+    assert stored.calendar_event_id == event_id
+
+    total = adapter.connection.execute('SELECT COUNT(*) AS total FROM app_settings').fetchone()
+    assert total['total'] == 1
+    mode = adapter.connection.execute("SELECT value FROM app_settings WHERE key = 'identity_mode'").fetchone()
+    assert mode['value'] == 'dual'
+
+
+def test_wave1_backfill_links_unique_preset(adapter):
+    event_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+
+    counters = adapter._backfill_competition_calendar_links()
+    assert counters['considered'] == 1
+    assert counters['matched'] == 1
+    assert counters['unmatched'] == 0
+    assert counters['ambiguous'] == 0
+    assert counters['already_linked'] == 0
+    assert adapter.get_competitions()[0].calendar_event_id == event_id
+
+
+def test_wave1_backfill_without_match_keeps_null(adapter):
+    adapter.create_calendar_event(
+        name='Другой кубок', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+
+    counters = adapter._backfill_competition_calendar_links()
+    assert counters['matched'] == 0
+    assert counters['unmatched'] == 1
+    assert counters['ambiguous'] == 0
+    assert adapter.get_competitions()[0].calendar_event_id is None
+
+
+def test_wave1_backfill_ambiguous_preset_skipped(adapter):
+    for _ in range(2):
+        adapter.create_calendar_event(
+            name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+        )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+
+    counters = adapter._backfill_competition_calendar_links()
+    assert counters['matched'] == 0
+    assert counters['ambiguous'] == 1
+    assert counters['unmatched'] == 0
+    assert adapter.get_competitions()[0].calendar_event_id is None
+
+
+def test_wave1_backfill_does_not_touch_linked_rows(tmp_path):
+    db_path = str(tmp_path / 'wave1-linked.sqlite3')
+    adapter = SQLiteAdapter(db_path)
+    adapter.create_calendar_event(name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url='')
+    other_event_id = adapter.create_calendar_event(
+        name='Другое событие', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+    # Заранее выставленная ссылка (raw SQL — как будто сделана link/unlink
+    # будущих фаз), намеренно НЕ совпадающая с пресетом записи.
+    adapter.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = 1', (other_event_id,))
+    adapter.connection.commit()
+
+    adapter = SQLiteAdapter(db_path)
+    assert adapter.get_competitions()[0].calendar_event_id == other_event_id
+
+
+def test_wave1_fields_roundtrip_crud(adapter):
+    event_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    record = make_competition('Раунд Ростислав', datetime(2026, 1, 10))
+    record.discipline = 'Бег 100 м'
+    record.result = '11.2'
+    record.calendar_event_id = event_id
+    adapter.save_competitions([record])
+
+    stored = adapter.get_competitions()[0]
+    assert stored.discipline == 'Бег 100 м'
+    assert stored.result == '11.2'
+    assert stored.calendar_event_id == event_id
+
+    by_id = adapter.get_competition_by_id(int(stored.record_id))
+    assert by_id.discipline == 'Бег 100 м'
+    assert by_id.result == '11.2'
+    assert by_id.calendar_event_id == event_id
+
+    page = adapter.get_competitions_page(limit=10)
+    assert page[0].discipline == 'Бег 100 м'
+    assert page[0].result == '11.2'
+    assert page[0].calendar_event_id == event_id
+
+    stored.discipline = 'Эстафета 4х100'
+    stored.result = '42.1'
+    adapter.update_competition(stored.record_id, stored)
+    updated = adapter.get_competition_by_id(int(stored.record_id))
+    assert updated.discipline == 'Эстафета 4х100'
+    assert updated.result == '42.1'
+    # calendar_event_id общий update не трогает — управляемое поле link/unlink.
+    assert updated.calendar_event_id == event_id
+
+    imported = make_competition('Импорт Игорь', datetime(2026, 2, 1))
+    imported.discipline = 'Прыжки в длину'
+    imported.result = '7.10'
+    imported.calendar_event_id = event_id
+    adapter.import_competitions([imported])
+    imported_stored = [item for item in adapter.get_competitions() if item.student_name == 'Импорт Игорь'][0]
+    assert imported_stored.discipline == 'Прыжки в длину'
+    assert imported_stored.result == '7.10'
+    assert imported_stored.calendar_event_id == event_id

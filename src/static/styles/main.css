@@ -828,6 +828,16 @@ select {
     word-break: break-all;
 }
 
+/* Пустое состояние атлета без записей: текст + CTA «Добавить участие»
+   над каркасом таблицы (цвета наследуются из темы). */
+.empty-add-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 40px 16px 24px;
+}
+
 .empty-content {
     width: fit-content;
     color: var(--text-2);

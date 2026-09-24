@@ -32,3 +32,13 @@ class Competition(Student):
     # остаются NULL. Runtime (авторизация атлета, отчёты, легаси-merge)
     # по-прежнему работает по legacy-ключу sha256(ФИО) — Phase 3 не начата.
     student_ref_id: int | None = Field(default=None)
+    # Event Model, Wave 1 P0/P1 (целевая архитектура): дисциплина и результат
+    # участия + явная ссылка на событие календаря. Колонки существуют и
+    # проводятся через storage (insert/select/update), но runtime их НЕ
+    # читает: пользовательское поведение в этой волне не меняется.
+    # Participation-identity будущих фаз = (calendar_event_id, student_ref_id,
+    # discipline); calendar_event_id управляется link/unlink (P2), общий
+    # update записи его сохраняет.
+    discipline: str | None = Field(default=None)
+    result: str | None = Field(default=None)
+    calendar_event_id: int | None = Field(default=None)
