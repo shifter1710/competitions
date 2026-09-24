@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
 from src.conftest import make_report_unapproved_fixture
 from src.models.competition import Competition
@@ -2298,6 +2299,124 @@ def test_student_update_does_not_touch_competitions(adapter):
     after = adapter.connection.execute('SELECT * FROM competitions WHERE id = 1').fetchone()
     assert tuple(after) == tuple(before)
     assert after['student_ref_id'] is None
+
+
+def test_delete_student_success_with_aliases(adapter):
+    """Hard delete пустой карточки: строка и её псевдонимы исчезают;
+    одноимённый псевдоним ДРУГОЙ карточки не трогается; неактивная
+    карточка без связей тоже удаляется."""
+    first = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+    second = adapter.create_student('Сидор Сидор Сидорович', 'М', '', '', '')
+    adapter.add_student_alias(first, 'Иванов И.И.')
+    adapter.add_student_alias(second, 'Иванов И.И.')
+    inactive = adapter.create_student('Спящий Студент', 'Ж', '', '', '')
+    adapter.set_student_active(inactive, False)
+
+    assert adapter.delete_student(first) == ('ok', {})
+    assert adapter.get_student_by_id(first) is None
+    assert adapter.list_student_aliases(first) == []
+    # Псевдоним другой карточки с тем же именем на месте
+    assert [alias['name'] for alias in adapter.list_student_aliases(second)] == ['Иванов И.И.']
+
+    assert adapter.delete_student(inactive) == ('ok', {})
+    assert [student['id'] for student in adapter.list_students()] == [second]
+
+
+def test_delete_student_not_found(adapter):
+    assert adapter.delete_student(999999) == ('not_found', {})
+    assert adapter.delete_student(0) == ('not_found', {})
+
+
+def test_delete_student_blocked_by_any_link(adapter):
+    """Блок при ЛЮБЫХ связях: записи, аккаунты (включая легаси-строку без
+    роли athlete), слитые карточки — при блоке не меняется ни одна строка."""
+    student_id = adapter.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    adapter.add_student_alias(student_id, 'Иванов И.И.')
+
+    # 1) записи соревнований
+    adapter.save_competitions(
+        [
+            make_competition('Старое ФИО', datetime(2026, 1, 10)),
+            make_competition('Старое ФИО', datetime(2026, 2, 20)),
+        ]
+    )
+    adapter.link_competitions([1, 2], student_id)
+    assert adapter.delete_student(student_id) == (
+        'blocked',
+        {'records': 2, 'athlete_users': 0, 'merged_children': 0},
+    )
+    assert adapter.get_student_by_id(student_id) is not None
+    assert [alias['name'] for alias in adapter.list_student_aliases(student_id)] == ['Иванов И.И.']
+
+    # 2) аккаунт атлета
+    adapter.unlink_competition(1)
+    adapter.unlink_competition(2)
+    anna_id = make_athlete_user(adapter, 'anna')
+    adapter.link_user(anna_id, student_id)
+    assert adapter.delete_student(student_id) == (
+        'blocked',
+        {'records': 0, 'athlete_users': 1, 'merged_children': 0},
+    )
+
+    # 2а) легаси-строка без роли athlete с тем же ref — тоже блокер
+    # (счётчик без фильтра роли: link_user пишет только athlete, но
+    # прямые записи в БД накрываются тем же запретом)
+    adapter.unlink_user(anna_id)
+    adapter.create_user('chief', 'scrypt$x', 'admin')
+    chief_id = adapter.get_user('chief')['id']
+    adapter.connection.execute(
+        'UPDATE users SET student_ref_id = ? WHERE id = ?',
+        (student_id, chief_id),
+    )
+    adapter.connection.commit()
+    assert adapter.delete_student(student_id) == (
+        'blocked',
+        {'records': 0, 'athlete_users': 1, 'merged_children': 0},
+    )
+    adapter.connection.execute('UPDATE users SET student_ref_id = NULL WHERE id = ?', (chief_id,))
+    adapter.connection.commit()
+
+    # 3) карточка, слитая в эту (merged_into_id)
+    child = adapter.create_student('Дубль Дублёв', 'М', '', '', '')
+    adapter.connection.execute(
+        'UPDATE students SET merged_into_id = ? WHERE id = ?',
+        (student_id, child),
+    )
+    adapter.connection.commit()
+    assert adapter.delete_student(student_id) == (
+        'blocked',
+        {'records': 0, 'athlete_users': 0, 'merged_children': 1},
+    )
+    assert adapter.get_student_by_id(child) is not None
+
+    # Снятие блокера открывает удаление; карточка-дубль не тронута
+    adapter.connection.execute('UPDATE students SET merged_into_id = NULL WHERE id = ?', (child,))
+    adapter.connection.commit()
+    assert adapter.delete_student(student_id) == ('ok', {})
+    assert adapter.get_student_by_id(child) is not None
+
+
+def test_delete_student_rolls_back_on_failure_between_deletes(adapter, monkeypatch):
+    """Сбой между DELETE псевдонимов и DELETE карточки откатывает всё:
+    карточка и псевдонимы на месте, соединение остаётся рабочим."""
+    student_id = adapter.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
+    adapter.add_student_alias(student_id, 'Иванов И.И.')
+    adapter.add_student_alias(student_id, 'Иванов И.')
+
+    monkeypatch.setattr(adapter, 'connection', FailingStudentsDeleteConnection(adapter.connection))
+    with pytest.raises(RuntimeError):
+        adapter.delete_student(student_id)
+    monkeypatch.undo()
+
+    student = adapter.get_student_by_id(student_id)
+    assert student is not None and student['full_name'] == 'Иванов Иван'
+    assert [alias['name'] for alias in adapter.list_student_aliases(student_id)] == [
+        'Иванов И.И.',
+        'Иванов И.',
+    ]
+    # Соединение живо: повторная попытка без сбоя проходит
+    assert adapter.delete_student(student_id) == ('ok', {})
+    assert adapter.get_student_by_id(student_id) is None
 
 
 def test_manual_entry_still_works_on_db_with_students(tmp_path):

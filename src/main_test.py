@@ -19,7 +19,9 @@ import pytest
 from sanic_testing.testing import SanicTestClient
 
 from src.auth import hash_password
+from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
+from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
 from src.main import app
 from src.main import build_competition
@@ -4005,7 +4007,9 @@ def test_admin_hub_shows_all_sections_for_admin(client: SanicTestClient):
     _, response = client.get('/admin', headers=get_auth_headers())
     assert response.status == 200
     for path in ADMIN_SECTION_PAGES + ('/admin/audit',):
-        if path == '/admin/maintenance/export':  # хаб ссылается на раздел, не на выгрузку
+        if path in ('/admin/maintenance/export', '/admin/students'):
+            # хаб ссылается на раздел, не на выгрузку; объединение студентов
+            # (IA 2026-09) — внутри раздела «Студенты», а не плитка хаба
             continue
         assert path in response.text
 
@@ -4026,6 +4030,42 @@ def test_admin_hub_access_for_viewer_athlete_and_anonymous(client: SanicTestClie
     assert response.status == 403
 
     _, response = client.get('/admin', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+
+# IA редизайна 2026-09: браузерной навигации (Accept: text/html) вместо
+# голого text() отдаются страница «Доступ запрещён» (403) и редирект на
+# вход (401); программным клиентам (fetch, Accept: */*) — как раньше.
+
+
+def test_admin_forbidden_renders_html_page_for_browser(client: SanicTestClient):
+    headers = {**get_auth_headers(role='editor'), 'accept': 'text/html'}
+    _, response = client.get('/admin/users', headers=headers, allow_redirects=False)
+    assert response.status == 403
+    assert response.headers['content-type'].startswith('text/html')
+    assert 'Доступ запрещён' in response.text
+    assert 'У вашей роли нет доступа к этому разделу.' in response.text
+
+
+def test_admin_forbidden_stays_plain_text_for_fetch_like_client(client: SanicTestClient):
+    _, response = client.get('/admin/users', headers=get_auth_headers(role='editor'), allow_redirects=False)
+    assert response.status == 403
+    assert response.text == 'Forbidden'
+    assert response.headers['content-type'].startswith('text/plain')
+
+
+def test_admin_unauthorized_redirects_browser_to_login(client: SanicTestClient):
+    _, response = client.get('/admin/users', headers={'accept': 'text/html'}, allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+    _, response = client.post(
+        '/admin/users',
+        headers={'accept': 'text/html'},
+        data={'anything': '1'},
+        allow_redirects=False,
+    )
     assert response.status == 302
     assert response.headers['location'] == '/login'
 
@@ -5410,12 +5450,89 @@ def test_upload_similar_row_goes_to_queue(client: SanicTestClient):
     )
     assert response.status == 200
     assert 'Импортировано записей: 0' in response.text
-    assert 'На подтверждение: 1' in response.text
+    assert 'На подтверждение: 1 — передано администратору.' in response.text
+    assert 'import-queue' not in response.text
     assert app.ctx.storage.import_competitions.call_args[0][0] == []
     app.ctx.storage.add_import_queue_entry.assert_called_once()
     payload = app.ctx.storage.add_import_queue_entry.call_args[0][0]
     assert payload['sport'] == 'Лыжи'
     assert app.ctx.storage.add_import_queue_entry.call_args[1]['matched_record_id'] == 7
+
+
+def make_similar_row_file() -> bytes:
+    df = pd.DataFrame(
+        [
+            {
+                'ФИО': 'Похожий Павел',
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Лыжи',
+                'Дата': '15.03.2026',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 2,
+                'Курс': 2,
+            },
+        ]
+    )
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    return file_obj.getvalue()
+
+
+def upload_registry_file(client, role: str):
+    headers = get_auth_headers(role=role)
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                make_similar_row_file(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_upload_similar_row_summary_admin_vs_editor(client: SanicTestClient):
+    # IA-редизайн 2026-09: admin видит адресата разбора очереди, editor —
+    # только факт передачи администратору.
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            record_id='7',
+            student_id='1',
+            student_name='Похожий Павел',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+        )
+    ]
+    try:
+        response = upload_registry_file(client, 'admin')
+        assert response.status == 200
+        assert 'На подтверждение: 1.' in response.text
+        assert 'передано администратору' not in response.text
+
+        response = upload_registry_file(client, 'editor')
+        assert response.status == 200
+        assert 'На подтверждение: 1 — передано администратору.' in response.text
+        assert 'import-queue' not in response.text
+    finally:
+        app.ctx.storage.get_competitions.return_value = []
 
 
 def test_upload_exact_duplicate_still_skipped_as_before(client: SanicTestClient):
@@ -6626,6 +6743,51 @@ def test_calendar_delete_without_participants_writes_audit(client: SanicTestClie
         app.ctx.storage.get_calendar_event.return_value = None
 
 
+def test_calendar_delete_flashes_message(client: SanicTestClient):
+    # IA-редизайн 2026-09: тихие редиректы календаря несут flash-сообщение.
+    app.ctx.storage.get_calendar_event.return_value = {
+        'id': 5,
+        'name': 'Пустой турнир',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/5/delete',
+            headers=headers,
+            data=csrf_for(headers),
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert response.headers['location'].startswith('/calendar?admin_message=')
+        assert 'Соревнование удалено' in unquote_plus(response.headers['location'])
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_create_flashes_message(client: SanicTestClient):
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Осенний кросс СибАДИ',
+            'date': '25.06.2026',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_message=')
+    assert 'Соревнование «Осенний кросс СибАДИ» запланировано' in unquote_plus(response.headers['location'])
+
+
 def test_calendar_filters_pass_sport_to_storage(client: SanicTestClient):
     headers = get_auth_headers('viewer')
     _, response = client.get('/calendar?status=past&sport=Бег', headers=headers)
@@ -6840,7 +7002,7 @@ def test_calendar_regulation_upload_download_replace_delete(calendar_client: San
     pdf_bytes = b'%PDF-1.4 ' + b'0' * 32
     response = upload_regulation(calendar_client, admin, event_id, 'polozhenie.pdf', pdf_bytes)
     assert response.status == 302
-    assert 'Положение обновлено' in unquote_plus(response.headers['location'])
+    assert 'Положение прикреплено' in unquote_plus(response.headers['location'])
     event = storage.get_calendar_event(event_id)
     assert event['regulation_filename'] == 'polozhenie.pdf'
     stored_files = list((tmp_path / 'files' / 'calendar' / str(event_id)).iterdir())
@@ -6868,6 +7030,7 @@ def test_calendar_regulation_upload_download_replace_delete(calendar_client: San
     png_bytes = b'\x89PNG\r\n\x1a\n' + b'1' * 16
     response = upload_regulation(calendar_client, admin, event_id, 'новое.png', png_bytes)
     assert response.status == 302
+    assert 'Положение заменено' in unquote_plus(response.headers['location'])
     event = storage.get_calendar_event(event_id)
     assert event['regulation_filename'] == 'новое.png'
     assert not (tmp_path / 'files' / 'calendar' / str(event_id) / old_stored).exists()
@@ -6889,7 +7052,7 @@ def test_calendar_regulation_upload_download_replace_delete(calendar_client: San
         allow_redirects=False,
     )
     assert response.status == 302
-    assert 'Положение удалено.' in unquote_plus(response.headers['location'])
+    assert 'Положение удалено' in unquote_plus(response.headers['location'])
     event = storage.get_calendar_event(event_id)
     assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
     assert not (tmp_path / 'files' / 'calendar' / str(event_id)).exists()
@@ -7039,7 +7202,8 @@ def test_editor_adds_participant_as_registry_record(client: SanicTestClient):
             allow_redirects=False,
         )
         assert response.status == 302
-        assert response.headers['location'].endswith('/calendar/7')
+        assert response.headers['location'].startswith('/calendar/7?admin_message=')
+        assert 'Соколова Екатерина Дмитриевна' in unquote_plus(response.headers['location'])
         app.ctx.storage.save_competitions.assert_called_once()
         args, kwargs = app.ctx.storage.save_competitions.call_args
         competition = args[0][0]
@@ -7141,7 +7305,8 @@ def test_calendar_event_edit_redirects_back_to_event_page(client: SanicTestClien
             allow_redirects=False,
         )
         assert response.status == 302
-        assert response.headers['location'].endswith('/calendar/7')
+        assert response.headers['location'].startswith('/calendar/7?admin_message=')
+        assert 'Соревнование обновлено' in unquote_plus(response.headers['location'])
 
         _, response = client.post(
             '/calendar/7/edit',
@@ -7155,7 +7320,8 @@ def test_calendar_event_edit_redirects_back_to_event_page(client: SanicTestClien
             allow_redirects=False,
         )
         assert response.status == 302
-        assert response.headers['location'] == '/calendar'
+        assert response.headers['location'].startswith('/calendar?admin_message=')
+        assert 'Соревнование обновлено' in unquote_plus(response.headers['location'])
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
 
@@ -7390,6 +7556,10 @@ def test_admin_person_endpoints_reject_missing_csrf(people_client: SanicTestClie
     assert response.status == 403
     assert 'CSRF' in response.text
 
+    _, response = people_client.post('/admin/people/1/delete', headers=headers, allow_redirects=False)
+    assert response.status == 403
+    assert 'CSRF' in response.text
+
 
 def test_admin_person_unknown_id_redirects(people_client: SanicTestClient):
     _, response = people_client.get('/admin/people/999999', headers=get_auth_headers(), allow_redirects=False)
@@ -7416,6 +7586,265 @@ def test_admin_person_non_numeric_id_returns_400(people_client: SanicTestClient)
     headers = get_auth_headers()
     _, response = people_client.post('/admin/people/abc/active', headers=headers, data=csrf_for(headers))
     assert response.status == 400
+
+    _, response = people_client.post('/admin/people/abc/delete', headers=headers, data=csrf_for(headers))
+    assert response.status == 400
+
+
+# --- Полное удаление карточки студента (hard delete, admin-only). ---
+
+
+def save_person_record(storage, student_name: str) -> int:
+    """Синтетическая запись реестра для связи с карточкой; возвращает id."""
+    storage.save_competitions(
+        [make_report_record(student_name, 'М', 'ИСИ', 'ПГС-101', 1, 'Бег', datetime(2024, 3, 1), 'внутривузовские', 1)]
+    )
+    row = storage.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()
+    return row['id']
+
+
+def test_admin_person_delete_requires_admin_role(people_client: SanicTestClient):
+    create_person(people_client)
+    # sportik должен существовать в реальном storage, иначе cookie не распарсится
+    app.ctx.storage.create_user('sportik', 'hash', 'athlete')
+    for role in ('editor', 'viewer'):
+        headers = get_auth_headers(role)
+        _, response = people_client.post(
+            '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+        )
+        assert response.status == 403
+
+    headers = athlete_headers()
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 403
+
+    _, response = people_client.post('/admin/people/1/delete', allow_redirects=False)
+    assert response.status == 401
+
+    # Ни одна попытка ничего не удалила
+    assert app.ctx.storage.get_student_by_id(1) is not None
+
+
+def test_admin_person_delete_removes_card_aliases_and_hides_everywhere(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    # Псевдоним с тем же именем у ДРУГОЙ карточки — не должен пострадать
+    create_person(people_client, full_name='Сидор Сидор Сидорович')
+    people_client.post(
+        '/admin/people/2/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+
+    # Блок удаления на карточке без связей: форма с confirm и кнопкой
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Удаление карточки' in response.text
+    assert '/admin/people/1/delete' in response.text
+    assert 'Удалить карточку «Иванов Иван Иванович» (#1) безвозвратно?' in response.text
+    assert 'Удаление недоступно' not in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Карточка «Иванов Иван Иванович» (#1) удалена.' in location
+
+    # Карточка и её псевдонимы исчезли из БД; чужой псевдоним на месте
+    assert storage.get_student_by_id(1) is None
+    assert storage.list_student_aliases(1) == []
+    assert [alias['name'] for alias in storage.list_student_aliases(2)] == ['Иванов И.И.']
+
+    # Нет в списке и в поиске страницы
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Иванов Иван Иванович' not in response.text
+    _, response = people_client.get('/admin/people?q=Иванов', headers=get_auth_headers())
+    assert 'По запросу «Иванов» ничего не найдено.' in response.text
+
+    # Нет в кандидатах сопоставления и подсказках (storage-level);
+    # одноимённый псевдоним ДРУГОЙ карточки по-прежнему находится
+    assert storage.find_student_candidates('Иванов Иван Иванович') == []
+    assert [candidate['student_id'] for candidate in storage.find_student_candidates('Иванов И.И.')] == [2]
+    assert [candidate['student_id'] for candidate in storage.search_student_candidates('Иванов')] == [2]
+
+    # Аудит успешного удаления
+    events = storage.get_audit_events(limit=5)
+    deleted = next(event for event in events if event['action'] == 'student_deleted')
+    assert json.loads(deleted['details']) == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+
+
+def test_admin_person_delete_blocked_by_linked_records(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    record_id = save_person_record(storage, 'Старое ФИО')
+    storage.link_competitions([record_id], 1)
+    before = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+
+    # Блок удаления на карточке со связями: вместо формы — счётчик блокера
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Удаление недоступно' in response.text
+    assert 'записей о соревнованиях — <strong>1</strong>' in response.text
+    assert '/admin/people/1/delete' not in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Удалить карточку нельзя' in location
+    assert 'записей — 1' in location
+    assert 'аккаунтов' not in location
+
+    # Записи неизменны: состав и количество, байт-в-байт
+    after = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert tuple(after) == tuple(before)
+    assert storage.linked_records_count(1) == 1
+
+    # Карточка осталась со всеми полями и псевдонимами
+    student = storage.get_student_by_id(1)
+    assert student is not None
+    assert student['full_name'] == 'Иванов Иван Иванович'
+    assert student['sex'] == 'М'
+    assert student['institute'] == 'ИСИ'
+    assert student['group_name'] == 'ПГС-101'
+    assert student['course'] == '2'
+    assert student['active'] == 1
+    assert [alias['name'] for alias in storage.list_student_aliases(1)] == ['Иванов И.И.']
+
+
+def test_admin_person_delete_blocked_by_linked_account(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    storage.create_user('anna', 'hash', 'athlete')
+    anna_id = storage.get_user('anna')['id']
+    storage.link_user(anna_id, 1)
+
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Удалить карточку нельзя' in location
+    assert 'аккаунтов атлета — 1' in location
+    assert 'записей' not in location
+
+    # Связь аккаунта не тронута, карточка на месте
+    anna_ref = storage.connection.execute('SELECT student_ref_id FROM users WHERE id = ?', (anna_id,)).fetchone()
+    assert anna_ref['student_ref_id'] == 1
+    assert storage.get_student_by_id(1) is not None
+
+
+def test_admin_person_delete_blocked_writes_no_audit_and_toggle_audit_unchanged(
+    people_client: SanicTestClient,
+):
+    """Заблокированная попытка в аудит не пишется; deactivate/activate
+    аудируются как раньше (student_deactivated/student_activated)."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    record_id = save_person_record(storage, 'Старое ФИО')
+    storage.link_competitions([record_id], 1)
+
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    people_client.post('/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    events = [(event['action'], json.loads(event['details'])) for event in storage.get_audit_events(limit=10)]
+    actions = [action for action, _ in events]
+    assert actions == [
+        'student_activated',
+        'student_deactivated',
+        'student_created',
+    ]
+    by_action = dict(events)
+    assert by_action['student_deactivated'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    assert by_action['student_activated'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    assert 'student_deleted' not in by_action
+
+
+def test_admin_person_delete_inactive_card_without_links(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Карточка «Иванов Иван Иванович» (#1) удалена.' in unquote_plus(response.headers['location'])
+    assert storage.get_student_by_id(1) is None
+
+
+def test_admin_person_delete_get_deleted_id_redirects_not_found(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post('/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers(), allow_redirects=False)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Студент не найден.' in location
+
+
+def test_admin_person_delete_unknown_id_redirects(people_client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/999999/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Студент не найден.' in location
+
+
+def test_admin_person_delete_rolls_back_on_mid_delete_failure(people_client: SanicTestClient, monkeypatch):
+    """Сбой между DELETE псевдонимов и DELETE карточки: полный откат,
+    понятная ошибка сервера, ни карточки, ни псевдонима не потеряны."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+
+    monkeypatch.setattr(storage, 'connection', FailingStudentsDeleteConnection(storage.connection))
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 500
+    monkeypatch.undo()
+
+    student = storage.get_student_by_id(1)
+    assert student is not None and student['full_name'] == 'Иванов Иван Иванович'
+    assert [alias['name'] for alias in storage.list_student_aliases(1)] == ['Иванов И.И.']
+    # Аудита удаления нет — его и не было
+    assert all(event['action'] != 'student_deleted' for event in storage.get_audit_events(limit=10))
 
     _, response = people_client.post('/admin/people/1/alias/abc/delete', headers=headers, data=csrf_for(headers))
     assert response.status == 400
@@ -8090,6 +8519,9 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     assert 'Старое ФИО' in response.text
     assert 'Отвязать' in response.text
     assert 'Перепривязать' in response.text
+    # Перепривязка аккаунта атлета (IA 2026-09): details-паттерн как у записей
+    assert 'action="/admin/people/reconcile/users/relink"' in response.text
+    assert 'Перепривязать аккаунт sportik на выбранного студента?' in response.text
     # Предупреждение о двух аккаунтах
     assert 'привязано 2 аккаунта атлета' in response.text
     assert 'sportik' in response.text
@@ -8195,15 +8627,17 @@ def test_reconcile_non_numeric_ids_return_400(reconcile_client: SanicTestClient)
 
 def test_reconcile_links_in_admin_hub_and_people(reconcile_client: SanicTestClient):
     storage = app.ctx.storage
+    # IA редизайна 2026-09: сопоставление живёт в разделе «Студенты», хаб
+    # «Админ» на него больше не ссылается (пункт «Студенты» в меню — норма).
     _, response = reconcile_client.get('/admin', headers=get_auth_headers())
     assert response.status == 200
-    assert 'Сопоставление данных' in response.text
-    assert 'href="/admin/people/reconcile"' in response.text
+    assert 'href="/admin/people/reconcile"' not in response.text
 
     # Бейдж непривязанных записей — только когда они есть
     record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
     _, response = reconcile_client.get('/admin/people', headers=get_auth_headers())
     assert 'Сопоставление данных' in response.text
+    assert 'href="/admin/people/reconcile"' in response.text
     assert '<span class="badge text-bg-light border">1</span>' in response.text
 
     student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
@@ -9499,7 +9933,7 @@ def test_calendar_participant_add_writes_student_ref(event_import_client: SanicT
         allow_redirects=False,
     )
     assert response.status == 302
-    assert response.headers['location'] == f'/calendar/{event_id}'
+    assert response.headers['location'].startswith(f'/calendar/{event_id}?admin_message=')
     record = storage.connection.execute(
         'SELECT student_name, student_sex, institute, "group", student_ref_id FROM competitions'
     ).fetchone()

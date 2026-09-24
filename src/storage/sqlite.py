@@ -2512,7 +2512,8 @@ class SQLiteAdapter:
             return cursor.rowcount > 0
 
     def set_student_active(self, student_id: int, active: bool) -> bool:
-        """Включить/выключить карточку (физического удаления нет)."""
+        """Включить/выключить карточку (скрытие из поиска/импорта; полное
+        удаление пустой карточки — delete_student)."""
         with self._lock:
             cursor = self.connection.execute(
                 'UPDATE students SET active = ? WHERE id = ?',
@@ -2520,6 +2521,59 @@ class SQLiteAdapter:
             )
             self.connection.commit()
             return cursor.rowcount > 0
+
+    def delete_student(self, student_id: int) -> tuple[str, dict[str, int]]:
+        """Полное удаление карточки студента (hard delete, только admin).
+
+        Удаляет карточку и её псевдонимы ФИО ОДНОЙ транзакцией — «либо всё,
+        либо ничего». Блокируется при ЛЮБЫХ связях карточки (записи
+        соревнований, аккаунты, слитые в неё карточки): в этом случае не
+        меняется ни одна строка. Записи соревнований вместе с карточкой
+        не удаляются — их отвязывают отдельно.
+
+        Аккаунты считаются по student_ref_id без фильтра роли: link_user /
+        relink_user пишут связь только athlete-аккаунтам, но счётчик без
+        фильтра накрывает и любые легаси-строки с тем же ref.
+
+        Возвращает (код, счётчики блокеров):
+        'ok' — удалено (счётчики пустые);
+        'not_found' — карточки с таким id нет;
+        'blocked' — {'records': N, 'athlete_users': M, 'merged_children': K}.
+        """
+        with self._lock:
+            try:
+                row = self.connection.execute(
+                    'SELECT id FROM students WHERE id = ?',
+                    (int(student_id),),
+                ).fetchone()
+                if row is None:
+                    return 'not_found', {}
+                blockers = {
+                    'records': self.connection.execute(
+                        'SELECT COUNT(*) AS total FROM competitions WHERE student_ref_id = ?',
+                        (int(student_id),),
+                    ).fetchone()['total'],
+                    'athlete_users': self.connection.execute(
+                        'SELECT COUNT(*) AS total FROM users WHERE student_ref_id = ?',
+                        (int(student_id),),
+                    ).fetchone()['total'],
+                    'merged_children': self.connection.execute(
+                        'SELECT COUNT(*) AS total FROM students WHERE merged_into_id = ?',
+                        (int(student_id),),
+                    ).fetchone()['total'],
+                }
+                if any(blockers.values()):
+                    return 'blocked', blockers
+                self.connection.execute(
+                    'DELETE FROM student_aliases WHERE student_id = ?',
+                    (int(student_id),),
+                )
+                self.connection.execute('DELETE FROM students WHERE id = ?', (int(student_id),))
+                self.connection.commit()
+                return 'ok', {}
+            except BaseException:
+                self.connection.rollback()
+                raise
 
     def add_student_alias(self, student_id: int, name: str) -> bool:
         """Добавить псевдоним ФИО; False — пустое имя, нет такого студента

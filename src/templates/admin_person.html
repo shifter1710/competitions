@@ -1,14 +1,15 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Студент: {{ student.full_name }}{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Карточка студента: актуальные данные и псевдонимы ФИО. Правка карточки
     не меняет исторические записи о соревнованиях.
 {% endblock admin_description %}
 
 {% block admin_content %}
-
-<a class="btn btn-outline-secondary mb-3" href="/admin/people">← К списку</a>
 
 {# Актуальные данные. Сохранение меняет ТОЛЬКО карточку: ФИО и данные
    существующих записей, отчётов и выгрузок не переписываются. #}
@@ -211,12 +212,35 @@
                     <tr>
                         <td>{{ user.username }}</td>
                         <td>
-                            <form action="/admin/people/reconcile/users/unlink" method="post"
-                                  onsubmit="return confirm('Отвязать аккаунт {{ user.username }} от студента? Связь карточки с аккаунтом будет снята; кабинет атлета сейчас работает по ФИО и не изменится.')">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                <input type="hidden" name="user_id" value="{{ user.id }}">
-                                <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
-                            </form>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">
+                                <form action="/admin/people/reconcile/users/unlink" method="post"
+                                      onsubmit="return confirm('Отвязать аккаунт {{ user.username }} от студента? Связь карточки с аккаунтом будет снята; кабинет атлета сейчас работает по ФИО и не изменится.')">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <input type="hidden" name="user_id" value="{{ user.id }}">
+                                    <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
+                                </form>
+                                {# Перепривязка аккаунта — details-паттерн как у записей
+                                   выше; эндпоинт /admin/people/reconcile/users/relink. #}
+                                <details class="d-inline-block">
+                                    <summary class="btn btn-sm btn-outline-secondary">Перепривязать</summary>
+                                    <form action="/admin/people/reconcile/users/relink" class="d-flex flex-wrap gap-2 mt-2"
+                                          method="post"
+                                          onsubmit="return confirm('Перепривязать аккаунт {{ user.username }} на выбранного студента?')">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                        <input type="hidden" name="user_id" value="{{ user.id }}">
+                                        <select aria-label="Студент" class="form-select form-select-sm" name="student_id" required>
+                                            {% for item in active_students %}
+                                            {% if item.id != student.id %}
+                                            <option value="{{ item.id }}">
+                                                {{ item.full_name }} (#{{ item.id }}, {{ item.institute or '—' }}, {{ item.group_name or '—' }})
+                                            </option>
+                                            {% endif %}
+                                            {% endfor %}
+                                        </select>
+                                        <button class="btn btn-sm btn-primary" type="submit">Перепривязать</button>
+                                    </form>
+                                </details>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}
@@ -225,6 +249,60 @@
         </div>
         {% else %}
         <div class="text-muted">Аккаунтов атлетов нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{# Полное удаление ошибочно созданной карточки — только без связей
+   (records/accounts считаются на сервере, форма скрывается при блокерах). #}
+<div class="card shadow-sm mt-4 border-danger">
+    <div class="card-body">
+        <h5 class="card-title">Удаление карточки</h5>
+        <div class="text-muted mb-3">
+            Полное удаление ошибочно созданной карточки. Возможно только для карточки без записей
+            о соревнованиях и без привязанных аккаунтов атлета — данные соревнований не удаляются
+            вместе с карточкой.
+        </div>
+
+        {% if linked_records_count == 0 and not linked_users %}
+        <form action="/admin/people/{{ student.id }}/delete" method="post"
+              onsubmit="return confirm('Удалить карточку «{{ student.full_name }}» (#{{ student.id }}) безвозвратно? Удаление возможно только для карточки без записей о соревнованиях и без привязанных аккаунтов атлета. Восстановить карточку будет нельзя.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <button class="btn btn-danger" type="submit">Удалить карточку</button>
+            <div class="form-text ui-hint">
+                Карточка и её псевдонимы ФИО удалятся навсегда. Деактивация (кнопка в блоке
+                «Данные студента») скрывает карточку из поиска и импорта, сохраняя данные, —
+                используйте её, если карточка используется.
+            </div>
+        </form>
+        {% else %}
+        <div class="mb-1">
+            Удаление недоступно, пока к карточке привязаны:
+        </div>
+        <ul class="mb-2">
+            {% if linked_records_count > 0 %}
+            <li>
+                записей о соревнованиях — <strong>{{ linked_records_count }}</strong>: отвяжите каждую
+                («Отвязать» или «Перепривязать» в блоке «Связанные данные»);
+            </li>
+            {% endif %}
+            {% if linked_users %}
+            <li>
+                аккаунтов атлета — <strong>{{ linked_users | length }}</strong>: отвяжите каждый
+                («Отвязать» в блоке «Аккаунты атлетов»);
+            </li>
+            {% endif %}
+        </ul>
+        {% if student.active %}
+        <div class="text-muted">
+            Если карточка используется — деактивируйте её (кнопка в блоке «Данные студента»):
+            карточка исчезнет из поиска и импорта, а данные сохранятся.
+        </div>
+        {% else %}
+        <div class="text-muted">
+            Карточка уже неактивна и скрыта из поиска и импорта; её данные и связи сохраняются.
+        </div>
+        {% endif %}
         {% endif %}
     </div>
 </div>

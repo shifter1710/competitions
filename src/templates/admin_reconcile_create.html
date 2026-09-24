@@ -1,6 +1,9 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Сопоставление данных — создание студента{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Карточка студента создаётся из данных источника и сразу привязывается к нему.
     Данные источника (снимок в записи, профиль аккаунта) при этом не изменяются.

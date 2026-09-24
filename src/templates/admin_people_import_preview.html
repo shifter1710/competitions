@@ -1,6 +1,9 @@
 {% extends "layout/admin.html" %}
 
-{% block admin_title %}Предпросмотр импорта{% endblock admin_title %}
+{% block admin_title %}Предпросмотр импорта студентов{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Файл: {{ filename }}. Проверьте строки и подтвердите их — карточки
     создаются только после подтверждения.
@@ -152,8 +155,6 @@
 {% endmacro %}
 
 {% block admin_content %}
-
-<a class="btn btn-outline-secondary mb-3" href="/admin/people">← К списку студентов</a>
 
 <div class="text-muted mb-2">
     Всего строк: {{ total }} · новые: {{ new_count }} · требуют решения: {{ review_count }} · ошибочные: {{ error_count }}
