@@ -1,14 +1,15 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Студент: {{ student.full_name }}{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Карточка студента: актуальные данные и псевдонимы ФИО. Правка карточки
     не меняет исторические записи о соревнованиях.
 {% endblock admin_description %}
 
 {% block admin_content %}
-
-<a class="btn btn-outline-secondary mb-3" href="/admin/people">← К списку</a>
 
 {# Актуальные данные. Сохранение меняет ТОЛЬКО карточку: ФИО и данные
    существующих записей, отчётов и выгрузок не переписываются. #}
@@ -211,12 +212,35 @@
                     <tr>
                         <td>{{ user.username }}</td>
                         <td>
-                            <form action="/admin/people/reconcile/users/unlink" method="post"
-                                  onsubmit="return confirm('Отвязать аккаунт {{ user.username }} от студента? Связь карточки с аккаунтом будет снята; кабинет атлета сейчас работает по ФИО и не изменится.')">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                <input type="hidden" name="user_id" value="{{ user.id }}">
-                                <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
-                            </form>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">
+                                <form action="/admin/people/reconcile/users/unlink" method="post"
+                                      onsubmit="return confirm('Отвязать аккаунт {{ user.username }} от студента? Связь карточки с аккаунтом будет снята; кабинет атлета сейчас работает по ФИО и не изменится.')">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <input type="hidden" name="user_id" value="{{ user.id }}">
+                                    <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
+                                </form>
+                                {# Перепривязка аккаунта — details-паттерн как у записей
+                                   выше; эндпоинт /admin/people/reconcile/users/relink. #}
+                                <details class="d-inline-block">
+                                    <summary class="btn btn-sm btn-outline-secondary">Перепривязать</summary>
+                                    <form action="/admin/people/reconcile/users/relink" class="d-flex flex-wrap gap-2 mt-2"
+                                          method="post"
+                                          onsubmit="return confirm('Перепривязать аккаунт {{ user.username }} на выбранного студента?')">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                        <input type="hidden" name="user_id" value="{{ user.id }}">
+                                        <select aria-label="Студент" class="form-select form-select-sm" name="student_id" required>
+                                            {% for item in active_students %}
+                                            {% if item.id != student.id %}
+                                            <option value="{{ item.id }}">
+                                                {{ item.full_name }} (#{{ item.id }}, {{ item.institute or '—' }}, {{ item.group_name or '—' }})
+                                            </option>
+                                            {% endif %}
+                                            {% endfor %}
+                                        </select>
+                                        <button class="btn btn-sm btn-primary" type="submit">Перепривязать</button>
+                                    </form>
+                                </details>
+                            </div>
                         </td>
                     </tr>
                     {% endfor %}

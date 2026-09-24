@@ -1,6 +1,9 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Сопоставление данных{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Привязка существующих записей о соревнованиях и аккаунтов атлетов к карточкам
     студентов. Сами записи при привязке не изменяются.

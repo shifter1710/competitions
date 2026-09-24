@@ -3,14 +3,16 @@
 {% block content %}
 
 {# Заголовок страницы — .page-head прототипа (07–14): h1.page-title +
-   p.page-sub, справа — возврат в хаб. Тексты задают дочерние шаблоны
-   блоками admin_title/admin_description. #}
+   p.page-sub, справа — возврат. По умолчанию — в хаб «Админ»; раздел
+   «Студенты» переопределяет блок admin_back на «← К студентам». #}
 <div class="page-head">
     <div>
         <h1 class="page-title">{% block admin_title %}{% endblock admin_title %}</h1>
         <p class="page-sub">{% block admin_description %}{% endblock admin_description %}</p>
     </div>
+    {% block admin_back %}
     <a class="btn btn-outline-secondary" href="/admin">← В админку</a>
+    {% endblock admin_back %}
 </div>
 
 {% block admin_content %}

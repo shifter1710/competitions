@@ -3,41 +3,42 @@
 {% block content %}
 
 {# Хаб администрирования — заголовок по прототипу 07: .page-head с единым
-   текстом подписи (он адресован и editor: «видит только импорт и таблицу»). #}
+   текстом подписи. IA редизайна 2026-09: карточки студентов, объединение и
+   сопоставление живут в топ-разделе «Студенты» в верхнем меню, а не здесь;
+   editor видит единственную плитку «Импорт реестра» (прямой заход на /admin
+   остаётся рабочим). #}
 <div class="page-head">
     <div>
         <h1 class="page-title">Администрирование</h1>
-        <p class="page-sub">Разделы управления: импорт, справочники, пользователи, журнал и обслуживание базы. Роль editor видит только импорт и таблицу.</p>
+        {% if is_admin %}
+        <p class="page-sub">Импорт реестра, поля и справочники, пользователи, журнал и обслуживание базы.
+            Карточки студентов — в разделе «Студенты» в верхнем меню.</p>
+        {% else %}
+        <p class="page-sub">Импорт реестра записей о соревнованиях.</p>
+        {% endif %}
     </div>
 </div>
 
+{% if can_import %}
+{% if is_admin %}
+<h2 class="admin-hub-group-title">Импорт и структура данных</h2>
+{% endif %}
 <div class="row g-3">
-    {% if can_import %}
     <div class="col-md-4">
         <div class="card shadow-sm h-100">
             <div class="card-body">
-                <h5 class="card-title">Импорт</h5>
-                <p class="card-text text-muted">Загрузка Excel-файла со соревнованиями и пустой шаблон для заполнения.</p>
+                <h5 class="card-title">Импорт реестра</h5>
+                <p class="card-text text-muted">Загрузка Excel-файла со соревнованиями в реестр и пустой шаблон для заполнения.</p>
                 <a class="btn btn-primary" href="/admin/import">Перейти</a>
                 {% if is_admin %}
                 <a class="btn btn-outline-secondary" href="/admin/import-queue">Очередь подтверждения</a>
                 {% endif %}
+                {% if not is_admin %}
+                <div class="form-text ui-hint mt-2">Импорт реестра также открывается со страницы «Реестр» — кнопка «Импорт».</div>
+                {% endif %}
             </div>
         </div>
     </div>
-    {% endif %}
-
-    {% if not is_admin %}
-    <div class="col-md-4">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h5 class="card-title">Таблица</h5>
-                <p class="card-text text-muted">Общий реестр записей о соревнованиях.</p>
-                <a class="btn btn-outline-secondary" href="/">К таблице</a>
-            </div>
-        </div>
-    </div>
-    {% endif %}
 
     {% if is_admin %}
     <div class="col-md-4">
@@ -58,39 +59,19 @@
             </div>
         </div>
     </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if is_admin %}
+<h2 class="admin-hub-group-title">Пользователи и контроль</h2>
+<div class="row g-3">
     <div class="col-md-4">
         <div class="card shadow-sm h-100">
             <div class="card-body">
                 <h5 class="card-title">Пользователи</h5>
                 <p class="card-text text-muted">Пароли, включение/отключение, роли и привязка ФИО-псевдонимов к аккаунтам.</p>
                 <a class="btn btn-primary" href="/admin/users">Перейти</a>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h5 class="card-title">Студенты</h5>
-                <p class="card-text text-muted">Карточки студентов: актуальные институт, группа, курс, пол и псевдонимы ФИО. Правка карточки исторические записи не меняет.</p>
-                <a class="btn btn-primary" href="/admin/people">Перейти</a>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h5 class="card-title">Объединение студентов</h5>
-                <p class="card-text text-muted">Merge-инструмент: перенос записей со старого ФИО на новое с предпросмотром.</p>
-                <a class="btn btn-primary" href="/admin/students">Перейти</a>
-            </div>
-        </div>
-    </div>
-    <div class="col-md-4">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h5 class="card-title">Сопоставление данных</h5>
-                <p class="card-text text-muted">Привязка записей о соревнованиях и аккаунтов атлетов к карточкам студентов.</p>
-                <a class="btn btn-primary" href="/admin/people/reconcile">Перейти</a>
             </div>
         </div>
     </div>
@@ -112,8 +93,10 @@
             </div>
         </div>
     </div>
-    {% endif %}
-    {% if is_admin %}
+</div>
+
+<h2 class="admin-hub-group-title">Справка</h2>
+<div class="row g-3">
     <div class="col-md-4">
         <div class="card shadow-sm h-100">
             <div class="card-body">
@@ -132,7 +115,7 @@
             </div>
         </div>
     </div>
-    {% endif %}
 </div>
+{% endif %}
 
 {% endblock content %}

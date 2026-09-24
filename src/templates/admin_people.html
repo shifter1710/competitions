@@ -1,10 +1,12 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Студенты{% endblock admin_title %}
+{# Корень раздела «Студенты»: возврат — дефолтный «← В админку»; override
+   «← К студентам» — только на вложенных страницах раздела. #}
 {% block admin_description %}
-    Актуальные данные студентов. Правка карточки не меняет исторические записи
-    о соревнованиях; чтобы перенести записи со старого ФИО на новое,
-    используйте раздел «Объединение студентов».
+    Актуальные карточки студентов и инструменты работы с ними: импорт списка
+    из Excel, сопоставление записей и аккаунтов, объединение при смене ФИО.
+    Правка карточки не меняет исторические записи о соревнованиях.
 {% endblock admin_description %}
 
 {% block admin_content %}
@@ -31,6 +33,8 @@
                 </a>
                 {# Импорт списка студентов из Excel с предпросмотром (Phase 2.5). #}
                 <a class="btn btn-outline-secondary align-self-sm-start" href="/admin/people/import">Импорт из Excel</a>
+                {# Merge-инструмент — внутри раздела «Студенты» (IA 2026-09). #}
+                <a class="btn btn-outline-secondary align-self-sm-start" href="/admin/students">Объединение студентов</a>
                 <button class="btn btn-primary align-self-sm-start" data-bs-target="#student-create-modal" data-bs-toggle="modal" type="button">+ Добавить студента</button>
             </div>
         </div>
