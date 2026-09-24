@@ -229,6 +229,60 @@
     </div>
 </div>
 
+{# Полное удаление ошибочно созданной карточки — только без связей
+   (records/accounts считаются на сервере, форма скрывается при блокерах). #}
+<div class="card shadow-sm mt-4 border-danger">
+    <div class="card-body">
+        <h5 class="card-title">Удаление карточки</h5>
+        <div class="text-muted mb-3">
+            Полное удаление ошибочно созданной карточки. Возможно только для карточки без записей
+            о соревнованиях и без привязанных аккаунтов атлета — данные соревнований не удаляются
+            вместе с карточкой.
+        </div>
+
+        {% if linked_records_count == 0 and not linked_users %}
+        <form action="/admin/people/{{ student.id }}/delete" method="post"
+              onsubmit="return confirm('Удалить карточку «{{ student.full_name }}» (#{{ student.id }}) безвозвратно? Удаление возможно только для карточки без записей о соревнованиях и без привязанных аккаунтов атлета. Восстановить карточку будет нельзя.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <button class="btn btn-danger" type="submit">Удалить карточку</button>
+            <div class="form-text ui-hint">
+                Карточка и её псевдонимы ФИО удалятся навсегда. Деактивация (кнопка в блоке
+                «Данные студента») скрывает карточку из поиска и импорта, сохраняя данные, —
+                используйте её, если карточка используется.
+            </div>
+        </form>
+        {% else %}
+        <div class="mb-1">
+            Удаление недоступно, пока к карточке привязаны:
+        </div>
+        <ul class="mb-2">
+            {% if linked_records_count > 0 %}
+            <li>
+                записей о соревнованиях — <strong>{{ linked_records_count }}</strong>: отвяжите каждую
+                («Отвязать» или «Перепривязать» в блоке «Связанные данные»);
+            </li>
+            {% endif %}
+            {% if linked_users %}
+            <li>
+                аккаунтов атлета — <strong>{{ linked_users | length }}</strong>: отвяжите каждый
+                («Отвязать» в блоке «Аккаунты атлетов»);
+            </li>
+            {% endif %}
+        </ul>
+        {% if student.active %}
+        <div class="text-muted">
+            Если карточка используется — деактивируйте её (кнопка в блоке «Данные студента»):
+            карточка исчезнет из поиска и импорта, а данные сохранятся.
+        </div>
+        {% else %}
+        <div class="text-muted">
+            Карточка уже неактивна и скрыта из поиска и импорта; её данные и связи сохраняются.
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+
 {# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
    (script.js): на странице достаточно пустого datalist с этим id. #}
 <datalist id="student-names-list"></datalist>

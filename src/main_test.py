@@ -19,7 +19,9 @@ import pytest
 from sanic_testing.testing import SanicTestClient
 
 from src.auth import hash_password
+from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
+from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
 from src.main import app
 from src.main import build_competition
@@ -7390,6 +7392,10 @@ def test_admin_person_endpoints_reject_missing_csrf(people_client: SanicTestClie
     assert response.status == 403
     assert 'CSRF' in response.text
 
+    _, response = people_client.post('/admin/people/1/delete', headers=headers, allow_redirects=False)
+    assert response.status == 403
+    assert 'CSRF' in response.text
+
 
 def test_admin_person_unknown_id_redirects(people_client: SanicTestClient):
     _, response = people_client.get('/admin/people/999999', headers=get_auth_headers(), allow_redirects=False)
@@ -7416,6 +7422,265 @@ def test_admin_person_non_numeric_id_returns_400(people_client: SanicTestClient)
     headers = get_auth_headers()
     _, response = people_client.post('/admin/people/abc/active', headers=headers, data=csrf_for(headers))
     assert response.status == 400
+
+    _, response = people_client.post('/admin/people/abc/delete', headers=headers, data=csrf_for(headers))
+    assert response.status == 400
+
+
+# --- Полное удаление карточки студента (hard delete, admin-only). ---
+
+
+def save_person_record(storage, student_name: str) -> int:
+    """Синтетическая запись реестра для связи с карточкой; возвращает id."""
+    storage.save_competitions(
+        [make_report_record(student_name, 'М', 'ИСИ', 'ПГС-101', 1, 'Бег', datetime(2024, 3, 1), 'внутривузовские', 1)]
+    )
+    row = storage.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()
+    return row['id']
+
+
+def test_admin_person_delete_requires_admin_role(people_client: SanicTestClient):
+    create_person(people_client)
+    # sportik должен существовать в реальном storage, иначе cookie не распарсится
+    app.ctx.storage.create_user('sportik', 'hash', 'athlete')
+    for role in ('editor', 'viewer'):
+        headers = get_auth_headers(role)
+        _, response = people_client.post(
+            '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+        )
+        assert response.status == 403
+
+    headers = athlete_headers()
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 403
+
+    _, response = people_client.post('/admin/people/1/delete', allow_redirects=False)
+    assert response.status == 401
+
+    # Ни одна попытка ничего не удалила
+    assert app.ctx.storage.get_student_by_id(1) is not None
+
+
+def test_admin_person_delete_removes_card_aliases_and_hides_everywhere(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    # Псевдоним с тем же именем у ДРУГОЙ карточки — не должен пострадать
+    create_person(people_client, full_name='Сидор Сидор Сидорович')
+    people_client.post(
+        '/admin/people/2/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+
+    # Блок удаления на карточке без связей: форма с confirm и кнопкой
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Удаление карточки' in response.text
+    assert '/admin/people/1/delete' in response.text
+    assert 'Удалить карточку «Иванов Иван Иванович» (#1) безвозвратно?' in response.text
+    assert 'Удаление недоступно' not in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Карточка «Иванов Иван Иванович» (#1) удалена.' in location
+
+    # Карточка и её псевдонимы исчезли из БД; чужой псевдоним на месте
+    assert storage.get_student_by_id(1) is None
+    assert storage.list_student_aliases(1) == []
+    assert [alias['name'] for alias in storage.list_student_aliases(2)] == ['Иванов И.И.']
+
+    # Нет в списке и в поиске страницы
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Иванов Иван Иванович' not in response.text
+    _, response = people_client.get('/admin/people?q=Иванов', headers=get_auth_headers())
+    assert 'По запросу «Иванов» ничего не найдено.' in response.text
+
+    # Нет в кандидатах сопоставления и подсказках (storage-level);
+    # одноимённый псевдоним ДРУГОЙ карточки по-прежнему находится
+    assert storage.find_student_candidates('Иванов Иван Иванович') == []
+    assert [candidate['student_id'] for candidate in storage.find_student_candidates('Иванов И.И.')] == [2]
+    assert [candidate['student_id'] for candidate in storage.search_student_candidates('Иванов')] == [2]
+
+    # Аудит успешного удаления
+    events = storage.get_audit_events(limit=5)
+    deleted = next(event for event in events if event['action'] == 'student_deleted')
+    assert json.loads(deleted['details']) == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+
+
+def test_admin_person_delete_blocked_by_linked_records(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    record_id = save_person_record(storage, 'Старое ФИО')
+    storage.link_competitions([record_id], 1)
+    before = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+
+    # Блок удаления на карточке со связями: вместо формы — счётчик блокера
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert 'Удаление недоступно' in response.text
+    assert 'записей о соревнованиях — <strong>1</strong>' in response.text
+    assert '/admin/people/1/delete' not in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Удалить карточку нельзя' in location
+    assert 'записей — 1' in location
+    assert 'аккаунтов' not in location
+
+    # Записи неизменны: состав и количество, байт-в-байт
+    after = storage.connection.execute('SELECT * FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert tuple(after) == tuple(before)
+    assert storage.linked_records_count(1) == 1
+
+    # Карточка осталась со всеми полями и псевдонимами
+    student = storage.get_student_by_id(1)
+    assert student is not None
+    assert student['full_name'] == 'Иванов Иван Иванович'
+    assert student['sex'] == 'М'
+    assert student['institute'] == 'ИСИ'
+    assert student['group_name'] == 'ПГС-101'
+    assert student['course'] == '2'
+    assert student['active'] == 1
+    assert [alias['name'] for alias in storage.list_student_aliases(1)] == ['Иванов И.И.']
+
+
+def test_admin_person_delete_blocked_by_linked_account(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    storage.create_user('anna', 'hash', 'athlete')
+    anna_id = storage.get_user('anna')['id']
+    storage.link_user(anna_id, 1)
+
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Удалить карточку нельзя' in location
+    assert 'аккаунтов атлета — 1' in location
+    assert 'записей' not in location
+
+    # Связь аккаунта не тронута, карточка на месте
+    anna_ref = storage.connection.execute('SELECT student_ref_id FROM users WHERE id = ?', (anna_id,)).fetchone()
+    assert anna_ref['student_ref_id'] == 1
+    assert storage.get_student_by_id(1) is not None
+
+
+def test_admin_person_delete_blocked_writes_no_audit_and_toggle_audit_unchanged(
+    people_client: SanicTestClient,
+):
+    """Заблокированная попытка в аудит не пишется; deactivate/activate
+    аудируются как раньше (student_deactivated/student_activated)."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    record_id = save_person_record(storage, 'Старое ФИО')
+    storage.link_competitions([record_id], 1)
+
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    people_client.post('/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False)
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    events = [(event['action'], json.loads(event['details'])) for event in storage.get_audit_events(limit=10)]
+    actions = [action for action, _ in events]
+    assert actions == [
+        'student_activated',
+        'student_deactivated',
+        'student_created',
+    ]
+    by_action = dict(events)
+    assert by_action['student_deactivated'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    assert by_action['student_activated'] == {'student_id': 1, 'full_name': 'Иванов Иван Иванович'}
+    assert 'student_deleted' not in by_action
+
+
+def test_admin_person_delete_inactive_card_without_links(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post('/admin/people/1/active', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Карточка «Иванов Иван Иванович» (#1) удалена.' in unquote_plus(response.headers['location'])
+    assert storage.get_student_by_id(1) is None
+
+
+def test_admin_person_delete_get_deleted_id_redirects_not_found(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post('/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False)
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers(), allow_redirects=False)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Студент не найден.' in location
+
+
+def test_admin_person_delete_unknown_id_redirects(people_client: SanicTestClient):
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/999999/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Студент не найден.' in location
+
+
+def test_admin_person_delete_rolls_back_on_mid_delete_failure(people_client: SanicTestClient, monkeypatch):
+    """Сбой между DELETE псевдонимов и DELETE карточки: полный откат,
+    понятная ошибка сервера, ни карточки, ни псевдонима не потеряны."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+
+    monkeypatch.setattr(storage, 'connection', FailingStudentsDeleteConnection(storage.connection))
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 500
+    monkeypatch.undo()
+
+    student = storage.get_student_by_id(1)
+    assert student is not None and student['full_name'] == 'Иванов Иван Иванович'
+    assert [alias['name'] for alias in storage.list_student_aliases(1)] == ['Иванов И.И.']
+    # Аудита удаления нет — его и не было
+    assert all(event['action'] != 'student_deleted' for event in storage.get_audit_events(limit=10))
 
     _, response = people_client.post('/admin/people/1/alias/abc/delete', headers=headers, data=csrf_for(headers))
     assert response.status == 400
