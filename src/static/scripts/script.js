@@ -213,10 +213,18 @@ class InlineComboBox {
 // InlineComboBox: таблица в .table-responsive обрезала бы абсолют.
 // Вызовы только у ролей с правом записи: атлету чужие ФИО не раскрываются
 // (эндпоинт отвечает 403, его автоподстановка из профиля уже работает).
+//
+// Варианты двух видов: kind === "student" — активная карточка из раздела
+// Students (вторая строка с мета-данными и бейджем «Student #N»), прочие —
+// легаси-подсказки по истории участий. Опция {students: true} включает
+// карточки (страница участника события: явный выбор пишет student_ref_id);
+// без неё (инлайн-строки главной) карточки фильтруются — POST /competition
+// связь не пишет, и показывать её не нужно.
 class FioResolver {
-    constructor(input, onSelect) {
+    constructor(input, onSelect, options = {}) {
         this.input = input;
         this.onSelect = onSelect;
+        this.includeStudents = options.students === true;
         this.open = false;
         this.highlightIndex = -1;
         this.closeTimer = null;
@@ -248,9 +256,10 @@ class FioResolver {
                 return;
             }
             event.preventDefault(); // фокус остаётся в поле до выбора варианта
-            const athlete = this.athletes.find(
-                (item) => String(item.name) === option.dataset.name
-            );
+            // Идентификация строго по индексу: в списке бывают тёзки
+            // (два Student с одинаковым ФИО), поиск по имени выбирал бы
+            // первого из них.
+            const athlete = this.athletes[Number(option.dataset.index)];
             if (athlete) {
                 this.select(athlete);
             }
@@ -292,7 +301,11 @@ class FioResolver {
             if (controller.signal.aborted) {
                 return;
             }
-            this.athletes = Array.isArray(athletes) ? athletes : [];
+            let visible = Array.isArray(athletes) ? athletes : [];
+            if (!this.includeStudents) {
+                visible = visible.filter((item) => item.kind !== "student");
+            }
+            this.athletes = visible;
             if (this.athletes.length) {
                 this.openDropdown();
             } else {
@@ -330,21 +343,48 @@ class FioResolver {
     renderOptions() {
         this.highlightIndex = -1;
         this.dropdown.replaceChildren(
-            ...this.athletes.map((athlete) => {
+            ...this.athletes.map((athlete, index) => {
                 const item = document.createElement("li");
-                item.className = "combobox-option";
-                item.dataset.name = athlete.name;
-                item.textContent = athlete.name;
-                item.title = [
-                    athlete.sex,
-                    athlete.institute,
-                    athlete.group,
-                    athlete.course ? `курс ${athlete.course}` : ""
-                ].filter(Boolean).join(", ");
+                item.dataset.index = String(index);
                 item.setAttribute("role", "option");
+                if (athlete.kind === "student") {
+                    return this.renderStudentOption(item, athlete);
+                }
+                item.className = "combobox-option";
+                item.textContent = athlete.name;
+                item.title = this.optionMeta(athlete).join(", ");
                 return item;
             })
         );
+    }
+
+    optionMeta(athlete) {
+        const parts = [athlete.institute, athlete.group, athlete.course ? `курс ${athlete.course}` : ""];
+        return [athlete.sex, ...parts].filter(Boolean);
+    }
+
+    // Вариант-карточка: имя + бейдж «Student #N» первой строкой, мета
+    // «институт · группа X · N курс» — второй (только непустые части,
+    // white-space normal — длинные подписи переносятся, а не обрезаются).
+    renderStudentOption(item, athlete) {
+        item.className = "combobox-option combobox-option--student";
+        const nameLine = document.createElement("div");
+        nameLine.className = "combobox-option__name";
+        nameLine.textContent = athlete.name;
+        const badge = document.createElement("span");
+        badge.className = "badge text-bg-light border ms-1";
+        badge.textContent = `Student #${athlete.student_id}`;
+        nameLine.append(badge);
+        const meta = [athlete.institute, athlete.group, athlete.course ? `курс ${athlete.course}` : ""].filter(Boolean);
+        item.title = this.optionMeta(athlete).join(", ");
+        item.append(nameLine);
+        if (meta.length) {
+            const metaLine = document.createElement("div");
+            metaLine.className = "combobox-option__meta";
+            metaLine.textContent = meta.join(" · ");
+            item.append(metaLine);
+        }
+        return item;
     }
 
     visibleOptions() {
@@ -395,7 +435,7 @@ class FioResolver {
             event.stopPropagation();
             if (this.highlightIndex >= 0) {
                 const option = this.visibleOptions()[this.highlightIndex];
-                const athlete = this.athletes.find((item) => String(item.name) === option.dataset.name);
+                const athlete = option ? this.athletes[Number(option.dataset.index)] : null;
                 if (athlete) {
                     this.select(athlete);
                     return;
@@ -2856,25 +2896,86 @@ class ParticipantsPage {
 
     // Резолвер ФИО в строке добавления (та же логика, что у инлайн-строки
     // главной): выбор варианта подставляет известные значения, поля
-    // остаются редактируемыми. Свободный ввод — как на главной.
+    // остаются редактируемыми. Свободный ввод — как на главной. Варианты
+    // включают карточки Students: явный выбор карточки заполняет пустые
+    // пол/институт/группу/курс и пишет student_ref_id в скрытое поле;
+    // правка ФИО после выбора молча сбрасывает связь (имя записи — снимок
+    // ввода, связь имеет смысл только для выбранного написания).
     attachAddFormResolver() {
         const fioInput = document.getElementById("participant-fio");
         if (!fioInput || document.body.dataset.role === "athlete") {
             return;
         }
+        const refInput = document.getElementById("participant-student-ref");
+        const badge = document.getElementById("participant-student-badge");
+        const badgeId = document.getElementById("participant-student-badge-id");
+        const resetLink = document.getElementById("participant-student-reset");
+        let selectedStudent = null;
+        const hintedInputs = [];
+
+        const hideBadge = () => {
+            if (badge) {
+                badge.classList.add("d-none");
+            }
+        };
+        const clearTitleHints = () => {
+            hintedInputs.forEach((input) => input.removeAttribute("title"));
+            hintedInputs.length = 0;
+        };
+        const setStudent = (student) => {
+            selectedStudent = student;
+            if (refInput) {
+                refInput.value = student ? String(student.student_id) : "";
+            }
+            if (badgeId) {
+                badgeId.textContent = student ? String(student.student_id) : "";
+            }
+            clearTitleHints();
+            if (!student) {
+                hideBadge();
+            }
+        };
+
         const fill = (athlete, athleteKey, inputId) => {
             const value = athlete[athleteKey];
             const input = value ? document.getElementById(inputId) : null;
             if (input && !input.value) {
                 input.value = value;
+                if (athlete.kind === "student") {
+                    input.title = `Подставлено из карточки Student #${athlete.student_id}`;
+                    hintedInputs.push(input);
+                }
             }
         };
+
         new FioResolver(fioInput, (athlete) => {
+            // Сначала связь (сброс прежних подсказок-титулов), затем
+            // автозаполнение — оно расставит титулы выбранной карточки.
+            if (athlete.kind === "student") {
+                setStudent(athlete);
+                if (badge) {
+                    badge.classList.remove("d-none");
+                }
+            } else {
+                setStudent(null);
+            }
             fill(athlete, "sex", "participant-sex");
             fill(athlete, "institute", "participant-institute");
             fill(athlete, "group", "participant-group");
             fill(athlete, "course", "participant-course");
+        }, {students: true});
+
+        // Ручная правка ФИО после выбора карточки: связь больше не
+        // соответствует введённому имени — тихо сбрасываем (поля не трогаем).
+        fioInput.addEventListener("input", () => {
+            if (selectedStudent && fioInput.value !== selectedStudent.name) {
+                setStudent(null);
+            }
         });
+        // «сбросить связь»: только связь, автоподставленные поля остаются.
+        if (resetLink) {
+            resetLink.addEventListener("click", () => setStudent(null));
+        }
     }
 
     handleClick(event) {
@@ -2978,7 +3079,7 @@ class ParticipantsPage {
                     input.value = value;
                 }
             });
-        });
+        }, {students: true});
 
         this.keydownHandler = (keyEvent) => {
             // Открытый список резолвера работает в два шага (Enter — выбор,

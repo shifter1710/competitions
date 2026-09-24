@@ -11,6 +11,10 @@
 {% if can_write %}
 <form id="participant-add-form" method="post" action="/calendar/{{ event.id }}/participants">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    {# Явный выбор карточки студента в резолвере ФИО (script.js) пишет сюда id;
+       сброс связи/правка ФИО очищают поле — сервер валидирует его при непустом
+       значении. #}
+    <input type="hidden" name="student_ref_id" value="" id="participant-student-ref">
 </form>
 {% endif %}
 
@@ -163,6 +167,10 @@
         </select>
     </label>
     <span>Участников: <strong>{{ total_count }}</strong> · Без результата: <strong>{{ no_result_count }}</strong></span>
+    {% if can_write %}
+    <a class="btn btn-outline-primary btn-sm ms-auto"
+        href="/calendar/{{ event.id }}/participants/import">Импортировать участников из Excel</a>
+    {% endif %}
 </div>
 
 <datalist id="calendar-levels">
@@ -205,7 +213,17 @@
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-fio" name="student_name" required autocomplete="off"
-                        placeholder="ФИО: поиск по первым буквам" title="Известные атлеты подскажут пол, институт, группу и курс">
+                        placeholder="ФИО: поиск по первым буквам"
+                        title="Известные атлеты и карточки студентов подскажут пол, институт, группу и курс">
+                    {# Бейдж выбранной карточки: показывается при явном выборе Student
+                       в резолвере (script.js), «сбросить связь» чистит только
+                       student_ref_id, не автоподставленные поля. #}
+                    <div class="d-none mt-1" id="participant-student-badge">
+                        <span class="badge text-bg-primary">Выбран Student #<span
+                                id="participant-student-badge-id"></span></span>
+                        <button class="btn btn-link btn-sm p-0 align-baseline" id="participant-student-reset"
+                            type="button" title="Запись не будет связана с карточкой студента">сбросить связь</button>
+                    </div>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"

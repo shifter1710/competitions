@@ -1,0 +1,390 @@
+{% extends "layout/base.html" %}
+
+{# Предпросмотр импорта участников события. DOM скопирован с предпросмотра
+   импорта студентов (admin_people_import_preview.html): таблица-группы,
+   счётчики, тулбар из трёх форм, bootstrap-collapse для правок. Отличия
+   ролей: страницы импорта — модераторы (admin/editor), ссылки на карточки
+   и создание карточек — только admin. #}
+
+{# Строка таблицы предпросмотра. Макросу request/is_admin передаются явно:
+   макросы не видят контекст шаблона. #}
+{% macro candidate_line(candidate, row, token, request, is_admin, event) %}
+<div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
+    {% if is_admin %}
+    <a href="/admin/people/{{ candidate.student_id }}">{{ candidate.full_name }}</a>
+    {% else %}
+    <span>{{ candidate.full_name }}</span>
+    {% endif %}
+    <span class="small text-muted">
+        #{{ candidate.student_id }} · {{ candidate.institute or '—' }} ·
+        {{ candidate.group_name or '—' }} · курс {{ candidate.course or '—' }}
+    </span>
+    {% if candidate.match_type == 'alias' %}
+    <span class="badge text-bg-light border"
+          title="Совпадение по псевдониму «{{ candidate.alias_name }}»">псевдоним</span>
+    {% else %}
+    <span class="badge text-bg-secondary">ФИО</span>
+    {% endif %}
+    <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/select-student"
+          method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <input type="hidden" name="student_id" value="{{ candidate.student_id }}">
+        <button class="btn btn-sm btn-outline-primary" type="submit">Выбрать карточку #{{ candidate.student_id }}</button>
+    </form>
+</div>
+{% endmacro %}
+
+{% macro import_data_row(row, token, category, request, is_admin, event, custom_columns, custom_keys) %}
+<tr>
+    <td class="text-muted">{{ row.row_number }}</td>
+    <td>
+        <strong>{{ row.full_name }}</strong>
+        {% if row.duplicate_rows %}
+        <div class="small text-muted">Одинаковые строки в файле: строки {{ row.duplicate_rows | join(', ') }}</div>
+        {% endif %}
+    </td>
+    <td>{{ row.display.sex or '—' }}</td>
+    <td>
+        {% if row.display.institute %}{{ row.display.institute }}{% else %}—{% endif %}
+        {% if row.hints and row.hints.institute_autofilled %}
+        {% if row.hints.institute_source == 'file' %}
+        <span class="badge text-bg-light border"
+              title="Институт определён по группе из этого файла">определён по файлу</span>
+        {% else %}
+        <span class="badge text-bg-light border"
+              title="Институт определён по группе из справочника">определён по группе</span>
+        {% endif %}
+        {% endif %}
+    </td>
+    <td>{{ row.display.group or '—' }}</td>
+    <td>{{ row.display.course or '—' }}</td>
+    <td>
+        {% if row.display.position %}{{ row.display.position }}{% else %}<span class="text-muted"
+            title="Место можно дописать позже — участник сохранён со статусом «ждёт результата»">—</span>{% endif %}
+    </td>
+    {% for column in custom_columns %}
+    <td>{{ row.custom_display.get(column) or '—' }}</td>
+    {% endfor %}
+    <td>
+        {% if row.error %}
+        <div class="small text-danger">{{ row.error }}</div>
+        {% endif %}
+        {% if row.validation_error %}
+        <div class="small text-danger">{{ row.validation_error }}</div>
+        {% endif %}
+        {% if row.hints %}
+        {% for warning in row.hints.warnings %}
+        <div class="badge text-bg-warning">{{ warning }}</div>
+        {% endfor %}
+        {% endif %}
+        {% if category != 'resolved' and row.autofilled %}
+        <div class="mb-1">
+            <span class="badge text-bg-light border"
+                  title="Пустые значения файла заполнены из карточки студента; карточка при этом не меняется">поля
+                из карточки #{{ row.effective_student.id }}: {{ row.autofilled | join(', ') }}</span>
+        </div>
+        {% endif %}
+        {% if category != 'resolved' and row.existing %}
+        {% for participant in row.existing %}
+        {% if participant.position %}
+        <div class="small text-muted">уже участвует: место {{ participant.position }}</div>
+        {% else %}
+        <div class="small text-muted">уже участвует без результата</div>
+        {% endif %}
+        {% endfor %}
+        {% endif %}
+        {% if category == 'resolved' %}
+        {% if row.status == 'added' %}
+        <span class="badge text-bg-success">добавлен{% if row.added_student_id %} · карточка
+            #{{ row.added_student_id }}{% endif %}</span>
+        {% else %}
+        <span class="badge text-bg-secondary">пропущен</span>
+        {% endif %}
+        {% else %}
+        {% if row.candidates | length > 1 %}
+        <div class="badge text-bg-warning mb-1">несколько карточек с таким ФИО</div>
+        {% endif %}
+        {% if not row.candidates %}
+        <div class="small text-muted">Совпадений с активными карточками нет.</div>
+        {% if not row.error and not row.validation_error %}
+        <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/select-student"
+              class="d-flex flex-wrap gap-1 align-items-center mb-1" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input aria-label="Номер карточки студента" class="form-control form-control-sm" min="1" name="student_id"
+                placeholder="№ карточки" required style="max-width: 110px;" type="number">
+            <button class="btn btn-sm btn-outline-primary" type="submit">Выбрать существующего</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        {% for candidate in row.candidates %}
+        {{ candidate_line(candidate, row, token, request, is_admin, event) }}
+        {% endfor %}
+        {% if row.selected_not_candidate %}
+        <div class="d-flex flex-wrap gap-2 mb-1 align-items-center">
+            <span>Карточка #{{ row.selected_not_candidate.id }} · {{ row.selected_not_candidate.full_name }}</span>
+            <span class="small text-muted">
+                {{ row.selected_not_candidate.institute or '—' }} ·
+                {{ row.selected_not_candidate.group_name or '—' }} ·
+                курс {{ row.selected_not_candidate.course or '—' }}
+            </span>
+            <span class="badge text-bg-primary">выбрана вручную</span>
+        </div>
+        {% endif %}
+        {% endif %}
+    </td>
+    <td class="text-end">
+        {% if category != 'resolved' %}
+        <div class="d-flex flex-wrap gap-2 justify-content-end">
+            {% if category == 'ready' %}
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/add"
+                  method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-sm btn-outline-success" type="submit">Добавить</button>
+            </form>
+            {% elif category == 'review' %}
+            {% if is_admin %}
+            <button aria-expanded="false" aria-controls="import-row-{{ row.row_number }}-create"
+                    class="btn btn-sm btn-outline-success" data-bs-target="#import-row-{{ row.row_number }}-create"
+                    data-bs-toggle="collapse" type="button">Создать нового Student и добавить участника</button>
+            {% else %}
+            <span class="form-text ui-hint">Создать карточку студента может только администратор.</span>
+            {% endif %}
+            {% endif %}
+            <button aria-expanded="false" aria-controls="import-row-{{ row.row_number }}-edit"
+                    class="btn btn-sm btn-outline-secondary" data-bs-target="#import-row-{{ row.row_number }}-edit"
+                    data-bs-toggle="collapse" type="button">Изменить</button>
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/skip"
+                  method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Пропустить</button>
+            </form>
+        </div>
+        {% endif %}
+    </td>
+</tr>
+{% if category != 'resolved' %}
+<tr>
+    <td colspan="{{ 9 + custom_columns | length }}">
+        {# Правка строки — bootstrap-collapse по data-атрибутам (без JS).
+           Поля предзаполнены значениями строки файла (до автозаполнения). #}
+        <div class="collapse" id="import-row-{{ row.row_number }}-edit">
+            <div class="border rounded p-3">
+                <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/edit"
+                      class="row g-3" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <div class="col-md-6">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-full-name">ФИО</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-full-name"
+                               name="full_name" required type="text" value="{{ row.full_name }}">
+                        <div class="form-text ui-hint">После правки ФИО карточки-кандидаты пересчитаются.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-sex">Пол</label>
+                        <select class="form-select" id="import-row-{{ row.row_number }}-sex" name="sex">
+                            <option value="" {% if not row.sex %}selected{% endif %}>не указан</option>
+                            <option value="М" {% if row.sex == 'М' %}selected{% endif %}>М</option>
+                            <option value="Ж" {% if row.sex == 'Ж' %}selected{% endif %}>Ж</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-institute">Институт</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-institute"
+                               name="institute" type="text" value="{{ row.institute }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-group">Группа</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-group"
+                               name="group" type="text" value="{{ row.group }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-course">Курс</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-course"
+                               name="course" placeholder="например, 2" type="text" value="{{ row.course }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-position">Место</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-position"
+                               name="position" placeholder="пусто — ждёт результата" type="text"
+                               value="{{ row.position }}">
+                    </div>
+                    {% for column, field_key in custom_keys.items() %}
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-custom-{{ field_key }}">{{ column }}</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-custom-{{ field_key }}"
+                               name="custom__{{ field_key }}" type="text" value="{{ row.custom.get(field_key) }}">
+                    </div>
+                    {% endfor %}
+                    <div class="col-12">
+                        <button class="btn btn-primary btn-sm" type="submit">Сохранить правку</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        {% if is_admin and category == 'review' %}
+        {# Создание карточки + связанного участника — одна операция, только
+           admin. Форма предзаполнена значениями строки файла. #}
+        <div class="collapse" id="import-row-{{ row.row_number }}-create">
+            <div class="border rounded p-3">
+                <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/create-student"
+                      class="row g-3" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <div class="col-md-6">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-create-full-name">ФИО карточки</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-create-full-name"
+                               name="full_name" required type="text" value="{{ row.full_name }}">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-create-sex">Пол</label>
+                        <select class="form-select" id="import-row-{{ row.row_number }}-create-sex" name="sex">
+                            <option value="" {% if not row.sex %}selected{% endif %}>не указан</option>
+                            <option value="М" {% if row.sex == 'М' %}selected{% endif %}>М</option>
+                            <option value="Ж" {% if row.sex == 'Ж' %}selected{% endif %}>Ж</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-create-institute">Институт</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-create-institute"
+                               name="institute" type="text" value="{{ row.institute }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-create-group">Группа</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-create-group"
+                               name="group" type="text" value="{{ row.group }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-create-course">Курс</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-create-course"
+                               name="course" placeholder="например, 2" type="text" value="{{ row.course }}">
+                    </div>
+                    <div class="col-12">
+                        <button class="btn btn-success btn-sm" type="submit">Создать карточку и добавить участника</button>
+                        <span class="form-text ui-hint">Участие получит student_ref_id новой карточки.</span>
+                    </div>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+    </td>
+</tr>
+{% endif %}
+{% endmacro %}
+
+{% block content %}
+
+<div class="page-head">
+    <div>
+        <a class="backlink" href="/calendar/{{ event.id }}">← К соревнованию</a>
+        <h1 class="page-title mt-2">Импорт участников: предпросмотр</h1>
+        <p class="page-sub">Соревнование: {{ event.name }} · {{ event.date_label }}. Файл: {{ filename }}.</p>
+    </div>
+</div>
+
+<div class="text-muted mb-2">
+    Всего строк: {{ total }} · готовы к добавлению: {{ ready_count }} · требуют решения: {{ review_count }} ·
+    ошибочные: {{ error_count }}
+</div>
+{% if resolved_count %}
+<div class="text-muted mb-2">
+    Решено: добавлено {{ added_count }} · пропущено {{ skipped_count }}
+</div>
+{% endif %}
+
+{% if unknown_columns %}
+<div class="alert alert-warning">
+    Неизвестные колонки файла игнорируются: {{ unknown_columns | join(', ') }}.
+</div>
+{% endif %}
+
+{% if not pending %}
+<div class="alert alert-success">
+    Все строки разобраны — завершите импорт кнопкой «Завершить импорт».
+</div>
+{% endif %}
+
+{# Тулбар — три независимые формы (как у импорта студентов), confirm —
+   только с числами, значения файла в подтверждения не подставляются. #}
+<div class="d-flex flex-wrap gap-2 mb-2">
+    <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/bulk-commit" method="post"
+          onsubmit="return confirm('Добавить {{ ready_count }} готовых участников?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <button class="btn btn-success" type="submit" {% if not ready_count %}disabled{% endif %}>Добавить
+            {{ ready_count }} готовых</button>
+    </form>
+    <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/finish" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <button class="btn btn-primary" type="submit" {% if pending %}disabled{% endif %}>Завершить импорт</button>
+    </form>
+    <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/discard" method="post"
+          onsubmit="return confirm('Неразобранные строки будут отброшены, уже добавленные участники останутся.')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <button class="btn btn-outline-danger" type="submit">Отменить импорт</button>
+    </form>
+</div>
+{% if pending %}
+<div class="form-text ui-hint mb-3">
+    Кнопка «Завершить импорт» станет активной, когда все строки будут разобраны.
+</div>
+{% endif %}
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Стр.</th>
+                        <th>ФИО</th>
+                        <th>Пол</th>
+                        <th>Институт</th>
+                        <th>Группа</th>
+                        <th>Курс</th>
+                        <th>Место</th>
+                        {% for column in custom_columns %}
+                        <th>{{ column }}</th>
+                        {% endfor %}
+                        <th>Замечания и кандидаты</th>
+                        <th class="text-end">Действия</th>
+                    </tr>
+                </thead>
+                {% if groups.ready %}
+                <tbody>
+                    <tr class="table-secondary">
+                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Готовы к добавлению
+                            <span class="badge text-bg-light border">{{ groups.ready | length }}</span></th>
+                    </tr>
+                    {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                </tbody>
+                {% endif %}
+                {% if groups.review %}
+                <tbody>
+                    <tr class="table-secondary">
+                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Требуют решения
+                            <span class="badge text-bg-light border">{{ groups.review | length }}</span></th>
+                    </tr>
+                    {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                </tbody>
+                {% endif %}
+                {% if groups.error %}
+                <tbody>
+                    <tr class="table-secondary">
+                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Ошибочные
+                            <span class="badge text-bg-light border">{{ groups.error | length }}</span></th>
+                    </tr>
+                    {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                </tbody>
+                {% endif %}
+                {% if groups.resolved %}
+                <tbody>
+                    <tr class="table-secondary">
+                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Решено
+                            <span class="badge text-bg-light border">{{ groups.resolved | length }}</span></th>
+                    </tr>
+                    {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys) }}{% endfor %}
+                </tbody>
+                {% endif %}
+            </table>
+        </div>
+    </div>
+</div>
+
+{% endblock content %}

@@ -1,0 +1,51 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+{# Загрузка файла импорта участников события: пресет соревнования берётся из
+   события, в файле — только участники; предпросмотр ничего не пишет в БД. #}
+
+<div class="page-head">
+    <div>
+        <a class="backlink" href="/calendar/{{ event.id }}">← К соревнованию</a>
+        <h1 class="page-title mt-2">Импорт участников</h1>
+        <p class="page-sub">Соревнование: {{ event.name }} · {{ event.date_label }}</p>
+    </div>
+</div>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Как заполнить файл</h3>
+        <ul class="mb-3">
+            <li>Обязательное поле — только ФИО; пол, институт, группу, курс и место можно оставить пустыми.</li>
+            <li>Название, даты, уровень и вид спорта брать из файла не нужно — они уже известны из соревнования.</li>
+            <li>Если ФИО совпадает с карточкой студента, пустые поля подтянутся из неё; явные значения файла
+                имеют приоритет, карточка студента при этом не меняется.</li>
+            <li>Место можно оставить пустым — участник будет «ждать результата», место допишете позже.</li>
+            <li>Лишние колонки в файле игнорируются.</li>
+            <li>Ничего не добавляется, пока вы не подтвердите строки на странице предпросмотра.</li>
+        </ul>
+        <a class="btn btn-outline-primary"
+            href="/calendar/{{ event.id }}/participants/import/template">Скачать пустой шаблон (xlsx)</a>
+        <div class="form-text ui-hint">В шаблоне — только заголовки колонок, без данных.</div>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h3 class="title mb-1">Загрузка файла</h3>
+        {# Обычная multipart-форма (без класса import-form — тот перехватывается
+           скриптом страницы записей для AJAX-загрузки соревнований). #}
+        <form action="/calendar/{{ event.id }}/participants/import" class="mt-3" enctype="multipart/form-data"
+            method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="mb-3">
+                <input accept=".xlsx" aria-label="Файл .xlsx со списком участников"
+                    class="form-control" name="file" required type="file">
+            </div>
+            <button class="btn btn-primary" type="submit">Загрузить и проверить</button>
+        </form>
+    </div>
+</div>
+
+{% endblock content %}

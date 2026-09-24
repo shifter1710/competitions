@@ -2701,3 +2701,42 @@ def test_linked_records_and_users_queries(adapter):
     ]
     assert adapter.linked_records_count(999999) == 0
     assert adapter.linked_athlete_users(999999) == []
+
+
+# --- Подсказки автодополнения из карточек студентов (participant entry). ---
+
+
+def test_search_student_suggestions_substring_casefold_and_order(adapter):
+    """Активные карточки по подстроке ФИО: casefold-подстрока в Python,
+    алфавит + id, лимит; находятся и студенты без истории участий."""
+    first = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    second = adapter.create_student('Иванов Игнат Игоревич', 'Ж', 'ИСИ', 'ПГС-101', '1')
+    adapter.create_student('Петров Пётр Петрович', 'М', '', '', '')
+
+    matches = adapter.search_student_suggestions('иванов')
+    assert [item['student_id'] for item in matches] == sorted([first, second])
+    assert matches[0] == {
+        'student_id': first,
+        'name': 'Иванов Иван Иванович',
+        'sex': 'М',
+        'institute': 'ИСЭиУ',
+        'group': 'ЭБ-241',
+        'course': '2',
+    }
+
+    # Регистр запроса не важен, тёзки различимы по student_id.
+    upper = adapter.search_student_suggestions('ИВАНОВ ИГ')
+    assert [item['student_id'] for item in upper] == [second]
+    # Пустой запрос и пробелы — пустой ответ.
+    assert adapter.search_student_suggestions('') == []
+    assert adapter.search_student_suggestions('   ') == []
+    # Лимит обрезает список.
+    for index in range(10):
+        adapter.create_student(f'Сидоров Сидор {index:02d}', 'М', '', '', '')
+    assert len(adapter.search_student_suggestions('Сидоров', limit=4)) == 4
+
+
+def test_search_student_suggestions_exclude_inactive(adapter):
+    inactive_id = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    adapter.set_student_active(inactive_id, False)
+    assert adapter.search_student_suggestions('Иванов') == []
