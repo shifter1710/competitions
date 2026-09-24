@@ -6850,6 +6850,59 @@ async def admin_person_remove_alias(request: Request, student_id: str, alias_id:
     )
 
 
+@app.post('/admin/people/<student_id>/delete')
+async def admin_person_delete(request: Request, student_id: str):
+    """Полное удаление ОШИБОЧНО созданной карточки (hard delete, admin).
+
+    Возможно только для карточки без связей: storage блокирует удаление
+    при привязанных записях/аккаунтах и слитых карточках, не меняя ни
+    одной строки. Записи соревнований вместе с карточкой не удаляются.
+    """
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    numeric_id, id_error = resolve_student_id(request, student_id)
+    if id_error is not None:
+        return id_error
+
+    storage = get_storage(request.app)
+    # Снимок до удаления: ФИО нужно для сообщения и аудита после того,
+    # как строка исчезла (паттерн admin_person_remove_alias).
+    student = storage.get_student_by_id(numeric_id)
+    if student is None:
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+
+    code, blockers = storage.delete_student(numeric_id)
+    if code == 'not_found':
+        return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+    if code == 'blocked':
+        # Отказ не пишется в аудит (конвенция остальных проверок ролей/связей).
+        facts = []
+        if blockers.get('records'):
+            facts.append(f'записей — {blockers["records"]}')
+        if blockers.get('athlete_users'):
+            facts.append(f'аккаунтов атлета — {blockers["athlete_users"]}')
+        if blockers.get('merged_children'):
+            facts.append(f'объединённых карточек — {blockers["merged_children"]}')
+        return build_redirect_with_message(
+            error=(
+                f'Удалить карточку нельзя: к ней привязано {", ".join(facts)}. '
+                'Отвязайте их на этой странице или деактивируйте карточку.'
+            ),
+            url=f'/admin/people/{numeric_id}',
+        )
+
+    log_audit_event(
+        request,
+        'student_deleted',
+        {'student_id': numeric_id, 'full_name': student['full_name']},
+    )
+    return build_redirect_with_message(
+        message=f'Карточка «{student["full_name"]}» (#{numeric_id}) удалена.',
+        url='/admin/people',
+    )
+
+
 @app.post('/admin/students/merge')
 async def merge_students(request: Request):
     auth_error = require_admin(request)

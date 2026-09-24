@@ -20,6 +20,28 @@ from src.models.competition import Competition
 sys.setrecursionlimit(10000)
 
 
+class FailingStudentsDeleteConnection:
+    """Прокси sqlite3-соединения для теста отката delete_student: все
+    запросы проходят в реальное соединение, но DELETE FROM students
+    падает — сбой ВНУТРИ транзакции, между DELETE псевдонимов и DELETE
+    самой карточки. Проверяет, что rollback оставляет карточку и её
+    псевдонимы на месте."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, sql, parameters=()):
+        if sql.strip().startswith('DELETE FROM students'):
+            raise RuntimeError('Injected failure between alias and student deletes')
+        return self._connection.execute(sql, parameters)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+
 def make_report_record(
     student_name: str,
     student_sex: str,
