@@ -1,14 +1,15 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Импорт студентов{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Загрузка списка студентов из Excel с предпросмотром: карточки создаются
     только после подтверждения строк.
 {% endblock admin_description %}
 
 {% block admin_content %}
-
-<a class="btn btn-outline-secondary mb-3" href="/admin/people">← К списку студентов</a>
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">

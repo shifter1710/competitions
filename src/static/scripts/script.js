@@ -204,6 +204,162 @@ class InlineComboBox {
     }
 }
 
+// Уведомления (notify, IA-редизайн 2026-09): единая замена модальных
+// браузерных диалогов для результатов фоновых действий (сохранение,
+// импорт, удаление, модерация).
+// Стек карточек в правом верхнем углу; текст вставляется через textContent;
+// тип задаёт рамку/полосу/иконку по токенам main.css (--ok/--warn/--err/
+// --info). Автоскрытие: success/info 5 с, warning 8 с, error 10 с, с паузой
+// на hover/focus; Esc закрывает карточку в фокусе; в стеке не больше 4.
+// Опциональна одна кнопка-действие (ссылка actionUrl или обработчик
+// actionHandler). Функция глобальная: её зовут Main.makeRequest и
+// ParticipantsPage.request.
+
+const NOTIFY_TIMEOUT_MS = {success: 5000, info: 5000, warning: 8000, error: 10000};
+const NOTIFY_STACK_LIMIT = 4;
+const NOTIFY_ICONS = {
+    success: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.3"/>'
+        + '<path d="M5.3 8.2l1.8 1.8 3.6-3.9"/></svg>',
+    warning: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.4L14 13H2z"/>'
+        + '<path d="M8 6.4v3"/><circle cx="8" cy="11.3" r="0.1"/></svg>',
+    error: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.3"/>'
+        + '<path d="M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4"/></svg>',
+    info: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.3"/>'
+        + '<path d="M8 7.4v3.4"/><circle cx="8" cy="5.2" r="0.1"/></svg>',
+};
+
+function ensureNotifyStack() {
+    let stack = document.getElementById("notify-stack");
+    if (!stack) {
+        stack = document.createElement("div");
+        stack.id = "notify-stack";
+        stack.className = "notify-stack";
+        stack.setAttribute("aria-live", "polite");
+        document.body.appendChild(stack);
+    }
+    return stack;
+}
+
+function notify({
+    type = "info",
+    text = "",
+    actionLabel = "",
+    actionUrl = "",
+    actionHandler = null,
+    timeoutMs,
+} = {}) {
+    const kind = Object.prototype.hasOwnProperty.call(NOTIFY_TIMEOUT_MS, type) ? type : "info";
+    const stack = ensureNotifyStack();
+    while (stack.children.length >= NOTIFY_STACK_LIMIT) {
+        stack.firstElementChild.remove();
+    }
+
+    const card = document.createElement("div");
+    card.className = `notify-card notify-card--${kind}`;
+    // Спокойные типы не перебивают скринридер (status), тревожные — alert.
+    card.setAttribute("role", kind === "success" || kind === "info" ? "status" : "alert");
+
+    const icon = document.createElement("span");
+    icon.className = "notify-card__icon";
+    icon.innerHTML = NOTIFY_ICONS[kind];
+    icon.setAttribute("aria-hidden", "true");
+
+    const message = document.createElement("span");
+    message.className = "notify-card__text";
+    message.textContent = text;
+    card.append(icon, message);
+
+    let hideTimer = null;
+    let startedAt = 0;
+    let remaining = timeoutMs ?? NOTIFY_TIMEOUT_MS[kind];
+    const dismiss = () => {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+        card.remove();
+    };
+    const scheduleHide = () => {
+        clearTimeout(hideTimer);
+        if (remaining <= 0) {
+            dismiss();
+            return;
+        }
+        startedAt = Date.now();
+        hideTimer = setTimeout(dismiss, remaining);
+    };
+    const pauseHide = () => {
+        if (hideTimer === null) {
+            return;
+        }
+        clearTimeout(hideTimer);
+        remaining -= Date.now() - startedAt;
+        hideTimer = null;
+    };
+
+    if (actionLabel) {
+        if (actionUrl) {
+            const link = document.createElement("a");
+            link.className = "btn btn-sm btn-outline-secondary notify-card__action";
+            link.href = actionUrl;
+            link.textContent = actionLabel;
+            card.append(link);
+        } else {
+            const actionButton = document.createElement("button");
+            actionButton.type = "button";
+            actionButton.className = "btn btn-sm btn-outline-secondary notify-card__action";
+            actionButton.textContent = actionLabel;
+            actionButton.addEventListener("click", () => {
+                if (typeof actionHandler === "function") {
+                    actionHandler();
+                }
+                dismiss();
+            });
+            card.append(actionButton);
+        }
+    }
+
+    const closeButton = document.createElement("button");
+    closeButton.type = "button";
+    closeButton.className = "notify-card__close";
+    closeButton.setAttribute("aria-label", "Закрыть");
+    closeButton.textContent = "✕";
+    closeButton.addEventListener("click", dismiss);
+    card.append(closeButton);
+
+    card.addEventListener("mouseenter", pauseHide);
+    card.addEventListener("focusin", pauseHide);
+    card.addEventListener("mouseleave", scheduleHide);
+    card.addEventListener("focusout", (event) => {
+        if (!card.contains(event.relatedTarget)) {
+            scheduleHide();
+        }
+    });
+    card.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+            event.stopPropagation();
+            dismiss();
+        }
+    });
+
+    stack.append(card);
+    scheduleHide();
+    return dismiss;
+}
+
+window.notify = notify;
+
+// Серверные flash-сообщения (base.html): success скрывается сам через 10 с
+// (danger остаётся до ручного закрытия). Закрытие — нативный btn-close
+// Bootstrap, здесь только автоскрытие.
+function initFlashAutoHide() {
+    document.querySelectorAll("[data-flash-autohide]").forEach((element) => {
+        setTimeout(() => element.remove(), 10000);
+    });
+}
+
 // Резолвер атлета (№23доп, docs/feedback-live.md): тихий поиск по ФИО в
 // инлайн-строке главной. Ввод ≥2 символов — запрос /api/athletes/search
 // (троттлинг + отмена, ошибки сети тихие), выбор варианта подставляет
@@ -801,7 +957,7 @@ class Main {
     generatePassword(length = 16) {
         const alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         if (!window.crypto || !crypto.getRandomValues) {
-            alert("Браузер не поддерживает безопасную генерацию паролей");
+            notify({type: "error", text: "Браузер не поддерживает безопасную генерацию паролей"});
             return "";
         }
         const maxValidByte = 256 - (256 % alphabet.length);
@@ -860,7 +1016,7 @@ class Main {
         if (copied) {
             successCallback();
         } else {
-            alert("Не удалось скопировать пароль — скопируйте вручную");
+            notify({type: "error", text: "Не удалось скопировать пароль — скопируйте вручную"});
         }
     }
 
@@ -1708,12 +1864,12 @@ class Main {
             },
             onSuccess: () => {
                 this.inlineSaving = false;
-                alert("Запись успешно обновлена");
+                notify({type: "success", text: "Запись успешно обновлена"});
                 this.refreshCurrentContent();
             },
             onError: (message) => {
                 this.inlineSaving = false;
-                alert(message || "Ошибка сохранения записи");
+                notify({type: "error", text: message || "Ошибка сохранения записи"});
             }
         });
     }
@@ -1790,7 +1946,7 @@ class Main {
 
     startNewRowEdit() {
         if (!this.tableElement) {
-            alert("Таблица недоступна: нет данных");
+            notify({type: "error", text: "Таблица недоступна: нет данных"});
             return;
         }
         if (this.hasActiveRowEdit()) {
@@ -1876,12 +2032,12 @@ class Main {
             },
             onSuccess: () => {
                 this.newRowSaving = false;
-                alert("Запись успешно добавлена");
+                notify({type: "success", text: "Запись успешно добавлена"});
                 this.refreshCurrentContent();
             },
             onError: (message) => {
                 this.newRowSaving = false;
-                alert(message || "Ошибка добавления записи");
+                notify({type: "error", text: message || "Ошибка добавления записи"});
             }
         });
     }
@@ -1910,10 +2066,10 @@ class Main {
             url: `/competition/${recordId}/attachments`,
             options: {method: "POST", body: formData},
             onSuccess: (body) => {
-                alert(body || "Файл загружен");
+                notify({type: "success", text: body || "Файл загружен"});
                 this.refreshCurrentContent();
             },
-            onError: (message) => alert(message || "Ошибка загрузки файла")
+            onError: (message) => notify({type: "error", text: message || "Ошибка загрузки файла"})
         });
     }
 
@@ -1938,8 +2094,11 @@ class Main {
         this.makeRequest({
             url: `/attachment/${attachmentId}/delete`,
             options: {method: "POST"},
-            onSuccess: () => this.refreshCurrentContent(),
-            onError: (message2) => alert(message2 || "Ошибка удаления вложения")
+            onSuccess: () => {
+                notify({type: "success", text: "Вложение удалено"});
+                this.refreshCurrentContent();
+            },
+            onError: (message2) => notify({type: "error", text: message2 || "Ошибка удаления вложения"})
         });
     }
 
@@ -1952,16 +2111,22 @@ class Main {
                     method: "POST",
                     body: new URLSearchParams({comment}),
                 },
-                onSuccess: () => this.refreshCurrentContent(),
-                onError: (message) => alert(message || "Ошибка отклонения записи")
+                onSuccess: () => {
+                    notify({type: "success", text: "Запись отклонена"});
+                    this.refreshCurrentContent();
+                },
+                onError: (message) => notify({type: "error", text: message || "Ошибка отклонения записи"})
             });
             return;
         }
         this.makeRequest({
             url: `/competition/${recordId}/review/approve`,
             options: {method: "POST"},
-            onSuccess: () => this.refreshCurrentContent(),
-            onError: (message) => alert(message || "Ошибка подтверждения записи")
+            onSuccess: () => {
+                notify({type: "success", text: "Запись подтверждена"});
+                this.refreshCurrentContent();
+            },
+            onError: (message) => notify({type: "error", text: message || "Ошибка подтверждения записи"})
         });
     }
 
@@ -2082,7 +2247,7 @@ class Main {
             this.reportExportForm.querySelectorAll(".report-export-column:checked")
         ).map((input) => input.value);
         if (!selectedColumns.length) {
-            alert("Выберите хотя бы одну колонку");
+            notify({type: "warning", text: "Выберите хотя бы одну колонку"});
             return;
         }
         const filterParams = this.currentReportUrl
@@ -2107,11 +2272,20 @@ class Main {
                 body: formData,
             },
             onSuccess: (body) => {
-                alert(body || "Файл успешно импортирован");
+                // Сводка импорта (main.py): «Импортировано N [. Пропущено
+                // дублей: M] [. На подтверждение: K…]». Админу со спорными
+                // строками — кнопка перехода в очередь подтверждения.
+                const summary = body || "Файл успешно импортирован";
+                const options = {type: "success", text: summary};
+                if (document.body.dataset.role === "admin" && summary.includes("На подтверждение")) {
+                    options.actionLabel = "Разобрать очередь";
+                    options.actionUrl = "/admin/import-queue";
+                }
+                notify(options);
                 this.cleanFileInput();
                 this.refreshCurrentContent();
             },
-            onError: (message) => alert(message || "Ошибка импорта")
+            onError: (message) => notify({type: "error", text: message || "Ошибка импорта"})
         });
     }
 
@@ -2129,10 +2303,10 @@ class Main {
                 method: "POST",
             },
             onSuccess: () => {
-                alert("Запись удалена");
+                notify({type: "success", text: "Запись удалена"});
                 this.refreshCurrentContent();
             },
-            onError: (message2) => alert(message2 || "Ошибка удаления записи")
+            onError: (message2) => notify({type: "error", text: message2 || "Ошибка удаления записи"})
         });
     }
 
@@ -2166,7 +2340,7 @@ class Main {
             })
             .catch(() => {
                 this.setLoading(false);
-                alert("Ошибка применения фильтра. Попробуйте позже");
+                notify({type: "error", text: "Ошибка применения фильтра. Попробуйте позже"});
             });
     }
 
@@ -2216,7 +2390,12 @@ class Main {
                     return;
                 }
                 if (error.message && error.message.includes("CSRF")) {
-                    alert("Сессия обновлена в другой вкладке. Обновите страницу (F5) и повторите действие");
+                    notify({
+                        type: "error",
+                        text: "Сессия обновлена в другой вкладке. Обновите страницу и повторите действие",
+                        actionLabel: "Обновить страницу",
+                        actionHandler: () => window.location.reload(),
+                    });
                     return;
                 }
                 onError(error.message);
@@ -2502,7 +2681,7 @@ class Main {
 
     exportCurrentTable() {
         if (!this.tableElement) {
-            alert("Нет данных для выгрузки");
+            notify({type: "warning", text: "Нет данных для выгрузки"});
             return;
         }
         this.cancelInlineEdit();
@@ -2562,6 +2741,7 @@ class Main {
 window.addEventListener("DOMContentLoaded", () => {
     new Main();
     initCalendarPeriodPickers();
+    initFlashAutoHide();
     // Страница участников соревнования (волна B, прототип 16): резолвер ФИО
     // в строке добавления + инлайн-правка строки (место «дописать позже»).
     if (document.querySelector("[data-participants-page]")) {
@@ -3057,6 +3237,20 @@ class ParticipantsPage {
         courseCell.replaceChildren(courseInput);
         positionCell.replaceChildren(positionInput);
         row.children[1].replaceChildren(fioInput);
+        // Связь с карточкой студента — статичный бейдж под полем ФИО:
+        // сохраняется при правке, редактировать её здесь нельзя (инструмент
+        // смены связи — раздел «Сопоставление данных»).
+        const studentRefId = String(dataset.studentRefId || "").trim();
+        if (studentRefId) {
+            const badge = document.createElement("span");
+            badge.className = "badge text-bg-primary participant-student-link";
+            badge.textContent = `Student #${studentRefId}`;
+            badge.title = "Связь с карточкой студента сохраняется при правке. Изменить её можно в разделе «Сопоставление данных».";
+            const badgeWrap = document.createElement("div");
+            badgeWrap.className = "mt-1";
+            badgeWrap.append(badge);
+            row.children[1].append(badgeWrap);
+        }
 
         actionsCell.innerHTML = "";
         const saveButton = document.createElement("button");
@@ -3123,13 +3317,24 @@ class ParticipantsPage {
             body: formData,
             onSuccess: () => {
                 this.participantSaving = false;
-                window.location.reload();
+                this.navigateToEventWithMessage("Участник обновлён");
             },
             onError: (message) => {
                 this.participantSaving = false;
-                alert(message || "Ошибка сохранения записи");
+                notify({type: "error", text: message || "Ошибка сохранения записи"});
             }
         });
+    }
+
+    // Возврат на страницу события с flash-сообщением (server-side alert в
+    // base.html): id события берём из адреса — разметку таблицы не трогаем.
+    navigateToEventWithMessage(message) {
+        const eventId = (window.location.pathname.match(/^\/calendar\/(\d+)/) || [])[1];
+        if (!eventId) {
+            window.location.reload();
+            return;
+        }
+        window.location.href = `/calendar/${eventId}?admin_message=${encodeURIComponent(message)}`;
     }
 
     cancelEdit() {
@@ -3161,8 +3366,8 @@ class ParticipantsPage {
         }
         this.request(`/competition/${recordId}/delete`, {
             body: new FormData(),
-            onSuccess: () => window.location.reload(),
-            onError: (message2) => alert(message2 || "Ошибка удаления записи"),
+            onSuccess: () => this.navigateToEventWithMessage("Участник удалён"),
+            onError: (message2) => notify({type: "error", text: message2 || "Ошибка удаления записи"}),
         });
     }
 }

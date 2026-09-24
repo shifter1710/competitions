@@ -1,0 +1,34 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+{# Страница «Доступ запрещён» (IA редизайна 2026-09): браузерные переходы
+   на раздел без прав роли вместо голого text('Forbidden'). Все цвета —
+   токены main.css, тёмная тема работает автоматически. #}
+<div class="card shadow-sm mx-auto mt-5 no-access-card">
+    <div class="card-body text-center">
+        <svg class="no-access-card__icon" viewBox="0 0 32 32" width="32" height="32" fill="none"
+            stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true">
+            <rect x="6" y="13.5" width="20" height="14" rx="2.5" />
+            <path d="M11 13.5V9a5 5 0 0 1 10 0v4.5" />
+            <circle cx="16" cy="20.5" r="1.6" />
+            <path d="M16 22v3" />
+        </svg>
+        <h1 class="page-title mt-2">Доступ запрещён</h1>
+        <p class="page-sub mb-1">У вашей роли нет доступа к этому разделу.</p>
+        {% if request.ctx.auth_user %}
+        <p class="no-access-card__meta mb-3">Пользователь: {{ request.ctx.auth_user.username }}
+            ({{ request.ctx.auth_user.role }}). Если доступ нужен — обратитесь к администратору.</p>
+        {% endif %}
+        <div class="d-flex justify-content-center gap-2 flex-wrap">
+            <a class="btn btn-primary" href="/">К реестру</a>
+            <form action="/logout" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-outline-secondary" type="submit">Выйти</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+{% endblock content %}

@@ -1645,3 +1645,218 @@ a.calendar-comp-row__name:hover {
     font-size: var(--fs-xs);
     color: var(--text-3);
 }
+
+/* ----------------------------------------------------------------------------
+   5. Волна IA-редизайна 2026-09: уведомления notify, страница 403,
+      узкие экраны (narrow), группировка хаба «Админ». Только токены
+      прототипа — тёмная тема работает автоматически.
+   ------------------------------------------------------------------------- */
+
+/* Стек уведомлений (script.js notify): фиксирован под шапкой (высота
+   навбара ~56px + отступ), карточки — pointer-events auto. */
+.notify-stack {
+    position: fixed;
+    top: 76px;
+    right: 16px;
+    z-index: 1080;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 380px;
+    pointer-events: none;
+}
+
+.notify-stack > * {
+    pointer-events: auto;
+}
+
+.notify-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-2);
+    font-size: var(--fs-sm);
+    color: var(--text);
+}
+
+.notify-card__icon {
+    flex: none;
+    display: inline-flex;
+    margin-top: 2px;
+}
+
+.notify-card__icon svg {
+    display: block;
+}
+
+.notify-card__text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.notify-card__action {
+    flex: none;
+}
+
+.notify-card__close {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--text-3);
+    font-size: var(--fs-sm);
+    line-height: 1;
+    cursor: pointer;
+}
+
+.notify-card__close:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+}
+
+/* Типы: рамка 1px + левая цветная полоса 3px + иконка currentColor */
+.notify-card--success {
+    border-color: var(--ok-br);
+    border-left-color: var(--ok-fg);
+}
+
+.notify-card--success .notify-card__icon {
+    color: var(--ok-fg);
+}
+
+.notify-card--warning {
+    border-color: var(--warn-br);
+    border-left-color: var(--warn-fg);
+}
+
+.notify-card--warning .notify-card__icon {
+    color: var(--warn-fg);
+}
+
+.notify-card--error {
+    border-color: var(--err-br);
+    border-left-color: var(--err-fg);
+}
+
+.notify-card--error .notify-card__icon {
+    color: var(--err-fg);
+}
+
+.notify-card--info {
+    border-color: var(--info-br);
+    border-left-color: var(--info-fg);
+}
+
+.notify-card--info .notify-card__icon {
+    color: var(--info-fg);
+}
+
+/* Страница «Доступ запрещён» (error403.html): центрированная карточка */
+.no-access-card {
+    max-width: 520px;
+    padding: 8px 12px;
+}
+
+.no-access-card__icon {
+    color: var(--text-3);
+}
+
+.no-access-card__meta {
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+}
+
+/* Подписи-группы хаба «Админ» (admin.html): fs-sm text-muted */
+.admin-hub-group-title {
+    margin: 24px 0 12px;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text-2);
+}
+
+.admin-hub-group-title:first-of-type {
+    margin-top: 0;
+}
+
+/* Подсказка над широкой таблицей на узких экранах (реестр, событие) */
+.table-scroll-hint {
+    display: none;
+    margin-bottom: 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+}
+
+.table-responsive {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Шапка в свёрнутом меню (<992): пункты просторнее, блок пользователя
+   переносится. «Пользователь: » скрывается на <576 в base.html
+   (span.d-none.d-sm-inline). */
+@media (max-width: 991.98px) {
+    /* Специфичность не ниже .navbar.bg-dark .nav-link (padding-bottom) —
+       иначе полоса-актив растягивает пункт в свёрнутом меню. */
+    .navbar .navbar-collapse .nav-link {
+        padding-block: 0.6rem;
+    }
+
+    .navbar-user {
+        flex-wrap: wrap;
+        gap: 8px;
+        padding-block: 0.5rem;
+    }
+}
+
+/* Узкие экраны (narrow): заголовки и кнопки перестраиваются, флеш
+   компактнее; плотность таблиц и inline-правка не меняются. */
+@media (max-width: 767.98px) {
+    .page-head {
+        align-items: flex-start;
+    }
+
+    .buttons {
+        gap: 8px;
+    }
+
+    .table-scroll-hint {
+        display: block;
+    }
+}
+
+@media (max-width: 575.98px) {
+    .page-head .btn {
+        flex-basis: 100%;
+    }
+
+    .alert {
+        font-size: var(--fs-sm);
+    }
+
+    .notify-stack {
+        left: 12px;
+        right: 12px;
+        max-width: none;
+    }
+}
+
+/* Тач-устройства: минимальная высота кнопок под палец; компактные кнопки
+   в таблицах остаются 36px. */
+@media (max-width: 767.98px) and (pointer: coarse) {
+    .btn {
+        min-height: 40px;
+    }
+
+    .table .btn-sm {
+        min-height: 36px;
+    }
+}

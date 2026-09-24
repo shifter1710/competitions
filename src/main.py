@@ -26,6 +26,7 @@ from jinja2 import PackageLoader
 from jinja2 import select_autoescape
 from openpyxl.utils import get_column_letter
 from pandas import isna
+from sanic import html
 from sanic import redirect
 from sanic import Request
 from sanic import Sanic
@@ -47,6 +48,14 @@ jinja_env = Environment(
     loader=PackageLoader('src'),
     autoescape=select_autoescape(),
     enable_async=True,
+)
+
+# Синхронный клон окружения для error-страниц: хелперы unauthorized/forbidden
+# синхронны (их зовут require_* из синхронных проверок ролей), а render()
+# основной среды возвращает корутину (enable_async).
+jinja_env_sync = Environment(
+    loader=PackageLoader('src'),
+    autoescape=select_autoescape(),
 )
 
 app = Sanic('SIBADI_competitions')
@@ -539,6 +548,7 @@ def request_csrf_is_valid(request: Request) -> bool:
 
 
 jinja_env.globals['csrf_token'] = create_csrf_token
+jinja_env_sync.globals['csrf_token'] = create_csrf_token
 
 
 def user_is_admin(request: Request) -> bool:
@@ -583,30 +593,56 @@ def user_owns_record(request: Request, review: dict) -> bool:
     return review.get('student_id') in student_hashes_for_request(request)
 
 
+# UI-ответы 401/403 (IA редизайна 2026-09): браузерной навигации (Accept:
+# text/html) вместо голого text() отдаём редирект на вход / страницу
+# «Доступ запрещён»; программным клиентам (fetch, API-тесты) поведение
+# прежнее — строго text() с теми же статусами. CSRF-ответы middleware
+# этими хелперами не затрагиваются.
+
+
+def request_accepts_html(request: Request) -> bool:
+    return 'text/html' in (request.headers.get('accept') or '')
+
+
+def unauthorized(request: Request):
+    if request_accepts_html(request):
+        return redirect('/login')
+    return text(body='Unauthorized', status=401)
+
+
+def forbidden(request: Request):
+    if request_accepts_html(request):
+        return html(
+            jinja_env_sync.get_template('error403.html').render(request=request),
+            status=403,
+        )
+    return text(body='Forbidden', status=403)
+
+
 def require_admin(request: Request):
     user = get_auth_user(request)
     if not user:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
     if user['role'] != ADMIN_ROLE:
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     return None
 
 
 def require_moderator(request: Request):
     user = get_auth_user(request)
     if not user:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
     if user['role'] not in MODERATOR_ROLES:
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     return None
 
 
 def require_writer(request: Request):
     user = get_auth_user(request)
     if not user:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
     if user['role'] not in WRITE_ROLES:
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     return None
 
 
@@ -1286,7 +1322,7 @@ async def authorize_request(request: Request):
     if request.method == 'GET':
         return redirect('/login')
 
-    return text(body='Unauthorized', status=401)
+    return unauthorized(request)
 
 
 @app.get('/login')
@@ -1460,7 +1496,7 @@ async def index(request: Request):
 @app.get('/reports')
 async def reports_page(request: Request):
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     storage = get_storage(request.app)
     groups_by_institute = storage.get_group_options_by_institute()
     return await render(
@@ -1582,7 +1618,7 @@ async def calendar_page(request: Request):
     # Решение по ролям: admin/editor — полный доступ, viewer — просмотр без
     # кнопок, athlete — 403 (план — внутренняя кухня).
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     storage = get_storage(request.app)
     args = dict(request.args)
 
@@ -1633,7 +1669,10 @@ async def create_calendar_event(request: Request):
         sport=values['sport'],
         url=values['url'],
     )
-    return redirect(to='/calendar')
+    return build_redirect_with_message(
+        message=f'Соревнование «{values["name"]}» запланировано',
+        url='/calendar',
+    )
 
 
 @app.post('/calendar/<event_id>/edit')
@@ -1669,8 +1708,8 @@ async def edit_calendar_event(request: Request, event_id: str):
     # как путь внутрь /calendar/ — открытый редирект исключён.
     next_url = get_form_value(request, 'next')
     if next_url.startswith('/calendar/'):
-        return redirect(to=next_url)
-    return redirect(to='/calendar')
+        return build_redirect_with_message(message='Соревнование обновлено', url=next_url)
+    return build_redirect_with_message(message='Соревнование обновлено', url='/calendar')
 
 
 # Страница соревнования (волна B, прототип 16): участники = записи реестра
@@ -1700,7 +1739,7 @@ async def calendar_event_page(request: Request, event_id: str):
     # Решение по ролям — как у календаря: admin/editor — полный доступ,
     # viewer — просмотр без кнопок, athlete — 403.
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
 
     event, error = get_calendar_event_or_error(request, event_id)
     if error is not None:
@@ -1821,7 +1860,10 @@ async def add_calendar_event_participant(request: Request, event_id: str):
         review_status='approved',
         owner_id=get_current_user_id(request),
     )
-    return redirect(to=back_url)
+    return build_redirect_with_message(
+        message=f'Участник «{student_name}» добавлен',
+        url=back_url,
+    )
 
 
 @app.post('/calendar/<event_id>/delete')
@@ -1859,7 +1901,7 @@ async def delete_calendar_event(request: Request, event_id: str):
         'calendar_event_deleted',
         {'event_id': numeric_id, 'name': event['name'], 'date': event['date']},
     )
-    return redirect(to='/calendar')
+    return build_redirect_with_message(message='Соревнование удалено', url='/calendar')
 
 
 # Файл положения события календаря (решение 2026-09-22): один файл на событие
@@ -1874,7 +1916,7 @@ async def download_calendar_regulation(request: Request, event_id: str):
     # Права — как у страницы события: аноним перенаправляется на вход
     # middleware, атлету страница события недоступна — файл тоже.
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     event, error = get_calendar_event_or_error(request, event_id)
     if error is not None:
         return error
@@ -1917,6 +1959,9 @@ async def upload_calendar_regulation(request: Request, event_id: str):
     if content_type is None:
         return build_redirect_with_message(error='Допустимы только PDF, JPEG и PNG', url=back_url)
 
+    # Различаем первое прикрепление и замену до загрузки (flash-текст).
+    had_regulation = bool(event.get('regulation_filename'))
+
     # Порядок как у вложений: сначала новый файл на диск, затем колонки БД,
     # затем best-effort удаление прежнего файла (БД уже согласована).
     extension = Path(filename).suffix.lower().lstrip('.') or 'bin'
@@ -1944,7 +1989,10 @@ async def upload_calendar_regulation(request: Request, event_id: str):
             'replaced': bool(old_stored_name),
         },
     )
-    return build_redirect_with_message(message='Положение обновлено', url=back_url)
+    return build_redirect_with_message(
+        message='Положение заменено' if had_regulation else 'Положение прикреплено',
+        url=back_url,
+    )
 
 
 @app.post('/calendar/<event_id>/regulation/delete')
@@ -1969,7 +2017,7 @@ async def delete_calendar_regulation(request: Request, event_id: str):
         'calendar_regulation_deleted',
         {'event_id': event['id'], 'event_name': event['name'], 'filename': filename},
     )
-    return build_redirect_with_message(message='Положение удалено.', url=back_url)
+    return build_redirect_with_message(message='Положение удалено', url=back_url)
 
 
 # --- Импорт участников события календаря из Excel. ---
@@ -4162,7 +4210,7 @@ def build_index_dataframe(competitions, export_custom_fields) -> pd.DataFrame:
 @app.get('/export/index')
 async def export_index(request: Request):
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     storage = get_storage(request.app)
     competitions = storage.get_competitions()
     export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
@@ -4319,6 +4367,21 @@ def split_import_competitions(
     return new_competitions, skipped_duplicates, conflicts
 
 
+def build_import_summary(inserted: int, skipped_duplicates: int, conflicts: int, *, is_admin: bool) -> str:
+    """Сводка импорта реестра (IA-редизайн 2026-09): admin видит адресата
+    разбора, editor — что спорные строки переданы администратору (очередь
+    ему недоступна)."""
+    summary = f'Импортировано записей: {inserted}'
+    if skipped_duplicates:
+        summary += f'. Пропущено дублей: {skipped_duplicates}'
+    if conflicts:
+        if is_admin:
+            summary += f'. На подтверждение: {conflicts}.'
+        else:
+            summary += f'. На подтверждение: {conflicts} — передано администратору.'
+    return summary
+
+
 @app.post('/')
 async def upload(request: Request):
     auth_error = require_moderator(request)
@@ -4369,12 +4432,14 @@ async def upload(request: Request):
             created_by=created_by,
         )
 
-    summary = f'Импортировано записей: {len(new_competitions)}'
-    if skipped_duplicates:
-        summary += f'. Пропущено дублей: {skipped_duplicates}'
-    if conflicts:
-        summary += f'. На подтверждение: {len(conflicts)} — разобрать: /admin/import-queue'
-    return text(body=summary)
+    return text(
+        body=build_import_summary(
+            len(new_competitions),
+            skipped_duplicates,
+            len(conflicts),
+            is_admin=user_is_admin(request),
+        )
+    )
 
 
 def get_athlete_profile_defaults(request: Request, storage: SQLiteAdapter) -> dict:
@@ -4405,7 +4470,7 @@ def read_profile_payload(request: Request) -> tuple[dict, str | None]:
 @app.get('/api/profile')
 async def get_profile(request: Request):
     if get_auth_user(request) is None:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
     user_id = get_current_user_id(request)
     profile = get_storage(request.app).get_profile(user_id) if user_id else {}
     return json_response({'profile': profile})
@@ -4414,7 +4479,7 @@ async def get_profile(request: Request):
 @app.post('/api/profile')
 async def save_profile(request: Request):
     if get_auth_user(request) is None:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
     user_id = get_current_user_id(request)
     if user_id is None:
         return text(body='Unknown user', status=400)
@@ -4502,9 +4567,9 @@ async def lookup_student(request: Request):
     # Атлету нельзя отдавать чужие ФИО — только факт точного совпадения.
     user = get_auth_user(request)
     if user is None:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
     if user['role'] not in MODERATOR_ROLES and user['role'] != ATHLETE_ROLE:
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
 
     name = str(request.args.get('name', '')).strip()
     if not name:
@@ -4578,7 +4643,7 @@ async def update_competition(request: Request, record_id: str):
     storage = get_storage(request.app)
     existing_review = storage.get_competition_review(numeric_id)
     if existing_review is not None and not user_owns_record(request, existing_review):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
 
     custom_fields = storage.get_custom_fields()
     record = {
@@ -4959,7 +5024,7 @@ async def upload_attachment(request: Request, record_id: str):
     if review is None:
         return text(body='Record not found', status=404)
     if not user_owns_record(request, review):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
 
     upload_file = request.files.get('file')
     if not upload_file or not upload_file.body:
@@ -4992,7 +5057,7 @@ async def upload_attachment(request: Request, record_id: str):
 @app.get('/attachment/<attachment_id>')
 async def download_attachment(request: Request, attachment_id: str):
     if get_auth_user(request) is None:
-        return text(body='Unauthorized', status=401)
+        return unauthorized(request)
 
     try:
         numeric_attachment_id = int(attachment_id)
@@ -5005,7 +5070,7 @@ async def download_attachment(request: Request, attachment_id: str):
         return text(body='Not Found', status=404)
     review = storage.get_competition_review(attachment['record_id'])
     if review is not None and not user_owns_record(request, review):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
 
     file_path = attachments_dir() / str(attachment['record_id']) / attachment['stored_name']
     if not file_path.is_file():
@@ -7448,7 +7513,7 @@ async def audit_page(request: Request):
 async def get_report(request: Request):
     # Доступ как раньше: всем ролям, кроме athlete (личный кабинет вместо отчётов).
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)
@@ -7582,7 +7647,7 @@ async def export_report(request: Request):
     # Доступ как у просмотра отчёта: всем, кроме athlete. Наследует
     # срез/метрики/фильтры применённого отчёта (GET-параметры).
     if user_is_athlete(request):
-        return text(body='Forbidden', status=403)
+        return forbidden(request)
     error = validate_report_filters(dict(request.args)) or collect_custom_filters(request)[1]
     if error:
         return text(body=error, status=400)

@@ -1,6 +1,9 @@
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Объединение студентов (merge){% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
 {% block admin_description %}
     Переносит все записи со старого ФИО на новое (по хэшу студента).
     Сначала «Предпросмотр», затем «Объединить» — действие необратимо.

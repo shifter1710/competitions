@@ -184,6 +184,7 @@
     {% endfor %}
 </datalist>
 
+<div class="table-scroll-hint">↔ Таблица шире экрана — листайте по горизонтали</div>
 <div class="table-responsive">
     <table class="table table-striped table-bordered align-middle"
         data-participants-page data-event-date="{{ event.date_label }}" data-event-level="{{ event.level }}"
@@ -272,7 +273,14 @@
             {% for participant in participants %}
             <tr data-record-id="{{ participant.record_id }}" data-student-name="{{ participant.student_name }}">
                 <td class="text-center">{{ loop.index }}</td>
-                <td>{{ participant.student_name }}</td>
+                <td>{{ participant.student_name }}
+                    {# Связь с карточкой студента (IA 2026-09): только индикатор;
+                       смена связи — раздел «Сопоставление данных». #}
+                    {% if participant.student_ref_id %}
+                    <span class="badge text-bg-primary participant-student-link"
+                        title="Запись привязана к карточке студента #{{ participant.student_ref_id }}. Изменить связь — раздел «Сопоставление данных».">Student #{{ participant.student_ref_id }}</span>
+                    {% endif %}
+                </td>
                 <td>{{ participant.student_sex }}</td>
                 <td>{{ participant.institute }}</td>
                 <td>{{ participant.group_name }}</td>
@@ -295,7 +303,8 @@
                             data-record-id="{{ participant.record_id }}" data-student-name="{{ participant.student_name }}"
                             data-student-sex="{{ participant.student_sex }}" data-institute="{{ participant.institute }}"
                             data-group="{{ participant.group_name }}" data-course="{{ participant.course }}"
-                            data-position="{{ participant.position }}">Редактировать</button>
+                            data-position="{{ participant.position }}"
+                            data-student-ref-id="{{ participant.student_ref_id or '' }}">Редактировать</button>
                         {% if is_admin %}
                         <button class="btn btn-sm btn-outline-danger participant-delete-button" type="button"
                             data-record-id="{{ participant.record_id }}"

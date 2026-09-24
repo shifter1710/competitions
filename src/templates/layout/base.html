@@ -48,6 +48,11 @@
 <body {% if request.ctx.auth_user %}data-role="{{ request.ctx.auth_user.role }}"{% endif %}>
 
     {% set auth_role = request.ctx.auth_user.role if request.ctx.auth_user else None %}
+    {# IA редизайна 2026-09: единый порядок Реестр → Календарь → Студенты(admin)
+       → Отчёты → Админ(admin); атлету — Реестр → Профиль. «Студенты» —
+       /admin/people и /admin/students (объединение), «Админ» — остальной
+       /admin; условия проверяются в этом порядке. #}
+    {% set is_students_area = request.path.startswith('/admin/people') or request.path.startswith('/admin/students') %}
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
         <div class="container-fluid" style="margin: 0 20px">
             <a class="navbar-brand" href="/">Соревнования студентов</a>
@@ -59,20 +64,27 @@
                 {% if request.ctx.auth_user %}
                 <ul class="navbar-nav me-auto gap-lg-2">
                     <li class="nav-item">
-                        <a class="nav-link{% if request.path == '/' %} active{% endif %}" href="/">Таблица</a>
+                        <a class="nav-link{% if request.path == '/' %} active{% endif %}" href="/">Реестр</a>
                     </li>
                     {% if auth_role != 'athlete' %}
-                    <li class="nav-item">
-                        <a class="nav-link{% if request.path == '/reports' %} active{% endif %}" href="/reports">Отчёт</a>
-                    </li>
                     <li class="nav-item">
                         <a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}"
                             href="/calendar">Календарь</a>
                     </li>
-                    {% endif %}
-                    {% if auth_role == 'admin' or auth_role == 'editor' %}
+                    {% if auth_role == 'admin' %}
                     <li class="nav-item">
-                        <a class="nav-link{% if request.path.startswith('/admin') %} active{% endif %}" href="/admin">Админ</a>
+                        <a class="nav-link{% if is_students_area %} active{% endif %}" href="/admin/people">Студенты</a>
+                    </li>
+                    {% endif %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.path.startswith('/reports') %} active{% endif %}"
+                            href="/reports">Отчёты</a>
+                    </li>
+                    {% endif %}
+                    {% if auth_role == 'admin' %}
+                    <li class="nav-item">
+                        <a class="nav-link{% if request.path.startswith('/admin') and not is_students_area %} active{% endif %}"
+                            href="/admin">Админ</a>
                     </li>
                     {% endif %}
                     {% if auth_role == 'athlete' %}
@@ -82,9 +94,9 @@
                     {% endif %}
                 </ul>
                 {% endif %}
-                <div class="d-flex align-items-center gap-3 text-light">
+                <div class="navbar-user d-flex align-items-center gap-3 text-light">
                     {% if request.ctx.auth_user %}
-                    <span>Пользователь: <strong>{{ request.ctx.auth_user.username }}</strong>
+                    <span><span class="d-none d-sm-inline">Пользователь: </span><strong>{{ request.ctx.auth_user.username }}</strong>
                         ({{ request.ctx.auth_user.role }})</span>
                     {% endif %}
                     <button class="btn btn-outline-light btn-sm theme-toggle-button" type="button"
@@ -104,10 +116,16 @@
 
     <div style="margin: 20px 20px">
         {% if admin_message %}
-        <div class="alert alert-success" role="alert">{{ admin_message }}</div>
+        <div class="alert alert-success alert-dismissible" role="alert" data-flash-autohide>
+            {{ admin_message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Закрыть"></button>
+        </div>
         {% endif %}
         {% if admin_error %}
-        <div class="alert alert-danger" role="alert">{{ admin_error }}</div>
+        <div class="alert alert-danger alert-dismissible" role="alert">
+            {{ admin_error }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Закрыть"></button>
+        </div>
         {% endif %}
 
         {% block content %}
