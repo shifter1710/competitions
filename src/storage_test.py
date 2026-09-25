@@ -3632,3 +3632,425 @@ def test_wave1_fields_roundtrip_crud(adapter):
     assert imported_stored.discipline == 'Прыжки в длину'
     assert imported_stored.result == '7.10'
     assert imported_stored.calendar_event_id == event_id
+
+
+# --- P4 Event Participant Import v3: серверный enforcement батча участий. ---
+
+
+def make_participation(
+    name: str, event_id: int, discipline=None, result=None, student_ref=None, position=1
+) -> Competition:
+    record = make_competition(name, datetime(2026, 5, 10))
+    record.discipline = discipline
+    record.result = result
+    record.calendar_event_id = event_id
+    record.student_ref_id = student_ref
+    record.position = position
+    return record
+
+
+def test_p4_participants_select_carries_participation_fields(adapter):
+    """list_calendar_event_participants аддитивно несёт discipline/result и
+    РАСПАРСЕННЫЙ extra_data — классификация повторов не ходит в JSON руками."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    record = make_participation('Иванов Иван', event_id, discipline='100 м', result='11.0')
+    record.extra_data = {'note': 'прим.'}
+    adapter.save_competitions([record])
+    participants = adapter.list_calendar_event_participants(event_id)
+    assert len(participants) == 1
+    participant = participants[0]
+    assert participant['discipline'] == '100 м'
+    assert participant['result'] == '11.0'
+    assert participant['extra_data'] == {'note': 'прим.'}
+    assert participant['student_ref_id'] is None
+
+
+def test_p4_batch_rejects_duplicate_identity_and_content(adapter):
+    """apply_event_participation_batch: повтор identity (карточка+дисциплина)
+    и точный cardless-контент против живой БД И внутри батча — коллизия,
+    откат всего (включая справочники)."""
+    from src.storage.sqlite import EventParticipationConflictError
+
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    # Живое участие: карточка #1, дисциплина 100 м.
+    adapter.save_competitions([make_participation('Иванов Иван', event_id, '100 м', student_ref=1)])
+
+    # Коллизия identity против живой БД.
+    with pytest.raises(EventParticipationConflictError):
+        adapter.apply_event_participation_batch(
+            event_id, [make_participation('Иванов Иван Другой', event_id, '100 м', student_ref=1)]
+        )
+    assert len(adapter.get_competitions()) == 1
+
+    # Intra-batch first-wins по identity: вторая строка той же карточки и
+    # дисциплины откатывает весь батч (первая не вставляется).
+    with pytest.raises(EventParticipationConflictError):
+        adapter.apply_event_participation_batch(
+            event_id,
+            [
+                make_participation('Иванов Иван', event_id, '100 м', student_ref=2),
+                make_participation('Иванов Близнец', event_id, '100  М', student_ref=2, position=2),
+            ],
+        )
+    assert len(adapter.get_competitions()) == 1
+
+    # Точный cardless-контент против живой БД.
+    with pytest.raises(EventParticipationConflictError):
+        adapter.apply_event_participation_batch(event_id, [make_participation('Иванов Иван', event_id, '100 м')])
+    assert len(adapter.get_competitions()) == 1
+
+    # Тот же контент-ключ, ДРУГОЙ контент против ЖИВОЙ БД — не коллизия
+    # (явное «добавить как новое»); но ВНУТРИ батча тот же контент-ключ
+    # (ФИО+дисциплина) у второй cardless-строки — коллизия, откат всего.
+    with pytest.raises(EventParticipationConflictError):
+        adapter.apply_event_participation_batch(
+            event_id,
+            [
+                make_participation('Сидоров Сидор', event_id, '100 м', position=1),
+                make_participation('Сидоров Сидор', event_id, '100 м', position=2),
+            ],
+        )
+    assert len(adapter.get_competitions()) == 1
+
+    # Разные дисциплины (мульти-дисциплина) — не коллизия.
+    adapter.apply_event_participation_batch(
+        event_id,
+        [
+            make_participation('Иванов Иван', event_id, '100 м', position=3),
+            make_participation('Иванов Иван', event_id, '200 м'),
+        ],
+    )
+    assert len(adapter.get_competitions()) == 3
+
+
+def test_p4_batch_updates_and_rollback(adapter, monkeypatch):
+    """updates-часть батча: restricted-обновление в той же транзакции;
+    отсутствие участия — коллизия с откатом вставок; сбой справочников —
+    откат всего батча."""
+    from src.storage.sqlite import EventParticipationConflictError
+
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    existing = make_participation('Иванов Иван', event_id, '100 м', position=1)
+    adapter.save_competitions([existing])
+    record_id = int(adapter.get_competitions()[0].record_id)
+
+    # Успешный батч: вставка + restricted-update одной транзакцией.
+    adapter.apply_event_participation_batch(
+        event_id,
+        [make_participation('Петров Пётр', event_id, '200 м', position=2)],
+        [(record_id, 5, '10,5')],
+    )
+    rows = {row['student_name']: row for row in adapter.list_calendar_event_participants(event_id)}
+    assert rows['Иванов Иван']['position'] == 5
+    assert rows['Иванов Иван']['result'] == '10,5'
+    assert rows['Петров Пётр']['position'] == 2
+
+    # update чужого события (WHERE calendar_event_id) — коллизия, всё откат.
+    other_event = adapter.create_calendar_event(
+        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    with pytest.raises(EventParticipationConflictError):
+        adapter.apply_event_participation_batch(
+            other_event,
+            [make_participation('Сидоров Сидор', other_event)],
+            [(record_id, 9, None)],
+        )
+    assert len(adapter.list_calendar_event_participants(other_event)) == 0
+    assert adapter.list_calendar_event_participants(event_id)[0]['position'] == 5
+
+    # Сбой синхронизации справочников — откат вставок всего батча.
+    def failing_sync(*args, **kwargs):
+        raise sqlite3.OperationalError('simulated')
+
+    monkeypatch.setattr(SQLiteAdapter, '_sync_catalogs_from_records', failing_sync)
+    with pytest.raises(sqlite3.OperationalError):
+        adapter.apply_event_participation_batch(event_id, [make_participation('Козлов Козьма', event_id, 'эстафета')])
+    monkeypatch.undo()
+    names = [row['student_name'] for row in adapter.list_calendar_event_participants(event_id)]
+    assert names == ['Иванов Иван', 'Петров Пётр']
+
+
+def test_p4_update_event_participation_result_restricted(adapter):
+    """update_event_participation_result: SET только position/result,
+    WHERE id + calendar_event_id; чужое событие/несуществующий id — 0."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    existing = make_participation('Иванов Иван', event_id, '100 м', result='11.0')
+    adapter.save_competitions([existing])
+    row = adapter.get_competitions()[0]
+    record_id = int(row.record_id)
+
+    assert adapter.update_event_participation_result(record_id, event_id, 3, '10,9') == 1
+    updated = adapter.get_competition_by_id(record_id)
+    assert (updated.position, updated.result) == (3, '10,9')
+    assert updated.discipline == '100 м'
+    assert updated.student_name == 'Иванов Иван'
+    assert updated.calendar_event_id == event_id
+
+    # Чужое событие и несуществующая запись — 0 изменений.
+    other_event = event_id + 1000
+    assert adapter.update_event_participation_result(record_id, other_event, 7, None) == 0
+    assert adapter.update_event_participation_result(record_id + 1000, event_id, 7, None) == 0
+    untouched = adapter.get_competition_by_id(record_id)
+    assert (untouched.position, untouched.result) == (3, '10,9')
+
+
+# --- P5b: явные связки «запись → событие» (link / create+link / preview / apply). ---
+
+
+def test_link_participation_to_event_error_codes(adapter):
+    """Несуществующая запись/событие — явные коды, БД не меняется."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+    )
+
+    event, error = adapter.link_participation_to_event(999999, event_id)
+    assert (event, error) == (None, 'record_not_found')
+
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+    event, error = adapter.link_participation_to_event(record_id, 999999)
+    assert (event, error) == (None, 'event_not_found')
+    assert adapter.get_competitions()[0].calendar_event_id is None
+
+
+def test_link_participation_race_returns_already_linked(adapter):
+    """Guarded UPDATE: повторное связывание уже связанной записи не
+    перезаписывает ни ссылку, ни поля."""
+    first_id = adapter.create_calendar_event(
+        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='А', sport='Бег', url=''
+    )
+    second_id = adapter.create_calendar_event(
+        name='Второй кросс', date='2026-10-01T00:00:00', date_to=None, level='Б', sport='Лыжи', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+    # Ссылка уже стоит (как будто её поставил другой запрос между SELECT и
+    # UPDATE) — намеренно без синхронизации полей.
+    adapter.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (first_id, record_id))
+    adapter.connection.commit()
+
+    event, error = adapter.link_participation_to_event(record_id, second_id)
+    assert (event, error) == (None, 'already_linked')
+    record = adapter.get_competitions()[0]
+    assert record.calendar_event_id == first_id
+    # Поля записи при отказе не проиграны во «Второй кросс».
+    assert record.name == 'Кубок'
+    assert record.sport == 'Бег'
+
+
+def test_create_calendar_event_and_link_atomic_rollback(adapter):
+    """Сбой между INSERT события и UPDATE записи откатывает ВСЁ: события-
+    сироты не остаётся, запись не связана."""
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+
+    class FailingUpdateConnection:
+        """INSERT события проходит, guarded UPDATE записи (второй шаг
+        транзакции) падает — сбой между шагами, до commit."""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('UPDATE competitions'):
+                raise RuntimeError('Injected failure between INSERT and UPDATE')
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = FailingUpdateConnection(real_connection)
+    with pytest.raises(RuntimeError):
+        adapter.create_calendar_event_and_link(
+            name='Осенний кросс',
+            date='2026-10-01T00:00:00',
+            date_to=None,
+            level='',
+            sport='',
+            url='',
+            record_id=record_id,
+        )
+    adapter.connection = real_connection
+
+    assert adapter.list_calendar_events() == []
+    assert adapter.get_competitions()[0].calendar_event_id is None
+
+
+def test_create_calendar_event_and_link_checks_record_first(adapter):
+    """Несуществующая/уже связанная запись отклоняется ДО вставки события —
+    события-сироты не появляется."""
+    event_id, error = adapter.create_calendar_event_and_link(
+        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', url='', record_id=999999
+    )
+    assert (event_id, error) == (None, 'record_not_found')
+    assert adapter.list_calendar_events() == []
+
+    linked_id = adapter.create_calendar_event(
+        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+    adapter.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (linked_id, record_id))
+    adapter.connection.commit()
+
+    event_id, error = adapter.create_calendar_event_and_link(
+        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', url='', record_id=record_id
+    )
+    assert (event_id, error) == (None, 'already_linked')
+    assert len(adapter.list_calendar_events()) == 1
+
+
+def test_calendar_link_backfill_preview_groups_and_cap(adapter):
+    """Предпросмотр: группы matched/ambiguous/unmatched + уже связанные;
+    списки капнутся (200), счётчики останутся полными."""
+    matched_event = adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+
+    for _ in range(2):
+        adapter.create_calendar_event(
+            name='Дубль', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        )
+    daniel = make_competition('Двойной Данила', datetime(2026, 2, 1))
+    daniel.name = 'Дубль'
+    adapter.save_competitions([daniel])
+
+    # 205 записей без события — unmatched-список упрётся в кап.
+    adapter.save_competitions(
+        [make_competition(f'Без события {index:03d}', datetime(2026, 3, 1)) for index in range(205)]
+    )
+
+    linked_event = adapter.create_calendar_event(
+        name='Связанный', date='2026-04-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Связан Сергей', datetime(2026, 4, 1))])
+    adapter.connection.execute(
+        'UPDATE competitions SET calendar_event_id = ? WHERE student_name = ?',
+        (linked_event, 'Связан Сергей'),
+    )
+    adapter.connection.commit()
+
+    preview = adapter.calendar_link_backfill_preview()
+    assert preview['counters'] == {
+        'considered': 207,
+        'matched': 1,
+        'unmatched': 205,
+        'ambiguous': 1,
+        'already_linked': 1,
+    }
+    assert preview['matched'] == [
+        {
+            'record_id': 1,
+            'student_name': 'Легаси Лев',
+            'name': 'Кубок',
+            'date': '2026-01-10T00:00:00',
+            'date_to': None,
+            'sport': 'Бег',
+            'level': 'внутривузовские',
+            'event_id': matched_event,
+            'event_name': 'Кубок',
+        }
+    ]
+    ambiguous = preview['ambiguous'][0]
+    assert ambiguous['student_name'] == 'Двойной Данила'
+    assert ambiguous['candidate_count'] == 2
+    assert ambiguous['candidate_names'] == ['Дубль', 'Дубль']
+    assert len(preview['unmatched']) == 200
+
+
+def test_apply_calendar_link_backfill_links_only_matched(adapter):
+    """Apply: линкуются ТОЛЬКО однозначные matched с синхронизацией 5 полей;
+    ambiguous/unmatched/уже связанные не трогаются."""
+    event_id = adapter.create_calendar_event(
+        name='Кубок',
+        date='2026-01-10T00:00:00',
+        date_to='2026-01-12T00:00:00',
+        level='региональные',
+        sport='Лыжи',
+        url='',
+    )
+    for _ in range(2):
+        adapter.create_calendar_event(
+            name='Дубль', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        )
+    matched = make_calendar_record('Легаси Лев', datetime(2026, 1, 10), datetime(2026, 1, 12))
+    matched.name = 'Кубок'
+    ambiguous = make_calendar_record('Двойной Данила', datetime(2026, 2, 1), None)
+    ambiguous.name = 'Дубль'
+    unmatched = make_calendar_record('Одинокий Олег', datetime(2027, 5, 5), None)
+    adapter.save_competitions([matched, ambiguous, unmatched])
+
+    counters, items = adapter.apply_calendar_link_backfill()
+    assert counters == {'matched': 1, 'linked': 1, 'skipped': 0}
+    assert items == [{'record_id': 1, 'event_id': event_id, 'event_name': 'Кубок'}]
+
+    by_name = {record.student_name: record for record in adapter.get_competitions()}
+    linked = by_name['Легаси Лев']
+    assert linked.calendar_event_id == event_id
+    # Синхронизация 5 полей события.
+    assert linked.name == 'Кубок'
+    assert linked.sport == 'Лыжи'
+    assert linked.date == datetime(2026, 1, 10)
+    assert linked.date_to == datetime(2026, 1, 12)
+    assert linked.level == 'региональные'
+    assert by_name['Двойной Данила'].calendar_event_id is None
+    assert by_name['Одинокий Олег'].calendar_event_id is None
+
+
+def test_apply_calendar_link_backfill_skips_row_linked_after_selection(adapter):
+    """Гонка внутри пакета: запись связали между выборкой пар и UPDATE —
+    guarded UPDATE даёт rowcount 0, строка пропускается, пакет не валится."""
+    adapter.create_calendar_event(name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url='')
+    other_event = adapter.create_calendar_event(
+        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+
+    class RacingLinkConnection:
+        """Выборка пар проходит, а сразу ПОСЛЕ неё (до цикла UPDATE)
+        запись успевает связать другой запрос — UPDATE ... IS NULL даёт 0."""
+
+        def __init__(self, connection):
+            self._connection = connection
+            self._raced = False
+
+        def execute(self, sql, parameters=()):
+            result = self._connection.execute(sql, parameters)
+            if not self._raced and 'FROM competitions c' in sql:
+                self._raced = True
+                self._connection.execute(
+                    'UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (other_event, record_id)
+                )
+            return result
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = RacingLinkConnection(real_connection)
+    counters, items = adapter.apply_calendar_link_backfill()
+    adapter.connection = real_connection
+
+    assert counters == {'matched': 1, 'linked': 0, 'skipped': 1}
+    assert items == []
+    # Ссылка «гонщика» устояла, поля не перезаписаны.
+    record = adapter.get_competitions()[0]
+    assert record.calendar_event_id == other_event
+    assert record.name == 'Кубок'

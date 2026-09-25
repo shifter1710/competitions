@@ -42,6 +42,11 @@ from src.backup import run_backup
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.settings import settings
+from src.storage.sqlite import dedup_discipline
+from src.storage.sqlite import dedup_place
+from src.storage.sqlite import dedup_text
+from src.storage.sqlite import EventParticipationConflictError
+from src.storage.sqlite import participation_content_key
 from src.storage.sqlite import SQLiteAdapter
 
 jinja_env = Environment(
@@ -760,10 +765,10 @@ def normalize_discipline_for_dedup(value) -> str:
     регистр не важен — то же написание с другими пробелами/регистром
     остаётся дублем. Хранится в записи оригинальное написание как введено;
     нормализация — только внутри ключа дедупликации.
+    P4: реализация делегирует общей функции storage — ключ участий события
+    и ключ реестра обязаны нормализоваться одинаково.
     """
-    if not value:
-        return ''
-    return ' '.join(value.split()).casefold()
+    return dedup_discipline(value)
 
 
 def normalize_position(value) -> int:
@@ -1914,6 +1919,31 @@ async def calendar_event_page(request: Request, event_id: str):
     )
 
 
+def resolve_manual_participant_student_ref(
+    storage: SQLiteAdapter,
+    request: Request,
+    back_url: str,
+) -> tuple[int | None, HTTPResponse | None]:
+    """Явный выбор карточки студента в ручном добавлении участника события:
+    непустое значение валидируется (карточка существует и активна); невалидное
+    — отказ БЕЗ создания записи, молчаливо терять выбранную админом связь
+    нельзя. Возвращает (student_ref_id, редирект-ошибка | None)."""
+    student_ref_raw = get_form_value(request, 'student_ref_id').strip()
+    if not student_ref_raw:
+        return None, None
+    try:
+        student_ref_id = int(student_ref_raw)
+    except ValueError:
+        student_ref_id = None
+    student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
+    if student is None or not student['active']:
+        return None, build_redirect_with_message(
+            error='Выбранная карточка студента не найдена или неактивна. Сбросьте связь и выберите карточку заново.',
+            url=back_url,
+        )
+    return student_ref_id, None
+
+
 @app.post('/calendar/<event_id>/participants')
 async def add_calendar_event_participant(request: Request, event_id: str):
     # Участник добавляется как ОБЫЧНАЯ запись реестра (историчность —
@@ -1940,23 +1970,9 @@ async def add_calendar_event_participant(request: Request, event_id: str):
     event_date_to = datetime.fromisoformat(event['date_to']) if event.get('date_to') else None
     storage = get_storage(request.app)
 
-    # Явный выбор карточки студента: непустое значение валидируется (существует
-    # и активна); невалидное — отказ БЕЗ создания записи, молчаливо терять
-    # выбранную админом связь нельзя.
-    student_ref_id: int | None = None
-    student_ref_raw = get_form_value(request, 'student_ref_id').strip()
-    if student_ref_raw:
-        try:
-            student_ref_id = int(student_ref_raw)
-        except ValueError:
-            student_ref_id = None
-        student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
-        if student is None or not student['active']:
-            return build_redirect_with_message(
-                error='Выбранная карточка студента не найдена или неактивна. '
-                'Сбросьте связь и выберите карточку заново.',
-                url=back_url,
-            )
+    student_ref_id, ref_error = resolve_manual_participant_student_ref(storage, request, back_url)
+    if ref_error is not None:
+        return ref_error
 
     custom_fields = storage.get_custom_fields()
     record = {
@@ -1973,6 +1989,10 @@ async def add_calendar_event_participant(request: Request, event_id: str):
         # Место опционально («можно дописать позже»): пусто → position = 0.
         'Место': get_form_value(request, 'position'),
         'Курс': get_form_value(request, 'course'),
+        # P4: дисциплина участия — та же фиксированная колонка, что у импорта
+        # (build_competition кладёт её в базовую колонку записи); поле формы
+        # опциональное, пусто → NULL.
+        'Дисциплина': get_form_value(request, 'discipline'),
     }
 
     try:
@@ -1984,6 +2004,12 @@ async def add_calendar_event_participant(request: Request, event_id: str):
     # P2: участник события получает явную ссылку на событие — состав
     # участников читается по calendar_event_id, а не по пресету.
     competition.calendar_event_id = event['id']
+    # Глобальный matched-инвариант (P4 QA D2): второй участия той же карточки
+    # с той же дисциплиной ручной ввод создать не может — guard до любых
+    # записей (справочники/участие), существующая строка не меняется.
+    guard_error = event_participation_matched_duplicate_guard(storage, event, competition)
+    if guard_error is not None:
+        return build_redirect_with_message(error=guard_error, url=back_url)
     ensure_catalog_values(storage, [competition])
     storage.save_competitions(
         [competition],
@@ -2166,8 +2192,30 @@ async def delete_calendar_regulation(request: Request, event_id: str):
 # Права: страницы/действия импорта — модераторы (admin/editor); «создать
 # карточку студента» — только admin (конвенция Phase 1/2.5: Students —
 # admin-only), editor видит выбор существующей карточки и пропуск.
+#
+# P4 (Event Participant Import v3): опциональные фиксированные колонки
+# «Дисциплина» (identity-часть участия) и «Результат» (informational);
+# строгий repeat-safe дедуп — предпросмотр классифицирует строки против
+# живых участий (already/update-candidate/possible-duplicate) и повторов
+# файла (дубликат-в-файле/конфликт), сервер повторяет проверку под _lock
+# (apply_event_participation_batch) — повторное участие НЕ создаётся:
+# вместо дубля доступно restricted-обновление место/результат существующего.
 
-EVENT_PARTICIPANT_IMPORT_BASE_COLUMNS: Sequence[str] = ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс', 'Место')
+# P4: «Дисциплина»/«Результат» — фиксированные опциональные колонки файла
+# участников (после «Места»): дисциплина — identity-часть участия (вместе с
+# карточкой/ФИО различает 100 м, 200 м и эстафету одного человека), результат
+# — informational-колонка участия (базовая result записи; импорт реестра её
+# по-прежнему не пишет).
+EVENT_PARTICIPANT_IMPORT_BASE_COLUMNS: Sequence[str] = (
+    'ФИО',
+    'Пол',
+    'Институт',
+    'Группа',
+    'Курс',
+    'Место',
+    'Дисциплина',
+    'Результат',
+)
 EVENT_PARTICIPANT_IMPORT_MAX_ROWS = 5000
 EVENT_IMPORT_SESSION_TTL_SECONDS = 2 * 60 * 60
 # Поиск карточки для строки предпросмотра («Найти студента»): лимит
@@ -2185,16 +2233,27 @@ event_import_sessions: dict[str, dict] = {}
 def event_import_custom_fields(custom_fields: Sequence[CustomField]) -> list[CustomField]:
     """Custom-поля импорта участников события: активные с show_in_template,
     КРОМЕ url-полей (ссылки уровня записи/события к снимку участия не
-    относятся). Признак — field_type, не label.
+    относятся; признак — field_type, не label) и КРОМЕ коллизии label с
+    фиксированными колонками «Дисциплина»/«Результат» (P5a-exception, P4):
+    колонка файла одна, значение идёт в базовые колонки записи через
+    build_competition. Определения полей и их значения в реестре/extra_data
+    не трогаются; select_template_custom_fields реестра — свои правила.
 
-    Сами url-поля в системе остаются (реестр, обычный импорт/экспорт,
-    link_target) — исключение касается только этого workflow. Фильтр
-    применяется на входе каждого пути (шаблон, разбор, предпросмотр, правки,
-    валидация, добавление) и обязан доходить до валидации
-    (build_event_participant_competition): иначе гипотетическое
+    Сами исключённые поля в системе остаются (реестр, обычный
+    импорт/экспорт, link_target) — исключение касается только этого
+    workflow. Фильтр применяется на входе каждого пути (шаблон, разбор,
+    предпросмотр, правки, валидация, добавление) и обязан доходить до
+    валидации (build_event_participant_competition): иначе гипотетическое
     ОБЯЗАТЕЛЬНОЕ url-поле заблокировало бы все строки импорта участников.
     """
-    return [field for field in custom_fields if field.active and field.show_in_template and field.field_type != 'url']
+    return [
+        field
+        for field in custom_fields
+        if field.active
+        and field.show_in_template
+        and field.field_type != 'url'
+        and not collides_with_fixed_columns(field.label, {'дисциплина', 'результат'})
+    ]
 
 
 def event_participant_import_columns(custom_fields: Sequence[CustomField]) -> list[str]:
@@ -2248,6 +2307,11 @@ def parse_event_participant_rows(
                 'group': clean_str(record.get('Группа')),
                 'course': normalize_import_course(record.get('Курс')),
                 'position': normalize_import_position(record.get('Место')),
+                # P4: фиксированные опциональные колонки участия (clean_str,
+                # пустая ячейка → «»); дисциплина идёт в запись через
+                # build_competition, результат — присвоением после build.
+                'discipline': clean_str(record.get('Дисциплина')),
+                'result': clean_str(record.get('Результат')),
                 'custom': {custom_by_label[column].key: clean_str(record.get(column)) for column in custom_columns},
                 'status': 'error' if error else 'pending',
                 'error': error,
@@ -2264,19 +2328,30 @@ def parse_event_participant_rows(
     return rows, unknown_columns, custom_columns
 
 
-EVENT_PARTICIPANT_SNAPSHOT_KEYS: Sequence[str] = ('full_name', 'sex', 'institute', 'group', 'course', 'position')
+# Полное равенство строк файла (P4) — с дисциплиной/результатом: «Иванов|100 м|1»
+# и «Иванов|200 м|3» — ДВА корректных участия, точная копия строки — повтор.
+EVENT_PARTICIPANT_SNAPSHOT_KEYS: Sequence[str] = (
+    'full_name',
+    'sex',
+    'institute',
+    'group',
+    'course',
+    'position',
+    'discipline',
+    'result',
+)
 
 
 def event_import_duplicate_rows(rows: Sequence[dict]) -> dict[int, list[int]]:
     """Полностью одинаковые строки файла: номер строки → номера всех строк группы.
 
     «Одинаковость» — полное равенство снимка импортируемых колонок
-    (strip + casefold, включая custom-значения): «Иванов|100 м|1» и
-    «Иванов|200 м|3» — ДВА корректных участия, а точная копия строки —
-    повод спросить админа. Молчаливого skip нет: обе строки группы
-    попадают в «Требуют решения», пока ОБЕ не разобраны (см.
-    event_import_pending_duplicates — семантика «оставить одну / создать
-    обе / исправить / пропустить» из §17 достигается действиями).
+    (strip + casefold, включая custom-значения и дисциплину/результат):
+    «Иванов|100 м|1» и «Иванов|200 м|3» — ДВА корректных участия, точная
+    копия строки — повтор. P4: повторы-копии pending-строк БОЛЬШЕ не
+    блокируют обе строки — поздняя копия получает производный статус
+    «дубликат в файле — пропускается» (event_import_infile_duplicates:
+    якорь — первая строка группы), карта используется как подсказка якорю.
     """
     groups: dict[tuple, list[int]] = {}
     for row in rows:
@@ -2286,18 +2361,6 @@ def event_import_duplicate_rows(rows: Sequence[dict]) -> dict[int, list[int]]:
         )
         groups.setdefault(key, []).append(row['row_number'])
     return {row_number: numbers for numbers in groups.values() if len(numbers) > 1 for row_number in numbers}
-
-
-def event_import_pending_duplicates(rows: Sequence[dict]) -> dict[int, list[int]]:
-    """Дубли среди НЕРАЗОБРАННЫХ (pending) строк сессии.
-
-    Это БЛОКИРУЮЩАЯ часть event_import_duplicate_rows: повтор-строка требует
-    решения, только пока её не разобранная копия тоже висит в предпросмотре.
-    После явного решения над копией (пропуск/добавление) или её ошибки
-    строка перестаёт блокироваться и становится добавляемой — «создать обе»
-    выполняется добавлением первой (вторая после этого разблокируется).
-    """
-    return event_import_duplicate_rows([row for row in rows if row['status'] == 'pending'])
 
 
 def sweep_event_import_sessions() -> None:
@@ -2419,6 +2482,12 @@ def event_import_row_record(
         'Группа': row['group'],
         'Курс': row['course'],
         'Место': row['position'],
+        # P4: дисциплина — фиксированной колонкой в build_competition (путь
+        # P5a, обязательный для реестра); результат — только в participation-
+        # workflow: присваивается ПОСЛЕ build (см. build_event_participant_
+        # competition), build_competition его не читает.
+        'Дисциплина': row.get('discipline', ''),
+        'Результат': row.get('result', ''),
         **preset,
     }
     record.update(
@@ -2449,14 +2518,23 @@ def build_event_participant_competition(
     record: dict,
     custom_fields: Sequence[CustomField],
     storage: SQLiteAdapter,
+    *,
+    result: str = '',
 ) -> tuple[Competition | None, str | None]:
     """Финальная валидация строки тем же механизмом, что ручной ввод
     (build_competition: field_settings, required custom-поля, число места).
-    Возвращает (competition, None) или (None, текст ошибки)."""
+    Возвращает (competition, None) или (None, текст ошибки).
+
+    P4: «Результат» — informational-колонка участия; build_competition её не
+    читает (базовый result импортом РЕЕСТРА не пишется — P5a), поэтому
+    значение присваивается здесь, сразу после build — все пути этого
+    workflow (предпросмотр/правка/вставка) получают одинаковую запись."""
     try:
-        return build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage), None
+        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
     except (TypeError, ValueError) as exc:
         return None, str(exc)
+    competition.result = str(result or '').strip() or None
+    return competition, None
 
 
 def event_import_existing_participations(
@@ -2481,10 +2559,341 @@ def event_import_existing_participations(
     ]
 
 
+# --- Классификация повторов импорта участников (P4, repeat-safe dedup). ---
+#
+# Строгая уникальность участия события enforced сервером (storage.
+# apply_event_participation_batch): MATCHED-строка (карточка определена)
+# уникальна по identity = (карточка, дисциплина), CARDLESS-строка — по
+# полному контенту (ФИО+дисциплина+снимок). Предпросмотр классифицирует
+# строки ТЕМИ ЖЕ ключами (пересчёт на каждом рендере), серверная проверка
+# повторяет её под _lock на момент клика — расхождение предпросмотра и БД
+# откатывает весь батч, а не создаёт дубль.
+
+
+def event_participation_effective_values(participant: dict, custom_fields: Sequence[CustomField]) -> tuple[str, str]:
+    """(дисциплина, результат) СУЩЕСТВУЮЩЕГО участия для сравнения с импортом.
+
+    Базовые колонки записи; NULL/пусто — legacy-фолбэк в extra_data активного
+    кастома с коллидирующим label «Дисциплина»/«Результат» (dual-write P5a:
+    записи, вставленные до P4, несут значение только в кастоме). Только
+    чтение: ни запись, ни extra_data не меняются."""
+    extra = participant.get('extra_data') or {}
+
+    def effective(base, folded_label: str) -> str:
+        value = str(base or '').strip()
+        if value:
+            return value
+        for field in custom_fields:
+            if field.label.strip().casefold() == folded_label:
+                fallback = str(extra.get(field.key) or '').strip()
+                if fallback:
+                    return fallback
+        return ''
+
+    return (
+        effective(participant.get('discipline'), 'дисциплина'),
+        effective(participant.get('result'), 'результат'),
+    )
+
+
+def event_participant_identity(participant: dict, custom_fields: Sequence[CustomField]) -> tuple | None:
+    """identity существующего участия: (карточка, дисциплина); None — участие
+    без связи с карточкой (для него уникальность — точный контент)."""
+    if participant.get('student_ref_id') is None:
+        return None
+    discipline, _ = event_participation_effective_values(participant, custom_fields)
+    return ('ref', participant['student_ref_id'], dedup_discipline(discipline))
+
+
+def event_participation_collision_custom_keys(custom_fields: Sequence[CustomField]) -> set[str]:
+    """Ключи кастомов с label, коллидирующим с фиксированными колонками
+    «Дисциплина»/«Результат» (QA D2, F′ v2): их сырые значения в extra_data
+    НЕ участвуют в customs-части контент-ключа — дисциплина/результат
+    сравниваются эффективными значениями (base ?? legacy-фолбэк), и легаси-
+    строка (значение только в кастоме) не должна отличаться от вставляемой
+    (значение только в базовой колонке). Тот же набор коллизий, что у
+    legacy-фолбэка event_participation_effective_values и серверной
+    проверки apply_event_participation_batch."""
+    fold_labels = {'дисциплина', 'результат'}
+    return {field.key for field in custom_fields if collides_with_fixed_columns(field.label, fold_labels)}
+
+
+def event_participant_content(participant: dict, custom_fields: Sequence[CustomField]) -> tuple:
+    """Полный контент существующего участия (единый participation_content_key
+    storage — сравнение с контентом вставляемой записи символ в символ)."""
+    discipline, result = event_participation_effective_values(participant, custom_fields)
+    return participation_content_key(
+        participant['student_name'],
+        discipline,
+        participant['student_sex'],
+        participant['institute'],
+        participant['group_name'],
+        participant['course'],
+        participant['position'],
+        result,
+        participant.get('extra_data') or {},
+        event_participation_collision_custom_keys(custom_fields),
+    )
+
+
+def competition_content(competition: Competition, custom_fields: Sequence[CustomField]) -> tuple:
+    """Полный контент вставляемой записи участия (та же форма ключа);
+    коллидирующие кастомы исключаются симметрично существующей строке
+    (QA D2 — см. event_participation_collision_custom_keys)."""
+    return participation_content_key(
+        competition.student_name,
+        competition.discipline,
+        competition.student_sex,
+        competition.institute,
+        competition.group,
+        competition.course,
+        competition.position,
+        competition.result,
+        competition.extra_data,
+        event_participation_collision_custom_keys(custom_fields),
+    )
+
+
+def event_participation_matched_duplicate_guard(
+    storage: SQLiteAdapter,
+    event: dict,
+    competition: Competition,
+) -> str | None:
+    """Глобальный matched-инвариант участий события (P4, QA D2): у события не
+    может быть двух участий ОДНОЙ карточки с той же нормализованной
+    дисциплиной. Импорт вставляет через guarded-батч (apply_event_participation_
+    batch), ручной ввод идёт через save_competitions — эта проверка закрывает
+    его теми же ключами: list_calendar_event_participants + identity с
+    эффективной дисциплиной (legacy-фолбэк base ?? extra_data коллидирующего
+    кастома) + dedup_discipline. Второй реализации нормализации нет.
+
+    Правило НЕ применяется для cardless-строк и пустой дисциплины (для них
+    остаются F′ v2/import semantics; глобального cardless-constraint нет).
+    Возвращает текст ошибки или None (вставлять можно)."""
+    discipline = dedup_discipline(competition.discipline)
+    if competition.student_ref_id is None or not discipline:
+        return None
+    identity = ('ref', competition.student_ref_id, discipline)
+    custom_fields = storage.get_custom_fields()
+    for participant in storage.list_calendar_event_participants(event['id']):
+        if event_participant_identity(participant, custom_fields) == identity:
+            return 'Такое участие уже существует: у этого студента уже есть участие с этой дисциплиной в событии.'
+    return None
+
+
+def event_import_diff_value(value) -> str:
+    """Значение диффа место/результат: 0/пусто → «—», иначе — как введено."""
+    text = str(value if value is not None else '').strip()
+    if not text or text == '0':
+        return '—'
+    return text
+
+
+def classify_event_import_row(
+    existing_participants: Sequence[dict],
+    row: dict,
+    student: dict | None,
+    competition: Competition | None,
+    custom_fields: Sequence[CustomField],
+) -> dict:
+    """Классификация pending-строки против УЖЕ существующих участий события
+    (P4; in-file повторы — отдельно, event_import_infile_duplicates).
+
+    MATCHED (карточка определена: явный выбор/единственный кандидат): identity
+    = (карточка, дисциплина). Участия с той же identity нет — ready; есть и
+    mutable (место+результат) равны — already (resolved-подобный, без
+    действий, в БД ничего); отличаются — update-candidate с диффом
+    место/результат. CARDLESS (без карточки): точная копия контента
+    существующего участия — already; контент-ключ (ФИО+дисциплина) совпал,
+    контент другой — possible-duplicate (явное решение «пропустить/добавить
+    как новое», обновить cardless-участие нельзя); иначе ready.
+
+    Возвращает {'status', 'match', 'diff'}: status — ready/already/
+    update-candidate/possible-duplicate, match — существующее участие,
+    diff — {'position'/'result': (старое, новое)} только изменившихся полей.
+    """
+    if student is not None:
+        identity = ('ref', student['id'], dedup_discipline(row.get('discipline')))
+        match = next(
+            (
+                participant
+                for participant in existing_participants
+                if event_participant_identity(participant, custom_fields) == identity
+            ),
+            None,
+        )
+        if match is None:
+            return {'status': 'ready', 'match': None, 'diff': None}
+        _, old_result = event_participation_effective_values(match, custom_fields)
+        new_place = row.get('position')
+        if dedup_place(match['position']) == dedup_place(new_place) and dedup_text(old_result) == dedup_text(
+            row.get('result')
+        ):
+            return {'status': 'already', 'match': match, 'diff': None}
+        diff: dict[str, tuple[str, str]] = {}
+        if dedup_place(match['position']) != dedup_place(new_place):
+            diff['position'] = (event_import_diff_value(match['position']), event_import_diff_value(new_place))
+        if dedup_text(old_result) != dedup_text(row.get('result')):
+            diff['result'] = (event_import_diff_value(old_result), event_import_diff_value(row.get('result')))
+        return {'status': 'update-candidate', 'match': match, 'diff': diff}
+    if competition is not None:
+        content = competition_content(competition, custom_fields)
+        exact = next(
+            (
+                participant
+                for participant in existing_participants
+                if event_participant_content(participant, custom_fields) == content
+            ),
+            None,
+        )
+        if exact is not None:
+            return {'status': 'already', 'match': exact, 'diff': None}
+    content_key = (dedup_text(row['full_name']), dedup_discipline(row.get('discipline')))
+    possible = next(
+        (
+            participant
+            for participant in existing_participants
+            if (
+                dedup_text(participant['student_name']),
+                dedup_discipline(event_participation_effective_values(participant, custom_fields)[0]),
+            )
+            == content_key
+        ),
+        None,
+    )
+    if possible is not None:
+        return {'status': 'possible-duplicate', 'match': possible, 'diff': None}
+    return {'status': 'ready', 'match': None, 'diff': None}
+
+
+def event_import_row_snapshot(row: dict) -> tuple:
+    """Полный снимок строки для сравнения in-file (равенство контента):
+    базовые колонки (с дисциплиной/результатом) + custom, strip + casefold —
+    та же форма, что у event_import_duplicate_rows."""
+    return (
+        tuple((row[column] or '').strip().casefold() for column in EVENT_PARTICIPANT_SNAPSHOT_KEYS),
+        tuple(sorted((key, (value or '').strip().casefold()) for key, value in row['custom'].items())),
+    )
+
+
+def event_import_row_uniqueness_key(row: dict, student: dict | None) -> tuple:
+    """Ключ уникальности строки (P4): MATCHED — (карточка, дисциплина),
+    CARDLESS — (ФИО, дисциплина); совпадает с серверной проверкой батча
+    (identity MATCHED / контент-ключ CARDLESS)."""
+    discipline = dedup_discipline(row.get('discipline'))
+    if student is not None:
+        return ('ref', student['id'], discipline)
+    return ('name', dedup_text(row['full_name']), discipline)
+
+
+def event_import_infile_duplicates(
+    rows: Sequence[dict],
+    students: dict[int, dict | None],
+) -> tuple[dict[int, int], dict[int, list[int]]]:
+    """In-file повторы импорта участников (P4), по pending-строкам.
+
+    Возвращает (копия → якорь, строка → номера конфликтующих строк):
+    - точная копия снимка (casefold) БОЛЕЕ ПОЗДНЕЙ строки — производный
+      пропуск «дубликат в файле» (якорь — первая строка группы по
+      row_number; флаг НЕ sticky: разобранный якорь продвигает следующую
+      копию; в bulk не входит, завершение не блокирует);
+    - тот же ключ уникальности (карточка/ФИО + дисциплина) при РАЗНОМ
+      контенте — взаимный конфликт строк (v2-семантика «требуют решения»,
+      пока одна из строк не разобрана): сервер обе не вставит.
+    """
+    anchor_by_snapshot: dict[tuple, int] = {}
+    duplicate_of: dict[int, int] = {}
+    anchor_rows: list[dict] = []
+    for row in sorted(rows, key=lambda item: item['row_number']):
+        snapshot = event_import_row_snapshot(row)
+        anchor = anchor_by_snapshot.get(snapshot)
+        if anchor is not None:
+            duplicate_of[row['row_number']] = anchor
+            continue
+        anchor_by_snapshot[snapshot] = row['row_number']
+        anchor_rows.append(row)
+    by_key: dict[tuple, list[dict]] = {}
+    for row in anchor_rows:
+        by_key.setdefault(event_import_row_uniqueness_key(row, students.get(row['row_number'])), []).append(row)
+    conflicts: dict[int, list[int]] = {}
+    for group in by_key.values():
+        if len(group) > 1:
+            numbers = [row['row_number'] for row in group]
+            for row in group:
+                conflicts[row['row_number']] = sorted(number for number in numbers if number != row['row_number'])
+    return duplicate_of, conflicts
+
+
+# Производные статусы pending-строк (P4): пересчитываются на каждом рендере,
+# в сессии НЕ фиксируются (не sticky) — изменение БД/строк меняет их сами.
+EVENT_IMPORT_STATUS_FILE_DUPLICATE = 'file-duplicate'
+EVENT_IMPORT_STATUS_CONFLICT = 'conflict'
+# Финальные статусы строк: производные pending + разобранные (sticky).
+EVENT_IMPORT_DERIVED_RESOLVED = (EVENT_IMPORT_STATUS_FILE_DUPLICATE, 'already')
+EVENT_IMPORT_REVIEW_STATUSES = ('update-candidate', 'possible-duplicate', EVENT_IMPORT_STATUS_CONFLICT)
+
+
+def event_import_pending_states(
+    storage: SQLiteAdapter,
+    event: dict,
+    session: dict,
+    custom_fields: Sequence[CustomField],
+) -> dict[int, dict]:
+    """Один проход по pending-строкам сессии (P4): кандидаты, эффективная
+    карточка, автозаполнение, снимок для build_competition, валидация,
+    классификация против живых участников события и in-file повторы.
+    Только чтение; вызывается предпросмотром, завершением и guard'ами
+    вставки — классификация везде одинаковая.
+
+    Возвращает {row_number: state}; state['import_status'] — финальный
+    производный статус строки (classify-статус с наложением in-file:
+    точная копия — file-duplicate, конфликт ключей — conflict)."""
+    preset = event_participant_preset(event)
+    existing_participants = storage.list_calendar_event_participants(event['id'])
+    all_custom_fields = storage.get_custom_fields()
+    file_groups = student_file_group_institutes(session['rows'])
+    states: dict[int, dict] = {}
+    for row in session['rows']:
+        if row['status'] != 'pending':
+            continue
+        candidates = storage.find_student_candidates(row['full_name'])
+        student = event_import_effective_student(storage, row, candidates)
+        record, autofilled, hints = event_import_row_record(storage, row, preset, student, custom_fields, file_groups)
+        competition, validation_error = build_event_participant_competition(
+            record, custom_fields, storage, result=row.get('result', '')
+        )
+        classification = classify_event_import_row(existing_participants, row, student, competition, all_custom_fields)
+        states[row['row_number']] = {
+            'candidates': candidates,
+            'student': student,
+            'record': record,
+            'autofilled': autofilled,
+            'hints': hints,
+            'competition': competition,
+            'validation_error': validation_error,
+            'classification': classification,
+        }
+    duplicate_of, conflicts = event_import_infile_duplicates(
+        [row for row in session['rows'] if row['status'] == 'pending'],
+        {number: state['student'] for number, state in states.items()},
+    )
+    for number, state in states.items():
+        state['duplicate_of'] = duplicate_of.get(number)
+        state['conflict_rows'] = conflicts.get(number)
+        if state['duplicate_of'] is not None:
+            state['import_status'] = EVENT_IMPORT_STATUS_FILE_DUPLICATE
+        elif state['classification']['status'] == 'ready' and state['conflict_rows']:
+            state['import_status'] = EVENT_IMPORT_STATUS_CONFLICT
+        else:
+            state['import_status'] = state['classification']['status']
+    return states
+
+
 def event_import_row_display(record: dict, competition: Competition | None) -> dict:
     """Значения строки для таблицы предпросмотра: из ПОСТРОЕННОЙ записи
     (ровно то, что будет вставлено — с канонизацией справочников), при
-    ошибке валидации — из record после автозаполнения."""
+    ошибке валидации — из record после автозаполнения. P4: дисциплина и
+    результат участия — те же колонки таблицы (пустые рисуются тире)."""
     if competition is not None:
         return {
             'sex': competition.student_sex,
@@ -2492,6 +2901,8 @@ def event_import_row_display(record: dict, competition: Competition | None) -> d
             'group': competition.group,
             'course': competition.course,
             'position': competition.position,
+            'discipline': competition.discipline or '',
+            'result': competition.result or '',
         }
     return {
         'sex': record.get('Пол', ''),
@@ -2499,7 +2910,68 @@ def event_import_row_display(record: dict, competition: Competition | None) -> d
         'group': record.get('Группа', ''),
         'course': record.get('Курс', ''),
         'position': record.get('Место', ''),
+        'discipline': record.get('Дисциплина', ''),
+        'result': record.get('Результат', ''),
     }
+
+
+def event_import_pending_category(import_status: str, validation_error: str | None) -> str:
+    """Финальная категория pending-строки (P4): ошибочные — валидация;
+    «уже существует»/«дубликат в файле» — «Решено» (производные, без
+    действий); update-candidate/possible-duplicate/конфликт файла —
+    «Требуют решения»; готовые (в т.ч. без карточки) — «Готовы»."""
+    if validation_error:
+        return 'error'
+    if import_status in EVENT_IMPORT_DERIVED_RESOLVED:
+        return 'resolved'
+    if import_status in EVENT_IMPORT_REVIEW_STATUSES:
+        return 'review'
+    return 'ready'
+
+
+def event_import_pending_view(
+    view: dict,
+    row: dict,
+    state: dict,
+    custom_fields: Sequence[CustomField],
+    existing_participants: Sequence[dict],
+) -> str:
+    """Заполнить view pending-строки производными данными classify-прохода и
+    вернуть её категорию (P4). Заодно фиксирует в строке сессии признаки
+    последнего рендера: bulk-commit берёт только «готовые» строки и
+    отменяется целиком, если их состав изменился ПОСЛЕ рендера."""
+    student = state['student']
+    competition = state['competition']
+    import_status = state['import_status']
+    view.update(
+        {
+            'candidates': state['candidates'],
+            'effective_student': student,
+            'auto_preselected': student is not None and row.get('student_id') is None,
+            'autofilled': state['autofilled'],
+            'hints': state['hints'],
+            'validation_error': state['validation_error'],
+            'display': event_import_row_display(state['record'], competition),
+            'import_status': import_status,
+            'classification': state['classification'],
+            'file_anchor': state['duplicate_of'],
+            'conflict_rows': state['conflict_rows'],
+        }
+    )
+    view['custom_display'] = {
+        field.label: (
+            competition.extra_data.get(field.key, '')
+            if competition is not None
+            else state['record'].get(field.label, '')
+        )
+        for field in custom_fields
+        if field.key in row['custom']
+    }
+    view['existing'] = event_import_existing_participations(existing_participants, row, student)
+    row['had_student_id'] = student['id'] if student else None
+    row['had_validation_error'] = bool(state['validation_error'])
+    row['had_import_ready'] = import_status == 'ready' and not state['validation_error']
+    return event_import_pending_category(import_status, state['validation_error'])
 
 
 def event_import_preview_context(
@@ -2511,23 +2983,15 @@ def event_import_preview_context(
     """Контекст предпросмотра импорта участников.
 
     Всё производное (кандидаты, автозаполнение, подсказки, дубли файла,
-    существующие участия, валидация, категории, счётчики) пересчитывается
-    при каждом рендере; в сессии — строки файла, явные решения и
-    фиксируемые рендером признаки had_student_id/had_validation_error
-    (см. event_import_bulk_rows).
+    существующие участия, валидация, классификация повторов P4, категории,
+    счётчики) пересчитывается при каждом рендере; в сессии — строки файла,
+    явные решения и фиксируемые рендером признаки had_student_id/
+    had_validation_error/had_import_ready (см. event_import_bulk_rows).
     """
     duplicates = event_import_duplicate_rows(session['rows'])
-    # Блокирующие дубли — только среди не разобранных строк (§17): после
-    # явного решения над копией (пропуск/добавление) строка разблокируется.
-    pending_duplicates = event_import_pending_duplicates(session['rows'])
-    file_groups = student_file_group_institutes(session['rows'])
-    preset = event_participant_preset(event)
     existing_participants = storage.list_calendar_event_participants(event['id'])
+    states = event_import_pending_states(storage, event, session, custom_fields)
     groups: dict[str, list[dict]] = {'ready': [], 'review': [], 'error': [], 'resolved': []}
-    resolved_counts = {'added': 0, 'skipped': 0}
-    pending = 0
-    linked_ready = 0
-    unlinked_ready = 0
     for row in session['rows']:
         status = row['status']
         view = {
@@ -2542,60 +3006,44 @@ def event_import_preview_context(
             'custom_display': {},
             'duplicate_rows': duplicates.get(row['row_number']),
             'existing': [],
+            'import_status': status,
+            'classification': None,
+            'update_diff': None,
+            'file_anchor': None,
+            'conflict_rows': None,
         }
         if status == 'pending':
-            pending += 1
-            view['candidates'] = storage.find_student_candidates(row['full_name'])
-            student = event_import_effective_student(storage, row, view['candidates'])
-            view['effective_student'] = student
-            view['auto_preselected'] = student is not None and row.get('student_id') is None
-            record, autofilled, hints = event_import_row_record(
-                storage, row, preset, student, custom_fields, file_groups
+            category = event_import_pending_view(
+                view, row, states[row['row_number']], custom_fields, existing_participants
             )
-            view['autofilled'] = autofilled
-            view['hints'] = hints
-            competition, validation_error = build_event_participant_competition(record, custom_fields, storage)
-            view['validation_error'] = validation_error
-            view['display'] = event_import_row_display(record, competition)
-            view['custom_display'] = {
-                field.label: (
-                    competition.extra_data.get(field.key, '')
-                    if competition is not None
-                    else record.get(field.label, '')
-                )
-                for field in custom_fields
-                if field.key in row['custom']
-            }
-            view['existing'] = event_import_existing_participations(existing_participants, row, student)
-            # Классификация рендера фиксируется в строке сессии: bulk-commit
-            # берёт только «готовые» строки и отменяется целиком, если их
-            # состав изменился ПОСЛЕ рендера. После правки строки следующий
-            # рендер пересчитает признаки естественно.
-            row['had_student_id'] = student['id'] if student else None
-            row['had_validation_error'] = bool(validation_error)
-            # Сопоставление с карточкой НЕ блокирует импорт: «Готова» — любая
-            # валидная строка без не разобранной строки-дубля (карточка при
-            # этом может подобраться автоматически — единственный точный
-            # кандидат). «Требуют решения» — только неразобранные дубли,
-            # ошибочные — только ошибки валидации.
-            blocked_by_duplicate = len(pending_duplicates.get(row['row_number'], [])) > 1
-            if validation_error:
-                category = 'error'
-            elif not blocked_by_duplicate:
-                category = 'ready'
-                if student is None:
-                    unlinked_ready += 1
-                else:
-                    linked_ready += 1
-            else:
-                category = 'review'
         elif status == 'error':
             category = 'error'
         else:
             category = 'resolved'
-            if status in resolved_counts:
-                resolved_counts[status] += 1
+            if status == 'updated':
+                view['update_diff'] = row.get('update_diff')
         groups[category].append(view)
+    resolved_counts = {'added': 0, 'updated': 0, 'kept': 0, 'skipped': 0, 'already': 0, 'file_duplicate': 0}
+    for view in groups['resolved']:
+        if view['status'] in resolved_counts:
+            resolved_counts[view['status']] += 1
+        elif view['import_status'] == 'already':
+            resolved_counts['already'] += 1
+        else:
+            resolved_counts['file_duplicate'] += 1
+    linked_ready = sum(1 for view in groups['ready'] if view['effective_student'] is not None)
+    resolved_parts = [
+        f'{label} {resolved_counts[key]}'
+        for label, key in (
+            ('добавлено', 'added'),
+            ('обновлено', 'updated'),
+            ('оставлено', 'kept'),
+            ('уже существует', 'already'),
+            ('дубликатов в файле', 'file_duplicate'),
+            ('пропущено', 'skipped'),
+        )
+        if resolved_counts[key]
+    ]
     return {
         'token': session['token'],
         'event': decorate_calendar_event(event),
@@ -2605,49 +3053,69 @@ def event_import_preview_context(
         'custom_keys': {field.label: field.key for field in custom_fields},
         'groups': groups,
         'total': len(session['rows']),
-        'pending': pending,
+        # pending — строки, требующие решения (готовые + review): производные
+        # already/«дубликат в файле» решения не требуют.
+        'pending': len(groups['ready']) + len(groups['review']),
         'ready_count': len(groups['ready']),
         'review_count': len(groups['review']),
         'error_count': len(groups['error']),
         'resolved_count': len(groups['resolved']),
+        'resolved_line': ', '.join(resolved_parts),
+        'already_count': resolved_counts['already'],
+        'file_duplicate_count': resolved_counts['file_duplicate'],
         'added_count': resolved_counts['added'],
+        'updated_count': resolved_counts['updated'],
+        'kept_count': resolved_counts['kept'],
         'skipped_count': resolved_counts['skipped'],
         # Для confirm-текста bulk: сколько готовых строк уйдут со связью и
         # сколько — без карточки.
         'linked_ready': linked_ready,
-        'unlinked_ready': unlinked_ready,
+        'unlinked_ready': len(groups['ready']) - linked_ready,
     }
 
 
 def event_import_bulk_rows(session: dict) -> list[dict]:
-    """Строки массового добавления: ровно группа «Готовы к добавлению» на
-    момент последнего рендера предпросмотра — счётчик кнопки совпадает с
-    числом вставляемых строк.
+    """Строки массового добавления: ровно строки, которые последний рендер
+    предпросмотра классифицировал как «готовые» (had_import_ready, P4), —
+    счётчик кнопки совпадает с числом вставляемых строк.
 
-    Признаки had_validation_error фиксирует контекст предпросмотра; строки
-    «Требуют решения» (не разобранные дубли файла) в батч НЕ входят и отмену
-    не вызывают — повторная проверка на момент клика отменяет всё, только
-    если состав «готовых» строк изменился. Сопоставление с карточкой
-    обязательным НЕ является: строка без карточки добавляется с
-    student_ref_id IS NULL."""
-    pending_duplicates = event_import_pending_duplicates(session['rows'])
+    В батч НЕ входят: ошибочные строки, строки review (update-candidate /
+    possible-duplicate / конфликт файла — обновление существующих только
+    построчными действиями), производные «уже существует» и «дубликат в
+    файле». Сопоставление с карточкой обязательным НЕ является: строка без
+    карточки добавляется с student_ref_id IS NULL. Авторитетная повторная
+    проверка уникальности — storage.apply_event_participation_batch под
+    _lock на момент клика: коллизия откатывает весь батч."""
     return [
         row
         for row in session['rows']
-        if row['status'] == 'pending'
-        and not row.get('had_validation_error')
-        and len(pending_duplicates.get(row['row_number'], [])) <= 1
+        if row['status'] == 'pending' and not row.get('had_validation_error') and row.get('had_import_ready')
     ]
 
 
-def event_import_counters(session: dict) -> dict[str, int]:
-    """Итоги сессии для аудита/сообщений (без содержимого файла)."""
-    counters = {'added': 0, 'skipped': 0, 'errors': 0}
+def event_import_counters(session: dict, derived_counts: dict[str, int] | None = None) -> dict[str, int]:
+    """Итоги сессии для аудита/сообщений (без содержимого файла).
+
+    P4: добавлены updated/kept (построчные решения по существующим участиям)
+    и производные already_exists/file_duplicates (строки, оказавшиеся
+    точными повторами — в БД ничего не писалось)."""
+    counters = {
+        'added': 0,
+        'updated': 0,
+        'kept': 0,
+        'skipped': 0,
+        'already_exists': 0,
+        'file_duplicates': 0,
+        'errors': 0,
+    }
     for row in session['rows']:
         if row['status'] == 'error':
             counters['errors'] += 1
         elif row['status'] in counters:
             counters[row['status']] += 1
+    derived = derived_counts or {}
+    counters['already_exists'] = derived.get('already', 0)
+    counters['file_duplicates'] = derived.get('file-duplicate', 0)
     counters['total'] = len(session['rows'])
     return counters
 
@@ -2943,7 +3411,8 @@ async def event_import_row_skip(request: Request, event_id: str, token: str, row
 
 @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/edit')
 async def event_import_row_edit(request: Request, event_id: str, token: str, row_number: str):
-    """Правка строки в сессии: ФИО/пол/институт/группа/курс/место/custom.
+    """Правка строки в сессии: ФИО/пол/институт/группа/курс/место/дисциплина/
+    результат/custom.
 
     Некорректные данные — строка становится ошибочной; после правки ФИО
     кандидаты и автозаполнение пересчитаются при следующем рендере (строка
@@ -2980,8 +3449,11 @@ async def event_import_row_edit(request: Request, event_id: str, token: str, row
     row['group'] = get_form_value(request, 'group').strip()
     row['course'] = get_form_value(request, 'course').strip()
     row['position'] = get_form_value(request, 'position').strip()
+    row['discipline'] = get_form_value(request, 'discipline').strip()
+    row['result'] = get_form_value(request, 'result').strip()
     # Все импортируемые custom-поля (в т.ч. отсутствовавшие в файле —
-    # обязательное поле можно заполнить при правке); url-поля сюда не входят.
+    # обязательное поле можно заполнить при правке); url-поля и коллидирующие
+    # label «Дисциплина»/«Результат» сюда не входят (фиксированные колонки).
     for field in custom_fields:
         row['custom'][field.key] = get_form_value(request, f'custom__{field.key}').strip()
     error = None
@@ -3003,7 +3475,7 @@ async def event_import_row_edit(request: Request, event_id: str, token: str, row
             custom_fields,
             student_file_group_institutes(session['rows']),
         )
-        _, error = build_event_participant_competition(record, custom_fields, storage)
+        _, error = build_event_participant_competition(record, custom_fields, storage, result=row['result'])
     if error is not None:
         row['status'] = 'error'
         row['error'] = error
@@ -3019,6 +3491,45 @@ async def event_import_row_edit(request: Request, event_id: str, token: str, row
     )
 
 
+def event_import_insert_guard(
+    storage: SQLiteAdapter,
+    event: dict,
+    session: dict,
+    row: dict,
+    student: dict | None,
+    competition: Competition | None,
+) -> str | None:
+    """Серверная повторная классификация строки перед одиночной вставкой
+    (add/create-student, P4): одним запросом против живых участников события
+    + проверка якоря in-file. Возвращает текст ошибки или None (вставлять
+    можно). possible-duplicate НЕ отказ — «Добавить как новое» явное решение
+    админа; авторитетная повторная проверка под _lock — в
+    storage.apply_event_participation_batch."""
+    classification = classify_event_import_row(
+        storage.list_calendar_event_participants(event['id']),
+        row,
+        student,
+        competition,
+        storage.get_custom_fields(),
+    )
+    status = classification['status']
+    if status == 'already':
+        return 'такое участие уже существует — точная копия в списке участников'
+    if status == 'update-candidate':
+        return 'участие с этой карточкой и дисциплиной уже существует — обновите его кнопкой «Обновить существующее»'
+    # In-file копия с ещё не разобранным якорем: якорь добавят/пропустят,
+    # копия — производный повтор (сервер обе не вставляет).
+    snapshot = event_import_row_snapshot(row)
+    for other in session['rows']:
+        if (
+            other['status'] == 'pending'
+            and other['row_number'] < row['row_number']
+            and event_import_row_snapshot(other) == snapshot
+        ):
+            return f'дубликат в файле — повтор строки {other["row_number"]}'
+    return None
+
+
 def event_import_add_row_participation(
     request: Request, storage: SQLiteAdapter, event: dict, session: dict, row: dict
 ) -> str | None:
@@ -3027,9 +3538,11 @@ def event_import_add_row_participation(
     ошибки или None.
 
     Кандидаты и валидация пересчитываются на момент клика — предпросмотр
-    мог устареть. Вставка — обычным путём записи реестра (пресет события,
-    approved, student_ref_id подобранной карточки или NULL — сопоставить
-    можно позже)."""
+    мог устареть. P4: вставка — через apply_event_participation_batch
+    (повторная проверка уникальности под _lock + справочники одной
+    транзакцией); коллизия — отказ, строка остаётся pending. Пресет события,
+    approved, student_ref_id подобранной карточки или NULL (сопоставить
+    можно позже), result — informational-колонка участия."""
     candidates = storage.find_student_candidates(row['full_name'])
     student = event_import_effective_student(storage, row, candidates)
     custom_fields = event_import_custom_fields(storage.get_custom_fields())
@@ -3041,19 +3554,22 @@ def event_import_add_row_participation(
         custom_fields,
         student_file_group_institutes(session['rows']),
     )
-    competition, validation_error = build_event_participant_competition(record, custom_fields, storage)
+    competition, validation_error = build_event_participant_competition(
+        record, custom_fields, storage, result=row.get('result', '')
+    )
     if validation_error is not None:
         return validation_error
+    guard_error = event_import_insert_guard(storage, event, session, row, student, competition)
+    if guard_error is not None:
+        return guard_error
     competition.student_ref_id = student['id'] if student else None
     # P2: участие явно связывается с событием (участники читаются по ссылке,
     # не по пресету).
     competition.calendar_event_id = event['id']
-    ensure_catalog_values(storage, [competition])
-    storage.save_competitions(
-        [competition],
-        review_status='approved',
-        owner_id=get_current_user_id(request),
-    )
+    try:
+        storage.apply_event_participation_batch(event['id'], [competition], owner_id=get_current_user_id(request))
+    except EventParticipationConflictError:
+        return 'участники события изменились — обновите страницу и проверьте строки'
     row['status'] = 'added'
     row['student_id'] = student['id'] if student else None
     row['added_student_id'] = student['id'] if student else None
@@ -3097,6 +3613,233 @@ async def event_import_row_add(request: Request, event_id: str, token: str, row_
         message=f'Строка {row["row_number"]}: участник добавлен.',
         url=event_import_preview_url(event['id'], token),
     )
+
+
+def event_import_update_candidate_classification(
+    storage: SQLiteAdapter, event: dict, session: dict, row: dict
+) -> tuple[dict | None, Competition | None, str | None]:
+    """Повторная классификация строки для update-existing/keep-existing (P4):
+    (classification, competition, ошибка). Только update-candidate-строки
+    годятся для обоих действий — существующее участие той же карточки и
+    дисциплины с отличающимися местом/результатом."""
+    candidates = storage.find_student_candidates(row['full_name'])
+    student = event_import_effective_student(storage, row, candidates)
+    custom_fields = event_import_custom_fields(storage.get_custom_fields())
+    record, _, _ = event_import_row_record(
+        storage,
+        row,
+        event_participant_preset(event),
+        student,
+        custom_fields,
+        student_file_group_institutes(session['rows']),
+    )
+    competition, validation_error = build_event_participant_competition(
+        record, custom_fields, storage, result=row.get('result', '')
+    )
+    if validation_error is not None:
+        return None, None, validation_error
+    classification = classify_event_import_row(
+        storage.list_calendar_event_participants(event['id']),
+        row,
+        student,
+        competition,
+        storage.get_custom_fields(),
+    )
+    return classification, competition, None
+
+
+@app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/update-existing')
+async def event_import_row_update_existing(request: Request, event_id: str, token: str, row_number: str):
+    """Обновить место/результат СУЩЕСТВУЮЩЕГО участия по строке предпросмотра
+    (P4; только update-candidate-строки: та же карточка+дисциплина, место
+    или результат отличаются).
+
+    Повторная классификация на клике: участие найдено и mutable отличаются —
+    restricted-update (storage.update_event_participation_result: SET только
+    position/result, WHERE id + calendar_event_id — снимок, custom-поля,
+    вложения, student_ref_id и связь с событием недостижимы). Участие
+    исчезло/стало равным — flash, строка остаётся pending и
+    переклассифицируется. Фиксирует статус updated + дифф; аудит
+    event_participant_updated."""
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    event, session, row, error = resolve_event_import_row(request, event_id, token, row_number)
+    if error is not None:
+        return error
+    if row['status'] == 'error':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} содержит ошибку — исправьте её.',
+            url=event_import_preview_url(event['id'], token),
+        )
+    if row['status'] != 'pending':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=event_import_preview_url(event['id'], token),
+        )
+
+    storage = get_storage(request.app)
+    classification, competition, recheck_error = await asyncio.to_thread(
+        event_import_update_candidate_classification, storage, event, session, row
+    )
+    if recheck_error is not None:
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]}: {recheck_error}',
+            url=event_import_preview_url(event['id'], token),
+        )
+    if classification is None or classification['status'] != 'update-candidate' or competition is None:
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]}: обновление недоступно — участие не найдено '
+            'или место/результат не отличаются.',
+            url=event_import_preview_url(event['id'], token),
+        )
+    match = classification['match']
+    updated = await asyncio.to_thread(
+        storage.update_event_participation_result,
+        match['record_id'],
+        event['id'],
+        competition.position,
+        row.get('result') or None,
+    )
+    if not updated:
+        return build_redirect_with_message(
+            error='Участники события изменились — обновите страницу и проверьте строки.',
+            url=event_import_preview_url(event['id'], token),
+        )
+    row['status'] = 'updated'
+    # Дифф фиксируется на момент действия (дальнейшие изменения БД бейдж не меняют).
+    row['update_diff'] = classification['diff']
+    _, old_result = event_participation_effective_values(match, storage.get_custom_fields())
+    log_audit_event(
+        request,
+        'event_participant_updated',
+        {
+            'event_id': event['id'],
+            'record_id': match['record_id'],
+            'position': {'old': match['position'], 'new': competition.position},
+            'result': {'old': old_result, 'new': (row.get('result') or '')},
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]}: существующее участие обновлено.',
+        url=event_import_preview_url(event['id'], token),
+    )
+
+
+@app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/keep-existing')
+async def event_import_row_keep_existing(request: Request, event_id: str, token: str, row_number: str):
+    """Оставить СУЩЕСТВУЮЩЕЕ участие как есть по строке-кандидату (P4; только
+    update-candidate-строки): статус kept, в БД не меняется НИЧЕГО, аудит не
+    пишется — явное решение «новое место/результат из файла не переносим»."""
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+    event, session, row, error = resolve_event_import_row(request, event_id, token, row_number)
+    if error is not None:
+        return error
+    if row['status'] == 'error':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} содержит ошибку — исправьте её.',
+            url=event_import_preview_url(event['id'], token),
+        )
+    if row['status'] != 'pending':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]} уже разобрана.',
+            url=event_import_preview_url(event['id'], token),
+        )
+
+    storage = get_storage(request.app)
+    classification, _, recheck_error = await asyncio.to_thread(
+        event_import_update_candidate_classification, storage, event, session, row
+    )
+    if recheck_error is not None:
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]}: {recheck_error}',
+            url=event_import_preview_url(event['id'], token),
+        )
+    if classification is None or classification['status'] != 'update-candidate':
+        return build_redirect_with_message(
+            error=f'Строка {row["row_number"]}: оставление недоступно — участие не найдено '
+            'или место/результат не отличаются.',
+            url=event_import_preview_url(event['id'], token),
+        )
+    row['status'] = 'kept'
+    return build_redirect_with_message(
+        message=f'Строка {row["row_number"]}: оставлено существующее участие.',
+        url=event_import_preview_url(event['id'], token),
+    )
+
+
+def event_import_create_student_participation(
+    request: Request,
+    storage: SQLiteAdapter,
+    event: dict,
+    session: dict,
+    row: dict,
+    full_name: str,
+    sex: str,
+    hints: dict,
+    course: str,
+) -> str | None:
+    """Создать карточку + связанное участие по строке (P4). Возвращает текст
+    ошибки или None. Валидация и guard — ДО создания карточки (провал не
+    должен оставлять карточку без участия); вставка — guarded-батч."""
+    file_groups = student_file_group_institutes(session['rows'])
+    # Валидация будущего участия с данными БУДУЩЕЙ карточки.
+    future_student = {
+        'id': 0,
+        'full_name': full_name,
+        'sex': sex,
+        'institute': hints['institute'],
+        'group_name': hints['group'],
+        'course': course,
+    }
+    custom_fields = event_import_custom_fields(storage.get_custom_fields())
+    record, _, _ = event_import_row_record(
+        storage,
+        row,
+        event_participant_preset(event),
+        future_student,
+        custom_fields,
+        file_groups,
+    )
+    competition, validation_error = build_event_participant_competition(
+        record, custom_fields, storage, result=row.get('result', '')
+    )
+    if validation_error is not None:
+        return validation_error
+    # Тот же guard, что у одиночного добавления (P4): для БУДУЩЕЙ карточки
+    # (id 0) identity-коллизий нет по построению, проверка единая для всех
+    # путей вставки — включая in-file якорь и точные копии.
+    guard_error = event_import_insert_guard(storage, event, session, row, future_student, competition)
+    if guard_error is not None:
+        return guard_error
+
+    student_id = storage.create_student(full_name, sex, hints['institute'], hints['group'], course)
+    log_audit_event(
+        request,
+        'student_created',
+        {'student_id': student_id, 'full_name': full_name, 'source': 'event-participant-import'},
+    )
+    competition.student_ref_id = student_id
+    # P2: участие явно связывается с событием (участники читаются по ссылке,
+    # не по пресету). P4: вставка — apply_event_participation_batch (повторная
+    # проверка + справочники одной транзакцией).
+    competition.calendar_event_id = event['id']
+    try:
+        storage.apply_event_participation_batch(event['id'], [competition], owner_id=get_current_user_id(request))
+    except EventParticipationConflictError:
+        return 'участники события изменились — обновите страницу и проверьте строки'
+    row['status'] = 'added'
+    row['student_id'] = student_id
+    row['student_forced_none'] = False
+    row['added_student_id'] = student_id
+    log_audit_event(
+        request,
+        'event_participant_imported',
+        {'event_id': event['id'], 'student_ref_id': student_id},
+    )
+    return None
 
 
 @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/create-student')
@@ -3144,64 +3887,61 @@ async def event_import_row_create_student(request: Request, event_id: str, token
             url=event_import_preview_url(event['id'], token),
         )
 
-    file_groups = student_file_group_institutes(session['rows'])
-    hints = student_catalog_hints(storage, institute, group_name, file_groups)
-
-    # Валидация будущего участия ДО создания карточки: провал не должен
-    # оставлять карточку без участия.
-    future_student = {
-        'id': 0,
-        'full_name': full_name,
-        'sex': sex,
-        'institute': hints['institute'],
-        'group_name': hints['group'],
-        'course': course,
-    }
-    custom_fields = event_import_custom_fields(storage.get_custom_fields())
-    record, _, _ = event_import_row_record(
+    hints = student_catalog_hints(storage, institute, group_name, student_file_group_institutes(session['rows']))
+    add_error = await asyncio.to_thread(
+        event_import_create_student_participation,
+        request,
         storage,
+        event,
+        session,
         row,
-        event_participant_preset(event),
-        future_student,
-        custom_fields,
-        file_groups,
+        full_name,
+        sex,
+        hints,
+        course,
     )
-    competition, validation_error = build_event_participant_competition(record, custom_fields, storage)
-    if validation_error is not None:
+    if add_error is not None:
         return build_redirect_with_message(
-            error=f'Строка {row["row_number"]}: {validation_error}',
+            error=f'Строка {row["row_number"]}: {add_error}',
             url=event_import_preview_url(event['id'], token),
         )
-
-    student_id = storage.create_student(full_name, sex, hints['institute'], hints['group'], course)
-    log_audit_event(
-        request,
-        'student_created',
-        {'student_id': student_id, 'full_name': full_name, 'source': 'event-participant-import'},
-    )
-    competition.student_ref_id = student_id
-    # P2: участие явно связывается с событием (участники читаются по ссылке,
-    # не по пресету).
-    competition.calendar_event_id = event['id']
-    ensure_catalog_values(storage, [competition])
-    storage.save_competitions(
-        [competition],
-        review_status='approved',
-        owner_id=get_current_user_id(request),
-    )
-    row['status'] = 'added'
-    row['student_id'] = student_id
-    row['student_forced_none'] = False
-    row['added_student_id'] = student_id
-    log_audit_event(
-        request,
-        'event_participant_imported',
-        {'event_id': event['id'], 'student_ref_id': student_id},
-    )
     return build_redirect_with_message(
         message=f'Строка {row["row_number"]}: студент «{full_name}» создан, участник добавлен.',
         url=event_import_preview_url(event['id'], token),
     )
+
+
+def event_import_prepare_bulk_rows(
+    storage: SQLiteAdapter,
+    event: dict,
+    session: dict,
+    custom_fields: Sequence[CustomField],
+) -> tuple[list[tuple[dict, Competition, dict | None]] | None, str | None]:
+    """Пересобрать строки bulk-батча на момент клика (P4): (prepared, None)
+    или (None, текст ошибки). Кандидаты/валидация пересчитываются, состав
+    «готовых» (had_student_id) сверяется с зафиксированным рендером."""
+    bulk_rows = event_import_bulk_rows(session)
+    file_groups = student_file_group_institutes(session['rows'])
+    preset = event_participant_preset(event)
+    prepared: list[tuple[dict, Competition, dict | None]] = []
+    for row in bulk_rows:
+        candidates = storage.find_student_candidates(row['full_name'])
+        student = event_import_effective_student(storage, row, candidates)
+        actual_ref = student['id'] if student else None
+        if actual_ref != row.get('had_student_id'):
+            return None, 'Список карточек изменился — обновите страницу и проверьте строки.'
+        record, _, _ = event_import_row_record(storage, row, preset, student, custom_fields, file_groups)
+        competition, validation_error = build_event_participant_competition(
+            record, custom_fields, storage, result=row.get('result', '')
+        )
+        if validation_error is not None:
+            return None, f'Строка {row["row_number"]}: {validation_error}'
+        competition.student_ref_id = actual_ref
+        # P2: участие явно связывается с событием (участники читаются по
+        # ссылке, не по пресету).
+        competition.calendar_event_id = event['id']
+        prepared.append((row, competition, student))
+    return prepared, None
 
 
 @app.post('/calendar/<event_id>/participants/import/preview/<token>/bulk-commit')
@@ -3209,14 +3949,18 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
     """Добавить «готовые» строки одной транзакцией.
 
     В батч входят ТОЛЬКО строки «Готовы к добавлению» на момент последнего
-    рендера (фиксированный признак had_validation_error); неразобранные
-    строки в батч не входят. Предпроверка: эффективная карточка каждой
-    строки батча пересчитывается на момент клика и сравнивается с
-    зафиксированной рендером (had_student_id — id или None) — если состав
-    «готовых» изменился, не вставляется ничего (строки перейдут в правильные
-    группы при следующем рендере). Строка без карточки добавляется с
-    student_ref_id IS NULL (сопоставить можно позже). Сбой вставки — откат
-    всего батча вместе со справочниками (import_competitions).
+    рендера (фиксированные признаки had_validation_error/had_import_ready);
+    строки review (update-candidate/possible-duplicate/конфликт), производные
+    «уже существует»/«дубликат в файле» и ошибочные в батч не входят.
+    Предпроверка: эффективная карточка каждой строки батча пересчитывается
+    на момент клика и сравнивается с зафиксированной рендером
+    (had_student_id — id или None) — если состав «готовых» изменился, не
+    вставляется ничего (строки перейдут в правильные группы при следующем
+    рендере). Строка без карточки добавляется с student_ref_id IS NULL
+    (сопоставить можно позже). P4: вставка — apply_event_participation_batch:
+    повторная проверка уникальности (identity/cardless-контент) под _lock,
+    коллизия — откат всего батча вместе со справочниками и flash «участники
+    изменились»; уже существующие/дубли в файле в успешный батч не попадают.
     """
     auth_error = require_moderator(request)
     if auth_error is not None:
@@ -3229,39 +3973,32 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
         return session_error
 
     storage = get_storage(request.app)
-    custom_fields = event_import_custom_fields(storage.get_custom_fields())
-    bulk_rows = event_import_bulk_rows(session)
-    file_groups = student_file_group_institutes(session['rows'])
-    preset = event_participant_preset(event)
-    prepared: list[tuple[dict, Competition, dict | None]] = []
-    for row in bulk_rows:
-        candidates = storage.find_student_candidates(row['full_name'])
-        student = event_import_effective_student(storage, row, candidates)
-        actual_ref = student['id'] if student else None
-        if actual_ref != row.get('had_student_id'):
-            return build_redirect_with_message(
-                error='Список карточек изменился — обновите страницу и проверьте строки.',
-                url=event_import_preview_url(event['id'], token),
-            )
-        record, _, _ = event_import_row_record(storage, row, preset, student, custom_fields, file_groups)
-        competition, validation_error = build_event_participant_competition(record, custom_fields, storage)
-        if validation_error is not None:
-            return build_redirect_with_message(
-                error=f'Строка {row["row_number"]}: {validation_error}',
-                url=event_import_preview_url(event['id'], token),
-            )
-        competition.student_ref_id = actual_ref
-        # P2: участие явно связывается с событием (участники читаются по
-        # ссылке, не по пресету).
-        competition.calendar_event_id = event['id']
-        prepared.append((row, competition, student))
+    prepared, prepare_error = await asyncio.to_thread(
+        event_import_prepare_bulk_rows,
+        storage,
+        event,
+        session,
+        event_import_custom_fields(storage.get_custom_fields()),
+    )
+    if prepare_error is not None:
+        return build_redirect_with_message(
+            error=prepare_error,
+            url=event_import_preview_url(event['id'], token),
+        )
 
     if prepared:
-        await asyncio.to_thread(
-            storage.import_competitions,
-            [competition for _, competition, _ in prepared],
-            owner_id=get_current_user_id(request),
-        )
+        try:
+            await asyncio.to_thread(
+                storage.apply_event_participation_batch,
+                event['id'],
+                [competition for _, competition, _ in prepared],
+                owner_id=get_current_user_id(request),
+            )
+        except EventParticipationConflictError:
+            return build_redirect_with_message(
+                error='Участники события изменились — обновите страницу и проверьте строки.',
+                url=event_import_preview_url(event['id'], token),
+            )
     for row, _, student in prepared:
         row['status'] = 'added'
         row['student_id'] = student['id'] if student else None
@@ -3282,8 +4019,11 @@ async def event_import_finish(request: Request, event_id: str, token: str):
     """Завершить импорт: итоговое audit-событие с счётчиками (без содержимого
     файла), сессия удаляется.
 
-    Неразобранные pending-строки блокируют завершение; ошибочные — нет
-    (учтены как errors, их можно пропустить по одной).
+    Неразобранные pending-строки блокируют завершение; P4: производные
+    «уже существует»/«дубликат в файле» решений не требуют (учтены в
+    счётчиках already_exists/file_duplicates и отбрасываются вместе с
+    сессией); ошибочные — не блокируют (учтены как errors, их можно
+    пропустить по одной).
     """
     auth_error = require_moderator(request)
     if auth_error is not None:
@@ -3295,22 +4035,43 @@ async def event_import_finish(request: Request, event_id: str, token: str):
     if session_error is not None:
         return session_error
 
-    pending = sum(1 for row in session['rows'] if row['status'] == 'pending')
+    storage = get_storage(request.app)
+    states = event_import_pending_states(
+        storage, event, session, event_import_custom_fields(storage.get_custom_fields())
+    )
+    # Требуют решения: готовые и review-строки; производные повторы
+    # (already/дубликат в файле) завершение не блокируют.
+    pending = sum(1 for state in states.values() if state['import_status'] not in EVENT_IMPORT_DERIVED_RESOLVED)
     if pending:
         return build_redirect_with_message(
             error=f'Завершение недоступно: не разобрано строк: {pending}.',
             url=event_import_preview_url(event['id'], token),
         )
 
-    counters = event_import_counters(session)
+    derived_counts: dict[str, int] = {}
+    for state in states.values():
+        derived_counts[state['import_status']] = derived_counts.get(state['import_status'], 0) + 1
+    counters = event_import_counters(session, derived_counts)
     log_audit_event(
         request,
         'event_participants_import_completed',
         {'event_id': event['id'], 'event_name': event['name'], 'counters': counters},
     )
     event_import_sessions.pop(token, None)
+    summary = ', '.join(
+        f'{label} {counters[key]}'
+        for label, key in (
+            ('добавлено', 'added'),
+            ('обновлено', 'updated'),
+            ('оставлено', 'kept'),
+            ('уже существует', 'already_exists'),
+            ('дубликатов в файле', 'file_duplicates'),
+            ('пропущено', 'skipped'),
+        )
+        if counters[key]
+    )
     return build_redirect_with_message(
-        message=(f'Импорт завершён: добавлено {counters["added"]}, ' f'пропущено {counters["skipped"]}.'),
+        message=f'Импорт завершён: {summary}.' if summary else 'Импорт завершён.',
         url=f'/calendar/{event["id"]}',
     )
 
@@ -4906,6 +5667,379 @@ async def delete_competition(request: Request, record_id: str):
         logger.warning('Attachment directory of record %s still exists after record deletion', numeric_id)
     log_audit_event(request, 'record_deleted', {'record_id': numeric_id, 'student_name': student_name})
     return redirect(to='/')
+
+
+# --- P5b: явные связки «запись → событие» (Registry ↔ Calendar). ---
+#
+# Страница связывания NULL-записи со соревнованием календаря: снимок записи,
+# GET-поиск событий с пресет-кандидатами (точное name+date+date_to) и диффом
+# 5 event-owned полей «после связывания», либо создание нового события прямо
+# со страницы записи (атомарно create+link). Сами операции — guarded UPDATE
+# в storage (link_participation_to_event / create_calendar_event_and_link):
+# гонку «двое связывают одну запись» закрывает calendar_event_id IS NULL.
+
+LINK_EVENT_CANDIDATE_CAP = 20
+LINK_EVENT_SEARCH_KEYS = ('name', 'sport', 'level', 'date_from', 'date_to')
+# Человекочитаемые метки 5 event-owned полей для диффа и подтверждений.
+LINK_EVENT_FIELD_LABELS: dict[str, str] = {
+    'name': 'название',
+    'sport': 'вид спорта',
+    'date': 'дата',
+    'date_to': 'дата окончания',
+    'level': 'уровень',
+}
+
+
+def parse_link_event_filters(args: dict) -> tuple[dict[str, str], str | None]:
+    """Параметры GET-поиска событий на странице связывания: подстроки
+    name/sport/level + границы периода дд.мм.гггг (валидация — как
+    parse_index_filters; некорректная дата — текст ошибки для 400)."""
+    filters = {key: (get_param(args, key) or '').strip() for key in ('name', 'sport', 'level')}
+    for key in ('date_from', 'date_to'):
+        raw_value = (get_param(args, key) or '').strip()
+        if raw_value:
+            try:
+                datetime.strptime(raw_value, settings.date_format)
+            except ValueError:
+                return {}, f'Некорректная дата в фильтре ({key}): {raw_value}'
+        filters[key] = raw_value
+    return filters, None
+
+
+def calendar_event_overlaps_period(event: dict, date_from: str, date_to: str) -> bool:
+    """Пересекается ли период события с границами фильтра (пустая граница —
+    не ограничивает). Записи и события хранят даты ISO-текстом."""
+    event_start = datetime.fromisoformat(event['date']).date()
+    event_end = datetime.fromisoformat(event['date_to'] or event['date']).date()
+    if date_from:
+        start_bound = datetime.strptime(date_from, settings.date_format).date()
+        if event_end < start_bound:
+            return False
+    if date_to:
+        end_bound = datetime.strptime(date_to, settings.date_format).date()
+        if event_start > end_bound:
+            return False
+    return True
+
+
+def filter_link_event_candidates(events: Sequence[dict], filters: dict[str, str]) -> list[dict]:
+    """Фильтрация событий поверх list_calendar_events(): casefold-подстрока
+    по названию/уровню/виду спорта + пересечение периода."""
+    name_query = filters['name'].casefold()
+    sport_query = filters['sport'].casefold()
+    level_query = filters['level'].casefold()
+    found = []
+    for event in events:
+        if name_query and name_query not in (event['name'] or '').casefold():
+            continue
+        if sport_query and sport_query not in (event['sport'] or '').casefold():
+            continue
+        if level_query and level_query not in (event['level'] or '').casefold():
+            continue
+        if not calendar_event_overlaps_period(event, filters['date_from'], filters['date_to']):
+            continue
+        found.append(event)
+    return found
+
+
+def event_is_record_preset(event: dict, record: Competition) -> bool:
+    """Точное совпадение события с пресетом записи — та же семантика, что у
+    _calendar_preset_match_sql (name + date + COALESCE(date_to, ''))."""
+    return (
+        event['name'] == record.name
+        and event['date'] == record.date.isoformat()
+        and (event.get('date_to') or '') == (record.date_to.isoformat() if record.date_to else '')
+    )
+
+
+def participation_field_changes(
+    name: str,
+    sport: str,
+    date: str,
+    date_to: str | None,
+    level: str,
+    event: dict,
+) -> dict[str, dict[str, str | None]]:
+    """old/new по 5 event-owned полям записи против события (сырые значения,
+    паттерн аудита calendar_event_edited)."""
+    return {
+        'name': {'old': name, 'new': event['name']},
+        'sport': {'old': sport, 'new': event['sport']},
+        'date': {'old': date, 'new': event['date']},
+        'date_to': {'old': date_to, 'new': event.get('date_to')},
+        'level': {'old': level, 'new': event['level']},
+    }
+
+
+def competition_link_changes(record: Competition, event: dict) -> dict[str, dict[str, str | None]]:
+    return participation_field_changes(
+        record.name,
+        record.sport,
+        record.date.isoformat(),
+        record.date_to.isoformat() if record.date_to else None,
+        record.level,
+        event,
+    )
+
+
+def format_link_diff_value(key: str, value: str | None) -> str:
+    """Отображение значения поля в диффе: даты — dd.mm.yyyy, пустое — «»."""
+    if not value:
+        return ''
+    if key in ('date', 'date_to'):
+        return datetime.fromisoformat(value).strftime(settings.date_format)
+    return value
+
+
+def build_link_diff_rows(changes: dict[str, dict[str, str | None]]) -> list[dict]:
+    """Строки диффа «после связывания» для шаблона: только отличающиеся поля;
+    очистка (было значение → станет пустым) помечается для warning-бейджа."""
+    rows = []
+    for key, label in LINK_EVENT_FIELD_LABELS.items():
+        old_value, new_value = changes[key]['old'], changes[key]['new']
+        if old_value == new_value:
+            continue
+        clears = not new_value and bool(old_value)
+        rows.append(
+            {
+                'key': key,
+                'label': label,
+                'old': format_link_diff_value(key, old_value),
+                'new': format_link_diff_value(key, new_value),
+                'clears': clears,
+            }
+        )
+    return rows
+
+
+def decorate_link_event_candidates(
+    record: Competition,
+    events: Sequence[dict],
+) -> tuple[list[dict], int]:
+    """Кандидаты связывания для страницы записи: пресеты первыми (без очистки
+    полей выше пресетов с очисткой), затем остальные по хронологии; каждому —
+    дифф 5 полей и готовый текст confirm. Возвращает (строки, всего до капа)."""
+    decorated = []
+    for event in events:
+        diff = build_link_diff_rows(competition_link_changes(record, event))
+        decorated.append(
+            {
+                'event': decorate_calendar_event(event),
+                'is_preset': event_is_record_preset(event, record),
+                'diff': diff,
+                'confirm_text': build_link_confirm_text(
+                    int(record.record_id),
+                    event['name'],
+                    [item['key'] for item in diff if item['clears']],
+                ),
+            }
+        )
+    decorated.sort(key=lambda row: (not row['is_preset'], any(item['clears'] for item in row['diff'])))
+    total = len(decorated)
+    return decorated[:LINK_EVENT_CANDIDATE_CAP], total
+
+
+def build_link_confirm_text(record_id: int, event_name: str, cleared_fields: Sequence[str]) -> str:
+    base = (
+        f'Связать запись №{record_id} с соревнованием «{event_name}»? '
+        'Название, вид спорта, дату и уровень запись возьмёт из соревнования.'
+    )
+    if cleared_fields:
+        labels = ', '.join(LINK_EVENT_FIELD_LABELS[key] for key in cleared_fields)
+        base += f' Пустыми станут: {labels}.'
+    return base
+
+
+@app.get('/competition/<record_id>/link-event')
+async def competition_link_event_page(request: Request, record_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(numeric_id)
+    if record is None:
+        return text(body='Record not found', status=404)
+    if record.calendar_event_id:
+        return build_redirect_with_message(
+            error=f'Запись №{numeric_id} уже связана с соревнованием.',
+            url='/',
+        )
+
+    args = dict(request.args)
+    filters, filter_error = parse_link_event_filters(args)
+    if filter_error is not None:
+        return text(body=filter_error, status=400)
+    # Первый заход без параметров ищет по пресету записи (форма предзаполнена
+    # его же значениями) — пресет-кандидаты видны сразу; «Сбросить» возвращает
+    # к этому же состоянию.
+    if not any((get_param(args, key) or '').strip() for key in LINK_EVENT_SEARCH_KEYS):
+        filters = {
+            'name': record.name,
+            'sport': '',
+            'level': '',
+            'date_from': record.date.strftime(settings.date_format),
+            'date_to': record.date_to.strftime(settings.date_format) if record.date_to else '',
+        }
+
+    candidates, found_total = decorate_link_event_candidates(
+        record,
+        filter_link_event_candidates(storage.list_calendar_events(), filters),
+    )
+
+    return await render(
+        template_name=jinja_env.get_template('competition_link.html'),
+        context={
+            'request': request,
+            'record': record,
+            'record_id': numeric_id,
+            'filters': filters,
+            'candidates': candidates,
+            'found_total': found_total,
+            'candidates_capped': found_total > LINK_EVENT_CANDIDATE_CAP,
+            'candidate_cap': LINK_EVENT_CANDIDATE_CAP,
+            # Нет кандидатов — секция создания события раскрыта сразу.
+            'new_form_open': found_total == 0,
+            'sport_options': storage.list_catalog('sport'),
+            'level_options': storage.get_level_names(),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/competition/<record_id>/link-event')
+async def competition_link_event(request: Request, record_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(numeric_id)
+    if record is None:
+        return text(body='Record not found', status=404)
+
+    try:
+        event_id = int(get_form_value(request, 'event_id'))
+    except ValueError:
+        return text(body='Invalid event id', status=400)
+
+    event, error = storage.link_participation_to_event(numeric_id, event_id)
+    if error == 'record_not_found':
+        return text(body='Record not found', status=404)
+    if error == 'already_linked':
+        return build_redirect_with_message(
+            error=f'Запись №{numeric_id} уже связана с соревнованием.',
+            url='/',
+        )
+    if error == 'event_not_found':
+        return build_redirect_with_message(error='Соревнование не найдено.', url='/')
+
+    log_audit_event(
+        request,
+        'participation_linked',
+        {
+            'record_id': numeric_id,
+            'student_name': record.student_name,
+            'event_id': event_id,
+            'event_name': event['name'],
+            'changes': competition_link_changes(record, event),
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Запись №{numeric_id} связана с соревнованием «{event["name"]}».',
+        url='/',
+    )
+
+
+@app.post('/competition/<record_id>/link-event/new')
+async def competition_link_event_new(request: Request, record_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(numeric_id)
+    if record is None:
+        return text(body='Record not found', status=404)
+
+    values, error = parse_calendar_event_form(request)
+    if error is not None:
+        return text(body=error, status=400)
+
+    new_date = values['date'].isoformat()
+    new_date_to = values['date_to'].isoformat() if values['date_to'] else None
+    event_id, error = storage.create_calendar_event_and_link(
+        name=values['name'],
+        date=new_date,
+        date_to=new_date_to,
+        level=values['level'],
+        sport=values['sport'],
+        url=values['url'],
+        record_id=numeric_id,
+    )
+    if error == 'record_not_found':
+        return text(body='Record not found', status=404)
+    if error == 'already_linked':
+        return build_redirect_with_message(
+            error=f'Запись №{numeric_id} уже связана с соревнованием.',
+            url='/',
+        )
+
+    log_audit_event(
+        request,
+        'calendar_event_created',
+        {
+            'event_id': event_id,
+            'name': values['name'],
+            'date': new_date,
+            'date_to': new_date_to,
+            'sport': values['sport'],
+            'level': values['level'],
+            'url': values['url'],
+            'linked_record_id': numeric_id,
+            'source': 'registry',
+        },
+    )
+    log_audit_event(
+        request,
+        'participation_linked',
+        {
+            'record_id': numeric_id,
+            'student_name': record.student_name,
+            'event_id': event_id,
+            'event_name': values['name'],
+            'changes': competition_link_changes(
+                record,
+                {
+                    'name': values['name'],
+                    'sport': values['sport'],
+                    'date': new_date,
+                    'date_to': new_date_to,
+                    'level': values['level'],
+                },
+            ),
+            'event_created': True,
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Соревнование «{values["name"]}» запланировано, запись №{numeric_id} связана с ним.',
+        url='/',
+    )
 
 
 @app.post('/admin/fields')
@@ -7402,10 +8536,136 @@ async def admin_maintenance_page(request: Request):
             'wipe_confirm_phrase': WIPE_CONFIRM_PHRASE,
             'records_count': storage.count_competitions(),
             'attachments_count': storage.count_attachments(),
+            'unlinked_records_count': storage.count_participations_without_event(),
             'stats': stats,
             **get_flash_args(request),
         },
     )
+
+
+# --- P5b: массовое связывание записей без события (обслуживание базы). ---
+#
+# Предпросмотр по P0-семантике стартового backfill (однозначный пресет
+# name + date + date_to): matched — можно связать, ambiguous — только
+# вручную со страницы записи, unmatched — нет события. Apply проводит
+# ТОЛЬКО matched со синхронизацией 5 полей; гонки закрывает guarded
+# UPDATE (пропуск, не откат пакета).
+
+LINK_PREVIEW_AMBIGUOUS_NAME_CAP = 5
+
+
+def decorate_calendar_link_preview(preview: dict, events_by_id: dict[int, dict]) -> dict:
+    """Строки matched с диффом «после связывания» и агрегаты очисток полей
+    для warning-бейджа и текста confirm у кнопки пакета."""
+    matched_rows = []
+    clearing_counts: dict[str, int] = {}
+    for row in preview['matched']:
+        event = events_by_id.get(row['event_id'])
+        if event is None:
+            continue
+        diff = build_link_diff_rows(
+            participation_field_changes(row['name'], row['sport'], row['date'], row['date_to'], row['level'], event)
+        )
+        for item in diff:
+            if item['clears']:
+                clearing_counts[item['key']] = clearing_counts.get(item['key'], 0) + 1
+        matched_rows.append(
+            {
+                **row,
+                'record_date_label': format_date_range(
+                    datetime.fromisoformat(row['date']),
+                    datetime.fromisoformat(row['date_to']) if row['date_to'] else None,
+                ),
+                'event_period': format_date_range(
+                    datetime.fromisoformat(event['date']),
+                    datetime.fromisoformat(event['date_to']) if event.get('date_to') else None,
+                ),
+                'event_level': event['level'],
+                'event_sport': event['sport'],
+                'diff': diff,
+            }
+        )
+    # Число ЗАПИСЕЙ хотя бы с одной очисткой (не сумма очисток по полям):
+    # бейдж и confirm подают его как «У K записей …», рядом — поля с счётчиками.
+    clearing_total = sum(1 for row in matched_rows if any(item['clears'] for item in row['diff']))
+
+    def decorate_record_row(row: dict) -> dict:
+        return {
+            **row,
+            'record_date_label': format_date_range(
+                datetime.fromisoformat(row['date']),
+                datetime.fromisoformat(row['date_to']) if row['date_to'] else None,
+            ),
+        }
+
+    clearing_labels = [LINK_EVENT_FIELD_LABELS[key] for key, count in clearing_counts.items() if count]
+    matched_total = preview['counters']['matched']
+    apply_confirm = (
+        f'Связать {matched_total} записей с найденными соревнованиями? '
+        'Название, вид спорта, дату и уровень записи возьмут из соревнований.'
+    )
+    if clearing_labels:
+        apply_confirm += f' У {clearing_total} записей станут пустыми: {", ".join(clearing_labels)}.'
+    return {
+        'counters': preview['counters'],
+        'matched': matched_rows,
+        'ambiguous': [decorate_record_row(row) for row in preview['ambiguous']],
+        'unmatched': [decorate_record_row(row) for row in preview['unmatched']],
+        'clearing_total': clearing_total,
+        # Бейдж: «уровень (2), вид спорта (1)» — по полям с очистками.
+        'clearing_parts': [
+            f'{LINK_EVENT_FIELD_LABELS[key]} ({count})' for key, count in clearing_counts.items() if count
+        ],
+        'clearing_labels': clearing_labels,
+        'apply_confirm_text': apply_confirm,
+        'ambiguous_name_cap': LINK_PREVIEW_AMBIGUOUS_NAME_CAP,
+    }
+
+
+@app.get('/admin/maintenance/calendar-links')
+async def admin_maintenance_calendar_links_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    preview = decorate_calendar_link_preview(
+        storage.calendar_link_backfill_preview(),
+        {event['id']: event for event in storage.list_calendar_events()},
+    )
+    return await render(
+        template_name=jinja_env.get_template('admin_maintenance_links.html'),
+        context={
+            'request': request,
+            'preview': preview,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/maintenance/calendar-links/apply')
+async def apply_maintenance_calendar_links(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    counters, items = get_storage(request.app).apply_calendar_link_backfill()
+    log_audit_event(
+        request,
+        'participation_batch_linked',
+        {
+            'linked': counters['linked'],
+            'skipped': counters['skipped'],
+            'items': items,
+        },
+    )
+    if counters['skipped']:
+        message = (
+            f'Связывание завершено: связано {counters["linked"]}, '
+            f'пропущено {counters["skipped"]} (уже связаны или соревнование не найдено).'
+        )
+    else:
+        message = f'Связывание завершено: связано {counters["linked"]}.'
+    return build_redirect_with_message(message=message, url='/admin/maintenance/calendar-links')
 
 
 def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:

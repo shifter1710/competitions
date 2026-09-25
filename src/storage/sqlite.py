@@ -6,6 +6,7 @@ import threading
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Collection
 from typing import Iterable
 from typing import Sequence
 
@@ -121,6 +122,86 @@ COMPETITION_INSERT_SQL = '''
         calendar_event_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
+
+
+class EventParticipationConflictError(Exception):
+    """Повторная проверка батча участий события (P4) нашла коллизию: участие
+    с тем же ключом уже существует в БД или вставляется этим же батчем
+    (intra-batch first-wins). Транзакция откатывается целиком; предпросмотр
+    нужно обновить и заново разобрать строки."""
+
+
+def dedup_text(value) -> str:
+    """Текст ключа дедупликации участий (P4): strip + casefold."""
+    if value is None:
+        return ''
+    return str(value).strip().casefold()
+
+
+def dedup_place(value) -> str:
+    """Место/курс в ключе (P4): 0 и пустое значение — «нет значения»
+    (0 = «ждёт результата»), остальное — строкой (место может быть text)."""
+    if value is None:
+        return ''
+    text = str(value).strip()
+    return '' if text in ('', '0') else text.casefold()
+
+
+def dedup_discipline(value) -> str:
+    """Дисциплина в ключе дедупликации (P5a/P4): пробелы схлопываются,
+    регистр не важен. Единая реализация для реестра и участий события —
+    src/main.py::normalize_discipline_for_dedup делегирует сюда."""
+    if not value:
+        return ''
+    return ' '.join(str(value).split()).casefold()
+
+
+def participation_content_key(
+    student_name,
+    discipline,
+    sex,
+    institute,
+    group,
+    course,
+    position,
+    result,
+    extra_data,
+    exclude_custom_keys: Collection[str] = (),
+) -> tuple:
+    """Полный контент участия для сравнения ТОЧНЫХ дублей (P4).
+
+    Контент-ключ CARDLESS-строк: ФИО + дисциплина (ключ повторов без
+    карточки) + пол/институт/группа/курс/место/результат + custom-значения
+    (сравниваются только непустые — пустая ячейка и отсутствие колонки
+    неразличимы). Одна реализация для классификации предпросмотра
+    (src/main.py) и серверной проверки apply_event_participation_batch:
+    стороны обязаны сравнивать символ в символ.
+
+    QA D2 (F′ v2): discipline/result сравниваются ЭФФЕКТИВНЫМИ значениями
+    (base ?? legacy-фолбэк в extra_data коллидирующего кастома), поэтому
+    сырые значения тех же коллидирующих кастомов в customs НЕ участвуют —
+    exclude_custom_keys выкидывает их СИММЕТРИЧНО у существующей строки и
+    вставляемой (легаси-строка до P4 несёт дисциплину только в extra_data,
+    вставляемая — только в базовой колонке). Остальные customs — как раньше."""
+    exclude = {str(key) for key in exclude_custom_keys}
+    customs = tuple(
+        sorted(
+            (str(key), dedup_text(value))
+            for key, value in (extra_data or {}).items()
+            if dedup_text(value) and str(key) not in exclude
+        )
+    )
+    return (
+        dedup_text(student_name),
+        dedup_discipline(discipline),
+        dedup_text(sex),
+        dedup_text(institute),
+        dedup_text(group),
+        dedup_place(course),
+        dedup_place(position),
+        dedup_text(result),
+        customs,
+    )
 
 
 def competition_insert_records(
@@ -1308,6 +1389,164 @@ class SQLiteAdapter:
             except BaseException:
                 self.connection.rollback()
                 raise
+
+    def _event_participation_recheck_context(self, event_id: int) -> tuple[set, set, set]:
+        """Живые ключи уникальности участий события (P4): (identity-ключи,
+        контент-ключи, ключи коллидирующих кастомов). Вызывается ПОД _lock
+        внутри батча — повторная проверка видит актуальное состояние, а не
+        снимок предпросмотра.
+
+        identity — (карточка, дисциплина) связанного участия; контент — полный
+        ключ participation_content_key. Дисциплина/результат существующего
+        участия читаются с legacy-фолбэком (P5a dual-write): NULL в базовой
+        колонке значит «взять значение активного кастома с коллидирующим
+        label из extra_data» — старые записи до P4 писали только туда.
+        Ключи коллидирующих кастомов исключаются из customs-части контент-ключа
+        у ОБЕИХ сторон сравнения (QA D2: эффективная дисциплина легаси-строки
+        в extra_data, вставляемой — в базовой колонке)."""
+        collision_labels = ('дисциплина', 'результат')
+        collision_keys = [
+            (field.key, field.label.strip().casefold())
+            for field in self.get_custom_fields()
+            if field.label.strip().casefold() in collision_labels
+        ]
+        collision_custom_keys = {key for key, _ in collision_keys}
+        identities: set = set()
+        contents: set = set()
+
+        def effective(base, extra, folded_label: str) -> str:
+            value = str(base or '').strip()
+            if value:
+                return value
+            for key, label in collision_keys:
+                if label == folded_label:
+                    fallback = str(extra.get(key) or '').strip()
+                    if fallback:
+                        return fallback
+            return ''
+
+        for participant in self.list_calendar_event_participants(event_id):
+            extra = participant.get('extra_data') or {}
+            discipline = effective(participant.get('discipline'), extra, 'дисциплина')
+            result = effective(participant.get('result'), extra, 'результат')
+            if participant.get('student_ref_id') is not None:
+                identities.add(('ref', participant['student_ref_id'], dedup_discipline(discipline)))
+            contents.add(
+                participation_content_key(
+                    participant['student_name'],
+                    discipline,
+                    participant['student_sex'],
+                    participant['institute'],
+                    participant['group_name'],
+                    participant['course'],
+                    participant['position'],
+                    result,
+                    extra,
+                    collision_custom_keys,
+                )
+            )
+        return identities, contents, collision_custom_keys
+
+    @staticmethod
+    def _event_participation_batch_guard(
+        inserts: Sequence[Competition],
+        live_identities: set,
+        live_contents: set,
+        exclude_custom_keys: Collection[str] = (),
+    ) -> None:
+        """Повторная проверка insert-строк батча участий (P4) против живой БД
+        и самого батча (intra-batch first-wins). Поднимает
+        EventParticipationConflictError при коллизии: MATCHED — identity
+        (карточка + дисциплина); CARDLESS против живой БД — точный контент,
+        внутри батча — контент-ключ (ФИО + дисциплина): оба участия одного
+        файла с тем же ключом сервер не вставляет (предпросмотр показывает
+        их конфликтом строк). exclude_custom_keys — симметричное исключение
+        коллидирующих кастомов из customs-части контент-ключа (QA D2,
+        см. participation_content_key)."""
+        batch_identities: set = set()
+        batch_contents: set = set()
+        batch_cardless_keys: set = set()
+        for competition in inserts:
+            content = participation_content_key(
+                competition.student_name,
+                competition.discipline,
+                competition.student_sex,
+                competition.institute,
+                competition.group,
+                competition.course,
+                competition.position,
+                competition.result,
+                competition.extra_data,
+                exclude_custom_keys,
+            )
+            if competition.student_ref_id is not None:
+                identity = ('ref', competition.student_ref_id, dedup_discipline(competition.discipline))
+                if identity in live_identities or identity in batch_identities:
+                    raise EventParticipationConflictError('participation identity already exists')
+                batch_identities.add(identity)
+            else:
+                cardless_key = (dedup_text(competition.student_name), dedup_discipline(competition.discipline))
+                if content in live_contents or content in batch_contents:
+                    raise EventParticipationConflictError('identical cardless participation already exists')
+                if cardless_key in batch_cardless_keys:
+                    raise EventParticipationConflictError('cardless participation key already in batch')
+                batch_cardless_keys.add(cardless_key)
+            batch_contents.add(content)
+
+    def apply_event_participation_batch(
+        self,
+        event_id: int,
+        inserts: Sequence[Competition],
+        updates: Sequence[tuple[int, object, str | None]] | None = None,
+        *,
+        review_status: str = 'approved',
+        owner_id: int | None = None,
+    ) -> None:
+        """Батч участий события одной транзакцией со СТРОГОЙ повторной
+        проверкой уникальности (P4, паттерн import_competitions: вставки +
+        синхронизация справочников из записей + один COMMIT; любой сбой —
+        rollback всего батча вместе со справочниками).
+
+        Повторная проверка под _lock (см. _event_participation_batch_guard)
+        — коллизия означает, что предпросмотр устарел: сервер не позволяет
+        создать оба повторных участия. `updates` — restricted-обновления
+        (record_id, position, result) участий ЭТОГО события той же
+        транзакцией."""
+        with self._lock:
+            try:
+                live_identities, live_contents, collision_custom_keys = self._event_participation_recheck_context(
+                    event_id
+                )
+                self._event_participation_batch_guard(inserts, live_identities, live_contents, collision_custom_keys)
+                if inserts:
+                    records = competition_insert_records(inserts, review_status, owner_id)
+                    self.connection.executemany(COMPETITION_INSERT_SQL, records)
+                for record_id, position, result in updates or ():
+                    cursor = self.connection.execute(
+                        'UPDATE competitions SET position = ?, result = ? WHERE id = ? AND calendar_event_id = ?',
+                        (position, result, int(record_id), int(event_id)),
+                    )
+                    if not cursor.rowcount:
+                        raise EventParticipationConflictError('updated participation not found in event')
+                self._sync_catalogs_from_records()
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def update_event_participation_result(self, record_id: int, event_id: int, position, result: str | None) -> int:
+        """P4: restricted-обновление места/результата существующего участия
+        события — SET только position/result, WHERE id + calendar_event_id:
+        снимок участника, custom-поля, вложения, student_ref_id и ссылка на
+        событие физически недостижимы этим UPDATE. Возвращает число изменённых
+        строк (0 — участие не найдено или принадлежит другому событию)."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE competitions SET position = ?, result = ? WHERE id = ? AND calendar_event_id = ?',
+                (position, result, int(record_id), int(event_id)),
+            )
+            self.connection.commit()
+            return cursor.rowcount
 
     def _sync_catalogs_from_records(self) -> None:
         """Довести справочники до значений, реально присутствующих в записях.
@@ -3664,7 +3903,9 @@ class SQLiteAdapter:
         count_calendar_event_participants).
         Сначала с результатом, затем «ждут результата», внутри — по ФИО.
         student_ref_id — для предпросмотра импорта участников (поиск уже
-        существующих участий той же карточки).
+        существующих участий той же карточки). P4: discipline/result/extra_data
+        (распарсенный JSON) — аддитивно, для классификации повторов импорта
+        (эффективные значения участия с legacy-фолбэком в extra_data).
         """
         with self._lock:
             rows = self.connection.execute(
@@ -3677,7 +3918,10 @@ class SQLiteAdapter:
                     c."group" AS group_name,
                     c.course,
                     c.position,
-                    c.student_ref_id
+                    c.student_ref_id,
+                    c.discipline,
+                    c.result,
+                    c.extra_data
                 FROM competitions c
                 WHERE c.calendar_event_id = ?
                 ORDER BY
@@ -3686,4 +3930,289 @@ class SQLiteAdapter:
                 ''',
                 (event_id,),
             ).fetchall()
+            return [{**dict(row), 'extra_data': json.loads(row['extra_data'] or '{}')} for row in rows]
+
             return [dict(row) for row in rows]
+
+    # ---- P5b: явные связки «запись → событие» (Registry ↔ Calendar) ----
+    #
+    # Явное связывание существующей NULL-записи со событием календаря:
+    # ссылка calendar_event_id + синхронизация 5 event-owned полей
+    # (name/date/date_to/sport/level) — тот же состав, что у edit-sync
+    # update_calendar_event. Правило гонок: guarded UPDATE
+    # (WHERE calendar_event_id IS NULL) — запись, которую успел связать
+    # кто-то другой, не перезаписывается (already_linked), существующая
+    # ссылка не меняется.
+
+    def link_participation_to_event(self, record_id: int, event_id: int) -> tuple[dict | None, str | None]:
+        """Связать запись со существующим событием + синхронизация полей.
+
+        Одна транзакция под _lock (паттерн update_calendar_event): сбой
+        любого шага — откат всего. Возвращает (event, None) при успехе или
+        (None, код ошибки): record_not_found / event_not_found /
+        already_linked (запись уже связана — её ссылка и поля не тронуты).
+        """
+        with self._lock:
+            try:
+                record = self.connection.execute(
+                    'SELECT id, calendar_event_id FROM competitions WHERE id = ?',
+                    (record_id,),
+                ).fetchone()
+                if record is None:
+                    return None, 'record_not_found'
+                event = self.connection.execute(
+                    'SELECT * FROM calendar_events WHERE id = ?',
+                    (event_id,),
+                ).fetchone()
+                if event is None:
+                    return None, 'event_not_found'
+                cursor = self.connection.execute(
+                    'UPDATE competitions'
+                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' WHERE id = ? AND calendar_event_id IS NULL',
+                    (
+                        event_id,
+                        event['name'],
+                        event['date'],
+                        event['date_to'],
+                        event['sport'],
+                        event['level'],
+                        record_id,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    # Между SELECT и UPDATE запись успел связать другой
+                    # запрос — откатываем (SELECT читает снапшот неявной
+                    # транзакции) и отказываем без перезаписи.
+                    self.connection.rollback()
+                    return None, 'already_linked'
+                self.connection.commit()
+                return dict(event), None
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def create_calendar_event_and_link(
+        self,
+        *,
+        name: str,
+        date: str,
+        date_to: str | None,
+        level: str,
+        sport: str,
+        url: str,
+        record_id: int,
+    ) -> tuple[int | None, str | None]:
+        """Создать событие календаря и сразу связать с ним запись.
+
+        Атомарно (одна транзакция): INSERT события (без собственного
+        commit, паттерн create_calendar_event) + guarded UPDATE записи
+        с синхронизацией 5 полей. Проверки записи (существует + ещё NULL)
+        выполняются ДО вставки, чтобы не оставлять событий-сирот; гонку на
+        UPDATE закрывает rowcount (=0 → already_linked, откат всего).
+        Возвращает (event_id, None) или (None, record_not_found /
+        already_linked).
+        """
+        with self._lock:
+            try:
+                record = self.connection.execute(
+                    'SELECT id, calendar_event_id FROM competitions WHERE id = ?',
+                    (record_id,),
+                ).fetchone()
+                if record is None:
+                    return None, 'record_not_found'
+                if record['calendar_event_id'] is not None:
+                    return None, 'already_linked'
+                cursor = self.connection.execute(
+                    'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (name, date, date_to, level, sport, url, datetime.utcnow().isoformat()),
+                )
+                event_id = cursor.lastrowid
+                linked = self.connection.execute(
+                    'UPDATE competitions'
+                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' WHERE id = ? AND calendar_event_id IS NULL',
+                    (event_id, name, date, date_to, sport, level, record_id),
+                )
+                if linked.rowcount == 0:
+                    self.connection.rollback()
+                    return None, 'already_linked'
+                self.connection.commit()
+                return event_id, None
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def count_participations_without_event(self) -> int:
+        """Дешёвый счётчик записей без ссылки на событие (карточка
+        «Связывание с календарём» на странице обслуживания)."""
+        with self._lock:
+            return int(
+                self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions WHERE calendar_event_id IS NULL'
+                ).fetchone()['total']
+            )
+
+    def calendar_link_backfill_preview(self) -> dict:
+        """Read-only предпросмотр массового связывания NULL-записей.
+
+        Предикат — ровно семантика стартового P0-backfill
+        (_calendar_preset_match_sql: name + date + COALESCE(date_to, '')).
+        Группы: matched (ровно один кандидат-событие), ambiguous (больше
+        одного — вручную, автоматики не будет), unmatched (ноль).
+        Списки capped (CALENDAR_LINK_PREVIEW_CAP) — счётчики при этом
+        полные. Значения полей для диффа «после связывания» маршрут
+        берёт из события сам (get_calendar_event).
+        """
+        with self._lock:
+            predicate = self._calendar_preset_match_sql('c')
+            rows = self.connection.execute(
+                f'''
+                SELECT
+                    c.id AS record_id,
+                    c.student_name,
+                    c.name,
+                    c.date,
+                    c.date_to,
+                    c.sport,
+                    c.level,
+                    (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) AS candidate_count
+                FROM competitions c
+                WHERE c.calendar_event_id IS NULL
+                ORDER BY c.date ASC, c.id ASC
+                '''
+            ).fetchall()
+            already_linked = int(
+                self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions WHERE calendar_event_id IS NOT NULL'
+                ).fetchone()['total']
+            )
+            matched: list[dict] = []
+            ambiguous: list[dict] = []
+            unmatched: list[dict] = []
+            for row in rows:
+                base = {
+                    'record_id': row['record_id'],
+                    'student_name': row['student_name'],
+                    'name': row['name'],
+                    'date': row['date'],
+                    'date_to': row['date_to'],
+                    'sport': row['sport'],
+                    'level': row['level'],
+                }
+                # Кандидаты строки — тот же предикат пресета, что и в
+                # подсчёте выше (синхронно с _calendar_preset_match_sql):
+                # коррелированная форма по id записи, один источник
+                # семантики совпадения.
+                candidate_where = f'competitions.id = ? AND {self._calendar_preset_match_sql("competitions")}'
+                if row['candidate_count'] == 1:
+                    if len(matched) < CALENDAR_LINK_PREVIEW_CAP:
+                        event = self.connection.execute(
+                            f'SELECT e.id AS event_id, e.name AS event_name '
+                            f'FROM competitions, calendar_events e WHERE {candidate_where}',
+                            (row['record_id'],),
+                        ).fetchone()
+                        matched.append({**base, 'event_id': event['event_id'], 'event_name': event['event_name']})
+                elif row['candidate_count'] > 1:
+                    if len(ambiguous) < CALENDAR_LINK_PREVIEW_CAP:
+                        candidates = self.connection.execute(
+                            f'SELECT e.name AS event_name '
+                            f'FROM competitions, calendar_events e WHERE {candidate_where}',
+                            (row['record_id'],),
+                        ).fetchall()
+                        ambiguous.append(
+                            {
+                                **base,
+                                'candidate_count': row['candidate_count'],
+                                'candidate_names': [candidate['event_name'] for candidate in candidates],
+                            }
+                        )
+                elif len(unmatched) < CALENDAR_LINK_PREVIEW_CAP:
+                    unmatched.append(base)
+            matched_total = sum(1 for row in rows if row['candidate_count'] == 1)
+            ambiguous_total = sum(1 for row in rows if row['candidate_count'] > 1)
+            return {
+                'counters': {
+                    'considered': len(rows),
+                    'matched': matched_total,
+                    'unmatched': len(rows) - matched_total - ambiguous_total,
+                    'ambiguous': ambiguous_total,
+                    'already_linked': already_linked,
+                },
+                'matched': matched,
+                'ambiguous': ambiguous,
+                'unmatched': unmatched,
+            }
+
+    def apply_calendar_link_backfill(self) -> tuple[dict[str, int], list[dict]]:
+        """Массовое связывание matched-записей (одна транзакция).
+
+        В батч входят ТОЛЬКО строки с единственным пресет-кандидатом
+        (=1) — ambiguous не линкуются никогда, unmatched нечего линковать.
+        Для каждой строки — guarded UPDATE с синхронизацией 5 полей:
+        rowcount = 0 (запись успели связать между предпросмотром и apply)
+        — пропуск (skipped), не откат пакета. Возвращает счётчики
+        {matched, linked, skipped} и список связанных
+        [{record_id, event_id, event_name}].
+        """
+        with self._lock:
+            predicate = self._calendar_preset_match_sql('c')
+            pairs = self.connection.execute(
+                f'''
+                SELECT
+                    c.id AS record_id,
+                    (SELECT e.id FROM calendar_events e WHERE {predicate}) AS event_id,
+                    (SELECT e.name FROM calendar_events e WHERE {predicate}) AS event_name
+                FROM competitions c
+                WHERE c.calendar_event_id IS NULL
+                  AND (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) = 1
+                ORDER BY c.id ASC
+                '''
+            ).fetchall()
+            counters = {'matched': len(pairs), 'linked': 0, 'skipped': 0}
+            items: list[dict] = []
+            try:
+                for pair in pairs:
+                    event = self.connection.execute(
+                        'SELECT name, date, date_to, sport, level FROM calendar_events WHERE id = ?',
+                        (pair['event_id'],),
+                    ).fetchone()
+                    cursor = self.connection.execute(
+                        'UPDATE competitions'
+                        ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                        ' WHERE id = ? AND calendar_event_id IS NULL',
+                        (
+                            pair['event_id'],
+                            event['name'],
+                            event['date'],
+                            event['date_to'],
+                            event['sport'],
+                            event['level'],
+                            pair['record_id'],
+                        ),
+                    )
+                    if cursor.rowcount == 0:
+                        # Кто-то связал запись после предпросмотра — не
+                        # ломаем пакет, считаем пропуском.
+                        counters['skipped'] += 1
+                        continue
+                    counters['linked'] += 1
+                    items.append(
+                        {
+                            'record_id': pair['record_id'],
+                            'event_id': pair['event_id'],
+                            'event_name': pair['event_name'],
+                        }
+                    )
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
+            return counters, items
+
+
+# P5b: лимит списков предпросмотра массового связывания (matched/ambiguous/
+# unmatched); счётчики при этом полные — страницы-группы показывают первые
+# CALENDAR_LINK_PREVIEW_CAP строк, остальное владелец разбирает поиском/фильтром.
+CALENDAR_LINK_PREVIEW_CAP = 200
