@@ -6,6 +6,7 @@ import threading
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Collection
 from typing import Iterable
 from typing import Sequence
 
@@ -121,6 +122,86 @@ COMPETITION_INSERT_SQL = '''
         calendar_event_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
+
+
+class EventParticipationConflictError(Exception):
+    """Повторная проверка батча участий события (P4) нашла коллизию: участие
+    с тем же ключом уже существует в БД или вставляется этим же батчем
+    (intra-batch first-wins). Транзакция откатывается целиком; предпросмотр
+    нужно обновить и заново разобрать строки."""
+
+
+def dedup_text(value) -> str:
+    """Текст ключа дедупликации участий (P4): strip + casefold."""
+    if value is None:
+        return ''
+    return str(value).strip().casefold()
+
+
+def dedup_place(value) -> str:
+    """Место/курс в ключе (P4): 0 и пустое значение — «нет значения»
+    (0 = «ждёт результата»), остальное — строкой (место может быть text)."""
+    if value is None:
+        return ''
+    text = str(value).strip()
+    return '' if text in ('', '0') else text.casefold()
+
+
+def dedup_discipline(value) -> str:
+    """Дисциплина в ключе дедупликации (P5a/P4): пробелы схлопываются,
+    регистр не важен. Единая реализация для реестра и участий события —
+    src/main.py::normalize_discipline_for_dedup делегирует сюда."""
+    if not value:
+        return ''
+    return ' '.join(str(value).split()).casefold()
+
+
+def participation_content_key(
+    student_name,
+    discipline,
+    sex,
+    institute,
+    group,
+    course,
+    position,
+    result,
+    extra_data,
+    exclude_custom_keys: Collection[str] = (),
+) -> tuple:
+    """Полный контент участия для сравнения ТОЧНЫХ дублей (P4).
+
+    Контент-ключ CARDLESS-строк: ФИО + дисциплина (ключ повторов без
+    карточки) + пол/институт/группа/курс/место/результат + custom-значения
+    (сравниваются только непустые — пустая ячейка и отсутствие колонки
+    неразличимы). Одна реализация для классификации предпросмотра
+    (src/main.py) и серверной проверки apply_event_participation_batch:
+    стороны обязаны сравнивать символ в символ.
+
+    QA D2 (F′ v2): discipline/result сравниваются ЭФФЕКТИВНЫМИ значениями
+    (base ?? legacy-фолбэк в extra_data коллидирующего кастома), поэтому
+    сырые значения тех же коллидирующих кастомов в customs НЕ участвуют —
+    exclude_custom_keys выкидывает их СИММЕТРИЧНО у существующей строки и
+    вставляемой (легаси-строка до P4 несёт дисциплину только в extra_data,
+    вставляемая — только в базовой колонке). Остальные customs — как раньше."""
+    exclude = {str(key) for key in exclude_custom_keys}
+    customs = tuple(
+        sorted(
+            (str(key), dedup_text(value))
+            for key, value in (extra_data or {}).items()
+            if dedup_text(value) and str(key) not in exclude
+        )
+    )
+    return (
+        dedup_text(student_name),
+        dedup_discipline(discipline),
+        dedup_text(sex),
+        dedup_text(institute),
+        dedup_text(group),
+        dedup_place(course),
+        dedup_place(position),
+        dedup_text(result),
+        customs,
+    )
 
 
 def competition_insert_records(
@@ -1308,6 +1389,164 @@ class SQLiteAdapter:
             except BaseException:
                 self.connection.rollback()
                 raise
+
+    def _event_participation_recheck_context(self, event_id: int) -> tuple[set, set, set]:
+        """Живые ключи уникальности участий события (P4): (identity-ключи,
+        контент-ключи, ключи коллидирующих кастомов). Вызывается ПОД _lock
+        внутри батча — повторная проверка видит актуальное состояние, а не
+        снимок предпросмотра.
+
+        identity — (карточка, дисциплина) связанного участия; контент — полный
+        ключ participation_content_key. Дисциплина/результат существующего
+        участия читаются с legacy-фолбэком (P5a dual-write): NULL в базовой
+        колонке значит «взять значение активного кастома с коллидирующим
+        label из extra_data» — старые записи до P4 писали только туда.
+        Ключи коллидирующих кастомов исключаются из customs-части контент-ключа
+        у ОБЕИХ сторон сравнения (QA D2: эффективная дисциплина легаси-строки
+        в extra_data, вставляемой — в базовой колонке)."""
+        collision_labels = ('дисциплина', 'результат')
+        collision_keys = [
+            (field.key, field.label.strip().casefold())
+            for field in self.get_custom_fields()
+            if field.label.strip().casefold() in collision_labels
+        ]
+        collision_custom_keys = {key for key, _ in collision_keys}
+        identities: set = set()
+        contents: set = set()
+
+        def effective(base, extra, folded_label: str) -> str:
+            value = str(base or '').strip()
+            if value:
+                return value
+            for key, label in collision_keys:
+                if label == folded_label:
+                    fallback = str(extra.get(key) or '').strip()
+                    if fallback:
+                        return fallback
+            return ''
+
+        for participant in self.list_calendar_event_participants(event_id):
+            extra = participant.get('extra_data') or {}
+            discipline = effective(participant.get('discipline'), extra, 'дисциплина')
+            result = effective(participant.get('result'), extra, 'результат')
+            if participant.get('student_ref_id') is not None:
+                identities.add(('ref', participant['student_ref_id'], dedup_discipline(discipline)))
+            contents.add(
+                participation_content_key(
+                    participant['student_name'],
+                    discipline,
+                    participant['student_sex'],
+                    participant['institute'],
+                    participant['group_name'],
+                    participant['course'],
+                    participant['position'],
+                    result,
+                    extra,
+                    collision_custom_keys,
+                )
+            )
+        return identities, contents, collision_custom_keys
+
+    @staticmethod
+    def _event_participation_batch_guard(
+        inserts: Sequence[Competition],
+        live_identities: set,
+        live_contents: set,
+        exclude_custom_keys: Collection[str] = (),
+    ) -> None:
+        """Повторная проверка insert-строк батча участий (P4) против живой БД
+        и самого батча (intra-batch first-wins). Поднимает
+        EventParticipationConflictError при коллизии: MATCHED — identity
+        (карточка + дисциплина); CARDLESS против живой БД — точный контент,
+        внутри батча — контент-ключ (ФИО + дисциплина): оба участия одного
+        файла с тем же ключом сервер не вставляет (предпросмотр показывает
+        их конфликтом строк). exclude_custom_keys — симметричное исключение
+        коллидирующих кастомов из customs-части контент-ключа (QA D2,
+        см. participation_content_key)."""
+        batch_identities: set = set()
+        batch_contents: set = set()
+        batch_cardless_keys: set = set()
+        for competition in inserts:
+            content = participation_content_key(
+                competition.student_name,
+                competition.discipline,
+                competition.student_sex,
+                competition.institute,
+                competition.group,
+                competition.course,
+                competition.position,
+                competition.result,
+                competition.extra_data,
+                exclude_custom_keys,
+            )
+            if competition.student_ref_id is not None:
+                identity = ('ref', competition.student_ref_id, dedup_discipline(competition.discipline))
+                if identity in live_identities or identity in batch_identities:
+                    raise EventParticipationConflictError('participation identity already exists')
+                batch_identities.add(identity)
+            else:
+                cardless_key = (dedup_text(competition.student_name), dedup_discipline(competition.discipline))
+                if content in live_contents or content in batch_contents:
+                    raise EventParticipationConflictError('identical cardless participation already exists')
+                if cardless_key in batch_cardless_keys:
+                    raise EventParticipationConflictError('cardless participation key already in batch')
+                batch_cardless_keys.add(cardless_key)
+            batch_contents.add(content)
+
+    def apply_event_participation_batch(
+        self,
+        event_id: int,
+        inserts: Sequence[Competition],
+        updates: Sequence[tuple[int, object, str | None]] | None = None,
+        *,
+        review_status: str = 'approved',
+        owner_id: int | None = None,
+    ) -> None:
+        """Батч участий события одной транзакцией со СТРОГОЙ повторной
+        проверкой уникальности (P4, паттерн import_competitions: вставки +
+        синхронизация справочников из записей + один COMMIT; любой сбой —
+        rollback всего батча вместе со справочниками).
+
+        Повторная проверка под _lock (см. _event_participation_batch_guard)
+        — коллизия означает, что предпросмотр устарел: сервер не позволяет
+        создать оба повторных участия. `updates` — restricted-обновления
+        (record_id, position, result) участий ЭТОГО события той же
+        транзакцией."""
+        with self._lock:
+            try:
+                live_identities, live_contents, collision_custom_keys = self._event_participation_recheck_context(
+                    event_id
+                )
+                self._event_participation_batch_guard(inserts, live_identities, live_contents, collision_custom_keys)
+                if inserts:
+                    records = competition_insert_records(inserts, review_status, owner_id)
+                    self.connection.executemany(COMPETITION_INSERT_SQL, records)
+                for record_id, position, result in updates or ():
+                    cursor = self.connection.execute(
+                        'UPDATE competitions SET position = ?, result = ? WHERE id = ? AND calendar_event_id = ?',
+                        (position, result, int(record_id), int(event_id)),
+                    )
+                    if not cursor.rowcount:
+                        raise EventParticipationConflictError('updated participation not found in event')
+                self._sync_catalogs_from_records()
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def update_event_participation_result(self, record_id: int, event_id: int, position, result: str | None) -> int:
+        """P4: restricted-обновление места/результата существующего участия
+        события — SET только position/result, WHERE id + calendar_event_id:
+        снимок участника, custom-поля, вложения, student_ref_id и ссылка на
+        событие физически недостижимы этим UPDATE. Возвращает число изменённых
+        строк (0 — участие не найдено или принадлежит другому событию)."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'UPDATE competitions SET position = ?, result = ? WHERE id = ? AND calendar_event_id = ?',
+                (position, result, int(record_id), int(event_id)),
+            )
+            self.connection.commit()
+            return cursor.rowcount
 
     def _sync_catalogs_from_records(self) -> None:
         """Довести справочники до значений, реально присутствующих в записях.
@@ -3664,7 +3903,9 @@ class SQLiteAdapter:
         count_calendar_event_participants).
         Сначала с результатом, затем «ждут результата», внутри — по ФИО.
         student_ref_id — для предпросмотра импорта участников (поиск уже
-        существующих участий той же карточки).
+        существующих участий той же карточки). P4: discipline/result/extra_data
+        (распарсенный JSON) — аддитивно, для классификации повторов импорта
+        (эффективные значения участия с legacy-фолбэком в extra_data).
         """
         with self._lock:
             rows = self.connection.execute(
@@ -3677,7 +3918,10 @@ class SQLiteAdapter:
                     c."group" AS group_name,
                     c.course,
                     c.position,
-                    c.student_ref_id
+                    c.student_ref_id,
+                    c.discipline,
+                    c.result,
+                    c.extra_data
                 FROM competitions c
                 WHERE c.calendar_event_id = ?
                 ORDER BY
@@ -3686,4 +3930,4 @@ class SQLiteAdapter:
                 ''',
                 (event_id,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [{**dict(row), 'extra_data': json.loads(row['extra_data'] or '{}')} for row in rows]
