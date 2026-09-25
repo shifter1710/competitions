@@ -4908,6 +4908,379 @@ async def delete_competition(request: Request, record_id: str):
     return redirect(to='/')
 
 
+# --- P5b: явные связки «запись → событие» (Registry ↔ Calendar). ---
+#
+# Страница связывания NULL-записи со соревнованием календаря: снимок записи,
+# GET-поиск событий с пресет-кандидатами (точное name+date+date_to) и диффом
+# 5 event-owned полей «после связывания», либо создание нового события прямо
+# со страницы записи (атомарно create+link). Сами операции — guarded UPDATE
+# в storage (link_participation_to_event / create_calendar_event_and_link):
+# гонку «двое связывают одну запись» закрывает calendar_event_id IS NULL.
+
+LINK_EVENT_CANDIDATE_CAP = 20
+LINK_EVENT_SEARCH_KEYS = ('name', 'sport', 'level', 'date_from', 'date_to')
+# Человекочитаемые метки 5 event-owned полей для диффа и подтверждений.
+LINK_EVENT_FIELD_LABELS: dict[str, str] = {
+    'name': 'название',
+    'sport': 'вид спорта',
+    'date': 'дата',
+    'date_to': 'дата окончания',
+    'level': 'уровень',
+}
+
+
+def parse_link_event_filters(args: dict) -> tuple[dict[str, str], str | None]:
+    """Параметры GET-поиска событий на странице связывания: подстроки
+    name/sport/level + границы периода дд.мм.гггг (валидация — как
+    parse_index_filters; некорректная дата — текст ошибки для 400)."""
+    filters = {key: (get_param(args, key) or '').strip() for key in ('name', 'sport', 'level')}
+    for key in ('date_from', 'date_to'):
+        raw_value = (get_param(args, key) or '').strip()
+        if raw_value:
+            try:
+                datetime.strptime(raw_value, settings.date_format)
+            except ValueError:
+                return {}, f'Некорректная дата в фильтре ({key}): {raw_value}'
+        filters[key] = raw_value
+    return filters, None
+
+
+def calendar_event_overlaps_period(event: dict, date_from: str, date_to: str) -> bool:
+    """Пересекается ли период события с границами фильтра (пустая граница —
+    не ограничивает). Записи и события хранят даты ISO-текстом."""
+    event_start = datetime.fromisoformat(event['date']).date()
+    event_end = datetime.fromisoformat(event['date_to'] or event['date']).date()
+    if date_from:
+        start_bound = datetime.strptime(date_from, settings.date_format).date()
+        if event_end < start_bound:
+            return False
+    if date_to:
+        end_bound = datetime.strptime(date_to, settings.date_format).date()
+        if event_start > end_bound:
+            return False
+    return True
+
+
+def filter_link_event_candidates(events: Sequence[dict], filters: dict[str, str]) -> list[dict]:
+    """Фильтрация событий поверх list_calendar_events(): casefold-подстрока
+    по названию/уровню/виду спорта + пересечение периода."""
+    name_query = filters['name'].casefold()
+    sport_query = filters['sport'].casefold()
+    level_query = filters['level'].casefold()
+    found = []
+    for event in events:
+        if name_query and name_query not in (event['name'] or '').casefold():
+            continue
+        if sport_query and sport_query not in (event['sport'] or '').casefold():
+            continue
+        if level_query and level_query not in (event['level'] or '').casefold():
+            continue
+        if not calendar_event_overlaps_period(event, filters['date_from'], filters['date_to']):
+            continue
+        found.append(event)
+    return found
+
+
+def event_is_record_preset(event: dict, record: Competition) -> bool:
+    """Точное совпадение события с пресетом записи — та же семантика, что у
+    _calendar_preset_match_sql (name + date + COALESCE(date_to, ''))."""
+    return (
+        event['name'] == record.name
+        and event['date'] == record.date.isoformat()
+        and (event.get('date_to') or '') == (record.date_to.isoformat() if record.date_to else '')
+    )
+
+
+def participation_field_changes(
+    name: str,
+    sport: str,
+    date: str,
+    date_to: str | None,
+    level: str,
+    event: dict,
+) -> dict[str, dict[str, str | None]]:
+    """old/new по 5 event-owned полям записи против события (сырые значения,
+    паттерн аудита calendar_event_edited)."""
+    return {
+        'name': {'old': name, 'new': event['name']},
+        'sport': {'old': sport, 'new': event['sport']},
+        'date': {'old': date, 'new': event['date']},
+        'date_to': {'old': date_to, 'new': event.get('date_to')},
+        'level': {'old': level, 'new': event['level']},
+    }
+
+
+def competition_link_changes(record: Competition, event: dict) -> dict[str, dict[str, str | None]]:
+    return participation_field_changes(
+        record.name,
+        record.sport,
+        record.date.isoformat(),
+        record.date_to.isoformat() if record.date_to else None,
+        record.level,
+        event,
+    )
+
+
+def format_link_diff_value(key: str, value: str | None) -> str:
+    """Отображение значения поля в диффе: даты — dd.mm.yyyy, пустое — «»."""
+    if not value:
+        return ''
+    if key in ('date', 'date_to'):
+        return datetime.fromisoformat(value).strftime(settings.date_format)
+    return value
+
+
+def build_link_diff_rows(changes: dict[str, dict[str, str | None]]) -> list[dict]:
+    """Строки диффа «после связывания» для шаблона: только отличающиеся поля;
+    очистка (было значение → станет пустым) помечается для warning-бейджа."""
+    rows = []
+    for key, label in LINK_EVENT_FIELD_LABELS.items():
+        old_value, new_value = changes[key]['old'], changes[key]['new']
+        if old_value == new_value:
+            continue
+        clears = not new_value and bool(old_value)
+        rows.append(
+            {
+                'key': key,
+                'label': label,
+                'old': format_link_diff_value(key, old_value),
+                'new': format_link_diff_value(key, new_value),
+                'clears': clears,
+            }
+        )
+    return rows
+
+
+def decorate_link_event_candidates(
+    record: Competition,
+    events: Sequence[dict],
+) -> tuple[list[dict], int]:
+    """Кандидаты связывания для страницы записи: пресеты первыми (без очистки
+    полей выше пресетов с очисткой), затем остальные по хронологии; каждому —
+    дифф 5 полей и готовый текст confirm. Возвращает (строки, всего до капа)."""
+    decorated = []
+    for event in events:
+        diff = build_link_diff_rows(competition_link_changes(record, event))
+        decorated.append(
+            {
+                'event': decorate_calendar_event(event),
+                'is_preset': event_is_record_preset(event, record),
+                'diff': diff,
+                'confirm_text': build_link_confirm_text(
+                    int(record.record_id),
+                    event['name'],
+                    [item['key'] for item in diff if item['clears']],
+                ),
+            }
+        )
+    decorated.sort(key=lambda row: (not row['is_preset'], any(item['clears'] for item in row['diff'])))
+    total = len(decorated)
+    return decorated[:LINK_EVENT_CANDIDATE_CAP], total
+
+
+def build_link_confirm_text(record_id: int, event_name: str, cleared_fields: Sequence[str]) -> str:
+    base = (
+        f'Связать запись №{record_id} с соревнованием «{event_name}»? '
+        'Название, вид спорта, дату и уровень запись возьмёт из соревнования.'
+    )
+    if cleared_fields:
+        labels = ', '.join(LINK_EVENT_FIELD_LABELS[key] for key in cleared_fields)
+        base += f' Пустыми станут: {labels}.'
+    return base
+
+
+@app.get('/competition/<record_id>/link-event')
+async def competition_link_event_page(request: Request, record_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(numeric_id)
+    if record is None:
+        return text(body='Record not found', status=404)
+    if record.calendar_event_id:
+        return build_redirect_with_message(
+            error=f'Запись №{numeric_id} уже связана с соревнованием.',
+            url='/',
+        )
+
+    args = dict(request.args)
+    filters, filter_error = parse_link_event_filters(args)
+    if filter_error is not None:
+        return text(body=filter_error, status=400)
+    # Первый заход без параметров ищет по пресету записи (форма предзаполнена
+    # его же значениями) — пресет-кандидаты видны сразу; «Сбросить» возвращает
+    # к этому же состоянию.
+    if not any((get_param(args, key) or '').strip() for key in LINK_EVENT_SEARCH_KEYS):
+        filters = {
+            'name': record.name,
+            'sport': '',
+            'level': '',
+            'date_from': record.date.strftime(settings.date_format),
+            'date_to': record.date_to.strftime(settings.date_format) if record.date_to else '',
+        }
+
+    candidates, found_total = decorate_link_event_candidates(
+        record,
+        filter_link_event_candidates(storage.list_calendar_events(), filters),
+    )
+
+    return await render(
+        template_name=jinja_env.get_template('competition_link.html'),
+        context={
+            'request': request,
+            'record': record,
+            'record_id': numeric_id,
+            'filters': filters,
+            'candidates': candidates,
+            'found_total': found_total,
+            'candidates_capped': found_total > LINK_EVENT_CANDIDATE_CAP,
+            'candidate_cap': LINK_EVENT_CANDIDATE_CAP,
+            # Нет кандидатов — секция создания события раскрыта сразу.
+            'new_form_open': found_total == 0,
+            'sport_options': storage.list_catalog('sport'),
+            'level_options': storage.get_level_names(),
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/competition/<record_id>/link-event')
+async def competition_link_event(request: Request, record_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(numeric_id)
+    if record is None:
+        return text(body='Record not found', status=404)
+
+    try:
+        event_id = int(get_form_value(request, 'event_id'))
+    except ValueError:
+        return text(body='Invalid event id', status=400)
+
+    event, error = storage.link_participation_to_event(numeric_id, event_id)
+    if error == 'record_not_found':
+        return text(body='Record not found', status=404)
+    if error == 'already_linked':
+        return build_redirect_with_message(
+            error=f'Запись №{numeric_id} уже связана с соревнованием.',
+            url='/',
+        )
+    if error == 'event_not_found':
+        return build_redirect_with_message(error='Соревнование не найдено.', url='/')
+
+    log_audit_event(
+        request,
+        'participation_linked',
+        {
+            'record_id': numeric_id,
+            'student_name': record.student_name,
+            'event_id': event_id,
+            'event_name': event['name'],
+            'changes': competition_link_changes(record, event),
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Запись №{numeric_id} связана с соревнованием «{event["name"]}».',
+        url='/',
+    )
+
+
+@app.post('/competition/<record_id>/link-event/new')
+async def competition_link_event_new(request: Request, record_id: str):
+    auth_error = require_moderator(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        numeric_id = int(record_id)
+    except ValueError:
+        return text(body='Invalid record id', status=400)
+
+    storage = get_storage(request.app)
+    record = storage.get_competition_by_id(numeric_id)
+    if record is None:
+        return text(body='Record not found', status=404)
+
+    values, error = parse_calendar_event_form(request)
+    if error is not None:
+        return text(body=error, status=400)
+
+    new_date = values['date'].isoformat()
+    new_date_to = values['date_to'].isoformat() if values['date_to'] else None
+    event_id, error = storage.create_calendar_event_and_link(
+        name=values['name'],
+        date=new_date,
+        date_to=new_date_to,
+        level=values['level'],
+        sport=values['sport'],
+        url=values['url'],
+        record_id=numeric_id,
+    )
+    if error == 'record_not_found':
+        return text(body='Record not found', status=404)
+    if error == 'already_linked':
+        return build_redirect_with_message(
+            error=f'Запись №{numeric_id} уже связана с соревнованием.',
+            url='/',
+        )
+
+    log_audit_event(
+        request,
+        'calendar_event_created',
+        {
+            'event_id': event_id,
+            'name': values['name'],
+            'date': new_date,
+            'date_to': new_date_to,
+            'sport': values['sport'],
+            'level': values['level'],
+            'url': values['url'],
+            'linked_record_id': numeric_id,
+            'source': 'registry',
+        },
+    )
+    log_audit_event(
+        request,
+        'participation_linked',
+        {
+            'record_id': numeric_id,
+            'student_name': record.student_name,
+            'event_id': event_id,
+            'event_name': values['name'],
+            'changes': competition_link_changes(
+                record,
+                {
+                    'name': values['name'],
+                    'sport': values['sport'],
+                    'date': new_date,
+                    'date_to': new_date_to,
+                    'level': values['level'],
+                },
+            ),
+            'event_created': True,
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Соревнование «{values["name"]}» запланировано, запись №{numeric_id} связана с ним.',
+        url='/',
+    )
+
+
 @app.post('/admin/fields')
 async def create_custom_field(request: Request):
     auth_error = require_admin(request)
@@ -7402,10 +7775,136 @@ async def admin_maintenance_page(request: Request):
             'wipe_confirm_phrase': WIPE_CONFIRM_PHRASE,
             'records_count': storage.count_competitions(),
             'attachments_count': storage.count_attachments(),
+            'unlinked_records_count': storage.count_participations_without_event(),
             'stats': stats,
             **get_flash_args(request),
         },
     )
+
+
+# --- P5b: массовое связывание записей без события (обслуживание базы). ---
+#
+# Предпросмотр по P0-семантике стартового backfill (однозначный пресет
+# name + date + date_to): matched — можно связать, ambiguous — только
+# вручную со страницы записи, unmatched — нет события. Apply проводит
+# ТОЛЬКО matched со синхронизацией 5 полей; гонки закрывает guarded
+# UPDATE (пропуск, не откат пакета).
+
+LINK_PREVIEW_AMBIGUOUS_NAME_CAP = 5
+
+
+def decorate_calendar_link_preview(preview: dict, events_by_id: dict[int, dict]) -> dict:
+    """Строки matched с диффом «после связывания» и агрегаты очисток полей
+    для warning-бейджа и текста confirm у кнопки пакета."""
+    matched_rows = []
+    clearing_counts: dict[str, int] = {}
+    for row in preview['matched']:
+        event = events_by_id.get(row['event_id'])
+        if event is None:
+            continue
+        diff = build_link_diff_rows(
+            participation_field_changes(row['name'], row['sport'], row['date'], row['date_to'], row['level'], event)
+        )
+        for item in diff:
+            if item['clears']:
+                clearing_counts[item['key']] = clearing_counts.get(item['key'], 0) + 1
+        matched_rows.append(
+            {
+                **row,
+                'record_date_label': format_date_range(
+                    datetime.fromisoformat(row['date']),
+                    datetime.fromisoformat(row['date_to']) if row['date_to'] else None,
+                ),
+                'event_period': format_date_range(
+                    datetime.fromisoformat(event['date']),
+                    datetime.fromisoformat(event['date_to']) if event.get('date_to') else None,
+                ),
+                'event_level': event['level'],
+                'event_sport': event['sport'],
+                'diff': diff,
+            }
+        )
+    # Число ЗАПИСЕЙ хотя бы с одной очисткой (не сумма очисток по полям):
+    # бейдж и confirm подают его как «У K записей …», рядом — поля с счётчиками.
+    clearing_total = sum(1 for row in matched_rows if any(item['clears'] for item in row['diff']))
+
+    def decorate_record_row(row: dict) -> dict:
+        return {
+            **row,
+            'record_date_label': format_date_range(
+                datetime.fromisoformat(row['date']),
+                datetime.fromisoformat(row['date_to']) if row['date_to'] else None,
+            ),
+        }
+
+    clearing_labels = [LINK_EVENT_FIELD_LABELS[key] for key, count in clearing_counts.items() if count]
+    matched_total = preview['counters']['matched']
+    apply_confirm = (
+        f'Связать {matched_total} записей с найденными соревнованиями? '
+        'Название, вид спорта, дату и уровень записи возьмут из соревнований.'
+    )
+    if clearing_labels:
+        apply_confirm += f' У {clearing_total} записей станут пустыми: {", ".join(clearing_labels)}.'
+    return {
+        'counters': preview['counters'],
+        'matched': matched_rows,
+        'ambiguous': [decorate_record_row(row) for row in preview['ambiguous']],
+        'unmatched': [decorate_record_row(row) for row in preview['unmatched']],
+        'clearing_total': clearing_total,
+        # Бейдж: «уровень (2), вид спорта (1)» — по полям с очистками.
+        'clearing_parts': [
+            f'{LINK_EVENT_FIELD_LABELS[key]} ({count})' for key, count in clearing_counts.items() if count
+        ],
+        'clearing_labels': clearing_labels,
+        'apply_confirm_text': apply_confirm,
+        'ambiguous_name_cap': LINK_PREVIEW_AMBIGUOUS_NAME_CAP,
+    }
+
+
+@app.get('/admin/maintenance/calendar-links')
+async def admin_maintenance_calendar_links_page(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+    storage = get_storage(request.app)
+    preview = decorate_calendar_link_preview(
+        storage.calendar_link_backfill_preview(),
+        {event['id']: event for event in storage.list_calendar_events()},
+    )
+    return await render(
+        template_name=jinja_env.get_template('admin_maintenance_links.html'),
+        context={
+            'request': request,
+            'preview': preview,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/admin/maintenance/calendar-links/apply')
+async def apply_maintenance_calendar_links(request: Request):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    counters, items = get_storage(request.app).apply_calendar_link_backfill()
+    log_audit_event(
+        request,
+        'participation_batch_linked',
+        {
+            'linked': counters['linked'],
+            'skipped': counters['skipped'],
+            'items': items,
+        },
+    )
+    if counters['skipped']:
+        message = (
+            f'Связывание завершено: связано {counters["linked"]}, '
+            f'пропущено {counters["skipped"]} (уже связаны или соревнование не найдено).'
+        )
+    else:
+        message = f'Связывание завершено: связано {counters["linked"]}.'
+    return build_redirect_with_message(message=message, url='/admin/maintenance/calendar-links')
 
 
 def sanitize_dataframe(df: pd.DataFrame) -> pd.DataFrame:

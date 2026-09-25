@@ -3687,3 +3687,286 @@ class SQLiteAdapter:
                 (event_id,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    # ---- P5b: явные связки «запись → событие» (Registry ↔ Calendar) ----
+    #
+    # Явное связывание существующей NULL-записи со событием календаря:
+    # ссылка calendar_event_id + синхронизация 5 event-owned полей
+    # (name/date/date_to/sport/level) — тот же состав, что у edit-sync
+    # update_calendar_event. Правило гонок: guarded UPDATE
+    # (WHERE calendar_event_id IS NULL) — запись, которую успел связать
+    # кто-то другой, не перезаписывается (already_linked), существующая
+    # ссылка не меняется.
+
+    def link_participation_to_event(self, record_id: int, event_id: int) -> tuple[dict | None, str | None]:
+        """Связать запись со существующим событием + синхронизация полей.
+
+        Одна транзакция под _lock (паттерн update_calendar_event): сбой
+        любого шага — откат всего. Возвращает (event, None) при успехе или
+        (None, код ошибки): record_not_found / event_not_found /
+        already_linked (запись уже связана — её ссылка и поля не тронуты).
+        """
+        with self._lock:
+            try:
+                record = self.connection.execute(
+                    'SELECT id, calendar_event_id FROM competitions WHERE id = ?',
+                    (record_id,),
+                ).fetchone()
+                if record is None:
+                    return None, 'record_not_found'
+                event = self.connection.execute(
+                    'SELECT * FROM calendar_events WHERE id = ?',
+                    (event_id,),
+                ).fetchone()
+                if event is None:
+                    return None, 'event_not_found'
+                cursor = self.connection.execute(
+                    'UPDATE competitions'
+                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' WHERE id = ? AND calendar_event_id IS NULL',
+                    (
+                        event_id,
+                        event['name'],
+                        event['date'],
+                        event['date_to'],
+                        event['sport'],
+                        event['level'],
+                        record_id,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    # Между SELECT и UPDATE запись успел связать другой
+                    # запрос — откатываем (SELECT читает снапшот неявной
+                    # транзакции) и отказываем без перезаписи.
+                    self.connection.rollback()
+                    return None, 'already_linked'
+                self.connection.commit()
+                return dict(event), None
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def create_calendar_event_and_link(
+        self,
+        *,
+        name: str,
+        date: str,
+        date_to: str | None,
+        level: str,
+        sport: str,
+        url: str,
+        record_id: int,
+    ) -> tuple[int | None, str | None]:
+        """Создать событие календаря и сразу связать с ним запись.
+
+        Атомарно (одна транзакция): INSERT события (без собственного
+        commit, паттерн create_calendar_event) + guarded UPDATE записи
+        с синхронизацией 5 полей. Проверки записи (существует + ещё NULL)
+        выполняются ДО вставки, чтобы не оставлять событий-сирот; гонку на
+        UPDATE закрывает rowcount (=0 → already_linked, откат всего).
+        Возвращает (event_id, None) или (None, record_not_found /
+        already_linked).
+        """
+        with self._lock:
+            try:
+                record = self.connection.execute(
+                    'SELECT id, calendar_event_id FROM competitions WHERE id = ?',
+                    (record_id,),
+                ).fetchone()
+                if record is None:
+                    return None, 'record_not_found'
+                if record['calendar_event_id'] is not None:
+                    return None, 'already_linked'
+                cursor = self.connection.execute(
+                    'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (name, date, date_to, level, sport, url, datetime.utcnow().isoformat()),
+                )
+                event_id = cursor.lastrowid
+                linked = self.connection.execute(
+                    'UPDATE competitions'
+                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' WHERE id = ? AND calendar_event_id IS NULL',
+                    (event_id, name, date, date_to, sport, level, record_id),
+                )
+                if linked.rowcount == 0:
+                    self.connection.rollback()
+                    return None, 'already_linked'
+                self.connection.commit()
+                return event_id, None
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def count_participations_without_event(self) -> int:
+        """Дешёвый счётчик записей без ссылки на событие (карточка
+        «Связывание с календарём» на странице обслуживания)."""
+        with self._lock:
+            return int(
+                self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions WHERE calendar_event_id IS NULL'
+                ).fetchone()['total']
+            )
+
+    def calendar_link_backfill_preview(self) -> dict:
+        """Read-only предпросмотр массового связывания NULL-записей.
+
+        Предикат — ровно семантика стартового P0-backfill
+        (_calendar_preset_match_sql: name + date + COALESCE(date_to, '')).
+        Группы: matched (ровно один кандидат-событие), ambiguous (больше
+        одного — вручную, автоматики не будет), unmatched (ноль).
+        Списки capped (CALENDAR_LINK_PREVIEW_CAP) — счётчики при этом
+        полные. Значения полей для диффа «после связывания» маршрут
+        берёт из события сам (get_calendar_event).
+        """
+        with self._lock:
+            predicate = self._calendar_preset_match_sql('c')
+            rows = self.connection.execute(
+                f'''
+                SELECT
+                    c.id AS record_id,
+                    c.student_name,
+                    c.name,
+                    c.date,
+                    c.date_to,
+                    c.sport,
+                    c.level,
+                    (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) AS candidate_count
+                FROM competitions c
+                WHERE c.calendar_event_id IS NULL
+                ORDER BY c.date ASC, c.id ASC
+                '''
+            ).fetchall()
+            already_linked = int(
+                self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions WHERE calendar_event_id IS NOT NULL'
+                ).fetchone()['total']
+            )
+            matched: list[dict] = []
+            ambiguous: list[dict] = []
+            unmatched: list[dict] = []
+            for row in rows:
+                base = {
+                    'record_id': row['record_id'],
+                    'student_name': row['student_name'],
+                    'name': row['name'],
+                    'date': row['date'],
+                    'date_to': row['date_to'],
+                    'sport': row['sport'],
+                    'level': row['level'],
+                }
+                # Кандидаты строки — тот же предикат пресета, что и в
+                # подсчёте выше (синхронно с _calendar_preset_match_sql):
+                # коррелированная форма по id записи, один источник
+                # семантики совпадения.
+                candidate_where = f'competitions.id = ? AND {self._calendar_preset_match_sql("competitions")}'
+                if row['candidate_count'] == 1:
+                    if len(matched) < CALENDAR_LINK_PREVIEW_CAP:
+                        event = self.connection.execute(
+                            f'SELECT e.id AS event_id, e.name AS event_name '
+                            f'FROM competitions, calendar_events e WHERE {candidate_where}',
+                            (row['record_id'],),
+                        ).fetchone()
+                        matched.append({**base, 'event_id': event['event_id'], 'event_name': event['event_name']})
+                elif row['candidate_count'] > 1:
+                    if len(ambiguous) < CALENDAR_LINK_PREVIEW_CAP:
+                        candidates = self.connection.execute(
+                            f'SELECT e.name AS event_name '
+                            f'FROM competitions, calendar_events e WHERE {candidate_where}',
+                            (row['record_id'],),
+                        ).fetchall()
+                        ambiguous.append(
+                            {
+                                **base,
+                                'candidate_count': row['candidate_count'],
+                                'candidate_names': [candidate['event_name'] for candidate in candidates],
+                            }
+                        )
+                elif len(unmatched) < CALENDAR_LINK_PREVIEW_CAP:
+                    unmatched.append(base)
+            matched_total = sum(1 for row in rows if row['candidate_count'] == 1)
+            ambiguous_total = sum(1 for row in rows if row['candidate_count'] > 1)
+            return {
+                'counters': {
+                    'considered': len(rows),
+                    'matched': matched_total,
+                    'unmatched': len(rows) - matched_total - ambiguous_total,
+                    'ambiguous': ambiguous_total,
+                    'already_linked': already_linked,
+                },
+                'matched': matched,
+                'ambiguous': ambiguous,
+                'unmatched': unmatched,
+            }
+
+    def apply_calendar_link_backfill(self) -> tuple[dict[str, int], list[dict]]:
+        """Массовое связывание matched-записей (одна транзакция).
+
+        В батч входят ТОЛЬКО строки с единственным пресет-кандидатом
+        (=1) — ambiguous не линкуются никогда, unmatched нечего линковать.
+        Для каждой строки — guarded UPDATE с синхронизацией 5 полей:
+        rowcount = 0 (запись успели связать между предпросмотром и apply)
+        — пропуск (skipped), не откат пакета. Возвращает счётчики
+        {matched, linked, skipped} и список связанных
+        [{record_id, event_id, event_name}].
+        """
+        with self._lock:
+            predicate = self._calendar_preset_match_sql('c')
+            pairs = self.connection.execute(
+                f'''
+                SELECT
+                    c.id AS record_id,
+                    (SELECT e.id FROM calendar_events e WHERE {predicate}) AS event_id,
+                    (SELECT e.name FROM calendar_events e WHERE {predicate}) AS event_name
+                FROM competitions c
+                WHERE c.calendar_event_id IS NULL
+                  AND (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) = 1
+                ORDER BY c.id ASC
+                '''
+            ).fetchall()
+            counters = {'matched': len(pairs), 'linked': 0, 'skipped': 0}
+            items: list[dict] = []
+            try:
+                for pair in pairs:
+                    event = self.connection.execute(
+                        'SELECT name, date, date_to, sport, level FROM calendar_events WHERE id = ?',
+                        (pair['event_id'],),
+                    ).fetchone()
+                    cursor = self.connection.execute(
+                        'UPDATE competitions'
+                        ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                        ' WHERE id = ? AND calendar_event_id IS NULL',
+                        (
+                            pair['event_id'],
+                            event['name'],
+                            event['date'],
+                            event['date_to'],
+                            event['sport'],
+                            event['level'],
+                            pair['record_id'],
+                        ),
+                    )
+                    if cursor.rowcount == 0:
+                        # Кто-то связал запись после предпросмотра — не
+                        # ломаем пакет, считаем пропуском.
+                        counters['skipped'] += 1
+                        continue
+                    counters['linked'] += 1
+                    items.append(
+                        {
+                            'record_id': pair['record_id'],
+                            'event_id': pair['event_id'],
+                            'event_name': pair['event_name'],
+                        }
+                    )
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
+            return counters, items
+
+
+# P5b: лимит списков предпросмотра массового связывания (matched/ambiguous/
+# unmatched); счётчики при этом полные — страницы-группы показывают первые
+# CALENDAR_LINK_PREVIEW_CAP строк, остальное владелец разбирает поиском/фильтром.
+CALENDAR_LINK_PREVIEW_CAP = 200

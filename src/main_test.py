@@ -183,6 +183,8 @@ def client() -> SanicTestClient:
     fake_storage.delete_user.return_value = 0
     fake_storage.count_competitions.return_value = 0
     fake_storage.count_attachments.return_value = 0
+    # P5b: счётчик записей без события для карточки «Связывание с календарём».
+    fake_storage.count_participations_without_event.return_value = 0
     fake_storage.delete_all_competitions.return_value = 0
     fake_storage.delete_all_attachments.return_value = 0
     fake_storage.get_competitions_before.return_value = []
@@ -11269,6 +11271,676 @@ def test_calendar_delete_blocked_by_linked_participant_real_storage(event_import
     assert response.status == 302
     assert 'Соревнование удалено' in unquote_plus(response.headers['location'])
     assert storage.get_calendar_event(empty_id) is None
+
+
+# --- P5b: явные связки «запись → событие» (Registry ↔ Calendar). ---
+# Страница связывания NULL-записи (поиск с пресет-кандидатами + дифф 5
+# event-owned полей, создание события со страницы записи) и массовое
+# связывание в обслуживании базы: только однозначные matched, ambiguous —
+# никогда. Гонки закрывает guarded UPDATE в storage.
+
+
+def make_null_participation(
+    storage,
+    name: str = 'Николаев Николай',
+    *,
+    comp_name: str = 'Кросс весны',
+    date: datetime = datetime(2026, 4, 10),
+    date_to: datetime | None = None,
+    sport: str = 'Бег',
+    level: str = 'внутривузовские',
+    discipline: str | None = None,
+    result: str | None = None,
+) -> int:
+    """NULL-запись реестра (без ссылки на событие) — возвращает её id."""
+    storage.save_competitions(
+        [
+            Competition(
+                student_id=f'id-{name}',
+                student_name=name,
+                student_sex='М',
+                institute='ИСИ',
+                group='ПГС-101',
+                course=2,
+                sport=sport,
+                date=date,
+                date_to=date_to,
+                level=level,
+                name=comp_name,
+                position=1,
+                discipline=discipline,
+                result=result,
+            )
+        ]
+    )
+    row = storage.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()
+    return int(row['id'])
+
+
+def test_index_unlinked_record_shows_link_event_action(event_import_client: SanicTestClient):
+    """P5b: у NULL-записи в строке реестра модератору видна иконка связи
+    с соревнованием календаря."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+
+    _, response = event_import_client.get('/', headers=get_auth_headers())
+    assert response.status == 200
+    assert f'href="/competition/{record_id}/link-event"' in response.text
+    assert 'Связать с соревнованием календаря' in response.text
+
+
+def test_index_linked_record_has_no_link_event_action(event_import_client: SanicTestClient):
+    """У связанной записи иконки связи нет — повторное связывание невозможно."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (event_id, record_id))
+    storage.connection.commit()
+
+    _, response = event_import_client.get('/', headers=get_auth_headers())
+    assert response.status == 200
+    assert f'href="/competition/{record_id}/link-event"' not in response.text
+    assert 'Связать с соревнованием календаря' not in response.text
+
+
+def test_link_event_post_links_record(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    headers = get_auth_headers()
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=headers,
+        data={**csrf_for(headers), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'связана с соревнованием' in unquote_plus(response.headers['location'])
+    assert storage.get_competition_by_id(record_id).calendar_event_id == event_id
+
+
+def test_link_event_post_syncs_five_event_fields(event_import_client: SanicTestClient):
+    """Связывание копирует в запись все 5 event-owned полей события —
+    name/sport/date/date_to/level (включая появившийся date_to)."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage, date=datetime(2026, 5, 10), date_to=None)
+    event_id = make_calendar_event(storage, name='Забег 2026 — переименованный', sport='Лыжи', level='региональные')
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+
+    record = storage.get_competition_by_id(record_id)
+    event = storage.get_calendar_event(event_id)
+    assert record.name == event['name']
+    assert record.sport == event['sport']
+    assert record.date == datetime(2026, 5, 10)
+    assert record.date_to == datetime(2026, 5, 11)
+    assert record.level == event['level']
+    assert record.calendar_event_id == event_id
+
+
+def test_link_event_post_preserves_participation_fields(event_import_client: SanicTestClient):
+    """Не-event-owned поля записи (институт/группа/курс/место + дисциплина
+    и результат) связывание не затирает."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage, discipline='Эстафета', result='3:21')
+    event_id = make_calendar_event(storage)
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+
+    record = storage.get_competition_by_id(record_id)
+    assert record.institute == 'ИСИ'
+    assert record.group == 'ПГС-101'
+    assert record.course == 2
+    assert record.position == 1
+    assert record.discipline == 'Эстафета'
+    assert record.result == '3:21'
+
+
+def test_link_event_new_creates_event_and_links(event_import_client: SanicTestClient):
+    """Создание соревнования со страницы записи: событие появляется в
+    календаре, запись сразу связывается и берёт его поля."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    headers = get_auth_headers()
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс весны',
+            'date': '10-12.04.2026',
+            'level': 'региональные',
+            'sport': 'Лыжи',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'запланировано' in unquote_plus(response.headers['location'])
+    assert 'связана с ним' in unquote_plus(response.headers['location'])
+
+    events = storage.list_calendar_events()
+    assert len(events) == 1
+    event = events[0]
+    assert event['name'] == 'Кросс весны'
+    assert event['date'] == '2026-04-10T00:00:00'
+    assert event['date_to'] == '2026-04-12T00:00:00'
+    assert event['level'] == 'региональные'
+    assert event['sport'] == 'Лыжи'
+
+    record = storage.get_competition_by_id(record_id)
+    assert record.calendar_event_id == event['id']
+    assert record.name == 'Кросс весны'
+    assert record.sport == 'Лыжи'
+    assert record.date == datetime(2026, 4, 10)
+    assert record.date_to == datetime(2026, 4, 12)
+    assert record.level == 'региональные'
+
+
+def test_link_event_page_snapshot_search_and_preset_diff(event_import_client: SanicTestClient):
+    """GET-страница: снимок записи, GET-поиск, пресет-кандидат первым с
+    бейджем «предложение» и диффом «после связывания»."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage, comp_name='Кросс весны', date=datetime(2026, 5, 10))
+    # Пресет-кандидат: точное name + date + date_to (однодневный).
+    event_id = make_calendar_event(
+        storage,
+        name='Кросс весны',
+        date='2026-05-10T00:00:00',
+        date_to=None,
+        sport='Лыжи',
+        level='региональные',
+    )
+
+    _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Связывание с календарём' in response.text
+    assert 'Николаев Николай' in response.text
+    assert 'После связывания' in response.text
+    # Пресет-кандидат — первым, с бейджем и диффом по отличающимся полям.
+    assert 'предложение' in response.text
+    assert 'вид спорта: «Бег» → «Лыжи»' in response.text
+    assert 'уровень: «внутривузовские» → «региональные»' in response.text
+    assert f'href="/calendar/{event_id}"' in response.text
+    # Есть кандидаты — секция создания скрыта (collapse без show).
+    assert 'id="link-event-new-form"' in response.text
+    assert 'collapse show' not in response.text
+
+
+def test_link_event_page_caps_candidates_at_twenty(event_import_client: SanicTestClient):
+    """Больше 20 кандидатов — показываются первые 20 с подсказкой
+    уточнить поиск."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage, comp_name='Серия', date=datetime(2026, 9, 1))
+    # a..y: хронология+алфавит -> первые 20 = a..t, хвост (u..y) скрыт капом.
+    for index in range(25):
+        storage.create_calendar_event(
+            name=f'Серия {chr(97 + index)}', date='2026-09-01T00:00:00', date_to=None, level='', sport='', url=''
+        )
+
+    _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Показаны первые 20 — уточните поиск.' in response.text
+    assert 'Серия t' in response.text
+    assert 'Серия u' not in response.text
+    assert 'Серия y' not in response.text
+
+
+def test_link_event_page_prefilled_and_create_open_without_candidates(event_import_client: SanicTestClient):
+    """Нет кандидатов — пустое состояние + секция «Добавить в календарь»
+    раскрыта, форма предзаполнена снимком записи."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(
+        storage, comp_name='Уникальный турнир', date=datetime(2026, 4, 10), sport='Плавание'
+    )
+
+    _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Подходящих соревнований не найдено' in response.text
+    assert 'collapse show' in response.text
+    assert 'value="Уникальный турнир"' in response.text
+    assert 'value="Плавание"' in response.text
+    assert 'data-range-from="2026-04-10"' in response.text
+
+
+def test_link_event_race_already_linked_keeps_existing_link(event_import_client: SanicTestClient):
+    """Гонка: запись уже связали с другим событием — POST не перезаписывает
+    ни ссылку, ни поля (guarded UPDATE → already_linked)."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    first_id = make_calendar_event(storage, name='Забег 2026')
+    second_id = make_calendar_event(
+        storage, name='Другое событие', date='2027-02-02T00:00:00', date_to=None, level='', sport=''
+    )
+    storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (first_id, record_id))
+    storage.connection.commit()
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': str(second_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'уже связана с соревнованием' in unquote_plus(response.headers['location'])
+
+    record = storage.get_competition_by_id(record_id)
+    assert record.calendar_event_id == first_id
+    # Поля записи при отказе не тронуты (событие-«второе» не проигралось).
+    assert record.name == 'Кросс весны'
+    assert record.sport == 'Бег'
+
+
+def test_link_event_target_event_missing(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': '424242'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Соревнование не найдено' in unquote_plus(response.headers['location'])
+    assert storage.get_competition_by_id(record_id).calendar_event_id is None
+
+
+def test_link_event_page_for_linked_record_redirects_with_flash(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (event_id, record_id))
+    storage.connection.commit()
+
+    _, response = event_import_client.get(
+        f'/competition/{record_id}/link-event', headers=get_auth_headers(), allow_redirects=False
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/?admin_error=')
+    assert 'уже связана с соревнованием' in unquote_plus(response.headers['location'])
+
+
+def test_maintenance_calendar_links_admin_allowed(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    make_null_participation(storage)
+
+    _, response = event_import_client.get('/admin/maintenance/calendar-links', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Связывание с календарём' in response.text
+    # Карточка-счётчик NULL-записей на странице обслуживания.
+    _, maintenance = event_import_client.get('/admin/maintenance', headers=get_auth_headers())
+    assert maintenance.status == 200
+    assert '/admin/maintenance/calendar-links' in maintenance.text
+    assert 'Записи реестра без соревнования: 1.' in maintenance.text
+
+
+def test_link_event_editor_allowed(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    headers = get_auth_headers(role='editor')
+
+    _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=headers)
+    assert response.status == 200
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=headers,
+        data={**csrf_for(headers), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_competition_by_id(record_id).calendar_event_id == event_id
+
+
+def test_link_event_denied_for_viewer_and_athlete(event_import_client: SanicTestClient):
+    """Viewer и атлет: страница/POST связывания — 403, иконки связи в
+    реестре нет (связывание — работа модератора)."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+
+    _, response = event_import_client.get(
+        f'/competition/{record_id}/link-event', headers=get_auth_headers(role='viewer')
+    )
+    assert response.status == 403
+
+    _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=athlete_headers())
+    assert response.status == 403
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(role='viewer'),
+        data={**csrf_for(get_auth_headers(role='viewer')), 'event_id': '1'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+    for headers in (get_auth_headers(role='viewer'), athlete_headers()):
+        _, response = event_import_client.get('/', headers=headers)
+        assert response.status == 200
+        assert f'href="/competition/{record_id}/link-event"' not in response.text
+        assert 'Связать с соревнованием календаря' not in response.text
+
+
+def test_batch_apply_never_links_ambiguous(event_import_client: SanicTestClient):
+    """Неоднозначный пресет (несколько событий) автоматикой не линкуется."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 1, 10))
+    for _ in range(2):
+        storage.create_calendar_event(
+            name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+        )
+
+    _, response = event_import_client.get('/admin/maintenance/calendar-links', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Неоднозначно' in response.text
+    assert 'Подходит несколько (2)' in response.text
+
+    _, response = event_import_client.post(
+        '/admin/maintenance/calendar-links/apply',
+        headers=get_auth_headers(),
+        data=csrf_for(get_auth_headers()),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'связано 0' in unquote_plus(response.headers['location'])
+    assert storage.get_competition_by_id(record_id).calendar_event_id is None
+
+
+def test_batch_preview_counts_and_apply_links_matched(event_import_client: SanicTestClient):
+    """Предпросмотр считает matched/ambiguous/unmatched/уже связанных; apply
+    связывает ТОЛЬКО matched с синхронизацией полей события."""
+    storage = app.ctx.storage
+    matched_id = make_null_participation(storage, comp_name='Кросс весны', date=datetime(2026, 5, 10))
+    # Однодневное событие с тем же названием и датой — однозначный пресет.
+    event_id = make_calendar_event(
+        storage, name='Кросс весны', date='2026-05-10T00:00:00', date_to=None, sport='Лыжи', level='региональные'
+    )
+    ambiguous_id = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 1, 10))
+    for _ in range(2):
+        storage.create_calendar_event(
+            name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+        )
+    unmatched_id = make_null_participation(storage, comp_name='Нет события', date=datetime(2028, 2, 2))
+    linked_id = make_null_participation(storage, comp_name='Уже связан', date=datetime(2026, 7, 7))
+    other_event = make_calendar_event(
+        storage, name='Другое событие', date='2026-07-07T00:00:00', date_to=None, level='', sport=''
+    )
+    storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (other_event, linked_id))
+    storage.connection.commit()
+
+    _, response = event_import_client.get('/admin/maintenance/calendar-links', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Можно связать' in response.text
+    assert 'Без совпадений' in response.text
+    # Дифф matched-строки + текст явного подтверждения у кнопки пакета.
+    assert 'уровень: «внутривузовские» → «региональные»' in response.text
+    assert 'Связать 1 записей' in response.text
+    # Confirm у кнопки уходит в onsubmit через |tojson — кириллица в
+    # \uXXXX-эскейпах JSON (браузер декодирует их в confirm() сам).
+    assert json.dumps('Название, вид спорта, дату и уровень записи возьмут из соревнований.')[1:-1] in response.text
+
+    _, response = event_import_client.post(
+        '/admin/maintenance/calendar-links/apply',
+        headers=get_auth_headers(),
+        data=csrf_for(get_auth_headers()),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/admin/maintenance/calendar-links?admin_message=')
+    assert 'связано 1' in unquote_plus(response.headers['location'])
+
+    record = storage.get_competition_by_id(matched_id)
+    assert record.calendar_event_id == event_id
+    assert record.sport == 'Лыжи'
+    assert record.level == 'региональные'
+    # Остальные группы не тронуты.
+    assert storage.get_competition_by_id(ambiguous_id).calendar_event_id is None
+    assert storage.get_competition_by_id(unmatched_id).calendar_event_id is None
+    assert storage.get_competition_by_id(linked_id).calendar_event_id == other_event
+
+
+def test_forged_event_fields_ignored_right_after_link(event_import_client: SanicTestClient):
+    """P2 сразу после связывания: подделанные event-поля в форме правки
+    игнорируются, обычные поля редактируются."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    before = record_identity_snapshot(storage, record_id)
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=get_auth_headers(),
+        data={
+            **csrf_for(get_auth_headers()),
+            'student_name': 'Николаев Николай',
+            'student_sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group': 'ПГС-201',
+            'sport': 'Подделанный спорт',
+            'date': '01.01.2030',
+            'level': 'олимпийские',
+            'name': 'Подделанное название',
+            'position': '3',
+            'course': '3',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert record_identity_snapshot(storage, record_id) == before
+    row = storage.connection.execute(
+        'SELECT institute, "group", course, position FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()
+    assert tuple(row) == ('ИСЭиУ', 'ПГС-201', 3, 3)
+
+
+def test_registry_name_becomes_event_link_after_linking(event_import_client: SanicTestClient):
+    """После связывания название в строке реестра — ссылка на соревнование."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+
+    _, response = event_import_client.get('/', headers=get_auth_headers())
+    assert response.status == 200
+    assert (
+        f'<a href="/calendar/{event_id}" class="link" title="Открыть страницу соревнования">Забег 2026</a>'
+        in response.text
+    )
+
+
+def test_link_routes_write_audit_events(event_import_client: SanicTestClient):
+    """Аудит: participation_linked (с event_name и old/new), связка при
+    создании — calendar_event_created (source: registry) + event_created,
+    пакет — participation_batch_linked со списком items."""
+    storage = app.ctx.storage
+    linked_id = make_null_participation(storage)
+    event_id = make_calendar_event(storage)
+    _, response = event_import_client.post(
+        f'/competition/{linked_id}/link-event',
+        headers=get_auth_headers(),
+        data={**csrf_for(get_auth_headers()), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert audit_details(storage, 'participation_linked') == [
+        {
+            'record_id': linked_id,
+            'student_name': 'Николаев Николай',
+            'event_id': event_id,
+            'event_name': 'Забег 2026',
+            'changes': {
+                'name': {'old': 'Кросс весны', 'new': 'Забег 2026'},
+                'sport': {'old': 'Бег', 'new': 'Бег'},
+                'date': {'old': '2026-04-10T00:00:00', 'new': '2026-05-10T00:00:00'},
+                'date_to': {'old': None, 'new': '2026-05-11T00:00:00'},
+                'level': {'old': 'внутривузовские', 'new': 'внутривузовские'},
+            },
+        }
+    ]
+
+    created_id = make_null_participation(storage, comp_name='Турнир новичков', date=datetime(2026, 6, 1))
+    _, response = event_import_client.post(
+        f'/competition/{created_id}/link-event/new',
+        headers=get_auth_headers(),
+        data={
+            **csrf_for(get_auth_headers()),
+            'name': 'Турнир новичков',
+            'date': '01.06.2026',
+            'level': 'внутривузовские',
+            'sport': 'Бег',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    new_event_id = storage.get_competition_by_id(created_id).calendar_event_id
+    assert audit_details(storage, 'calendar_event_created') == [
+        {
+            'event_id': new_event_id,
+            'name': 'Турнир новичков',
+            'date': '2026-06-01T00:00:00',
+            'date_to': None,
+            'sport': 'Бег',
+            'level': 'внутривузовские',
+            'url': '',
+            'linked_record_id': created_id,
+            'source': 'registry',
+        }
+    ]
+    created_events = audit_details(storage, 'participation_linked')
+    assert created_events[0]['event_created'] is True
+    assert created_events[0]['event_id'] == new_event_id
+
+    batch_id = make_null_participation(storage, comp_name='Пакетный кубок', date=datetime(2026, 8, 8))
+    batch_event = storage.create_calendar_event(
+        name='Пакетный кубок', date='2026-08-08T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    _, response = event_import_client.post(
+        '/admin/maintenance/calendar-links/apply',
+        headers=get_auth_headers(),
+        data=csrf_for(get_auth_headers()),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert audit_details(storage, 'participation_batch_linked') == [
+        {
+            'linked': 1,
+            'skipped': 0,
+            'items': [{'record_id': batch_id, 'event_id': batch_event, 'event_name': 'Пакетный кубок'}],
+        }
+    ]
+
+
+def test_link_event_post_routes_require_csrf(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    for path in (
+        f'/competition/{record_id}/link-event',
+        f'/competition/{record_id}/link-event/new',
+        '/admin/maintenance/calendar-links/apply',
+    ):
+        _, response = event_import_client.post(path, headers=get_auth_headers(), data={}, allow_redirects=False)
+        assert response.status == 403, path
+    assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 1
+    assert storage.list_calendar_events() == []
+
+
+ONSUBMIT_CONFIRM_PREFIX = 'return confirm('
+
+
+def parse_onsubmit_confirms(html: str) -> list[str]:
+    """Валидация onsubmit-confirm форм: КАЖДЫЙ onsubmit на странице — в
+    одинарных кавычках (двойные обрывались бы JSON-строкой tojson → форма
+    отправлялась бы без диалога), значение — «return confirm(<JSON>)»,
+    JSON декодируется в исходный текст (апострофы внутри — \\u0027)."""
+    values = re.findall(r"onsubmit='([^']*)'", html)
+    onsubmit_total = len(re.findall(r'onsubmit=', html))
+    assert values, 'на странице нет onsubmit-confirm форм'
+    assert len(values) == onsubmit_total, 'onsubmit вне одинарных кавычек обрывается JSON-строкой'
+    messages = []
+    prefix_len = len(ONSUBMIT_CONFIRM_PREFIX)
+    for value in values:
+        assert value.startswith(ONSUBMIT_CONFIRM_PREFIX) and value.endswith(')'), value
+        messages.append(json.loads(value[prefix_len:-1]))
+    return messages
+
+
+def test_link_confirm_onsubmit_is_valid_js_with_quoted_names(event_import_client: SanicTestClient):
+    """Ремонт QA: onsubmit='return confirm(...)' — атрибут в одинарных
+    кавычках, JSON внутри валиден даже для названий с „ " и апострофом;
+    предупреждение об очистке полей доходит до диалога."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage, comp_name='Спартакиада', date=datetime(2026, 6, 10))
+    # Пустой уровень/вид спорта — в подтверждении будет «Пустыми станут: …».
+    storage.create_calendar_event(
+        name='Спартакиада „ОУВООО"', date='2026-06-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    storage.create_calendar_event(
+        name="Спартакиада д'Орсе",
+        date='2026-06-10T00:00:00',
+        date_to=None,
+        level='региональные',
+        sport='Лыжи',
+        url='',
+    )
+
+    _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
+    assert response.status == 200
+    messages = parse_onsubmit_confirms(response.text)
+    assert len(messages) == 2
+    joined = ' | '.join(messages)
+    assert 'Связать запись №' in joined
+    assert 'Спартакиада „ОУВООО"' in joined
+    assert "Спартакиада д'Орсе" in joined
+    assert 'Пустыми станут: вид спорта, уровень.' in joined
+
+
+def test_batch_apply_confirm_onsubmit_is_valid_js(event_import_client: SanicTestClient):
+    """Тот же контракт у кнопки пакета: confirm выживает после tojson,
+    включая число записей с очистками и названия с кавычками."""
+    storage = app.ctx.storage
+    make_null_participation(storage, comp_name='Спартакиада „ОУВООО"', date=datetime(2026, 6, 10))
+    storage.create_calendar_event(
+        name='Спартакиада „ОУВООО"', date='2026-06-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+
+    _, response = event_import_client.get('/admin/maintenance/calendar-links', headers=get_auth_headers())
+    assert response.status == 200
+    messages = parse_onsubmit_confirms(response.text)
+    assert len(messages) == 1
+    message = messages[0]
+    assert 'Связать 1 записей с найденными соревнованиями?' in message
+    assert 'Название, вид спорта, дату и уровень записи возьмут из соревнований.' in message
+    assert 'У 1 записей станут пустыми: вид спорта, уровень.' in message
 
 
 def test_event_import_row_add_and_create_student_write_link(event_import_client: SanicTestClient):
