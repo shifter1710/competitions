@@ -136,7 +136,48 @@ BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
 )
 
 REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
-INDEX_EXPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
+# Event Model, P5a (docs/data-model-decisions.md «Event Model, P5a»):
+# «Дисциплина» — опциональная фиксированная колонка шаблона импорта после
+# базовых; «Дисциплина»/«Результат» — фиксированные колонки выгрузки реестра
+# после «Курса». Значения живут в базовых discipline/result записи, а не в
+# кастомных полях.
+IMPORT_DISCIPLINE_COLUMN = 'Дисциплина'
+INDEX_EXPORT_COLUMNS: Sequence[str] = (
+    *tuple(field['label'] for field in BASE_FIELD_SPECS),
+    'Дисциплина',
+    'Результат',
+)
+
+
+def collides_with_fixed_columns(label: str, fold_labels) -> bool:
+    """Label кастомного поля совпадает с фиксированной колонкой (casefold)."""
+    return label.strip().casefold() in fold_labels
+
+
+def select_export_custom_fields(custom_fields: Sequence[CustomField]) -> list[CustomField]:
+    """Кастомные поля выгрузки реестра: show_in_export и без коллизии label
+    с фиксированными «Дисциплина»/«Результат» — заголовок в выгрузке один,
+    значение отдаётся из базовой колонки записи. Определение поля и его
+    значения в реестре/extra_data не трогаются."""
+    fold_labels = {'дисциплина', 'результат'}
+    return [
+        field
+        for field in custom_fields
+        if field.show_in_export and not collides_with_fixed_columns(field.label, fold_labels)
+    ]
+
+
+def select_template_custom_fields(custom_fields: Sequence[CustomField]) -> list[CustomField]:
+    """Кастомные поля шаблона импорта: show_in_template и без коллизии label
+    с фиксированной опциональной колонкой «Дисциплина» (в шаблоне «Результата»
+    нет — кастомное поле с таким label в шаблон попадает как обычно)."""
+    fold_labels = {'дисциплина'}
+    return [
+        field
+        for field in custom_fields
+        if field.show_in_template and not collides_with_fixed_columns(field.label, fold_labels)
+    ]
+
 
 # Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md
 # «Реестр полей: лёгкая версия сейчас, полная запланирована»): у каждого
@@ -682,6 +723,17 @@ def clean_str(value) -> str:
     return str(value).strip()
 
 
+def normalize_discipline_for_dedup(value) -> str:
+    """Дисциплина для ключа дубля (Event Model, P5a): пробелы схлопываются,
+    регистр не важен — то же написание с другими пробелами/регистром
+    остаётся дублем. Хранится в записи оригинальное написание как введено;
+    нормализация — только внутри ключа дедупликации.
+    """
+    if not value:
+        return ''
+    return ' '.join(value.split()).casefold()
+
+
 def normalize_position(value) -> int:
     if isna(value) or value == '':
         return 0
@@ -1027,6 +1079,11 @@ def build_competition(
                 empty_error='Курс обязателен',
             )
         ),
+        # Event Model, P5a: опциональная колонка «Дисциплина» импорта/форм —
+        # в базовую колонку записи, пустая ячейка → None. Если активен кастом
+        # с тем же label, значение попадает и в extra_data (ниже) — двойная
+        # запись, self-healing. Базовый result импортом не пишется.
+        discipline=clean_str(record.get(IMPORT_DISCIPLINE_COLUMN)) or None,
         extra_data=extract_custom_field_values(record, custom_fields),
     )
     if storage is not None:
@@ -1101,9 +1158,12 @@ def competition_to_export_row(
     # в Excel-выгрузки (реестр/отчёты/обслуживание) не отдаётся: формат
     # выгрузок — часть контракта импорта/экспорта и не меняется.
     row.pop('student_ref_id', None)
-    # Event Model, Wave 1 P1: служебные поля participation-identity
-    # (дисциплина/результат/ссылка на событие) тоже внутренние — контракт
-    # Excel-выгрузок не меняется, ключей в строке быть не должно.
+    # Event Model, P5a: дисциплина/результат — фиксированные колонки выгрузки
+    # «Дисциплина»/«Результат» после «Курса» (порядок задаёт reindex в
+    # build_index_dataframe), NULL → пустая ячейка. Служебная ссылка
+    # calendar_event_id по-прежнему внутренняя и не отдаётся.
+    row['Дисциплина'] = competition.discipline or ''
+    row['Результат'] = competition.result or ''
     row.pop('discipline', None)
     row.pop('result', None)
     row.pop('calendar_event_id', None)
@@ -3278,7 +3338,13 @@ QUEUE_FIELD_ORDER: Sequence[str] = (
     'level',
     'name',
     'position',
+    # Event Model, P5a: дисциплина кандидата видна при разборе конфликта
+    # (разные дисциплины — не дубль) и участвует в diff аудита replace.
+    'discipline',
 )
+# «discipline» НЕ добавляется в BASE_FIELD_LABELS: тот словарь уходит в
+# настройки базовых полей (admin_fields_page), где дисциплины нет.
+QUEUE_FIELD_LABELS: dict[str, str] = {**BASE_FIELD_LABELS, 'discipline': 'Дисциплина'}
 
 
 def queue_candidate_view(payload: dict) -> list[tuple[str, str]]:
@@ -3294,7 +3360,7 @@ def queue_candidate_view(payload: dict) -> list[tuple[str, str]]:
                 )
             except (TypeError, ValueError):
                 pass
-        view.append((BASE_FIELD_LABELS.get(key, key), '' if value is None else str(value)))
+        view.append((QUEUE_FIELD_LABELS.get(key, key), '' if value is None else str(value)))
     return view
 
 
@@ -3322,6 +3388,8 @@ def queue_edit_values(payload: dict) -> dict:
         'level': '' if payload.get('level') is None else str(payload.get('level')),
         'name': '' if payload.get('name') is None else str(payload.get('name')),
         'position': '' if payload.get('position') is None else str(payload.get('position')),
+        # Event Model, P5a: легаси-payload без ключа даёт пустую строку.
+        'discipline': '' if payload.get('discipline') is None else str(payload.get('discipline')),
     }
 
 
@@ -3508,6 +3576,8 @@ async def edit_import_queue_entry(request: Request, entry_id: str):
         'Название соревнований': get_form_value(request, 'name'),
         'Место': get_form_value(request, 'position'),
         'Курс': get_form_value(request, 'course'),
+        # Event Model, P5a: дисциплина правится вместе с остальными полями.
+        'Дисциплина': get_form_value(request, 'discipline'),
     }
     try:
         competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
@@ -4168,8 +4238,10 @@ async def export_empty_template(request: Request):
         return auth_error
 
     storage = get_storage(request.app)
-    custom_fields = [field for field in storage.get_custom_fields() if field.show_in_template]
-    columns = list(REQUIRED_IMPORT_COLUMNS) + [field.label for field in custom_fields]
+    custom_fields = select_template_custom_fields(storage.get_custom_fields())
+    # «Дисциплина» — опциональная фиксированная колонка шаблона (P5a):
+    # колонки без неё продолжают импортироваться, «Результата» в шаблоне нет.
+    columns = [*REQUIRED_IMPORT_COLUMNS, IMPORT_DISCIPLINE_COLUMN, *(field.label for field in custom_fields)]
 
     df = pd.DataFrame(columns=columns)
     buffer = BytesIO()
@@ -4219,7 +4291,7 @@ async def export_index(request: Request):
         return forbidden(request)
     storage = get_storage(request.app)
     competitions = storage.get_competitions()
-    export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
+    export_custom_fields = select_export_custom_fields(storage.get_custom_fields())
     df = await asyncio.to_thread(build_index_dataframe, competitions, export_custom_fields)
 
     now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
@@ -4294,11 +4366,16 @@ def build_import_competitions(df: pd.DataFrame, custom_fields, storage: SQLiteAd
 
 
 def competition_duplicate_key(competition: Competition) -> tuple:
+    # Event Model, P5a: дисциплина — пятый элемент ключа в нормализованном
+    # виде (пробелы/регистр не различаются). Разные дисциплины в тот же день
+    # — НЕ дубль: строка уходит в очередь подтверждения, а не пропускается
+    # молча. Частичный ключ (ФИО+дата) не меняется.
     return (
         competition.student_name,
         competition.date.date().isoformat(),
         competition.sport,
         competition.name,
+        normalize_discipline_for_dedup(competition.discipline),
     )
 
 
@@ -7123,7 +7200,7 @@ def build_sports_dataframe(sport_names: Sequence[str]) -> pd.DataFrame:
 def build_database_export_frames(storage: SQLiteAdapter) -> dict[str, pd.DataFrame]:
     """All database sheets for the maintenance export (one xlsx, one sheet per entity)."""
     competitions = storage.get_competitions()
-    export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
+    export_custom_fields = select_export_custom_fields(storage.get_custom_fields())
     return {
         'Записи': build_index_dataframe(competitions, export_custom_fields),
         'Пользователи': build_users_dataframe(storage.list_users()),
@@ -7266,7 +7343,7 @@ def create_pre_wipe_archive(
     }
 
     if records:
-        export_custom_fields = [field for field in storage.get_custom_fields() if field.show_in_export]
+        export_custom_fields = select_export_custom_fields(storage.get_custom_fields())
         df = build_index_dataframe(records, export_custom_fields)
         xlsx_path = root / f'pre-wipe-{stamp}-{scope_label}.xlsx'
         df.to_excel(xlsx_path, index=False)
