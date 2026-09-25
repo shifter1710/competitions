@@ -30,6 +30,10 @@
         <a class="nav-link active" href="/admin/people/reconcile/users">Аккаунты атлетов без студента
             <span class="badge text-bg-light border">{{ counters.athlete_users_unlinked }}</span></a>
     </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/admin/people/reconcile/identity">Режим идентификации
+            <span class="badge text-bg-light border">{{ hash_only_total }}</span></a>
+    </li>
 </ul>
 
 {% if users %}
@@ -59,6 +63,9 @@
                     Псевдонимы ФИО аккаунта:
                     {% if user.name_aliases %}{{ user.name_aliases | join(', ') }}{% else %}—{% endif %}
                 </div>
+                <div class="small text-muted">
+                    Сейчас видно атлету: {{ user.visible_now }} записей.
+                </div>
                 <div class="form-text ui-hint">
                     Не переносятся: привязка не копирует псевдонимы аккаунта студенту —
                     они остаются у аккаунта.
@@ -86,6 +93,14 @@
                         <input type="hidden" name="back" value="{{ back_url }}">
                         <button class="btn btn-sm btn-outline-primary" type="submit">Привязать</button>
                     </form>
+                    {# P3: предпросмотр видимости кабинета после привязки. #}
+                    <span class="small text-muted">
+                        {% if candidate.visible_after == user.visible_now %}
+                        видимость не изменится
+                        {% else %}
+                        после привязки: {{ candidate.visible_after }} записей
+                        {% endif %}
+                    </span>
                 </div>
                 {% endfor %}
                 {% else %}
@@ -93,6 +108,13 @@
                 {% endif %}
                 <a class="btn btn-sm btn-outline-secondary mt-2"
                    href="/admin/people/reconcile/users/create?user_id={{ user.id }}&amp;back={{ back_url | urlencode }}">Создать студента из профиля</a>
+                {% if identity_mode == 'ref' %}
+                <div class="form-text ui-hint">
+                    Режим «только связи»: пока у аккаунта нет карточки студента, атлет видит
+                    только собственные записи. Создание карточки с привязкой сразу расширит
+                    кабинет атлета.
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>
