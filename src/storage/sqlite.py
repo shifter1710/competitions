@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import sqlite3
@@ -27,6 +28,14 @@ CATALOG_CATEGORIES: tuple[str, ...] = ('sport', 'institute')
 # называется так же («group» — ключевое слово SQL, экранируется в запросах).
 RENAME_CATEGORIES: tuple[str, ...] = ('level', 'sport', 'institute', 'group')
 
+# P3 Runtime Identity: режимы идентичности кабинета атлета (app_settings,
+# ключ identity_mode). 'dual' — читать И легаси-хеш ФИО, И стабильную связь
+# student_ref_id (режим по умолчанию и на проде); 'ref' — только owner и
+# student_ref_id (после ручной проверки отчётом, guard см.
+# set_identity_mode_guarded).
+IDENTITY_MODES: tuple[str, ...] = ('dual', 'ref')
+IDENTITY_MODE_DEFAULT = 'dual'
+
 # Срезы отчёта (замечание №19, docs/data-model-decisions.md «Расширение
 # отчётов»): группировка ВСЕГДА по данным записи — исторический факт на
 # момент соревнования, смена группы/института в профиле строки не склеивает.
@@ -52,6 +61,8 @@ REPORT_METRIC_SELECTS: tuple[str, ...] = (
 
 # Выборка записи соревнований: общий SELECT для get_competitions и
 # get_competitions_page (серверные фильтры/пагинация главной, прототип 02).
+# P3 Runtime Identity: student_ref_id входит в выборку — dual-read кабинет
+# атлета читает стабильную связь с карточкой наравне с легаси-ключом.
 COMPETITION_SELECT_SQL = '''
     SELECT
         id,
@@ -72,6 +83,7 @@ COMPETITION_SELECT_SQL = '''
         review_status,
         owner_id,
         review_comment,
+        student_ref_id,
         discipline,
         result,
         calendar_event_id
@@ -80,7 +92,8 @@ COMPETITION_SELECT_SQL = '''
 
 # Вставка записей соревнований: общий SQL для одиночного сохранения и импорта.
 # student_ref_id пишется только из модели (явный выбор/создание карточки
-# студента); по умолчанию поле None → NULL, существующие пути не меняются.
+# студента); по умолчанию поле None → NULL, существующие пути не меняются
+# (P3: записанное значение читает кабинет атлета, режим dual/ref).
 # Wave 1 P1: discipline/result/calendar_event_id проводятся так же — None
 # → NULL, runtime поля не читает.
 COMPETITION_INSERT_SQL = '''
@@ -364,8 +377,8 @@ class SQLiteAdapter:
             # актуальные данные и псевдонимы ФИО. Авто-связей нет: ссылки
             # записей/аккаунтов (student_ref_id) с Phase 2 заполняются только
             # вручную через сопоставление, легаси-идентичность sha256(ФИО)
-            # не меняется. merged_into_id зарезервирована и не пишется/не
-            # читается.
+            # не меняется (P3: связи читает кабинет атлета, режим dual/ref).
+            # merged_into_id зарезервирована и не пишется/не читается.
             self.connection.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS students (
@@ -410,10 +423,11 @@ class SQLiteAdapter:
             if 'student_ref_id' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN student_ref_id INTEGER')
             # Event Model, Wave 1 P0 (целевая архитектура): app_settings —
-            # флаги миграций. Seed identity_mode='dual' готовит Phase 3
-            # dual-read; в этой волне флаг никто не читает (паттерн seeding —
-            # как _populate_field_settings_defaults: PRIMARY KEY +
-            # INSERT OR IGNORE, повторные старты не дублируют).
+            # флаги миграций. Seed identity_mode='dual' готовил Phase 3
+            # dual-read; с P3 Runtime Identity флаг читается на каждый запрос
+            # (get_identity_mode; нет строки/неизвестное значение → 'dual').
+            # Паттерн seeding — как _populate_field_settings_defaults:
+            # PRIMARY KEY + INSERT OR IGNORE, повторные старты не дублируют.
             self.connection.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS app_settings (
@@ -697,6 +711,7 @@ class SQLiteAdapter:
                 'extra_data': json.loads(row['extra_data'] or '{}'),
                 'Статус проверки': row['review_status'],
                 'Комментарий проверки': row['review_comment'],
+                'student_ref_id': row['student_ref_id'],
                 'discipline': row['discipline'],
                 'result': row['result'],
                 'calendar_event_id': row['calendar_event_id'],
@@ -723,9 +738,13 @@ class SQLiteAdapter:
         self,
         owner_id: int | None = None,
         student_id_hashes: Sequence[str] = (),
+        student_ref_id: int | None = None,
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
     ) -> Iterable[Competition]:
         with self._lock:
-            scope_clauses, scope_params = self._competition_scope_clauses(owner_id, student_id_hashes)
+            scope_clauses, scope_params = self._competition_scope_clauses(
+                owner_id, student_id_hashes, student_ref_id=student_ref_id, identity_mode=identity_mode
+            )
             where_clause = f'WHERE {" AND ".join(scope_clauses)}\n' if scope_clauses else ''
             query = f'{COMPETITION_SELECT_SQL}{where_clause}ORDER BY date ASC, created_at ASC'
             rows = self.connection.execute(query, scope_params).fetchall()
@@ -735,22 +754,34 @@ class SQLiteAdapter:
     def _competition_scope_clauses(
         owner_id: int | None,
         student_id_hashes: Sequence[str],
+        student_ref_id: int | None = None,
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
     ) -> tuple[list[str], list[object]]:
-        """Видимость записей (кабинет атлета): свои по owner_id и/или по хешам
-        привязанных ФИО. Как в get_competitions: без owner_id ограничение
-        не применяется — модератор видит весь реестр."""
+        """Видимость записей (кабинет атлета, P3 dual-read): свои по owner_id,
+        по стабильной связи student_ref_id и — в dual-режиме — по хешам
+        привязанных ФИО (легаси). В ref-режиме легаси-ветка не применяется.
+        Как раньше: без owner_id ограничение не применяется — модератор
+        видит весь реестр."""
         if owner_id is None:
             return [], []
-        if student_id_hashes:
+        clauses = ['owner_id = ?']
+        params: list[object] = [owner_id]
+        if student_ref_id is not None:
+            clauses.append('student_ref_id = ?')
+            params.append(student_ref_id)
+        if identity_mode != 'ref' and student_id_hashes:
             placeholders = ', '.join('?' for _ in student_id_hashes)
-            return [f'(owner_id = ? OR student_id IN ({placeholders}))'], [owner_id, *student_id_hashes]
-        return ['owner_id = ?'], [owner_id]
+            clauses.append(f'student_id IN ({placeholders})')
+            params.extend(student_id_hashes)
+        return ['(' + ' OR '.join(clauses) + ')'], params
 
     def _competition_filter_clauses(
         self,
         *,
         owner_id: int | None,
         student_id_hashes: Sequence[str] = (),
+        student_ref_id: int | None = None,
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
         name: str = '',
         institute: str = '',
         sport: str = '',
@@ -760,10 +791,13 @@ class SQLiteAdapter:
         date_from: str = '',
         date_to: str = '',
     ) -> tuple[str, list[object]]:
-        """Общий WHERE серверных фильтров главной (прототип 02): видимость +
+        """Общий WHERE серверных фильтров главной (прототип 02): видимость
+        (P3 dual-read: owner / student_ref_id / легаси-хеши) +
         ФИО (подстрока), институт/вид спорта/уровень (точное совпадение),
         статус проверки и период дат (дд.мм.гггг, как в фильтрах отчёта)."""
-        clauses, params = self._competition_scope_clauses(owner_id, student_id_hashes)
+        clauses, params = self._competition_scope_clauses(
+            owner_id, student_id_hashes, student_ref_id=student_ref_id, identity_mode=identity_mode
+        )
 
         if name:
             clauses.append('student_name LIKE ?')
@@ -796,6 +830,8 @@ class SQLiteAdapter:
         *,
         owner_id: int | None = None,
         student_id_hashes: Sequence[str] = (),
+        student_ref_id: int | None = None,
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
         name: str = '',
         institute: str = '',
         sport: str = '',
@@ -815,6 +851,8 @@ class SQLiteAdapter:
             where_clause, params = self._competition_filter_clauses(
                 owner_id=owner_id,
                 student_id_hashes=student_id_hashes,
+                student_ref_id=student_ref_id,
+                identity_mode=identity_mode,
                 name=name,
                 institute=institute,
                 sport=sport,
@@ -835,6 +873,8 @@ class SQLiteAdapter:
         *,
         owner_id: int | None = None,
         student_id_hashes: Sequence[str] = (),
+        student_ref_id: int | None = None,
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
         name: str = '',
         institute: str = '',
         sport: str = '',
@@ -855,6 +895,8 @@ class SQLiteAdapter:
             where_clause, params = self._competition_filter_clauses(
                 owner_id=owner_id,
                 student_id_hashes=student_id_hashes,
+                student_ref_id=student_ref_id,
+                identity_mode=identity_mode,
                 name=name,
                 institute=institute,
                 sport=sport,
@@ -1369,7 +1411,8 @@ class SQLiteAdapter:
     def get_competitions_before(self, date_before: datetime) -> list[Competition]:
         """Записи с датой соревнования ДО указанной (для архива перед очисткой).
 
-        Wave 1 P1: три служебные колонки нужны общему _row_to_competition;
+        Wave 1 P1 + P3: служебные колонки (student_ref_id, discipline,
+        result, calendar_event_id) нужны общему _row_to_competition;
         в сам xlsx-архив они НЕ попадают (competition_to_export_row
         вырезает) — ограничение pre-wipe архива см. docs/data-model.md.
         """
@@ -1379,7 +1422,7 @@ class SQLiteAdapter:
                 SELECT
                     id, student_id, student_name, student_sex, institute, "group", course,
                     sport, date, date_to, level, name, position, created_at, extra_data,
-                    review_status, owner_id, review_comment,
+                    review_status, owner_id, review_comment, student_ref_id,
                     discipline, result, calendar_event_id
                 FROM competitions
                 WHERE date < ?
@@ -1462,7 +1505,8 @@ class SQLiteAdapter:
     def get_user(self, username: str) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, username, password_hash, role, active, pwd_ver FROM users WHERE username = ?',
+                'SELECT id, username, password_hash, role, active, pwd_ver, student_ref_id '
+                'FROM users WHERE username = ?',
                 (username,),
             ).fetchone()
             return dict(row) if row else None
@@ -1470,7 +1514,7 @@ class SQLiteAdapter:
     def get_user_by_id(self, user_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, username, password_hash, role, active, pwd_ver FROM users WHERE id = ?',
+                'SELECT id, username, password_hash, role, active, pwd_ver, student_ref_id ' 'FROM users WHERE id = ?',
                 (user_id,),
             ).fetchone()
             return dict(row) if row else None
@@ -2201,7 +2245,7 @@ class SQLiteAdapter:
     def get_competition_review(self, record_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, review_status, owner_id, student_id FROM competitions WHERE id = ?',
+                'SELECT id, review_status, owner_id, student_id, student_ref_id FROM competitions WHERE id = ?',
                 (record_id,),
             ).fetchone()
             return dict(row) if row else None
@@ -2683,8 +2727,10 @@ class SQLiteAdapter:
     # Ручное заполнение стабильных связей student_ref_id существующих
     # записей/аккаунтов с карточками. Кандидаты — ТОЛЬКО предложения:
     # ничего не связывается автоматически. Привязка меняет ТОЛЬКО
-    # student_ref_id: снимки данных в записях, легаси-ключ
-    # student_id (sha256 ФИО) и рабочие workflow не трогаются.
+    # student_ref_id: снимки данных в записях и легаси-ключ
+    # student_id (sha256 ФИО) не трогаются; с P3 связанная запись
+    # появляется в кабинете атлета (dual — вдобавок к легаси-хешу,
+    # ref — вместо него; отчёты/выгрузки по-прежнему только легаси).
 
     def count_student_reconciliation(self) -> dict:
         """Сводные счётчики сопоставления: всего/связано/без связи."""
@@ -3125,6 +3171,232 @@ class SQLiteAdapter:
             if row is None:
                 return False, None
             return True, row['student_ref_id']
+
+    # ---- P3 Runtime Identity: режим dual/ref и проверка перед переходом. ----
+    #
+    # Кабинет атлета с этой фазы читает стабильные связи student_ref_id
+    # (dual: owner OR ref OR легаси-хеш ФИО; ref: owner OR ref). Режим —
+    # флаг app_settings.identity_mode, читается на каждый запрос без кэша.
+    # Схема не меняется; легаси-ключ student_id и история aliases живут
+    # как раньше. Переход на 'ref' — только через set_identity_mode_guarded:
+    # guard без waiver блокирует переключение, пока хоть одна запись видна
+    # атлету ТОЛЬКО по легаси-хешу.
+
+    def get_identity_mode(self) -> str:
+        """Текущий режим идентичности (per-request, без кэша). Нет строки или
+        неизвестное значение → 'dual': легаси-поведение безопаснее."""
+        with self._lock:
+            row = self.connection.execute("SELECT value FROM app_settings WHERE key = 'identity_mode'").fetchone()
+        if row and row['value'] in IDENTITY_MODES:
+            return row['value']
+        return IDENTITY_MODE_DEFAULT
+
+    def set_identity_mode(self, value: str) -> None:
+        """Прямая установка режима (валидация ∈ {dual, ref}), без guard.
+        Рабочий путь переключения — set_identity_mode_guarded."""
+        if value not in IDENTITY_MODES:
+            raise ValueError(f'Unknown identity mode: {value}')
+        with self._lock:
+            self.connection.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('identity_mode', ?) "
+                'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+                (value,),
+            )
+            self.connection.commit()
+
+    def athlete_name_hashes(self, user_id: int) -> list[str]:
+        """Легаси-хеши ФИО аккаунта: profile_data.student_name и все
+        name_aliases — та же формула, что student_hashes_for_request
+        в src/main.py (sha256(strip(name))). Нужен storage-у для отчётов
+        по произвольным аккаунтам, а не только по текущему запросу."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT profile_data, name_aliases FROM users WHERE id = ?',
+                (int(user_id),),
+            ).fetchone()
+        if row is None:
+            return []
+        names = list(json.loads(row['name_aliases'] or '[]'))
+        profile_name = json.loads(row['profile_data'] or '{}').get('student_name', '').strip()
+        if profile_name and profile_name not in names:
+            names.append(profile_name)
+        return [hashlib.sha256(name.strip().encode()).hexdigest() for name in names if name.strip()]
+
+    def count_competitions_visible(
+        self,
+        *,
+        owner_id: int | None,
+        student_ref_id: int | None = None,
+        student_id_hashes: Sequence[str] = (),
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
+    ) -> int:
+        """Сколько записей видно атлету с данным scope (без прочих фильтров)
+        — предпросмотры «сейчас N · после привязки/отвязки M»."""
+        with self._lock:
+            clauses, params = self._competition_scope_clauses(
+                owner_id, student_id_hashes, student_ref_id=student_ref_id, identity_mode=identity_mode
+            )
+            where_clause = f'WHERE {" AND ".join(clauses)}' if clauses else ''
+            row = self.connection.execute(
+                f'SELECT COUNT(*) FROM competitions {where_clause}',
+                params,
+            ).fetchone()
+            return int(row[0])
+
+    @staticmethod
+    def _hash_only_where(
+        user_id: int,
+        student_ref_id: int | None,
+        hashes: Sequence[str],
+    ) -> tuple[str, list[object]]:
+        """WHERE записей, видимых атлету ТОЛЬКО по легаси-хешу ФИО: хеш
+        совпадает, но записью не владеет и на его карточку она не связана.
+        Такие записи пропадают из кабинета в ref-режиме."""
+        clauses = ['(owner_id IS NULL OR owner_id != ?)']
+        params: list[object] = [int(user_id)]
+        if student_ref_id is not None:
+            clauses.append('(student_ref_id IS NULL OR student_ref_id != ?)')
+            params.append(int(student_ref_id))
+        placeholders = ', '.join('?' for _ in hashes)
+        clauses.append(f'student_id IN ({placeholders})')
+        params.extend(hashes)
+        return ' AND '.join(clauses), params
+
+    def _identity_user_rows(self) -> list[dict]:
+        """Атлеты с их scope-числами (без пагинации — режет вызывающая
+        сторона). Считается под уже взятым self._lock."""
+        users = self.connection.execute(
+            'SELECT id, username, student_ref_id FROM users ' "WHERE role = 'athlete' ORDER BY username ASC"
+        ).fetchall()
+        cards = {
+            row['id']: row['full_name']
+            for row in self.connection.execute('SELECT id, full_name FROM students').fetchall()
+        }
+        rows: list[dict] = []
+        for user in users:
+            user_id = user['id']
+            ref = user['student_ref_id']
+            hashes = self.athlete_name_hashes(user_id)
+            row = {
+                'user_id': user_id,
+                'username': user['username'],
+                'student_ref_id': ref,
+                'student_name': cards.get(ref) if ref is not None else None,
+                'visible_by_owner': self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM competitions WHERE owner_id = ?',
+                    (user_id,),
+                ).fetchone()['total'],
+                'visible_by_ref': (
+                    self.connection.execute(
+                        'SELECT COUNT(*) AS total FROM competitions WHERE student_ref_id = ?',
+                        (ref,),
+                    ).fetchone()['total']
+                    if ref is not None
+                    else 0
+                ),
+                'hash_only_visible': 0,
+                'visible_by_hash': 0,
+                'namesake_risk': 0,
+            }
+            if hashes:
+                placeholders = ', '.join('?' for _ in hashes)
+                hash_where = f'student_id IN ({placeholders})'
+                row['visible_by_hash'] = self.connection.execute(
+                    f'SELECT COUNT(*) AS total FROM competitions WHERE {hash_where}',
+                    list(hashes),
+                ).fetchone()['total']
+                hash_only_where, hash_only_params = self._hash_only_where(user_id, ref, hashes)
+                row['hash_only_visible'] = self.connection.execute(
+                    f'SELECT COUNT(*) AS total FROM competitions WHERE {hash_only_where}',
+                    hash_only_params,
+                ).fetchone()['total']
+                # Риск тёзки: запись совпала с ФИО аккаунта, но привязана
+                # к ДРУГОЙ карточке — легаси показывает её в кабинете.
+                namesake_clauses = [f'student_id IN ({placeholders})', 'student_ref_id IS NOT NULL']
+                namesake_params = list(hashes)
+                if ref is not None:
+                    namesake_clauses.append('student_ref_id != ?')
+                    namesake_params.append(int(ref))
+                row['namesake_risk'] = self.connection.execute(
+                    f"SELECT COUNT(*) AS total FROM competitions WHERE {' AND '.join(namesake_clauses)}",
+                    namesake_params,
+                ).fetchone()['total']
+            rows.append(row)
+        return rows
+
+    def count_hash_only_visible(self) -> int:
+        """Guard-счётчик: суммарно записей, видимых атлетам только по
+        легаси-хешу (по всем аккаунтам athlete; одна запись, совпавшая
+        с двумя аккаунтами, считается дважды — каждый кабинет потеряет её)."""
+        with self._lock:
+            return sum(row['hash_only_visible'] for row in self._identity_user_rows())
+
+    def identity_verification_data(
+        self,
+        users_limit: int = 50,
+        users_offset: int = 0,
+        disappearing_limit: int = 20,
+    ) -> dict:
+        """Данные отчёта «Режим идентификации» (/admin/people/reconcile/identity).
+
+        Возвращает per-user строки (пагинация users_limit/users_offset —
+        паттерн сопоставления), глобальный hash_only_total (бейдж вкладки и
+        guard) и первые disappearing_limit записей, которые пропадут из
+        кабинетов при переходе на ref (с аккаунтом, которому пропадут).
+        """
+        with self._lock:
+            rows = self._identity_user_rows()
+            disappearing: list[dict] = []
+            for row in rows:
+                if not row['hash_only_visible']:
+                    continue
+                hashes = self.athlete_name_hashes(row['user_id'])
+                hash_only_where, hash_only_params = self._hash_only_where(row['user_id'], row['student_ref_id'], hashes)
+                records = self.connection.execute(
+                    f'''
+                    SELECT id, student_name, sport, date, date_to, name
+                    FROM competitions
+                    WHERE {hash_only_where}
+                    ORDER BY date ASC, id ASC
+                    LIMIT ?
+                    ''',
+                    [*hash_only_params, int(disappearing_limit)],
+                ).fetchall()
+                for record in records:
+                    disappearing.append({'username': row['username'], **dict(record)})
+            disappearing.sort(key=lambda item: (item['username'], item['date'], item['id']))
+            total = sum(row['hash_only_visible'] for row in rows)
+            users_start = int(users_offset)
+            users_end = users_start + int(users_limit)
+            return {
+                'users_total': len(rows),
+                'users': rows[users_start:users_end],
+                'hash_only_total': total,
+                'disappearing': disappearing[: int(disappearing_limit)],
+                'disappearing_total': total,
+            }
+
+    def set_identity_mode_guarded(self, target: str) -> tuple[bool, int]:
+        """Атомарное переключение режима с guard'ом (без waiver).
+
+        target='dual' — всегда разрешён (возврат легаси-поведения).
+        target='ref' — только при hash_only_total == 0: иначе режим НЕ
+        меняется. Проверка и UPDATE — под одной блокировкой, чтобы между
+        ними никто не привязал/отвязал записи. Возвращает (ok, счётчик
+        hash-only на момент попытки — для аудита/отказа)."""
+        if target not in IDENTITY_MODES:
+            raise ValueError(f'Unknown identity mode: {target}')
+        with self._lock:
+            count = sum(row['hash_only_visible'] for row in self._identity_user_rows())
+            if target == 'ref' and count >= 1:
+                return False, count
+            self.connection.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('identity_mode', ?) "
+                'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+                (target,),
+            )
+            self.connection.commit()
+            return True, count
 
     # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
     #

@@ -3632,6 +3632,12 @@ def athlete_headers() -> dict[str, str]:
     return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
 
 
+def athlete_headers_for(username: str) -> dict[str, str]:
+    """Cookie произвольного аккаунта атлета (фикстуры создают их в БД явно)."""
+    cookie = create_auth_cookie_value(username=username, role='athlete')
+    return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+
+
 ATHLETE_RECORD_DATA = {
     'student_name': 'Спортсменов Спорт Спортович',
     'student_sex': 'М',
@@ -8037,10 +8043,11 @@ def reconcile_client(client: SanicTestClient, tmp_path):
         app.ctx.storage = previous
 
 
-def save_reconcile_record(storage, name: str, date: datetime, position: int = 1) -> int:
+def save_reconcile_record(storage, name: str, date: datetime, position: int = 1, owner_id=None) -> int:
     """Одна одобренная запись реестра; возвращает её id.
 
-    Легаси-ключ личности — sha256(ФИО), как в реальных данных.
+    Легаси-ключ личности — sha256(ФИО), как в реальных данных. owner_id —
+    владелец записи (P3: ветка owner в scope кабинета атлета).
     """
     storage.save_competitions(
         [
@@ -8058,7 +8065,8 @@ def save_reconcile_record(storage, name: str, date: datetime, position: int = 1)
                 position=position,
                 extra_data={},
             )
-        ]
+        ],
+        owner_id=owner_id,
     )
     row = storage.connection.execute('SELECT MAX(id) AS id FROM competitions').fetchone()
     return row['id']
@@ -8705,9 +8713,12 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     assert '…и ещё 3 записей (показаны первые 50).' in response.text
 
 
-def test_reconcile_link_keeps_athlete_cabinet_unchanged(reconcile_client: SanicTestClient):
-    """Runtime-совместимость: кабинет атлета считает записи по легаси
-    sha256(ФИО) из профиля — привязка student_ref_id ничего не меняет."""
+def test_reconcile_link_extends_athlete_cabinet_by_ref(reconcile_client: SanicTestClient):
+    """P3 dual-инвариант (замена test_reconcile_link_keeps_athlete_cabinet_
+    unchanged): привязка по-прежнему меняет только student_ref_id, но
+    кабинет атлета теперь читает связь (dual-read). Своя по ФИО запись
+    видима до и после привязки; чужая запись ПОЯВЛЯЕТСЯ после привязки
+    её карточки к аккаунту — плановое поведение dual-read."""
     storage = app.ctx.storage
     sportik = storage.get_user('sportik')
     storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
@@ -8727,9 +8738,12 @@ def test_reconcile_link_keeps_athlete_cabinet_unchanged(reconcile_client: SanicT
 
     _, after = reconcile_client.get('/', headers=athlete)
     assert after.status == 200
-    assert after.text == before.text
+    # Своя (по ФИО) запись не пропала...
+    assert 'Иванов Иван' in after.text
+    # ...а чужая появилась: кабинет читает стабильную связь с карточкой
+    assert 'Петров Пётр' in after.text
 
-    # Отчёт администратора тоже не изменился от привязок
+    # Отчёт администратора от привязок не изменился (снимок по записям)
     _, report_before = reconcile_client.get('/report?slice=student', headers=get_auth_headers())
     storage.unlink_competition(own_id)
     storage.unlink_competition(alien_id)
@@ -8811,6 +8825,516 @@ def test_reconcile_links_in_admin_hub_and_people(reconcile_client: SanicTestClie
     storage.link_competitions([record_id], student_id)
     _, response = reconcile_client.get('/admin/people', headers=get_auth_headers())
     assert 'badge text-bg-light border' not in response.text
+
+
+# --- P3 Runtime Identity: dual-read кабинета атлета и режим dual/ref. ---
+#
+# HTTP-сценарии на реальном SQLite-адаптере (паттерн reconcile_client):
+# ветки видимости главной (owner / student_ref_id / легаси-хеш), права на
+# запись по связи, сужение кабинета в ref, отчёт проверки и guard-переключение
+# режима. Синтетические данные.
+
+
+def test_dual_mode_visibility_branches_and_owns_by_ref(reconcile_client: SanicTestClient, tmp_path, monkeypatch):
+    """Dual: главная атлета = owner OR ref OR легаси-хеш; связь даёт и право
+    на запись (правка, вложения)."""
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_user(sportik['id'], student_id)
+
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))  # хеш
+    ref_id = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))  # связь
+    storage.link_competitions([ref_id], student_id)
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 3, 10), owner_id=sportik['id'])  # owner
+    save_reconcile_record(storage, 'Невидимый Ник', datetime(2026, 4, 10))  # мимо всех веток
+
+    headers = athlete_headers()
+    _, response = reconcile_client.get('/', headers=headers)
+    assert response.status == 200
+    assert 'Иванов Иван' in response.text
+    assert 'Петров Пётр' in response.text
+    assert 'Чужое Имя' in response.text
+    assert 'Невидимый Ник' not in response.text
+
+    # Правка записи, видимой только по связи, разрешена атлету
+    _, response = reconcile_client.post(
+        f'/competition/{ref_id}',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA, 'student_name': 'Петров Пётр'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'] == '/'
+
+    # Вложение на запись по связи тоже разрешено
+    _, response = reconcile_client.post(
+        f'/competition/{ref_id}/attachments',
+        headers=headers,
+        data=csrf_for(headers),
+        files={'file': ('diploma.png', PNG_BYTES, 'application/octet-stream')},
+    )
+    assert response.status == 200
+    assert response.text == 'Файл загружен'
+    # Связь пережила правку записи
+    assert record_ref(storage, ref_id) == student_id
+
+
+def test_ref_mode_narrows_athlete_cabinet(reconcile_client: SanicTestClient):
+    """Ref: кабинет = owner OR ref; хеши и псевдонимы ФИО не расширяют;
+    модератор видит весь реестр независимо от режима."""
+    storage = app.ctx.storage
+    storage.set_identity_mode('ref')
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    storage.add_name_alias(sportik['id'], 'Иванов И.И.')
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_user(sportik['id'], student_id)
+
+    ref_id = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))
+    storage.link_competitions([ref_id], student_id)
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))  # только хеш
+    save_reconcile_record(storage, 'Иванов И.И.', datetime(2026, 3, 10))  # псевдоним
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 4, 10), owner_id=sportik['id'])
+
+    headers = athlete_headers()
+    _, response = reconcile_client.get('/', headers=headers)
+    assert response.status == 200
+    assert 'Петров Пётр' in response.text
+    assert 'Чужое Имя' in response.text
+    assert 'Иванов Иван' not in response.text
+    assert 'Иванов И.И.' not in response.text
+
+    _, response = reconcile_client.get('/', headers=get_auth_headers())
+    for name in ('Петров Пётр', 'Чужое Имя', 'Иванов Иван', 'Иванов И.И.'):
+        assert name in response.text
+
+
+def test_namesakes_isolated_in_ref_mode(reconcile_client: SanicTestClient):
+    """Два аккаунта с одинаковым ФИО на разных карточках. Dual (легаси):
+    хеш один — оба видят обе записи (фиксируем поведение). Ref: каждый
+    видит только запись своей карточки."""
+    storage = app.ctx.storage
+    storage.create_user('twin1', 'hash', 'athlete')
+    storage.create_user('twin2', 'hash', 'athlete')
+    twin1 = storage.get_user('twin1')
+    twin2 = storage.get_user('twin2')
+    for user in (twin1, twin2):
+        storage.set_profile(user['id'], {'student_name': 'Одинаков Фамилия', 'student_sex': 'М'})
+    card1 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    card2 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    storage.link_user(twin1['id'], card1)
+    storage.link_user(twin2['id'], card2)
+
+    storage.link_competitions([save_reconcile_record(storage, 'Одинаков Фамилия', datetime(2026, 1, 10))], card1)
+    storage.link_competitions([save_reconcile_record(storage, 'Одинаков Фамилия', datetime(2026, 2, 10))], card2)
+
+    # Dual: обе записи в кабинете (даты различают записи с одинаковым ФИО)
+    _, response = reconcile_client.get('/', headers=athlete_headers_for('twin1'))
+    assert '10.01.2026' in response.text
+    assert '10.02.2026' in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=athlete_headers_for('twin1'))
+    assert '10.01.2026' in response.text
+    assert '10.02.2026' not in response.text
+
+
+def test_ref_mode_namesake_hash_cannot_edit_or_touch_attachments(
+    reconcile_client: SanicTestClient, tmp_path, monkeypatch
+):
+    """QA D2: в ref право на запись = owner OR ref ТОЛЬКО. Атлет-тёзка
+    (то же ФИО в профиле, другая карточка) при хеш-совпадении НЕ может
+    править чужую запись, загружать вложения и скачивать чужие вложения.
+    В dual легаси-хеш-ветка прав сохраняется (инвариант зафиксирован)."""
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    storage = app.ctx.storage
+    storage.create_user('twin1', 'hash', 'athlete')
+    storage.create_user('twin2', 'hash', 'athlete')
+    twin1 = storage.get_user('twin1')
+    twin2 = storage.get_user('twin2')
+    for user in (twin1, twin2):
+        storage.set_profile(user['id'], {'student_name': 'Одинаков Фамилия', 'student_sex': 'М'})
+    card1 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    card2 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    storage.link_user(twin1['id'], card1)
+    storage.link_user(twin2['id'], card2)
+
+    # Запись twin1: связана с его карточкой, owner нет — для twin2 она
+    # «чужая по связи», но совпадает по легаси-хешу ФИО.
+    record_id = save_reconcile_record(storage, 'Одинаков Фамилия', datetime(2026, 1, 10))
+    storage.link_competitions([record_id], card1)
+
+    # Dual (легаси-инвариант): хеш-ветка прав разрешает правку и вложения
+    assert storage.get_identity_mode() == 'dual'
+    twin2_headers = athlete_headers_for('twin2')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=twin2_headers,
+        data={**csrf_for(twin2_headers), **ATHLETE_RECORD_DATA, 'student_name': 'Одинаков Фамилия'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}/attachments',
+        headers=twin2_headers,
+        data=csrf_for(twin2_headers),
+        files={'file': ('note.png', PNG_BYTES, 'application/octet-stream')},
+    )
+    assert response.status == 200
+    assert response.text == 'Файл загружен'
+    attachment_id = storage.get_attachments(record_id)[0]['id']
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=twin2_headers)
+    assert response.status == 200
+
+    # Ref: те же действия тёзкой — запрещены (owner OR ref только)
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=twin2_headers,
+        data={**csrf_for(twin2_headers), **ATHLETE_RECORD_DATA, 'student_name': 'Одинаков Фамилия'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}/attachments',
+        headers=twin2_headers,
+        data=csrf_for(twin2_headers),
+        files={'file': ('note2.png', PNG_BYTES, 'application/octet-stream')},
+    )
+    assert response.status == 403
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=twin2_headers)
+    assert response.status == 403
+
+    # Владелец по связи (twin1) работает в обоих режимах: правка и вложения
+    twin1_headers = athlete_headers_for('twin1')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=twin1_headers,
+        data={**csrf_for(twin1_headers), **ATHLETE_RECORD_DATA, 'student_name': 'Одинаков Фамилия'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=twin1_headers)
+    assert response.status == 200
+
+
+def test_account_without_student_card(reconcile_client: SanicTestClient):
+    """Аккаунт без карточки: dual — owner и хеши; ref — только owner."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Сидоров Сидор', 'student_sex': 'М'})
+
+    save_reconcile_record(storage, 'Сидоров Сидор', datetime(2026, 1, 10))  # хеш
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 2, 10), owner_id=sportik['id'])
+
+    headers = athlete_headers()
+    _, response = reconcile_client.get('/', headers=headers)
+    assert 'Сидоров Сидор' in response.text
+    assert 'Чужое Имя' in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=headers)
+    assert 'Сидоров Сидор' not in response.text
+    assert 'Чужое Имя' in response.text
+
+
+def test_unlinked_participation_hash_only_disappears_in_ref(reconcile_client: SanicTestClient):
+    """Запись без ref, созданная модератором: владелец видит её в обоих
+    режимах; атлет, совпадающий только по ФИО, — только в dual."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    admin = storage.get_user(settings.auth_admin_username)
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=admin['id'])
+
+    athlete = athlete_headers()
+    _, response = reconcile_client.get('/', headers=athlete)
+    assert 'Иванов Иван' in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=athlete)
+    assert 'Иванов Иван' not in response.text
+    # Владелец-модератор видит свою запись в обоих режимах
+    _, response = reconcile_client.get('/', headers=get_auth_headers())
+    assert 'Иванов Иван' in response.text
+    assert record_ref(storage, record_id) is None
+
+
+def test_person_card_relink_preview_counts(reconcile_client: SanicTestClient):
+    """Предпросмотр «Видимо атлету» следует за перепривязкой аккаунта:
+    счётчики на карточке-цели учитывают её записи."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    first = storage.create_student('Иванов Иван', 'М', '', '', '')
+    second = storage.create_student('Петров Пётр', 'Ж', '', '', '')
+    storage.link_user(sportik['id'], first)
+
+    own = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=sportik['id'])
+    storage.link_competitions([own], first)
+    alien = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))
+    storage.link_competitions([alien], second)
+
+    _, response = reconcile_client.get(f'/admin/people/{first}', headers=get_auth_headers())
+    assert 'сейчас 1 · после отвязки 1' in response.text
+
+    # Перепривязка аккаунта на вторую карточку: кабинет читает уже её
+    assert storage.relink_user(sportik['id'], second) == (first, None)
+    _, response = reconcile_client.get(f'/admin/people/{second}', headers=get_auth_headers())
+    assert 'сейчас 2 · после отвязки 1' in response.text
+
+
+def test_person_card_unlink_preview_counts_and_confirm_variants(reconcile_client: SanicTestClient):
+    """Три варианта подтверждения отвязки: ничего не меняется / частично /
+    пропадает всё; счётчики соответствуют scope атлета."""
+    storage = app.ctx.storage
+    student = storage.create_student('Иванов Иван', 'М', '', '', '')
+
+    # Все записи карточки названы «Иванов Иван»: stable покрывает их хешем
+    # (отвязка ничего не меняет), partial/doomed теряют их целиком.
+    storage.create_user('stable', 'hash', 'athlete')
+    stable = storage.get_user('stable')
+    storage.set_profile(stable['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    storage.link_user(stable['id'], student)
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=stable['id'])
+    storage.link_competitions(
+        [
+            save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 2, 10)),
+            save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 4, 10)),
+            save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 5, 10)),
+        ],
+        student,
+    )
+
+    storage.create_user('partial', 'hash', 'athlete')
+    partial = storage.get_user('partial')
+    storage.set_profile(partial['id'], {'student_name': 'Чужое Имя', 'student_sex': 'М'})
+    storage.link_user(partial['id'], student)
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 3, 10), owner_id=partial['id'])
+
+    storage.create_user('doomed', 'hash', 'athlete')
+    storage.link_user(storage.get_user('doomed')['id'], student)
+
+    _, response = reconcile_client.get(f'/admin/people/{student}', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'сейчас 4 · после отвязки 4' in response.text
+    assert 'сейчас 4 · после отвязки 1' in response.text
+    assert 'сейчас 3 · после отвязки 0' in response.text
+    # Подтверждения различают три случая
+    assert 'Видимость кабинета атлета не изменится (4 записей).' in response.text
+    assert 'Атлет будет видеть 1 из 4 записей.' in response.text
+    assert 'Атлет перестанет видеть записи этого студента (сейчас 3, останется 0).' in response.text
+
+
+def test_identity_report_counts_and_tab(reconcile_client: SanicTestClient):
+    """Отчёт проверки: сводка аккаунтов, строка H, риск тёзки, пропадающие
+    записи и вкладка с бейджем hash_only_total."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    storage.create_user('free', 'hash', 'athlete')
+    free = storage.get_user('free')
+    storage.set_profile(free['id'], {'student_name': 'Безкарточкин Бес', 'student_sex': 'М'})
+
+    student = storage.create_student('Иванов Иван', 'М', '', '', '')
+    namesake_card = storage.create_student('Иванов Иван', 'Ж', '', '', '')
+    storage.link_user(sportik['id'], student)
+
+    ref_only = save_reconcile_record(storage, 'По связи', datetime(2026, 1, 10))
+    storage.link_competitions([ref_only], student)
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 2, 10))
+    namesake = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 3, 10))
+    storage.link_competitions([namesake], namesake_card)
+    save_reconcile_record(storage, 'Безкарточкин Бес', datetime(2026, 4, 10))
+
+    # H: hash_only (спорт) + namesake (спорт, чужая карточка) + free_hash (free)
+    assert storage.count_hash_only_visible() == 3
+
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Режим идентификации' in response.text
+    assert 'двойной (dual)' in response.text
+    assert 'Аккаунтов атлетов: 2, из них привязано к карточкам: 1, без карточки: 1.' in response.text
+    assert 'пропадут из кабинетов при переходе на «только связи»:' in response.text
+    assert '<strong>3</strong>' in response.text
+    assert 'риск тёзки: 1' in response.text
+    assert 'Записи, которые пропадут из кабинетов' in response.text
+    # Бейдж вкладки — на всех трёх страницах раздела
+    for url in ('/admin/people/reconcile', '/admin/people/reconcile/users', '/admin/people/reconcile/identity'):
+        _, page = reconcile_client.get(url, headers=get_auth_headers())
+        assert page.status == 200
+        assert 'Режим идентификации' in page.text
+
+
+def test_identity_flip_blocked_with_hash_only(reconcile_client: SanicTestClient):
+    """Guard: при H≥1 формы нет, POST-подделка отклоняется — flash с числом,
+    режим прежний, аудита нет."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    assert storage.count_hash_only_visible() == 1
+
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', headers=get_auth_headers())
+    assert 'заблокирован' in response.text
+    assert 'action="/admin/people/reconcile/identity/flip"' not in response.text
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'ref'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/reconcile/identity?')
+    assert '1 записей видны атлетам только по ФИО' in location
+    assert storage.get_identity_mode() == 'dual'
+    assert audit_details(storage, 'identity_mode_changed') == []
+
+
+def test_identity_flip_dual_to_ref_with_zero_hash_only(reconcile_client: SanicTestClient):
+    """Dual→ref при H=0: режим меняется, аудит пишется, кабинет атлета
+    меняется ровно на H=0 записей — то есть не меняется."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    student = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_user(sportik['id'], student)
+    # Всё, что видит атлет, связано с его карточкой или принадлежит ему
+    linked = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=sportik['id'])
+    storage.link_competitions([linked], student)
+    assert storage.count_hash_only_visible() == 0
+
+    athlete = athlete_headers()
+    _, before = reconcile_client.get('/', headers=athlete)
+    assert before.status == 200
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'ref'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_identity_mode() == 'ref'
+    assert audit_details(storage, 'identity_mode_changed') == [{'old': 'dual', 'new': 'ref', 'hash_only_visible': 0}]
+
+    _, after = reconcile_client.get('/', headers=athlete)
+    assert after.status == 200
+    assert after.text == before.text
+
+
+def test_identity_flip_ref_back_to_dual_always_allowed(reconcile_client: SanicTestClient):
+    """Ref→dual — всегда разрешён (даже при H≥1) и пишется в аудит."""
+    storage = app.ctx.storage
+    storage.set_identity_mode('ref')
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    # Появилась hash-only запись — возврат всё равно разрешён
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    assert storage.count_hash_only_visible() == 1
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'dual'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_identity_mode() == 'dual'
+    assert audit_details(storage, 'identity_mode_changed') == [{'old': 'ref', 'new': 'dual', 'hash_only_visible': 1}]
+    # Атлет снова видит запись по ФИО
+    _, response = reconcile_client.get('/', headers=athlete_headers())
+    assert 'Иванов Иван' in response.text
+
+
+def test_athlete_self_submit_visible_by_owner_in_both_modes(reconcile_client: SanicTestClient):
+    """Своя заявка атлета видна по owner в dual и в ref (модерация —
+    как раньше: новая запись уходит в pending)."""
+    storage = app.ctx.storage
+    headers = athlete_headers()
+    _, response = reconcile_client.post(
+        '/competition',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT id, review_status, owner_id FROM competitions WHERE student_name = ?',
+        (ATHLETE_RECORD_DATA['student_name'],),
+    ).fetchone()
+    assert row['review_status'] == 'pending'
+    assert row['owner_id'] == storage.get_user('sportik')['id']
+
+    _, response = reconcile_client.get('/', headers=headers)
+    assert ATHLETE_RECORD_DATA['student_name'] in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=headers)
+    assert ATHLETE_RECORD_DATA['student_name'] in response.text
+
+
+def test_admin_editor_semantics_unchanged_in_ref_mode(reconcile_client: SanicTestClient):
+    """Режим касается только кабинета атлета: admin/editor видят весь
+    реестр, editor правит любую запись, модерация подтверждает."""
+    storage = app.ctx.storage
+    storage.set_identity_mode('ref')
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+
+    _, response = reconcile_client.get('/', headers=get_auth_headers(role='editor'))
+    assert 'Иванов Иван' in response.text
+
+    editor = get_auth_headers(role='editor')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=editor,
+        data={**csrf_for(editor), **ATHLETE_RECORD_DATA, 'student_name': 'Иванов Иван'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    # Правка модератора подтверждает запись
+    assert storage.get_competition_review(record_id)['review_status'] == 'approved'
+
+
+def test_identity_endpoints_require_admin_and_csrf(reconcile_client: SanicTestClient):
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    _, response = reconcile_client.post('/admin/people/reconcile/identity/flip', data={'mode': 'ref'})
+    assert response.status == 401
+
+    # CSRF проверяет общий middleware POST-запросов
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip', headers=get_auth_headers(), data={'mode': 'ref'}
+    )
+    assert response.status == 403
+    assert 'CSRF' in response.text
+
+    # Неизвестный режим — 400, ничего не меняется
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'single'},
+    )
+    assert response.status == 400
+    assert app.ctx.storage.get_identity_mode() == 'dual'
 
 
 # --- Импорт студентов из Excel (Student Identity v1, Phase 2.5). ---

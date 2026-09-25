@@ -1,0 +1,232 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Сопоставление данных{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
+{% endblock admin_back %}
+{% block admin_description %}
+    Привязка существующих записей о соревнованиях и аккаунтов атлетов к карточкам
+    студентов. Сами записи при привязке не изменяются.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+{# Сводка и вкладки общие для трёх вкладок раздела (Phase 2 + P3). Здесь —
+   режим идентификации: проверка перед переходом на «только связи» и сам
+   переход с guard'ом (hash-only записи блокируют flip без waiver). #}
+<div class="text-muted mb-2">
+    Записей о соревнованиях: {{ counters.records_total }}, из них без студента:
+    <strong>{{ counters.records_unlinked }}</strong>.
+    Аккаунтов атлетов: {{ counters.athlete_users_total }}, из них без студента:
+    <strong>{{ counters.athlete_users_unlinked }}</strong>.
+</div>
+
+<ul class="nav nav-pills mb-3">
+    <li class="nav-item">
+        <a class="nav-link" href="/admin/people/reconcile">Записи без студента
+            <span class="badge text-bg-light border">{{ counters.records_unlinked }}</span></a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/admin/people/reconcile/users">Аккаунты атлетов без студента
+            <span class="badge text-bg-light border">{{ counters.athlete_users_unlinked }}</span></a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link active" href="/admin/people/reconcile/identity">Режим идентификации
+            <span class="badge text-bg-light border">{{ hash_only_total }}</span></a>
+    </li>
+</ul>
+
+{# Карточка 1: режим + переключение. На «только связи» — только при H=0. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Режим видимости кабинета атлета
+            {% if identity_mode == 'ref' %}
+            <span class="badge text-bg-primary">только связи (ref)</span>
+            {% else %}
+            <span class="badge text-bg-secondary">двойной (dual)</span>
+            {% endif %}
+        </h5>
+
+        <div class="text-muted mb-3">
+            {% if identity_mode == 'ref' %}
+            Только связи (ref): кабинет атлета собирает записи по владельцу (owner) и по
+            стабильной связи аккаунта с карточкой студента. Совпадение по ФИО
+            (легаси-хеш) записи в кабинет не добавляет.
+            {% else %}
+            Двойной (dual): кабинет атлета собирает записи по владельцу (owner), по
+            стабильной связи аккаунта с карточкой студента и по совпадению ФИО
+            (легаси-хеш sha256). Все существующие записи остаются видимыми.
+            {% endif %}
+        </div>
+
+        <div class="mb-3">
+            Аккаунтов атлетов: {{ counters.athlete_users_total }}, из них привязано к карточкам: {{ counters.athlete_users_linked }}, без карточки: {{ counters.athlete_users_unlinked }}.
+        </div>
+        {% if identity_mode == 'dual' %}
+        <div class="mb-3">
+            Записей, которые пропадут из кабинетов при переходе на «только связи»:
+            <strong>{{ hash_only_total }}</strong>.
+        </div>
+
+        {% if hash_only_total == 0 %}
+        <div class="alert alert-success" role="alert">
+            Проверка пройдена: ни одна запись не видна атлетам только по ФИО — переход
+            на «только связи» не изменит кабинеты.
+        </div>
+        <form action="/admin/people/reconcile/identity/flip" method="post"
+              onsubmit="return confirm('Перейти на режим «только связи» (ref)? Кабинеты атлетов не изменятся: записей, видимых только по ФИО, нет. Вернуть двойной режим можно в любой момент.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="mode" value="ref">
+            <button class="btn btn-warning" type="submit">Перейти на «только связи»</button>
+            <div class="form-text ui-hint">
+                Режим влияет только на видимость кабинета атлета: записи, отчёты, выгрузки
+                и модерация не меняются.
+            </div>
+        </form>
+        {% else %}
+        <div class="alert alert-danger" role="alert">
+            Переход на «только связи» заблокирован: {{ hash_only_total }} записей видны
+            атлетам только по ФИО (легаси-хеш). Привяжите их или их аккаунты к карточкам
+            студентов в сопоставлении — счётчик обнулится.
+        </div>
+        {% endif %}
+        {% else %}
+        <form action="/admin/people/reconcile/identity/flip" method="post"
+              onsubmit="return confirm('Вернуть двойной режим? Кабинеты атлетов снова увидят записи, совпадающие по ФИО.')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="mode" value="dual">
+            <button class="btn btn-outline-secondary" type="submit">Вернуть двойной режим</button>
+            <div class="form-text ui-hint">
+                Режим влияет только на видимость кабинета атлета: записи, отчёты, выгрузки
+                и модерация не меняются.
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+{# Карточка 2: per-user сводка видимости. «Пропадёт» имеет смысл только в dual. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Аккаунты атлетов</h5>
+        <div class="text-muted mb-3">
+            Сколько записей видит каждый аккаунт по каждой ветке идентичности.
+            {% if identity_mode == 'dual' %}
+            «Пропадёт» — записи, которые исчезнут из кабинета при переходе на «только связи».
+            {% endif %}
+        </div>
+
+        {% if users %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Аккаунт</th>
+                        <th scope="col">Карточка</th>
+                        <th scope="col">По ФИО</th>
+                        <th scope="col">По привязке</th>
+                        {% if identity_mode == 'dual' %}
+                        <th scope="col">Пропадёт</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>
+                            {{ user.username }}
+                            <span class="text-muted small">· своих записей: {{ user.visible_by_owner }}</span>
+                        </td>
+                        <td>
+                            {% if user.student_ref_id is not none %}
+                            <a href="/admin/people/{{ user.student_ref_id }}">{{ user.student_name }}</a>
+                            <span class="text-muted small">#{{ user.student_ref_id }}</span>
+                            {% else %}
+                            <span class="text-muted">без карточки</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ user.visible_by_hash }}</td>
+                        <td>{{ user.visible_by_ref }}</td>
+                        {% if identity_mode == 'dual' %}
+                        <td>
+                            {{ user.hash_only_visible }}
+                            {% if user.namesake_risk > 0 %}
+                            <span class="badge text-bg-warning"
+                                  title="Записи, совпавшие с ФИО аккаунта, но привязанные к другой карточке студента">
+                                риск тёзки: {{ user.namesake_risk }}
+                            </span>
+                            {% endif %}
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="text-muted mt-2">
+            Всего атлетов: {{ counters.athlete_users_total }}; страница {{ page }} из {{ pages }}.
+        </div>
+        {% if pages > 1 %}
+        <nav aria-label="Страницы аккаунтов атлетов">
+            <ul class="pagination justify-content-center mb-0">
+                <li class="page-item {% if not prev_url %}disabled{% endif %}">
+                    {% if prev_url %}<a class="page-link" href="{{ prev_url }}" aria-label="Предыдущая">«</a>
+                    {% else %}<span class="page-link" aria-hidden="true">«</span>{% endif %}
+                </li>
+                <li class="page-item disabled"><span class="page-link">Стр. {{ page }} из {{ pages }}</span></li>
+                <li class="page-item {% if not next_url %}disabled{% endif %}">
+                    {% if next_url %}<a class="page-link" href="{{ next_url }}" aria-label="Следующая">»</a>
+                    {% else %}<span class="page-link" aria-hidden="true">»</span>{% endif %}
+                </li>
+            </ul>
+        </nav>
+        {% endif %}
+        {% else %}
+        <div class="text-muted">Аккаунтов атлетов нет.</div>
+        {% endif %}
+    </div>
+</div>
+
+{% if identity_mode == 'dual' %}
+{# Карточка 3 (только dual): конкретные записи, которые пропадут. #}
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h5 class="card-title">Записи, которые пропадут из кабинетов</h5>
+        <div class="text-muted mb-3">
+            Видны атлетам только по совпадению ФИО — при переходе на «только связи»
+            исчезнут из кабинетов, пока не привязаны к карточкам студентов.
+        </div>
+
+        {% if disappearing %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Аккаунт</th>
+                        <th scope="col">Запись</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in disappearing %}
+                    <tr>
+                        <td>{{ item.username }}</td>
+                        <td>
+                            <div>#{{ item.id }} <strong>{{ item.student_name }}</strong></div>
+                            <div class="small text-muted">{{ item.sport }} · {{ format_date_range(item.date, item.date_to) }} · {{ item.name }}</div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if disappearing_total > disappearing | length %}
+        <div class="text-muted">…и ещё {{ disappearing_total - disappearing | length }}.</div>
+        {% endif %}
+        {% else %}
+        <div class="text-muted">Таких записей нет — переход на «только связи» ничего не скроет.</div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% endblock admin_content %}

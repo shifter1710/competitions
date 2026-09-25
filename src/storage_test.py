@@ -101,11 +101,13 @@ def test_review_lifecycle(adapter):
 
     review = adapter.get_competition_review(record_id)
     expected_hash = make_competition('Спортсменов', datetime(2026, 2, 1)).student_id
+    # P3: review несёт и стабильную связь — ветка ref в user_owns_record.
     assert review == {
         'id': record_id,
         'review_status': 'pending',
         'owner_id': 7,
         'student_id': expected_hash,
+        'student_ref_id': None,
     }
 
     adapter.set_competition_review(record_id, 'rejected', 'проверьте место')
@@ -3130,6 +3132,223 @@ def test_search_student_candidates_exclude_inactive(adapter):
     # Неактивная карточка не находится ни по ФИО, ни по псевдониму.
     assert adapter.search_student_candidates('иван') == []
     assert adapter.search_student_candidates('ваня') == []
+
+
+# ---- P3 Runtime Identity: dual-read кабинета атлета и режим dual/ref. ----
+#
+# Gate-фиксы: student_ref_id читается общим SELECT записей и SELECT'ами
+# пользователей; режим identity_mode и guard переключения — см.
+# docs/data-model-decisions.md, Phase 3. Синтетические данные.
+
+
+def test_competition_select_round_trips_student_ref_id(adapter):
+    record = make_competition('Иванов Иван', datetime(2026, 1, 10))
+    record.student_ref_id = 7
+    adapter.save_competitions([record])
+
+    by_id = adapter.get_competition_by_id(1)
+    assert by_id.student_ref_id == 7
+    listed = adapter.get_competitions()
+    assert [item.student_ref_id for item in listed] == [7]
+
+    # Правка записи не сбрасывает стабильную связь (её меняют только
+    # link/unlink/relink сопоставления).
+    by_id.discipline = 'Бег 100 м'
+    by_id.result = '11.2'
+    adapter.update_competition('1', by_id)
+    assert adapter.get_competition_by_id(1).student_ref_id == 7
+
+    # NULL-связь существующих записей тоже читается как None
+    adapter.save_competitions([make_competition('Петров Пётр', datetime(2026, 2, 10))])
+    assert adapter.get_competition_by_id(2).student_ref_id is None
+
+
+def test_user_select_round_trips_student_ref_id(adapter):
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    user_id = make_athlete_user(adapter, 'anna')
+
+    assert adapter.get_user('anna')['student_ref_id'] is None
+    assert adapter.get_user_by_id(user_id)['student_ref_id'] is None
+
+    assert adapter.link_user(user_id, student_id) == (1, None)
+    assert adapter.get_user('anna')['student_ref_id'] == student_id
+    assert adapter.get_user_by_id(user_id)['student_ref_id'] == student_id
+
+
+def test_identity_mode_default_set_and_guarded_flip(adapter):
+    # Свежая БД: seed dual; чтение без кэша видит и ручную замену строки
+    assert adapter.get_identity_mode() == 'dual'
+    adapter.connection.execute("UPDATE app_settings SET value = 'ref' WHERE key = 'identity_mode'")
+    adapter.connection.commit()
+    assert adapter.get_identity_mode() == 'ref'
+
+    # Прямая установка валидирует значение
+    adapter.set_identity_mode('dual')
+    with pytest.raises(ValueError):
+        adapter.set_identity_mode('single')
+    assert adapter.get_identity_mode() == 'dual'
+
+    # Неизвестное значение в БД безопасно откатывается к dual
+    adapter.connection.execute("UPDATE app_settings SET value = 'broken' WHERE key = 'identity_mode'")
+    adapter.connection.commit()
+    assert adapter.get_identity_mode() == 'dual'
+
+    with pytest.raises(ValueError):
+        adapter.set_identity_mode_guarded('broken')
+
+
+def test_identity_mode_default_on_legacy_db(tmp_path):
+    # Легаси-БД без app_settings: чтение режима не падает, дефолт dual
+    db_path = tmp_path / 'legacy.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute('CREATE TABLE competitions (id INTEGER PRIMARY KEY)')
+    connection.commit()
+    connection.close()
+    adapter = SQLiteAdapter(str(db_path))
+    assert adapter.get_identity_mode() == 'dual'
+
+
+def test_scope_clauses_dual_and_ref_modes(adapter):
+    """Видимость кабинета: dual = owner OR ref OR хеши; ref = owner OR ref."""
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    user_id = make_athlete_user(adapter, 'anna', profile={'student_name': 'Иванов Иван'})
+    adapter.link_user(user_id, student_id)
+    hashes = adapter.athlete_name_hashes(user_id)
+
+    # (a) чужая запись, связанная с карточкой Анны: ref-ветка
+    linked = make_competition('Иванов Иван', datetime(2026, 1, 10))
+    linked.student_ref_id = student_id
+    # (b) чужая запись без связи, совпадающая по ФИО: легаси-хеш
+    hash_only = make_competition('Иванов Иван', datetime(2026, 2, 10))
+    hash_only.student_id = hashes[0]
+    # (c) чужая запись другого человека: не видна ни в одном режиме
+    alien = make_competition('Петров Пётр', datetime(2026, 3, 10))
+    # (d) своя по owner_id без совпадений ФИО
+    own = make_competition('Своё Имя', datetime(2026, 4, 10))
+    adapter.save_competitions([linked, hash_only, alien, own])
+    adapter.connection.execute('UPDATE competitions SET owner_id = ? WHERE id = 4', (user_id,))
+    adapter.connection.commit()
+
+    def visible_ids(mode):
+        return sorted(
+            int(item.record_id)
+            for item in adapter.get_competitions(
+                owner_id=user_id,
+                student_id_hashes=hashes,
+                student_ref_id=student_id,
+                identity_mode=mode,
+            )
+        )
+
+    assert visible_ids('dual') == [1, 2, 4]
+    assert visible_ids('ref') == [1, 4]
+
+    # Счётчик с теми же параметрами согласован со списком
+    assert (
+        adapter.count_competitions_visible(
+            owner_id=user_id, student_id_hashes=hashes, student_ref_id=student_id, identity_mode='dual'
+        )
+        == 3
+    )
+    assert (
+        adapter.count_competitions_visible(
+            owner_id=user_id, student_id_hashes=hashes, student_ref_id=student_id, identity_mode='ref'
+        )
+        == 2
+    )
+
+    # Модератор (без owner_id) видит всё; режим не влияет
+    assert len(adapter.get_competitions()) == 4
+
+
+def test_count_hash_only_visible_and_guarded_flip(adapter):
+    """Guard без waiver: ref запрещён, пока есть hash-only записи; после
+    привязки — разрешён; возврат на dual — всегда."""
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    user_id = make_athlete_user(adapter, 'anna', profile={'student_name': 'Иванов Иван'})
+    adapter.link_user(user_id, student_id)
+    hashes = adapter.athlete_name_hashes(user_id)
+
+    record = make_competition('Иванов Иван', datetime(2026, 1, 10))
+    record.student_id = hashes[0]
+    adapter.save_competitions([record])
+
+    # Хеш-совпадение без owner и без связи с карточкой Анны — hash-only
+    assert adapter.count_hash_only_visible() == 1
+
+    ok, count = adapter.set_identity_mode_guarded('ref')
+    assert (ok, count) == (False, 1)
+    assert adapter.get_identity_mode() == 'dual'
+
+    # Привязка записи к карточке Анны обнуляет счётчик — flip проходит
+    assert adapter.link_competitions([1], student_id) == (1, None)
+    assert adapter.count_hash_only_visible() == 0
+    ok, count = adapter.set_identity_mode_guarded('ref')
+    assert (ok, count) == (True, 0)
+    assert adapter.get_identity_mode() == 'ref'
+
+    # Возврат на dual разрешён всегда, даже при наличии hash-only записей
+    adapter.unlink_competition(1)
+    assert adapter.count_hash_only_visible() == 1
+    ok, count = adapter.set_identity_mode_guarded('dual')
+    assert (ok, count) == (True, 1)
+    assert adapter.get_identity_mode() == 'dual'
+
+
+def test_identity_verification_data_counts(adapter):
+    """Отчёт проверки: per-user ветки видимости, hash-only, риск тёзки."""
+    anna_student = adapter.create_student('Анна Аннова', 'Ж', '', '', '')
+    namesake_student = adapter.create_student('Анна Аннова', 'Ж', '', '', '')
+    anna_id = make_athlete_user(adapter, 'anna', profile={'student_name': 'Анна Аннова'})
+    make_athlete_user(adapter, 'boris', profile={'student_name': 'Борис Борисов'})
+    adapter.link_user(anna_id, anna_student)
+    anna_hashes = adapter.athlete_name_hashes(anna_id)
+
+    # Своя по owner; по связи (чужая, ref=карточка Анны); hash-only;
+    # запись тёзки (ФИО Анны, но связана с другой карточкой).
+    own = make_competition('Своя', datetime(2026, 1, 1))
+    by_ref = make_competition('Запись по связи', datetime(2026, 2, 1))
+    by_ref.student_ref_id = anna_student
+    hash_only = make_competition('Анна Аннова', datetime(2026, 3, 1))
+    hash_only.student_id = anna_hashes[0]
+    namesake = make_competition('Анна Аннова', datetime(2026, 4, 1))
+    namesake.student_ref_id = namesake_student
+    namesake.student_id = anna_hashes[0]
+    adapter.save_competitions([own, by_ref, hash_only, namesake])
+    adapter.connection.execute('UPDATE competitions SET owner_id = ? WHERE id = 1', (anna_id,))
+    adapter.connection.commit()
+
+    data = adapter.identity_verification_data()
+    anna_row = next(row for row in data['users'] if row['username'] == 'anna')
+    assert anna_row['visible_by_owner'] == 1
+    assert anna_row['visible_by_ref'] == 1
+    assert anna_row['visible_by_hash'] == 2  # hash_only + namesake
+    # Обе хеш-записи пропадут из кабинета Анны в ref: одна без связи,
+    # вторая (тёзка) связана с ДРУГОЙ карточкой.
+    assert anna_row['hash_only_visible'] == 2
+    assert anna_row['namesake_risk'] == 1
+    boris_row = next(row for row in data['users'] if row['username'] == 'boris')
+    assert boris_row['hash_only_visible'] == 0
+
+    assert data['hash_only_total'] == 2
+    assert data['disappearing_total'] == 2
+    assert [item['id'] for item in data['disappearing']] == [3, 4]
+    assert {item['username'] for item in data['disappearing']} == {'anna'}
+    assert data['users_total'] == 2
+
+
+def test_athlete_name_hashes_matches_request_formula(adapter):
+    """Хеши storage-у — та же формула, что student_hashes_for_request:
+    профиль + псевдонимы, без дублей."""
+    user_id = make_athlete_user(
+        adapter,
+        'anna',
+        profile={'student_name': 'Иванов Иван'},
+        aliases=['Иванов И.И.', 'Иванов Иван'],
+    )
+    expected = [hashlib.sha256(name.encode()).hexdigest() for name in ('Иванов И.И.', 'Иванов Иван')]
+    assert adapter.athlete_name_hashes(user_id) == expected
+    assert adapter.athlete_name_hashes(999999) == []
 
 
 # ---- Event Model, Wave 1 P0/P1 (целевая архитектура) ----
