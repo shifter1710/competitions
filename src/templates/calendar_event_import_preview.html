@@ -7,11 +7,18 @@
    и создание карточек — только admin.
 
    Сопоставление с карточкой НЕ блокирует импорт: «Готовы» — все валидные
-   строки без неразобранных дублей; карточка (единственный точный кандидат
-   или явный выбор) подбирается автоматически и видна первой строкой ячейки
-   «Замечания и кандидаты»; сбросить её можно кнопкой «Без карточки» —
-   участие добавится без связи, сопоставить можно позже. «Требуют решения» —
-   только неразобранные дубли файла. #}
+   строки-НОВЫЕ участия; карточка (единственный точный кандидат или явный
+   выбор) подбирается автоматически и видна первой строкой ячейки «Замечания
+   и кандидаты»; сбросить её можно кнопкой «Без карточки» — участие добавится
+   без связи, сопоставить можно позже.
+
+   P4 (repeat-safe дедуп): повтор уже существующего участия НЕ добавляется —
+   точная копия → «уже существует» (без действий), изменившиеся место/
+   результат → «существует — можно обновить» (построчно), cardless-похожесть
+   → «возможный дубль» (пропустить/добавить как новое). Точные копии в файле
+   — «дубликат в файле — пропускается» (повтор строки-якоря), несколько строк
+   с той же карточкой/ФИО и дисциплиной, но разными данными — конфликт строк
+   («Требуют решения», разбираются по одной). #}
 
 {# Строка таблицы предпросмотра. Макросу request/is_admin передаются явно:
    макросы не видят контекст шаблона. search_result=True — строка из поиска
@@ -41,6 +48,19 @@
         <button class="btn btn-sm btn-outline-primary" type="submit">Выбрать карточку #{{ candidate.student_id }}</button>
     </form>
 </div>
+{% endmacro %}
+
+{# Дифф место/результат (P4): «старое → новое», изменившиеся поля. strong —
+   у кандидата на обновление (предложение), без strong — у разобранной
+   строки (фиксированный результат действия). #}
+{% macro update_diff_line(diff, strong=False) %}
+{% if diff %}
+<span class="small">
+    {% if diff.position %}место: {{ diff.position[0] }} → {% if strong %}<strong>{{ diff.position[1] }}</strong>{% else %}{{ diff.position[1] }}{% endif %}{% endif %}
+    {% if diff.position and diff.result %} · {% endif %}
+    {% if diff.result %}результат: {{ diff.result[0] }} → {% if strong %}<strong>{{ diff.result[1] }}</strong>{% else %}{{ diff.result[1] }}{% endif %}{% endif %}
+</span>
+{% endif %}
 {% endmacro %}
 
 {# Строка-подсказка личности: карточка, которая будет связана с участием.
@@ -97,6 +117,11 @@
         {% if row.display.position %}{{ row.display.position }}{% else %}<span class="text-muted"
             title="Место можно дописать позже — участник сохранён со статусом «ждёт результата»">—</span>{% endif %}
     </td>
+    <td>
+        {% if row.display.discipline %}{{ row.display.discipline }}{% else %}<span class="text-muted"
+            title="Дисциплина необязательна: различает участия одного человека (100 м и 200 м — два участия)">—</span>{% endif %}
+    </td>
+    <td>{{ row.display.result or '—' }}</td>
     {% for column in custom_columns %}
     <td>{{ row.custom_display.get(column) or '—' }}</td>
     {% endfor %}
@@ -119,7 +144,10 @@
                 из карточки #{{ row.effective_student.id }}: {{ row.autofilled | join(', ') }}</span>
         </div>
         {% endif %}
-        {% if category != 'resolved' and row.existing %}
+        {% if category == 'ready' and row.existing %}
+        {# v2-блок «уже участвует» — информационный, для готовых строк с
+           участвиями, не совпавшими по дисциплине (совпавшие — статусы
+           «уже существует»/«существует — можно обновить»). #}
         {% for participant in row.existing %}
         {% if participant.position %}
         <div class="small text-muted">уже участвует: место {{ participant.position }}</div>
@@ -132,11 +160,44 @@
         {% if row.status == 'added' %}
         <span class="badge text-bg-success">добавлен{% if row.added_student_id %} · карточка
             #{{ row.added_student_id }}{% endif %}</span>
+        {% elif row.status == 'updated' %}
+        <span class="badge text-bg-success">обновлён</span>
+        {{ update_diff_line(row.update_diff) }}
+        {% elif row.status == 'kept' %}
+        <span class="badge text-bg-secondary">оставлено существующее</span>
+        {% elif row.import_status == 'already' %}
+        <span class="badge text-bg-secondary"
+              title="Участие с той же карточкой/ФИО и дисциплиной уже есть в списке участников — дубль не создаётся">уже
+            существует</span>
+        {% elif row.import_status == 'file-duplicate' %}
+        <span class="badge text-bg-light border"
+              title="Точная копия строки {{ row.file_anchor }} — сервер не создаёт оба участия; якорь можно добавить или пропустить">дубликат
+            в файле — пропускается</span>
+        <span class="small text-muted">повтор строки {{ row.file_anchor }}</span>
         {% else %}
         <span class="badge text-bg-secondary">пропущен</span>
         {% endif %}
         {% elif row.error or row.validation_error %}
         {# Ошибочные строки: только текст ошибки, карточки не предлагаются. #}
+        {% elif row.import_status == 'update-candidate' %}
+        <div class="mb-1">
+            <span class="badge text-bg-warning"
+                  title="Участие с той же карточкой и дисциплиной уже есть; место/результат из файла отличаются">существует
+                — можно обновить</span>
+            {{ update_diff_line(row.classification.diff, strong=True) }}
+        </div>
+        {% elif row.import_status == 'possible-duplicate' %}
+        <div class="mb-1">
+            <span class="badge text-bg-warning"
+                  title="Участие с тем же ФИО и дисциплиной уже есть, но данные отличаются">возможный дубль</span>
+            <span class="small text-muted">по умолчанию пропускается; «Добавить как новое» — если это другой человек.</span>
+        </div>
+        {% elif row.import_status == 'conflict' %}
+        <div class="mb-1">
+            <span class="badge text-bg-warning">конфликт строк в файле</span>
+            <span class="small text-muted">та же карточка/ФИО и дисциплина, данные разные — строки {{ row.conflict_rows | join(', ') }}.
+                Разберите по одной: обе не добавятся.</span>
+        </div>
         {% else %}
         {# Подсказка личности — первой строкой ячейки. #}
         {% if row.effective_student %}
@@ -209,7 +270,30 @@
     <td class="text-end">
         {% if category != 'resolved' %}
         <div class="d-flex flex-wrap gap-2 justify-content-end">
-            {% if category != 'error' %}
+            {% if row.import_status == 'update-candidate' %}
+            {# P4: дубль не создаётся — только restricted-обновление место/
+               результат существующего участия или явное «оставить как есть»
+               (в bulk-батч строка не входит). #}
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/update-existing"
+                  method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-sm btn-outline-primary" type="submit"
+                        title="Заменит только место и результат существующего участия">Обновить существующее</button>
+            </form>
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/keep-existing"
+                  method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-sm btn-outline-secondary" type="submit"
+                        title="Существующее участие останется без изменений">Оставить существующее</button>
+            </form>
+            {% elif row.import_status == 'possible-duplicate' %}
+            <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/add"
+                  method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <button class="btn btn-sm btn-outline-success" type="submit"
+                        title="Создаст второе участие с тем же ФИО и дисциплиной">Добавить как новое</button>
+            </form>
+            {% elif category != 'error' %}
             <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/row/{{ row.row_number }}/add"
                   method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -230,7 +314,7 @@
 </tr>
 {% if category != 'resolved' %}
 <tr>
-    <td colspan="{{ 9 + custom_columns | length }}">
+    <td colspan="{{ 11 + custom_columns | length }}">
         {# Правка строки — bootstrap-collapse по data-атрибутам (без JS).
            Поля предзаполнены значениями строки файла (до автозаполнения). #}
         <div class="collapse" id="import-row-{{ row.row_number }}-edit">
@@ -274,6 +358,18 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-position"
                                name="position" placeholder="пусто — ждёт результата" type="text"
                                value="{{ row.position }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-discipline">Дисциплина</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-discipline"
+                               name="discipline" placeholder="например, 100 м" type="text"
+                               value="{{ row.discipline }}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="import-row-{{ row.row_number }}-result">Результат</label>
+                        <input class="form-control" id="import-row-{{ row.row_number }}-result"
+                               name="result" placeholder="например, 12,3 с" type="text"
+                               value="{{ row.result }}">
                     </div>
                     {% for column, field_key in custom_keys.items() %}
                     <div class="col-md-3">
@@ -353,7 +449,7 @@
 </div>
 {% if resolved_count %}
 <div class="text-muted mb-2">
-    Решено: добавлено {{ added_count }} · пропущено {{ skipped_count }}
+    Решено: {{ resolved_line }}
 </div>
 {% endif %}
 <div class="form-text ui-hint mb-3">
@@ -373,10 +469,12 @@
 {% endif %}
 
 {# Тулбар — три независимые формы (как у импорта студентов), confirm —
-   только с числами, значения файла в подтверждения не подставляются. #}
+   только с числами, значения файла в подтверждения не подставляются.
+   Сегменты already/filedup (P4): эти строки в батч не входят — «уже
+   существует» ничего не меняет, «дубликаты в файле» пропускаются. #}
 <div class="d-flex flex-wrap gap-2 mb-2">
     <form action="/calendar/{{ event.id }}/participants/import/preview/{{ token }}/bulk-commit" method="post"
-          onsubmit="return confirm('Добавить {{ ready_count }} готовых участников{% if unlinked_ready %} (без карточки — {{ unlinked_ready }}){% endif %}?')">
+          onsubmit="return confirm('Добавить {{ ready_count }} готовых участников{% if unlinked_ready %} (без карточки — {{ unlinked_ready }}){% endif %}{% if already_count %}. Уже существуют: {{ already_count }} — не добавляются{% endif %}{% if file_duplicate_count %}. Дубликатов в файле: {{ file_duplicate_count }} — пропускаются{% endif %}?')">
         <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <button class="btn btn-success" type="submit" {% if not ready_count %}disabled{% endif %}>Добавить
             {{ ready_count }} готовых</button>
@@ -410,6 +508,8 @@
                         <th>Группа</th>
                         <th>Курс</th>
                         <th>Место</th>
+                        <th>Дисциплина</th>
+                        <th>Результат</th>
                         {% for column in custom_columns %}
                         <th>{{ column }}</th>
                         {% endfor %}
@@ -420,7 +520,7 @@
                 {% if groups.ready %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Готовы к добавлению
+                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Готовы к добавлению
                             <span class="badge text-bg-light border">{{ groups.ready | length }}</span></th>
                     </tr>
                     {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
@@ -429,7 +529,7 @@
                 {% if groups.review %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Требуют решения
+                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Требуют решения
                             <span class="badge text-bg-light border">{{ groups.review | length }}</span></th>
                     </tr>
                     {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
@@ -438,7 +538,7 @@
                 {% if groups.error %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Ошибочные
+                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Ошибочные
                             <span class="badge text-bg-light border">{{ groups.error | length }}</span></th>
                     </tr>
                     {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
@@ -447,7 +547,7 @@
                 {% if groups.resolved %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 9 + custom_columns | length }}">Решено
+                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Решено
                             <span class="badge text-bg-light border">{{ groups.resolved | length }}</span></th>
                     </tr>
                     {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
