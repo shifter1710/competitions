@@ -3280,22 +3280,51 @@ class SQLiteAdapter:
         level: str,
         sport: str,
         url: str,
-    ) -> None:
+    ) -> int:
+        """Правка события + синхронизация связанных записей одной транзакцией.
+
+        Event Model, Wave 1 P2: событие — владелец полей участия
+        name/date/date_to/sport/level, правка пресета переносится в записи
+        со ссылкой calendar_event_id (NULL-legacy-строки не трогаются —
+        ссылки у них нет). Сбой любого шага — откат всего (паттерн
+        import_competitions). Возвращает synced — число синхронизированных
+        записей (rowcount второго UPDATE).
+        """
         with self._lock:
-            self.connection.execute(
-                'UPDATE calendar_events'
-                ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?, url = ?'
-                ' WHERE id = ?',
-                (name, date, date_to, level, sport, url, event_id),
-            )
-            self.connection.commit()
+            try:
+                self.connection.execute(
+                    'UPDATE calendar_events'
+                    ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?, url = ?'
+                    ' WHERE id = ?',
+                    (name, date, date_to, level, sport, url, event_id),
+                )
+                cursor = self.connection.execute(
+                    'UPDATE competitions'
+                    ' SET name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' WHERE calendar_event_id = ?',
+                    (name, date, date_to, sport, level, event_id),
+                )
+                synced = cursor.rowcount
+                self.connection.commit()
+            except BaseException:
+                self.connection.rollback()
+                raise
+            return synced
 
     def count_calendar_event_participants(self, event_id: int) -> int:
-        """Записи реестра, совпадающие с пресетом (name + date + date_to)."""
+        """Блокировщик удаления события (консервативный OR, решение A).
+
+        Считаются записи, связанные ссылкой calendar_event_id, ИЛИ
+        совпадающие с пресетом (name + date + date_to): legacy-NULL-строки
+        по пресету из участников страницы события уже исчезли (id-first
+        reading), но молчаливое удаление события с записями-двойниками
+        пресета хуже ложного блокирующего отказа — владелец решает случай
+        вручную (unlink/перелинковка в будущих фазах).
+        """
         with self._lock:
             row = self.connection.execute(
                 'SELECT COUNT(*) AS total FROM calendar_events e, competitions c'
-                f' WHERE e.id = ? AND {self._calendar_preset_match_sql()}',
+                f' WHERE e.id = ? AND (c.calendar_event_id = e.id OR {self._calendar_preset_match_sql()})',
                 (event_id,),
             ).fetchone()
             return row['total']
@@ -3306,9 +3335,10 @@ class SQLiteAdapter:
             self.connection.commit()
 
     def list_calendar_events(self, sport: str = '') -> list[dict]:
-        """Все события по хронологии; рядом — счётчики участников по пресету:
-        participant_count — все совпавшие записи реестра, no_result_count —
-        из них с position = 0 («без результата»)."""
+        """Все события по хронологии; рядом — счётчики участников по ссылке
+        calendar_event_id (P2, id-first; NULL-legacy-строки пресета не
+        считаются): participant_count — все связанные записи реестра,
+        no_result_count — из них с position = 0 («без результата»)."""
         with self._lock:
             params: list[object] = []
             where = ''
@@ -3329,7 +3359,7 @@ class SQLiteAdapter:
                     COUNT(c.id) AS participant_count,
                     SUM(CASE WHEN c.position = 0 THEN 1 ELSE 0 END) AS no_result_count
                 FROM calendar_events e
-                LEFT JOIN competitions c ON {self._calendar_preset_match_sql()}
+                LEFT JOIN competitions c ON c.calendar_event_id = e.id
                 {where}
                 GROUP BY e.id
                 ORDER BY e.date ASC, e.name ASC
@@ -3353,17 +3383,20 @@ class SQLiteAdapter:
             ]
 
     def list_calendar_event_participants(self, event_id: int) -> list[dict]:
-        """Записи реестра — участники события по пресету (name + date + date_to).
+        """Записи реестра — участники события по ссылке calendar_event_id.
 
-        Волна B (прототип 16): записи остаются обычными записями реестра
-        (никаких FK), совпадение — тот же пресет, что и в счётчиках.
+        Event Model, Wave 1 P2 (id-first): участники события — только явно
+        связанные записи; NULL-legacy-строки, совпадающие с пресетом по
+        случайности, на странице события не показываются (счётчик удаления
+        при этом консервативно учитывает и их — OR, см.
+        count_calendar_event_participants).
         Сначала с результатом, затем «ждут результата», внутри — по ФИО.
         student_ref_id — для предпросмотра импорта участников (поиск уже
         существующих участий той же карточки).
         """
         with self._lock:
             rows = self.connection.execute(
-                f'''
+                '''
                 SELECT
                     c.id AS record_id,
                     c.student_name,
@@ -3373,8 +3406,8 @@ class SQLiteAdapter:
                     c.course,
                     c.position,
                     c.student_ref_id
-                FROM calendar_events e, competitions c
-                WHERE e.id = ? AND {self._calendar_preset_match_sql()}
+                FROM competitions c
+                WHERE c.calendar_event_id = ?
                 ORDER BY
                     CASE WHEN c.position = 0 THEN 1 ELSE 0 END,
                     c.student_name ASC

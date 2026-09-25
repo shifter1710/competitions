@@ -1693,21 +1693,40 @@ async def edit_calendar_event(request: Request, event_id: str):
         return text(body='Invalid event id', status=400)
 
     storage = get_storage(request.app)
-    if storage.get_calendar_event(numeric_id) is None:
+    event = storage.get_calendar_event(numeric_id)
+    if event is None:
         return text(body='Event not found', status=404)
 
     values, error = parse_calendar_event_form(request)
     if error is not None:
         return text(body=error, status=400)
 
-    storage.update_calendar_event(
+    new_date = values['date'].isoformat()
+    new_date_to = values['date_to'].isoformat() if values['date_to'] else None
+    # P2: правка события — владелец полей участия; связанные записи (по
+    # calendar_event_id) синхронизируются той же транзакцией (см.
+    # SQLiteAdapter.update_calendar_event), synced — их число для аудита.
+    synced_participations = storage.update_calendar_event(
         event_id=numeric_id,
         name=values['name'],
-        date=values['date'].isoformat(),
-        date_to=values['date_to'].isoformat() if values['date_to'] else None,
+        date=new_date,
+        date_to=new_date_to,
         level=values['level'],
         sport=values['sport'],
         url=values['url'],
+    )
+    log_audit_event(
+        request,
+        'calendar_event_edited',
+        {
+            'event_id': numeric_id,
+            'name': {'old': event['name'], 'new': values['name']},
+            'date': {'old': event['date'], 'new': new_date},
+            'date_to': {'old': event.get('date_to'), 'new': new_date_to},
+            'sport': {'old': event['sport'], 'new': values['sport']},
+            'level': {'old': event['level'], 'new': values['level']},
+            'synced_participations': synced_participations,
+        },
     )
     # Правка со страницы соревнования (волна B, прототип 16) возвращает
     # внутрь события; из календаря — в календарь. next принимаем только
@@ -1860,6 +1879,9 @@ async def add_calendar_event_participant(request: Request, event_id: str):
         return build_redirect_with_message(error=str(exc), url=back_url)
 
     competition.student_ref_id = student_ref_id
+    # P2: участник события получает явную ссылку на событие — состав
+    # участников читается по calendar_event_id, а не по пресету.
+    competition.calendar_event_id = event['id']
     ensure_catalog_values(storage, [competition])
     storage.save_competitions(
         [competition],
@@ -2920,6 +2942,9 @@ def event_import_add_row_participation(
     if validation_error is not None:
         return validation_error
     competition.student_ref_id = student['id'] if student else None
+    # P2: участие явно связывается с событием (участники читаются по ссылке,
+    # не по пресету).
+    competition.calendar_event_id = event['id']
     ensure_catalog_values(storage, [competition])
     storage.save_competitions(
         [competition],
@@ -3052,6 +3077,9 @@ async def event_import_row_create_student(request: Request, event_id: str, token
         {'student_id': student_id, 'full_name': full_name, 'source': 'event-participant-import'},
     )
     competition.student_ref_id = student_id
+    # P2: участие явно связывается с событием (участники читаются по ссылке,
+    # не по пресету).
+    competition.calendar_event_id = event['id']
     ensure_catalog_values(storage, [competition])
     storage.save_competitions(
         [competition],
@@ -3120,6 +3148,9 @@ async def event_import_bulk_commit(request: Request, event_id: str, token: str):
                 url=event_import_preview_url(event['id'], token),
             )
         competition.student_ref_id = actual_ref
+        # P2: участие явно связывается с событием (участники читаются по
+        # ссылке, не по пресету).
+        competition.calendar_event_id = event['id']
         prepared.append((row, competition, student))
 
     if prepared:
@@ -4652,6 +4683,13 @@ async def update_competition(request: Request, record_id: str):
         return forbidden(request)
 
     custom_fields = storage.get_custom_fields()
+    # P2: снимок существующей записи — источник event-owned полей и
+    # discipline/result (форма их не присылает). Записи со ссылкой на
+    # событие календаря (calendar_event_id) этими полями не владеют:
+    # название/вид спорта/уровень/дата берутся из записи-события (правка —
+    # только со страницы события), подделка формы их изменить не может.
+    # NULL-записи правятся прежним путём — все поля из формы.
+    existing = storage.get_competition_by_id(numeric_id)
     record = {
         'ФИО': get_form_value(request, 'student_name'),
         'Пол': get_form_value(request, 'student_sex'),
@@ -4665,11 +4703,23 @@ async def update_competition(request: Request, record_id: str):
         'Курс': get_form_value(request, 'course'),
     }
     record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
+    if existing is not None and existing.calendar_event_id is not None:
+        record['Название соревнований'] = existing.name
+        record['Вид спорта'] = existing.sport
+        record['Уровень соревнований'] = existing.level
+        record['Дата'] = format_date_range(existing.date, existing.date_to)
 
     try:
         competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
+
+    # Серверная часть полей, которых нет в форме: discipline/result —
+    # внутренние поля participation-identity (P1), их модельные None не
+    # должны затирать сохранённые значения.
+    if existing is not None:
+        competition.discipline = existing.discipline
+        competition.result = existing.result
 
     storage.update_competition(numeric_id, competition)
     # Роль решает статус после правки: модератор (admin/editor)

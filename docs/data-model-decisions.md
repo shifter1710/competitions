@@ -555,3 +555,55 @@ storage, runtime их не читает.
   сохраняет). Экспорт в Excel поля не отдаёт — контракт выгрузок
   не меняется; payload очереди конфликтов сериализует поля как None,
   легаси-payload без ключей валидируется (дефолт None).
+
+## Event Model, Wave 1 P2: стабильная связь «запись → событие» (2026-09-25)
+
+`calendar_event_id` становится primary-ключом принадлежности участвия
+событию; пресет перестаёт быть идентификатором состава. Схема не менялась
+(колонка с P0), backfill не трогался.
+
+- **id-first чтение (решение A)**: список участников события
+  (`list_calendar_event_participants`) и счётчики `/calendar`
+  (`list_calendar_events`) — по `calendar_event_id` (LEFT JOIN по ссылке),
+  БЕЗ preset-fallback: NULL-legacy-строка, совпавшая с пресетом по
+  случайности, на странице события не показывается и в счётчики не входит;
+- **блокировщик удаления — консервативный OR (решение A, выбор владельца)**:
+  `count_calendar_event_participants` считает записи по ссылке ИЛИ по
+  пресету. Осознанный over-block: удалить событие, у которого остались
+  записи-двойники пресета, молча хуже, чем один раз отказать и разобрать
+  случай вручную;
+- **вставки пишут ссылку**: ручное добавление участника
+  (`POST /calendar/<id>/participants`) и все три пути импорта участников
+  (row-add / create-student / bulk-commit) ставят
+  `competition.calendar_event_id = event.id` до вставки — новые участия
+  связаны всегда;
+- **edit-sync одной транзакцией**: `update_calendar_event` под `_lock`
+  (паттерн `import_competitions`: try / commit / except BaseException
+  rollback) обновляет `calendar_events`, затем `UPDATE competitions SET
+  name/date/date_to/sport/level WHERE calendar_event_id = ?` и возвращает
+  synced = rowcount. Состав синхронизации — ровно 5 event-owned полей;
+  student-поля/место/discipline/result/extra_data не затрагиваются;
+  NULL-сосед с тем же старым пресетом не синхронизируется. Аудит —
+  `calendar_event_edited` `{event_id, 5 полей как {old,new},
+  synced_participations}`;
+- **реестр: защита UI + сервера**: у связанной записи поля
+  «Название/Вид спорта/Дата/Уровень» в инлайн-правке рендерятся
+  заблокированными текстовыми инпутами (кнопка правки несёт
+  `data-calendar-event-id`; title «Изменяется в соревновании»; значения
+  всё равно уходят в FormData неизменными — data-edit-key/классы прежние).
+  Сервер `POST /competition/<id>` при `existing.calendar_event_id IS NOT
+  NULL` подставляет эти 4 поля из существующей записи перед
+  `build_competition` — подделанная форма изменить их не может. Название
+  в таблице — ссылка на `/calendar/<id>` (атлету — простой текст,
+  страница события ему недоступна). NULL-записи правятся прежним путём;
+- **QA O1, контракт preservation**: форма реестра не присылает
+  `discipline`/`result` — после `build_competition` маршрут восстанавливает
+  их из существующей записи (и для linked, и для NULL), модельные None
+  больше не затирают сохранённые значения; `calendar_event_id` и
+  `student_ref_id` в SET `update_competition` по-прежнему не входят;
+- **известное следствие**: `rename_catalog_value` синхронизирует вид
+  спорта в записях, но не в `calendar_events` — после переименования
+  справочника sport события и его связанные записи могут разойтись до
+  следующей правки события (edit-sync восстановит согласованность).
+  Схема, права, athlete-доступ к Event (403), backfill и дедупликация
+  импорта участников в этой волне не менялись.

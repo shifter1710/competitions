@@ -1970,12 +1970,19 @@ def test_link_target_saved_and_read(adapter):
 # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
 
 
-def make_calendar_record(name: str, date: datetime, date_to: datetime | None, position: int = 1) -> Competition:
+def make_calendar_record(
+    name: str,
+    date: datetime,
+    date_to: datetime | None,
+    position: int = 1,
+    calendar_event_id: int | None = None,
+) -> Competition:
     competition = make_competition(name, date)
     competition.name = name
     competition.date = date
     competition.date_to = date_to
     competition.position = position
+    competition.calendar_event_id = calendar_event_id
     return competition
 
 
@@ -2013,8 +2020,10 @@ def test_calendar_event_crud(adapter):
 
 
 def test_calendar_list_counts_participants_by_preset(adapter):
-    """Счётчики: N — записи по пресету (название + дата начала + дата
-    окончания), M — из них с position=0 («без результата»)."""
+    """Счётчики (P2, id-first): N — записи со ссылкой calendar_event_id,
+    M — из них с position=0 («без результата»). NULL-legacy-строки, совпавшие
+    с пресетом по случайности, не считаются; блокировщик удаления при этом
+    консервативен (OR — см. test_calendar_delete_blocker_counts_link_or_preset)."""
     # Даты хранятся в том же ISO-формате, что и в записях реестра
     # (datetime.isoformat(), 'YYYY-MM-DDTHH:MM:SS') — совпадение по строке.
     event_id = adapter.create_calendar_event(
@@ -2027,17 +2036,23 @@ def test_calendar_list_counts_participants_by_preset(adapter):
     )
     adapter.save_competitions(
         [
-            # Совпадает, без результата
+            # Связана, без результата
+            make_calendar_record(
+                'Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0, calendar_event_id=event_id
+            ),
+            make_calendar_record(
+                'Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0, calendar_event_id=event_id
+            ),
+            # Связана, с результатом
+            make_calendar_record(
+                'Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=1, calendar_event_id=event_id
+            ),
+            # NULL-legacy: пресет совпадает, ссылки нет — в счётчики /calendar
+            # и список участников события не входит
             make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0),
-            make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0),
-            # Совпадает, с результатом
-            make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=1),
-            # Другое название
+            # Другое название (связь есть, но с другим событием не совпадает
+            # и в этом тесте одна)
             make_calendar_record('Кубок', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0),
-            # Другая дата начала
-            make_calendar_record('Кросс', datetime(2026, 9, 11), datetime(2026, 9, 13), position=0),
-            # Нет date_to у записи (пресет многодневный)
-            make_calendar_record('Кросс', datetime(2026, 9, 12), None, position=0),
         ],
         review_status='approved',
         owner_id=None,
@@ -2048,16 +2063,20 @@ def test_calendar_list_counts_participants_by_preset(adapter):
     assert events[0]['participant_count'] == 3
     assert events[0]['no_result_count'] == 2
 
-    assert adapter.count_calendar_event_participants(event_id) == 3
+    participants = adapter.list_calendar_event_participants(event_id)
+    assert len(participants) == 3
 
 
 def test_calendar_list_matches_oneday_preset_exactly(adapter):
-    """Однодневный пресет (date_to NULL) не должен подхватывать многодневные
-    записи с тем же началом (COALESCE-совпадение с обеих сторон)."""
-    adapter.create_calendar_event(name='Кубок', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url='')
+    """Однодневное событие (date_to NULL): участники — только связанные
+    записи; многодневная NULL-legacy-строка с тем же началом не подхватывается
+    (P2 — состав участников читается по ссылке, не по пресету)."""
+    event_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+    )
     adapter.save_competitions(
         [
-            make_calendar_record('Кубок', datetime(2026, 9, 12), None, position=0),
+            make_calendar_record('Кубок', datetime(2026, 9, 12), None, position=0, calendar_event_id=event_id),
             make_calendar_record('Кубок', datetime(2026, 9, 12), datetime(2026, 9, 14), position=0),
         ],
         review_status='approved',
@@ -2066,6 +2085,7 @@ def test_calendar_list_matches_oneday_preset_exactly(adapter):
     events = adapter.list_calendar_events()
     assert events[0]['participant_count'] == 1
     assert events[0]['no_result_count'] == 1
+    assert len(adapter.list_calendar_event_participants(event_id)) == 1
 
 
 def test_calendar_list_orders_chronologically_and_filters_by_sport(adapter):
@@ -2078,6 +2098,199 @@ def test_calendar_list_orders_chronologically_and_filters_by_sport(adapter):
     assert [event['name'] for event in adapter.list_calendar_events()] == ['Ранний', 'Поздний']
     assert [event['name'] for event in adapter.list_calendar_events(sport='Бег')] == ['Ранний']
     assert adapter.list_calendar_events(sport='Шахматы') == []
+
+
+# ---- Event Model, Wave 1 P2: стабильная связь «запись → событие» ----
+
+
+def test_calendar_participants_list_reads_by_link_only(adapter):
+    """Список участников события — ТОЛЬКО записи со ссылкой calendar_event_id
+    (id-first). NULL-legacy-строка с совпадающим пресетом не показывается
+    на странице события и не попадает в счётчики."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    other_event_id = adapter.create_calendar_event(
+        name='Другой', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    adapter.save_competitions(
+        [
+            make_calendar_record('Иванов Иван', datetime(2026, 9, 12), None, position=1, calendar_event_id=event_id),
+            # С результатом — выше «ждущих результата» (position = 0)
+            make_calendar_record('Петров Пётр', datetime(2026, 9, 12), None, position=0, calendar_event_id=event_id),
+            # NULL-строка с ТОЧНО тем же пресетом — НЕ участник (id-first)
+            make_calendar_record('Кросс', datetime(2026, 9, 12), None, position=1),
+            # Связана с другим событием — НЕ участник этого
+            make_calendar_record(
+                'Козлов Козьма', datetime(2026, 9, 12), None, position=1, calendar_event_id=other_event_id
+            ),
+        ],
+        review_status='approved',
+        owner_id=None,
+    )
+    participants = adapter.list_calendar_event_participants(event_id)
+    assert [participant['student_name'] for participant in participants] == ['Иванов Иван', 'Петров Пётр']
+    assert participants[1]['position'] == 0
+    # Счётчики /calendar — те же участники
+    events = {event['id']: event for event in adapter.list_calendar_events()}
+    assert events[event_id]['participant_count'] == 2
+    assert events[event_id]['no_result_count'] == 1
+
+
+def test_calendar_delete_blocker_counts_link_or_preset(adapter):
+    """Блокировщик удаления — консервативный OR (решение A): считаются записи
+    по ссылке ИЛИ по пресету. Ложный блокирующий отказ лучше молчаливого
+    удаления события, у которого остались записи-двойники пресета."""
+    # Событие без связанных записей, но с NULL-строкой по пресету
+    # (make_calendar_record делает название записи = первому аргументу)
+    preset_only_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    adapter.save_competitions([make_calendar_record('Кубок', datetime(2026, 1, 10), None, position=1)])
+    assert adapter.list_calendar_event_participants(preset_only_id) == []
+    assert adapter.count_calendar_event_participants(preset_only_id) == 1
+
+    # Событие со связанной записью, пресет которой уже разошёлся
+    linked_id = adapter.create_calendar_event(
+        name='Другое событие', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions(
+        [make_calendar_record('Связан Сергей', datetime(2026, 3, 5), None, position=1, calendar_event_id=linked_id)]
+    )
+    assert adapter.count_calendar_event_participants(linked_id) == 1
+
+    # Совсем пустое событие — блокировки нет
+    empty_id = adapter.create_calendar_event(
+        name='Пустое', date='2026-04-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    assert adapter.count_calendar_event_participants(empty_id) == 0
+
+
+def test_update_calendar_event_syncs_linked_records(adapter):
+    """Правка события синхронизирует 5 event-owned полей ТОЛЬКО связанных
+    записей и возвращает их число; NULL-сосед с тем же старым пресетом
+    не трогается."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-09-12T00:00:00',
+        date_to='2026-09-13T00:00:00',
+        level='внутривузовские',
+        sport='Бег',
+        url='',
+    )
+    adapter.save_competitions(
+        [
+            make_calendar_record(
+                'Иванов Иван', datetime(2026, 9, 12), datetime(2026, 9, 13), position=1, calendar_event_id=event_id
+            ),
+            make_calendar_record(
+                'Петров Пётр', datetime(2026, 9, 12), datetime(2026, 9, 13), position=0, calendar_event_id=event_id
+            ),
+            # NULL-сосед с ТОЧНО тем же пресетом — синхронизация его не
+            # меняет (состав синхронизации — по ссылке, не по пресету)
+            make_calendar_record('Кросс', datetime(2026, 9, 12), datetime(2026, 9, 13), position=1),
+        ],
+        review_status='approved',
+        owner_id=None,
+    )
+
+    synced = adapter.update_calendar_event(
+        event_id,
+        name='Осенний кросс',
+        date='2026-10-01T00:00:00',
+        date_to=None,
+        level='региональные',
+        sport='Лыжи',
+        url='https://example.com',
+    )
+    assert synced == 2
+
+    event = adapter.get_calendar_event(event_id)
+    assert event['name'] == 'Осенний кросс'
+    assert event['date'] == '2026-10-01T00:00:00'
+    assert event['date_to'] is None
+    assert event['level'] == 'региональные'
+    assert event['sport'] == 'Лыжи'
+
+    records = adapter.get_competitions()
+    by_name = {record.student_name: record for record in records}
+    for name in ('Иванов Иван', 'Петров Пётр'):
+        record = by_name[name]
+        assert record.name == 'Осенний кросс'
+        assert record.date == datetime(2026, 10, 1, 0, 0)
+        assert record.date_to is None
+        assert record.level == 'региональные'
+        assert record.sport == 'Лыжи'
+        assert record.calendar_event_id == event_id
+        # Не event-owned поля синхронизацией не затираются
+        assert record.position == (1 if name == 'Иванов Иван' else 0)
+    legacy = by_name['Кросс']
+    assert legacy.name == 'Кросс'
+    assert legacy.date == datetime(2026, 9, 12, 0, 0)
+    assert legacy.date_to == datetime(2026, 9, 13, 0, 0)
+    assert legacy.level == 'внутривузовские'
+    assert legacy.sport == 'Бег'
+    assert legacy.calendar_event_id is None
+
+
+def test_update_calendar_event_rollback_on_failure(adapter):
+    """Сбой синхронизации откатывает и правку самого события (одна
+    транзакция): остаётся прежнее состояние — событие и записи неизменны."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-09-12T00:00:00',
+        date_to=None,
+        level='внутривузовские',
+        sport='Бег',
+        url='',
+    )
+    adapter.save_competitions(
+        [make_calendar_record('Кросс', datetime(2026, 9, 12), None, position=1, calendar_event_id=event_id)]
+    )
+
+    class FailingSyncConnection:
+        """Все запросы проходят в реальное соединение, но UPDATE связанных
+        записей (второй шаг транзакции) падает — сбой ПОСЛЕ правки события,
+        до commit."""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('UPDATE competitions'):
+                raise RuntimeError('Injected sync failure')
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = FailingSyncConnection(real_connection)
+    with pytest.raises(RuntimeError):
+        adapter.update_calendar_event(
+            event_id,
+            name='Осенний кросс',
+            date='2026-10-01T00:00:00',
+            date_to=None,
+            level='региональные',
+            sport='Лыжи',
+            url='',
+        )
+    adapter.connection = real_connection
+
+    event = adapter.get_calendar_event(event_id)
+    assert event['name'] == 'Кросс'
+    assert event['date'] == '2026-09-12T00:00:00'
+    assert event['level'] == 'внутривузовские'
+    assert event['sport'] == 'Бег'
+    record = adapter.get_competitions()[0]
+    assert record.name == 'Кросс'
+    assert record.date == datetime(2026, 9, 12, 0, 0)
+    assert record.level == 'внутривузовские'
+    assert record.sport == 'Бег'
 
 
 # ---- Карточки студентов (Student Identity v1, Phase 1 — фундамент) ----

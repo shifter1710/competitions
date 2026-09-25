@@ -629,6 +629,13 @@ class FioResolver {
     }
 }
 
+// P2 (Event Model): поля инлайн-правки, принадлежащие событию календаря.
+// У строк с data-calendar-event-id они рендерятся заблокированными — значения
+// берутся из соревнования (правка — со страницы события), сервер подделку
+// формы тоже отвергает. Один и тот же title — «Изменяется в соревновании».
+const EVENT_OWNED_EDIT_KEYS = ["sport", "date", "level", "name"];
+const EVENT_OWNED_FIELD_TITLE = "Изменяется в соревновании";
+
 class Main {
     constructor() {
         this.currentReportUrl = null;
@@ -1642,9 +1649,21 @@ class Main {
         });
     }
 
-    createInlineInput(key, value, fieldTypes) {
+    // eventOwned — строка связана со соревнованием (data-calendar-event-id):
+    // event-owned поля рендерятся заблокированными текстовыми инпутами без
+    // select/datalist/datepicker-обёрток. data-edit-key и классы прежние —
+    // FormData собирает и заблокированные значения, они уходят на сервер
+    // неизменными (сервер всё равно берёт их из записи-события).
+    createInlineInput(key, value, fieldTypes, eventOwned = false) {
+        const readOnly = eventOwned && EVENT_OWNED_EDIT_KEYS.includes(key);
         let input;
-        if (key === "student_sex" || key === "level") {
+        if (readOnly) {
+            input = document.createElement("input");
+            input.type = "text";
+            input.disabled = true;
+            input.title = EVENT_OWNED_FIELD_TITLE;
+            input.value = value ?? "";
+        } else if (key === "student_sex" || key === "level") {
             input = document.createElement("select");
             const options = key === "student_sex"
                 ? ["М", "Ж"]
@@ -1705,8 +1724,9 @@ class Main {
         }
         // Гибридный ввод даты (замечание №13): поле + иконка-календарь,
         // открывающая datepicker; сам пикер и авто-точки вешаются
-        // attachRowDatePickers при сборке строки.
-        if (input.type === "text" && (key === "date" || fieldTypes[key] === "date")) {
+        // attachRowDatePickers при сборке строки. Event-owned дата
+        // заблокирована — обёртка с календарём ей не нужна.
+        if (!input.disabled && input.type === "text" && (key === "date" || fieldTypes[key] === "date")) {
             const wrapper = document.createElement("div");
             wrapper.className = "input-group inline-date-group";
             const toggleButton = document.createElement("button");
@@ -1726,12 +1746,16 @@ class Main {
     // же, что в фильтрах отчёта) с кнопкой-календарем. Выбор из календаря
     // проставляет дату в формате дд.мм.гггг. Возвращает созданные пикеры —
     // их нужно разрушить при отмене правки (иначе «висячие» слушатели).
+    // Заблокированные event-owned даты пропускаются.
     attachRowDatePickers(row) {
         const fieldTypes = this.getCustomFieldTypes();
         const pickers = [];
         row.querySelectorAll("[data-edit-key]").forEach((input) => {
             const key = input.dataset.editKey;
             if (key !== "date" && fieldTypes[key] !== "date") {
+                return;
+            }
+            if (input.disabled) {
                 return;
             }
             input.addEventListener("input", (event) => this.handleManualDateInput(event));
@@ -1767,6 +1791,9 @@ class Main {
         const dataset = button.dataset;
         const extraData = dataset.extraJson ? JSON.parse(dataset.extraJson) : {};
         const fieldTypes = this.getCustomFieldTypes();
+        // P2: строка связана со соревнованием — event-owned поля строки
+        // рендерятся заблокированными (см. createInlineInput).
+        const eventOwned = Boolean(dataset.calendarEventId);
         const values = {
             student_name: dataset.studentName,
             student_sex: dataset.studentSex,
@@ -1809,7 +1836,7 @@ class Main {
                 ? values[key]
                 : extraData[key] ?? "";
             cell.textContent = "";
-            cell.append(this.createInlineInput(key, value, fieldTypes));
+            cell.append(this.createInlineInput(key, value, fieldTypes, eventOwned));
         });
 
         this.inlineDatePickers = this.attachRowDatePickers(row);
@@ -1833,7 +1860,8 @@ class Main {
         // (datepicker перехватывает Esc, комбобоксы/резолвер — Enter/Esc в
         // target-фазе), иначе Enter/Escape до строки не доходили вовсе.
         row.addEventListener("keydown", this.inlineKeydownHandler, true);
-        const firstInput = row.querySelector("[data-edit-key]");
+        // Фокус — первое РЕДАКТИРУЕМОЕ поле: event-owned заблокированы.
+        const firstInput = row.querySelector("[data-edit-key]:not([disabled])");
         if (firstInput) {
             firstInput.focus();
         }
