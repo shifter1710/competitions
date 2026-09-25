@@ -316,6 +316,22 @@
                             >
                                 Редактировать
                             </button>
+                            {# P5b: NULL-запись модератор может связать со
+                               соревнованием календаря (страница связывания);
+                               у связанной записи иконки нет. #}
+                            {% if is_moderator and not competition.calendar_event_id %}
+                            <a class="btn btn-sm btn-outline-secondary competition-link-event-button"
+                                href="/competition/{{ competition.record_id }}/link-event"
+                                title="Связать с соревнованием календаря"
+                                aria-label="Связать запись №{{ competition.record_id }} с соревнованием календаря">
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M6.5 9.5l3-3" />
+                                    <path d="M7.8 4.2l1-1 a2.4 2.4 0 0 1 3.4 3.4l-1 1" />
+                                    <path d="M8.2 11.8l-1 1 a2.4 2.4 0 0 1-3.4-3.4l1-1" />
+                                </svg>
+                            </a>
+                            {% endif %}
                             {% if competition.review_status != 'approved' and is_moderator %}
                             <button
                                 class="btn btn-sm btn-success competition-approve-button"

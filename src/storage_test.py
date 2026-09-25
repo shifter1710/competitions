@@ -3800,3 +3800,257 @@ def test_p4_update_event_participation_result_restricted(adapter):
     assert adapter.update_event_participation_result(record_id + 1000, event_id, 7, None) == 0
     untouched = adapter.get_competition_by_id(record_id)
     assert (untouched.position, untouched.result) == (3, '10,9')
+
+
+# --- P5b: явные связки «запись → событие» (link / create+link / preview / apply). ---
+
+
+def test_link_participation_to_event_error_codes(adapter):
+    """Несуществующая запись/событие — явные коды, БД не меняется."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+    )
+
+    event, error = adapter.link_participation_to_event(999999, event_id)
+    assert (event, error) == (None, 'record_not_found')
+
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+    event, error = adapter.link_participation_to_event(record_id, 999999)
+    assert (event, error) == (None, 'event_not_found')
+    assert adapter.get_competitions()[0].calendar_event_id is None
+
+
+def test_link_participation_race_returns_already_linked(adapter):
+    """Guarded UPDATE: повторное связывание уже связанной записи не
+    перезаписывает ни ссылку, ни поля."""
+    first_id = adapter.create_calendar_event(
+        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='А', sport='Бег', url=''
+    )
+    second_id = adapter.create_calendar_event(
+        name='Второй кросс', date='2026-10-01T00:00:00', date_to=None, level='Б', sport='Лыжи', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+    # Ссылка уже стоит (как будто её поставил другой запрос между SELECT и
+    # UPDATE) — намеренно без синхронизации полей.
+    adapter.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (first_id, record_id))
+    adapter.connection.commit()
+
+    event, error = adapter.link_participation_to_event(record_id, second_id)
+    assert (event, error) == (None, 'already_linked')
+    record = adapter.get_competitions()[0]
+    assert record.calendar_event_id == first_id
+    # Поля записи при отказе не проиграны во «Второй кросс».
+    assert record.name == 'Кубок'
+    assert record.sport == 'Бег'
+
+
+def test_create_calendar_event_and_link_atomic_rollback(adapter):
+    """Сбой между INSERT события и UPDATE записи откатывает ВСЁ: события-
+    сироты не остаётся, запись не связана."""
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+
+    class FailingUpdateConnection:
+        """INSERT события проходит, guarded UPDATE записи (второй шаг
+        транзакции) падает — сбой между шагами, до commit."""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('UPDATE competitions'):
+                raise RuntimeError('Injected failure between INSERT and UPDATE')
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = FailingUpdateConnection(real_connection)
+    with pytest.raises(RuntimeError):
+        adapter.create_calendar_event_and_link(
+            name='Осенний кросс',
+            date='2026-10-01T00:00:00',
+            date_to=None,
+            level='',
+            sport='',
+            url='',
+            record_id=record_id,
+        )
+    adapter.connection = real_connection
+
+    assert adapter.list_calendar_events() == []
+    assert adapter.get_competitions()[0].calendar_event_id is None
+
+
+def test_create_calendar_event_and_link_checks_record_first(adapter):
+    """Несуществующая/уже связанная запись отклоняется ДО вставки события —
+    события-сироты не появляется."""
+    event_id, error = adapter.create_calendar_event_and_link(
+        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', url='', record_id=999999
+    )
+    assert (event_id, error) == (None, 'record_not_found')
+    assert adapter.list_calendar_events() == []
+
+    linked_id = adapter.create_calendar_event(
+        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+    adapter.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (linked_id, record_id))
+    adapter.connection.commit()
+
+    event_id, error = adapter.create_calendar_event_and_link(
+        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', url='', record_id=record_id
+    )
+    assert (event_id, error) == (None, 'already_linked')
+    assert len(adapter.list_calendar_events()) == 1
+
+
+def test_calendar_link_backfill_preview_groups_and_cap(adapter):
+    """Предпросмотр: группы matched/ambiguous/unmatched + уже связанные;
+    списки капнутся (200), счётчики останутся полными."""
+    matched_event = adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+
+    for _ in range(2):
+        adapter.create_calendar_event(
+            name='Дубль', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        )
+    daniel = make_competition('Двойной Данила', datetime(2026, 2, 1))
+    daniel.name = 'Дубль'
+    adapter.save_competitions([daniel])
+
+    # 205 записей без события — unmatched-список упрётся в кап.
+    adapter.save_competitions(
+        [make_competition(f'Без события {index:03d}', datetime(2026, 3, 1)) for index in range(205)]
+    )
+
+    linked_event = adapter.create_calendar_event(
+        name='Связанный', date='2026-04-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Связан Сергей', datetime(2026, 4, 1))])
+    adapter.connection.execute(
+        'UPDATE competitions SET calendar_event_id = ? WHERE student_name = ?',
+        (linked_event, 'Связан Сергей'),
+    )
+    adapter.connection.commit()
+
+    preview = adapter.calendar_link_backfill_preview()
+    assert preview['counters'] == {
+        'considered': 207,
+        'matched': 1,
+        'unmatched': 205,
+        'ambiguous': 1,
+        'already_linked': 1,
+    }
+    assert preview['matched'] == [
+        {
+            'record_id': 1,
+            'student_name': 'Легаси Лев',
+            'name': 'Кубок',
+            'date': '2026-01-10T00:00:00',
+            'date_to': None,
+            'sport': 'Бег',
+            'level': 'внутривузовские',
+            'event_id': matched_event,
+            'event_name': 'Кубок',
+        }
+    ]
+    ambiguous = preview['ambiguous'][0]
+    assert ambiguous['student_name'] == 'Двойной Данила'
+    assert ambiguous['candidate_count'] == 2
+    assert ambiguous['candidate_names'] == ['Дубль', 'Дубль']
+    assert len(preview['unmatched']) == 200
+
+
+def test_apply_calendar_link_backfill_links_only_matched(adapter):
+    """Apply: линкуются ТОЛЬКО однозначные matched с синхронизацией 5 полей;
+    ambiguous/unmatched/уже связанные не трогаются."""
+    event_id = adapter.create_calendar_event(
+        name='Кубок',
+        date='2026-01-10T00:00:00',
+        date_to='2026-01-12T00:00:00',
+        level='региональные',
+        sport='Лыжи',
+        url='',
+    )
+    for _ in range(2):
+        adapter.create_calendar_event(
+            name='Дубль', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        )
+    matched = make_calendar_record('Легаси Лев', datetime(2026, 1, 10), datetime(2026, 1, 12))
+    matched.name = 'Кубок'
+    ambiguous = make_calendar_record('Двойной Данила', datetime(2026, 2, 1), None)
+    ambiguous.name = 'Дубль'
+    unmatched = make_calendar_record('Одинокий Олег', datetime(2027, 5, 5), None)
+    adapter.save_competitions([matched, ambiguous, unmatched])
+
+    counters, items = adapter.apply_calendar_link_backfill()
+    assert counters == {'matched': 1, 'linked': 1, 'skipped': 0}
+    assert items == [{'record_id': 1, 'event_id': event_id, 'event_name': 'Кубок'}]
+
+    by_name = {record.student_name: record for record in adapter.get_competitions()}
+    linked = by_name['Легаси Лев']
+    assert linked.calendar_event_id == event_id
+    # Синхронизация 5 полей события.
+    assert linked.name == 'Кубок'
+    assert linked.sport == 'Лыжи'
+    assert linked.date == datetime(2026, 1, 10)
+    assert linked.date_to == datetime(2026, 1, 12)
+    assert linked.level == 'региональные'
+    assert by_name['Двойной Данила'].calendar_event_id is None
+    assert by_name['Одинокий Олег'].calendar_event_id is None
+
+
+def test_apply_calendar_link_backfill_skips_row_linked_after_selection(adapter):
+    """Гонка внутри пакета: запись связали между выборкой пар и UPDATE —
+    guarded UPDATE даёт rowcount 0, строка пропускается, пакет не валится."""
+    adapter.create_calendar_event(name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url='')
+    other_event = adapter.create_calendar_event(
+        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
+    record_id = int(adapter.get_competitions()[0].record_id)
+
+    class RacingLinkConnection:
+        """Выборка пар проходит, а сразу ПОСЛЕ неё (до цикла UPDATE)
+        запись успевает связать другой запрос — UPDATE ... IS NULL даёт 0."""
+
+        def __init__(self, connection):
+            self._connection = connection
+            self._raced = False
+
+        def execute(self, sql, parameters=()):
+            result = self._connection.execute(sql, parameters)
+            if not self._raced and 'FROM competitions c' in sql:
+                self._raced = True
+                self._connection.execute(
+                    'UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (other_event, record_id)
+                )
+            return result
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = RacingLinkConnection(real_connection)
+    counters, items = adapter.apply_calendar_link_backfill()
+    adapter.connection = real_connection
+
+    assert counters == {'matched': 1, 'linked': 0, 'skipped': 1}
+    assert items == []
+    # Ссылка «гонщика» устояла, поля не перезаписаны.
+    record = adapter.get_competitions()[0]
+    assert record.calendar_event_id == other_event
+    assert record.name == 'Кубок'

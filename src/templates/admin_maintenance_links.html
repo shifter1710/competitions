@@ -1,0 +1,197 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Связывание с календарём{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/maintenance">← К обслуживанию базы</a>
+{% endblock admin_back %}
+{% block admin_description %}
+    Предпросмотр массового связывания записей без соревнования: совпадения ищутся по названию и датам записи.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+{# P5b: предпросмотр по P0-семантике стартового backfill (однозначный пресет
+   name + date + date_to). Apply проводит только matched — неоднозначные
+   никогда не линкуются автоматически. #}
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="border rounded p-3 h-100">
+            <div class="text-muted small">Можно связать</div>
+            <div class="fs-4"><strong>{{ preview.counters.matched }}</strong></div>
+            <div class="text-muted small">однозначный пресет</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="border rounded p-3 h-100">
+            <div class="text-muted small">Неоднозначно</div>
+            <div class="fs-4"><strong>{{ preview.counters.ambiguous }}</strong></div>
+            <div class="text-muted small">несколько событий-кандидатов</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="border rounded p-3 h-100">
+            <div class="text-muted small">Без совпадений</div>
+            <div class="fs-4"><strong>{{ preview.counters.unmatched }}</strong></div>
+            <div class="text-muted small">события с таким названием и датами нет</div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="border rounded p-3 h-100">
+            <div class="text-muted small">Всего без соревнования</div>
+            <div class="fs-4"><strong>{{ preview.counters.considered }}</strong></div>
+            <div class="text-muted small">уже связаны: {{ preview.counters.already_linked }}</div>
+        </div>
+    </div>
+</div>
+
+{% if preview.matched %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Можно связать</h3>
+        <div class="text-muted mb-3">
+            Совпадение по названию и датам ровно с одним событием. Кнопка связывает все строки ниже
+            (показаны первые {{ preview.matched | length }}{% if preview.counters.matched > (preview.matched | length) %}
+            из {{ preview.counters.matched }}{% endif %}).
+        </div>
+        {% if preview.clearing_parts %}
+        <div class="mb-3">
+            <span class="badge text-bg-warning">
+                У {{ preview.clearing_total }} записей очистится: {{ preview.clearing_parts | join(', ') }}
+            </span>
+        </div>
+        {% endif %}
+        <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Запись</th>
+                        <th scope="col">Соревнование</th>
+                        <th scope="col">Изменения</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in preview.matched %}
+                    <tr>
+                        <td>
+                            <div>№{{ row.record_id }} <strong>{{ row.student_name }}</strong></div>
+                            <div class="small text-muted">{{ row.record_date_label }} · {{ row.name }}</div>
+                        </td>
+                        <td>
+                            <a href="/calendar/{{ row.event_id }}" target="_blank" rel="noopener">{{ row.event_name }}</a>
+                            <div class="small text-muted">{{ row.event_period }} ·
+                                {{ row.event_level }}{% if row.event_level and row.event_sport %} · {% endif %}{{ row.event_sport }}</div>
+                        </td>
+                        <td>
+                            {% if row.diff %}
+                            {% for item in row.diff %}
+                            <div class="small">
+                                {% if item.clears %}
+                                <span class="badge text-bg-warning">{{ item.label }}: очистится</span>
+                                {% else %}
+                                {{ item.label }}: «{{ item.old }}» → «{{ item.new }}»
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                            {% else %}
+                            <span class="badge text-bg-success">без изменений</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <form action="/admin/maintenance/calendar-links/apply" class="mt-3" method="post"
+              onsubmit='return confirm({{ preview.apply_confirm_text | tojson }})'>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <button class="btn btn-primary" type="submit">Связать {{ preview.counters.matched }} записей</button>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+{% if preview.ambiguous %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Неоднозначно</h3>
+        <div class="text-muted mb-3">
+            Под одно название и даты подходит несколько событий (показаны первые
+            {{ preview.ambiguous | length }}{% if preview.counters.ambiguous > (preview.ambiguous | length) %}
+            из {{ preview.counters.ambiguous }}{% endif %}). Уточните вручную — кнопка связи в строке реестра.
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Запись</th>
+                        <th scope="col">Кандидаты</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in preview.ambiguous %}
+                    <tr>
+                        <td>
+                            <div>№{{ row.record_id }} <strong>{{ row.student_name }}</strong></div>
+                            <div class="small text-muted">{{ row.record_date_label }} · {{ row.name }}</div>
+                        </td>
+                        <td>
+                            <div>Подходит несколько ({{ row.candidate_count }})</div>
+                            <div class="small text-muted">
+                                {% for name in row.candidate_names[:preview.ambiguous_name_cap] %}{{ name }}{% if not loop.last %}, {% endif %}{% endfor %}
+                                {% if row.candidate_names | length > preview.ambiguous_name_cap %}
+                                и ещё {{ row.candidate_names | length - preview.ambiguous_name_cap }}
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if preview.unmatched %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Без совпадений</h3>
+        <div class="text-muted mb-3">
+            События с таким названием и датами нет (показаны первые
+            {{ preview.unmatched | length }}{% if preview.counters.unmatched > (preview.unmatched | length) %}
+            из {{ preview.counters.unmatched }}{% endif %}).
+            Создайте соревнование со страницы записи — «Связать» в строке реестра.
+        </div>
+        <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Запись</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in preview.unmatched %}
+                    <tr>
+                        <td>
+                            <div>№{{ row.record_id }} <strong>{{ row.student_name }}</strong></div>
+                            <div class="small text-muted">{{ row.record_date_label }} · {{ row.name }} · {{ row.sport }}</div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if not preview.matched and not preview.ambiguous and not preview.unmatched %}
+<div class="card shadow-sm">
+    <div class="card-body text-muted">
+        Записей без соревнования нет — связывать нечего.
+    </div>
+</div>
+{% endif %}
+
+{% endblock admin_content %}

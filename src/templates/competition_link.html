@@ -1,0 +1,206 @@
+{% extends "layout/base.html" %}
+
+{% block content %}
+
+{# P5b: явное связывание записи реестра со соревнованием календаря.
+   Кандидаты поиска — GET (ссылки шарятся, как на главной), связывание —
+   POST с csrf; дифф показывает, что именно запись возьмёт из события. #}
+
+{# Иконка календаря для поля периода (единый всплывающий пикер). #}
+{% macro calendar_icon() %}
+<svg class="range-picker__icon" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"
+    stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="2.5" y="3.5" width="11" height="10" rx="1.5" />
+    <path d="M2.5 6.5h11M5.5 2v3M10.5 2v3" />
+</svg>
+{% endmacro %}
+
+<div class="page-head">
+    <div>
+        <a class="backlink" href="/">← В реестр</a>
+        <h1 class="page-title mt-2">Связывание с календарём</h1>
+        <p class="page-sub mb-0">
+            Запись №{{ record_id }} · {{ record.student_name }}.
+            Выберите соревнование из календаря или создайте новое — поля записи обновятся данными соревнования.
+        </p>
+    </div>
+</div>
+
+{# Снимок записи — что изменится при связывании (паттерн карточки-источника
+   сопоставления). #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Запись №{{ record_id }}</h3>
+        <table class="table table-sm table-striped align-middle mb-0">
+            <tbody>
+                <tr><th style="width: 40%">ФИО</th><td>{{ record.student_name }}</td></tr>
+                <tr><th>Название</th><td>{{ record.name }}</td></tr>
+                <tr><th>Вид спорта</th><td>{{ record.sport }}</td></tr>
+                <tr><th>Дата</th><td>{{ format_date_range(record.date, record.date_to) }}</td></tr>
+                <tr><th>Уровень</th><td>{{ record.level }}</td></tr>
+            </tbody>
+        </table>
+        <div class="form-text ui-hint mt-2 mb-0">
+            После связывания «Название», «Вид спорта», «Дата» и «Уровень» запись берёт из соревнования —
+            остальные поля записи не меняются.
+        </div>
+    </div>
+</div>
+
+<section class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Выбрать существующее соревнование</h3>
+        <form class="row g-3 filter-form" method="get" action="/competition/{{ record_id }}/link-event">
+            <div class="col-md-4">
+                <label class="label" for="link-search-name">Название</label>
+                <input class="form-control" id="link-search-name" name="name" type="text" value="{{ filters.name }}">
+            </div>
+            <div class="col-md-2">
+                <label class="label" for="link-search-sport">Вид спорта</label>
+                <select class="form-select" id="link-search-sport" name="sport">
+                    <option value="">Все</option>
+                    {% for value in sport_options %}
+                    <option value="{{ value }}"{% if value == filters.sport %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="label" for="link-search-level">Уровень</label>
+                <select class="form-select" id="link-search-level" name="level">
+                    <option value="">Все</option>
+                    {% for value in level_options %}
+                    <option value="{{ value }}"{% if value == filters.level %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="label" for="link-search-date-from">Дата от</label>
+                <input class="form-control" id="link-search-date-from" name="date_from" type="text"
+                       inputmode="numeric" placeholder="дд.мм.гггг" autocomplete="off" value="{{ filters.date_from }}">
+            </div>
+            <div class="col-md-2">
+                <label class="label" for="link-search-date-to">Дата до</label>
+                <input class="form-control" id="link-search-date-to" name="date_to" type="text"
+                       inputmode="numeric" placeholder="дд.мм.гггг" autocomplete="off" value="{{ filters.date_to }}">
+            </div>
+            <div class="col-12 d-flex gap-2">
+                <button class="btn btn-primary" type="submit">Найти</button>
+                <a class="btn btn-outline-secondary" href="/competition/{{ record_id }}/link-event">Сбросить</a>
+            </div>
+        </form>
+
+        {% if candidates %}
+        {% if candidates_capped %}
+        <div class="text-muted mt-3">Показаны первые {{ candidate_cap }} — уточните поиск.</div>
+        {% endif %}
+        {% for candidate in candidates %}
+        <div class="border rounded p-3 my-3">
+            <div class="d-flex flex-wrap gap-2 align-items-center mb-1">
+                {# Пресет записи — точное совпадение названия и дат — первым. #}
+                {% if candidate.is_preset %}
+                <span class="badge text-bg-secondary" title="Совпадает по названию и датам записи">предложение</span>
+                {% endif %}
+                <a href="/calendar/{{ candidate.event.id }}" target="_blank" rel="noopener"
+                   title="Открыть страницу соревнования (новая вкладка)">{{ candidate.event.name }}</a>
+                <span class="text-muted">{{ candidate.event.date_label }} ·
+                    {{ candidate.event.level }}{% if candidate.event.level and candidate.event.sport %} · {% endif %}{{ candidate.event.sport }}</span>
+            </div>
+            <div class="small">
+                {% if candidate.diff %}
+                После связывания изменится:
+                {% for item in candidate.diff %}
+                <div class="small">
+                    {# Очистка: у события поле пусто — запись его потеряет. #}
+                    {% if item.clears %}
+                    {{ item.label }}: <span class="badge text-bg-warning">поле очистится</span>
+                    «{{ item.old }}» → станет пустым
+                    {% else %}
+                    {{ item.label }}: «{{ item.old }}» → «{{ item.new }}»
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% else %}
+                <span class="badge text-bg-success">без изменений</span>
+                {% endif %}
+            </div>
+            <form action="/competition/{{ record_id }}/link-event" class="mt-2 mb-0" method="post"
+                  onsubmit='return confirm({{ candidate.confirm_text | tojson }})'>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <input type="hidden" name="event_id" value="{{ candidate.event.id }}">
+                <button class="btn btn-sm btn-outline-primary" type="submit">Связать</button>
+            </form>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="text-muted mt-3">
+            Подходящих соревнований не найдено — создайте новое в разделе ниже, поля уже заполнены из записи.
+        </div>
+        {% endif %}
+    </div>
+</section>
+
+{# Создание события со страницы записи: форма календаря, предзаполненная
+   снимком записи (паттерн формы планирования). Нет кандидатов — раскрыта. #}
+<section class="card shadow-sm mb-4 collapse{% if new_form_open %} show{% endif %}" id="link-event-new-form">
+    <div class="card-body">
+        <h3 class="title mb-1">Добавить в календарь</h3>
+        <form class="row g-3" method="post" action="/competition/{{ record_id }}/link-event/new" data-period-form>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="date" data-period-field>
+            <div class="col-md-6">
+                <label class="label" for="link-new-name">Название<span class="req">*</span></label>
+                <input class="form-control" id="link-new-name" name="name" type="text" value="{{ record.name }}" required>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="link-new-date">Период<span class="req">*</span></label>
+                <div class="range-picker">
+                    <input class="form-control" id="link-new-date" type="text" readonly required
+                        placeholder="25.06.2026 или 25.06 – 01.07.2026" autocomplete="off" data-range-picker
+                        data-range-from="{{ record.date.strftime('%Y-%m-%d') }}"
+                        {% if record.date_to %}data-range-to="{{ record.date_to.strftime('%Y-%m-%d') }}"{% endif %}>
+                    {{ calendar_icon() }}
+                </div>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="link-new-level">Уровень</label>
+                <input class="form-control" id="link-new-level" name="level" type="text" value="{{ record.level }}"
+                    list="calendar-levels" autocomplete="off">
+                <datalist id="calendar-levels">
+                    {% for value in level_options %}
+                    <option value="{{ value }}">
+                    {% endfor %}
+                </datalist>
+            </div>
+            <div class="col-md-3">
+                <label class="label" for="link-new-sport">Вид спорта</label>
+                <input class="form-control" id="link-new-sport" name="sport" type="text" value="{{ record.sport }}"
+                    list="calendar-sports" autocomplete="off">
+                <datalist id="calendar-sports">
+                    {% for value in sport_options %}
+                    <option value="{{ value }}">
+                    {% endfor %}
+                </datalist>
+            </div>
+            <div class="col-md-6">
+                <label class="label" for="link-new-url">Ссылка</label>
+                <input class="form-control" id="link-new-url" name="url" type="text"
+                    placeholder="https://… — положение, регламент">
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Создать и связать</button>
+                <div class="form-text ui-hint">
+                    Соревнование создастся в календаре и сразу свяжется с этой записью.
+                    Поля предзаполнены данными записи.
+                </div>
+            </div>
+        </form>
+    </div>
+</section>
+{% if not new_form_open %}
+<button class="btn btn-outline-primary mb-4" type="button" data-bs-toggle="collapse"
+    data-bs-target="#link-event-new-form" aria-expanded="false" aria-controls="link-event-new-form">
+    Добавить в календарь
+</button>
+{% endif %}
+
+{% endblock content %}

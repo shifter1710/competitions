@@ -64,6 +64,18 @@
     </div>
 </div>
 
+{# P5b: предпросмотр и массовое связывание записей без события. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Связывание с календарём</h3>
+        <div class="text-muted mb-3">
+            Записи реестра без соревнования: {{ unlinked_records_count }}.
+            Предпросмотр совпадений по названию и датам, связывание по одному или пачкой.
+        </div>
+        <a class="btn btn-outline-primary" href="/admin/maintenance/calendar-links">Открыть предпросмотр</a>
+    </div>
+</div>
+
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <h3 class="title mb-1">Архивы очисток</h3>
