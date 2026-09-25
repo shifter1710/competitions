@@ -654,6 +654,10 @@ def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClie
         'Название соревнований',
         'Место',
         'Курс',
+        # Event Model, P5a: фиксированные колонки дисциплины/результата
+        # после «Курса»; прежние 10 колонок не меняются.
+        'Дисциплина',
+        'Результат',
     ]
 
 
@@ -5600,6 +5604,7 @@ def test_upload_similar_row_goes_to_queue(client: SanicTestClient):
                 'Название соревнований': 'Кубок',
                 'Место': 2,
                 'Курс': 2,
+                'Дисциплина': 'Лыжи 10 км',
             },
         ]
     )
@@ -5629,6 +5634,8 @@ def test_upload_similar_row_goes_to_queue(client: SanicTestClient):
     app.ctx.storage.add_import_queue_entry.assert_called_once()
     payload = app.ctx.storage.add_import_queue_entry.call_args[0][0]
     assert payload['sport'] == 'Лыжи'
+    # Event Model, P5a: дисциплина строки сохраняется в payload очереди.
+    assert payload['discipline'] == 'Лыжи 10 км'
     assert app.ctx.storage.add_import_queue_entry.call_args[1]['matched_record_id'] == 7
 
 
@@ -5768,6 +5775,310 @@ def test_upload_exact_duplicate_still_skipped_as_before(client: SanicTestClient)
     app.ctx.storage.add_import_queue_entry.assert_not_called()
 
 
+# --- Event Model, P5a: дисциплина в импорте/экспорте реестра (все данные синтетические) ---
+
+
+def reset_registry_import_mocks():
+    """Моки импорта в исходное состояние (module-scoped client)."""
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+
+
+def make_p5a_import_row(**overrides) -> dict:
+    row = {
+        'ФИО': 'Дисциплинарный Дмитрий',
+        'Пол': 'М',
+        'Институт': 'ИСИ',
+        'Группа': 'ПГС-101',
+        'Вид спорта': 'Лыжи',
+        'Дата': '15.03.2026',
+        'Уровень соревнований': 'внутривузовские',
+        'Название соревнований': 'Кубок',
+        'Место': 1,
+        'Курс': 2,
+    }
+    row.update(overrides)
+    return row
+
+
+def make_existing_p5a_competition(record_id='3', discipline=None) -> Competition:
+    return Competition(
+        record_id=record_id,
+        student_id='hash-p5a',
+        student_name='Дисциплинарный Дмитрий',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Лыжи',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+        discipline=discipline,
+    )
+
+
+def post_registry_import(client: SanicTestClient, rows: list[dict]):
+    df = pd.DataFrame(rows)
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_import_without_discipline_column_still_works(client: SanicTestClient):
+    # П1: старые файлы без колонки «Дисциплина» импортируются как раньше.
+    reset_registry_import_mocks()
+    response = post_registry_import(client, [make_p5a_import_row()])
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.discipline is None
+
+
+def test_template_contains_optional_discipline_column(client: SanicTestClient):
+    # П2: «Дисциплина» — опциональная фиксированная колонка шаблона, ровно
+    # одна, сразу после «Курса»; «Результата» в шаблоне нет.
+    app.ctx.storage.get_custom_fields.return_value = []
+    _, response = client.get('/template/empty.xlsx', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    headers = get_xlsx_headers(response.body)
+    assert headers.count('Дисциплина') == 1
+    assert headers.index('Дисциплина') == headers.index('Курс') + 1
+    assert 'Результат' not in headers
+
+
+def test_import_persists_discipline_as_typed(client: SanicTestClient):
+    # П3 (Р2): оригинальное написание (двойной пробел, регистр) хранится
+    # как введено — нормализация есть только в ключе дубля.
+    reset_registry_import_mocks()
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='Бег  100 М')])
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.discipline == 'Бег  100 М'
+
+
+def test_two_different_disciplines_are_not_full_duplicates(client: SanicTestClient):
+    # П4: та же запись с ДРУГОЙ дисциплиной — не дубль: не пропускается
+    # молча, а уходит в очередь с указанием похожей существующей записи.
+    reset_registry_import_mocks()
+    app.ctx.storage.get_competitions.return_value = [
+        make_existing_p5a_competition(record_id='3', discipline='Бег 100 м')
+    ]
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='Лыжи 10 км')])
+    assert response.status == 200
+    assert 'Пропущено дублей' not in response.text
+    assert 'На подтверждение: 1' in response.text
+    assert app.ctx.storage.import_competitions.call_args[0][0] == []
+    app.ctx.storage.add_import_queue_entry.assert_called_once()
+    assert app.ctx.storage.add_import_queue_entry.call_args[1]['matched_record_id'] == 3
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_same_normalized_discipline_is_full_duplicate(client: SanicTestClient):
+    # П5: то же написание с другим регистром/пробелами — дубль как раньше.
+    reset_registry_import_mocks()
+    app.ctx.storage.get_competitions.return_value = [make_existing_p5a_competition(discipline='бег 100 м')]
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='БЕГ  100 м')])
+    assert response.status == 200
+    assert 'Пропущено дублей: 1' in response.text
+    assert 'На подтверждение' not in response.text
+    app.ctx.storage.add_import_queue_entry.assert_not_called()
+
+    # None против пустой ячейки — тоже дубль (нормализация обеих в '').
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = [make_existing_p5a_competition(discipline=None)]
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='   ')])
+    assert response.status == 200
+    assert 'Пропущено дублей: 1' in response.text
+    app.ctx.storage.add_import_queue_entry.assert_not_called()
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_discipline_normalization_in_duplicate_key():
+    # П6: unit по ключу — пробелы/регистр не различаются, None → ''.
+    base = {
+        'student_id': '1',
+        'student_name': 'Ключев Клим',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': 1,
+        'sport': 'Бег',
+        'date': datetime(2026, 3, 15),
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 1,
+    }
+    typed = Competition(**base, discipline='Бег  100 М')
+    retyped = Competition(**{**base, 'student_id': '2'}, discipline='бег 100 м')
+    without = Competition(**{**base, 'student_id': '3'}, discipline=None)
+    assert competition_duplicate_key(typed) == competition_duplicate_key(retyped)
+    assert competition_duplicate_key(typed)[-1] == 'бег 100 м'
+    assert competition_duplicate_key(without)[-1] == ''
+    # Оригинал в модели не искажён нормализацией ключа.
+    assert typed.discipline == 'Бег  100 М'
+    assert retyped.discipline == 'бег 100 м'
+
+
+def test_result_column_not_imported_into_base(client: SanicTestClient):
+    # П7: «Результат» из файла никогда не пишется в базовую колонку result.
+    reset_registry_import_mocks()
+    response = post_registry_import(client, [make_p5a_import_row(Результат='11.2')])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.result is None
+    assert saved.extra_data == {}
+
+    # С активным кастомным полем «Результат» значение идёт только в extra_data.
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='результат', label='Результат', show_in_export=True, show_in_template=True)
+    ]
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = post_registry_import(client, [make_p5a_import_row(Результат='11.2')])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.result is None
+    assert saved.extra_data == {'результат': '11.2'}
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_export_index_contains_discipline_and_result_with_null_as_empty(client: SanicTestClient):
+    # П8-П10 (П11 — прежние колонки неизменны, см. test_export_index_omits_...):
+    # значения дисциплины/результата на месте, NULL → пустая ячейка.
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Экспорт Ефим',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+            discipline='Бег 100 м',
+            result='11.2 с',
+        ),
+        Competition(
+            student_id='2',
+            student_name='Пустов Пётр',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=2,
+            discipline=None,
+            result=None,
+        ),
+    ]
+
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    exported = pd.read_excel(BytesIO(response.body))
+    assert list(exported.columns)[-2:] == ['Дисциплина', 'Результат']
+    filled = exported.iloc[0]
+    assert filled['Дисциплина'] == 'Бег 100 м'
+    assert filled['Результат'] == '11.2 с'
+    empty = exported.iloc[1]
+    assert pd.isna(empty['Дисциплина'])
+    assert pd.isna(empty['Результат'])
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_colliding_custom_fields_excluded_from_export_and_template(client: SanicTestClient):
+    # П12 (Р1): активные кастомные «Дисциплина»/«Результат» не дублируют
+    # фиксированные колонки: в выгрузке заголовок один (значение — из базовой
+    # колонки записи), в шаблоне вторая «Дисциплина» не появляется.
+    colliding_fields = [
+        CustomField(field_id=1, key='дисциплина', label='Дисциплина', show_in_export=True, show_in_template=True),
+        CustomField(field_id=2, key='результат', label='Результат', show_in_export=True, show_in_template=True),
+    ]
+    app.ctx.storage.get_custom_fields.return_value = colliding_fields
+    app.ctx.storage.get_competitions.return_value = [make_existing_p5a_competition(discipline='Бег 100 м')]
+
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    export_headers = get_xlsx_headers(response.body)
+    assert export_headers.count('Дисциплина') == 1
+    assert export_headers.count('Результат') == 1
+    exported = pd.read_excel(BytesIO(response.body))
+    assert exported.iloc[0]['Дисциплина'] == 'Бег 100 м'
+
+    _, response = client.get('/template/empty.xlsx', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    template_headers = get_xlsx_headers(response.body)
+    assert template_headers.count('Дисциплина') == 1
+
+    # Р5, двойная запись: «Дисциплина» из файла — и в базовой колонке, и в
+    # extra_data коллидирующего кастомного поля (self-healing, потери нет).
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='Лыжи 10 км')])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.discipline == 'Лыжи 10 км'
+    assert saved.extra_data['дисциплина'] == 'Лыжи 10 км'
+    assert saved.result is None
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_registry_import_export_discipline_roundtrip(client: SanicTestClient):
+    # П14 (O1 GATE): дисциплины, введённые в файле импорта, возвращаются
+    # выгрузкой реестра ровно в том же написании.
+    reset_registry_import_mocks()
+    response = post_registry_import(
+        client,
+        [
+            make_p5a_import_row(ФИО='Кругов Кирилл Кириллович', Дисциплина='Бег 100 м'),
+            make_p5a_import_row(ФИО='Кругова Карина Кирилловна', Пол='Ж', Место=2, Дисциплина='Бег  200 М'),
+        ],
+    )
+    assert response.status == 200
+    assert 'Импортировано записей: 2' in response.text
+    saved = app.ctx.storage.import_competitions.call_args[0][0]
+
+    app.ctx.storage.get_competitions.return_value = saved
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    exported = pd.read_excel(BytesIO(response.body))
+    by_name = exported.set_index('ФИО')
+    assert by_name.loc['Кругов Кирилл Кириллович', 'Дисциплина'] == 'Бег 100 м'
+    assert by_name.loc['Кругова Карина Кирилловна', 'Дисциплина'] == 'Бег  200 М'
+    app.ctx.storage.get_competitions.return_value = []
+
+
 def test_import_queue_page_admin_only_and_renders(client: SanicTestClient):
     app.ctx.storage.get_field_settings.return_value = {}
     entry_payload = {
@@ -5847,6 +6158,7 @@ def test_import_queue_accept_inserts_record_and_audits(client: SanicTestClient):
         'level': 'внутривузовские',
         'name': 'Кубок',
         'position': 2,
+        'discipline': 'Лыжи 100 м',
         'extra_data': {},
         'record_id': None,
         'created_at': '2026-03-01T00:00:00',
@@ -5879,6 +6191,8 @@ def test_import_queue_accept_inserts_record_and_audits(client: SanicTestClient):
     saved = app.ctx.storage.save_competitions.call_args[0][0][0]
     assert saved.student_name == 'Принятый Пётр'
     assert saved.sport == 'Лыжи'
+    # Event Model, P5a: дисциплина кандидата доезжает из payload очереди.
+    assert saved.discipline == 'Лыжи 100 м'
     app.ctx.storage.set_import_queue_status.assert_called_once_with(9, 'accepted')
     app.ctx.storage.add_audit_event.assert_called_once()
     audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
@@ -6063,6 +6377,8 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
             'level': 'городские',
             'name': 'Кубок edited',
             'position': '1',
+            # Event Model, P5a: дисциплина правится в той же форме.
+            'discipline': 'Коньки 500 м',
         },
         allow_redirects=False,
     )
@@ -6080,6 +6396,7 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
     assert saved.name == 'Кубок edited'
     assert saved.position == 1
     assert saved.course == 3
+    assert saved.discipline == 'Коньки 500 м'
     app.ctx.storage.set_import_queue_status.assert_called_once_with(15, 'accepted')
     audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
     assert audit_kwargs['action'] == 'import_conflict_resolved'
@@ -12780,7 +13097,9 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         custom_fields=[],
     )
     competition.student_ref_id = 42
-    # Wave 1 P1: служебные поля participation-identity тоже не отдаются.
+    # Wave 1 P1: calendar_event_id — внутренняя колонка. Event Model, P5a:
+    # дисциплина/результат отдаются фиксированными колонками «Дисциплина»/
+    # «Результат», а не внутренними ключами модели.
     competition.discipline = 'Бег 100 м'
     competition.result = '11.2'
     competition.calendar_event_id = 7
@@ -12789,6 +13108,8 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
     assert 'discipline' not in row
     assert 'result' not in row
     assert 'calendar_event_id' not in row
+    assert row['Дисциплина'] == 'Бег 100 м'
+    assert row['Результат'] == '11.2'
     assert set(row) == {
         'Код студента',
         'ФИО',
@@ -12801,6 +13122,8 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         'Уровень соревнований',
         'Название соревнований',
         'Место',
+        'Дисциплина',
+        'Результат',
     }
 
 
