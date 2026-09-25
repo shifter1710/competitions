@@ -6,6 +6,7 @@ import threading
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Collection
 from typing import Iterable
 from typing import Sequence
 
@@ -165,6 +166,7 @@ def participation_content_key(
     position,
     result,
     extra_data,
+    exclude_custom_keys: Collection[str] = (),
 ) -> tuple:
     """Полный контент участия для сравнения ТОЧНЫХ дублей (P4).
 
@@ -173,9 +175,21 @@ def participation_content_key(
     (сравниваются только непустые — пустая ячейка и отсутствие колонки
     неразличимы). Одна реализация для классификации предпросмотра
     (src/main.py) и серверной проверки apply_event_participation_batch:
-    стороны обязаны сравнивать символ в символ."""
+    стороны обязаны сравнивать символ в символ.
+
+    QA D2 (F′ v2): discipline/result сравниваются ЭФФЕКТИВНЫМИ значениями
+    (base ?? legacy-фолбэк в extra_data коллидирующего кастома), поэтому
+    сырые значения тех же коллидирующих кастомов в customs НЕ участвуют —
+    exclude_custom_keys выкидывает их СИММЕТРИЧНО у существующей строки и
+    вставляемой (легаси-строка до P4 несёт дисциплину только в extra_data,
+    вставляемая — только в базовой колонке). Остальные customs — как раньше."""
+    exclude = {str(key) for key in exclude_custom_keys}
     customs = tuple(
-        sorted((str(key), dedup_text(value)) for key, value in (extra_data or {}).items() if dedup_text(value))
+        sorted(
+            (str(key), dedup_text(value))
+            for key, value in (extra_data or {}).items()
+            if dedup_text(value) and str(key) not in exclude
+        )
     )
     return (
         dedup_text(student_name),
@@ -1376,22 +1390,27 @@ class SQLiteAdapter:
                 self.connection.rollback()
                 raise
 
-    def _event_participation_recheck_context(self, event_id: int) -> tuple[set, set]:
+    def _event_participation_recheck_context(self, event_id: int) -> tuple[set, set, set]:
         """Живые ключи уникальности участий события (P4): (identity-ключи,
-        контент-ключи). Вызывается ПОД _lock внутри батча — повторная проверка
-        видит актуальное состояние, а не снимок предпросмотра.
+        контент-ключи, ключи коллидирующих кастомов). Вызывается ПОД _lock
+        внутри батча — повторная проверка видит актуальное состояние, а не
+        снимок предпросмотра.
 
         identity — (карточка, дисциплина) связанного участия; контент — полный
         ключ participation_content_key. Дисциплина/результат существующего
         участия читаются с legacy-фолбэком (P5a dual-write): NULL в базовой
         колонке значит «взять значение активного кастома с коллидирующим
-        label из extra_data» — старые записи до P4 писали только туда."""
+        label из extra_data» — старые записи до P4 писали только туда.
+        Ключи коллидирующих кастомов исключаются из customs-части контент-ключа
+        у ОБЕИХ сторон сравнения (QA D2: эффективная дисциплина легаси-строки
+        в extra_data, вставляемой — в базовой колонке)."""
         collision_labels = ('дисциплина', 'результат')
         collision_keys = [
             (field.key, field.label.strip().casefold())
             for field in self.get_custom_fields()
             if field.label.strip().casefold() in collision_labels
         ]
+        collision_custom_keys = {key for key, _ in collision_keys}
         identities: set = set()
         contents: set = set()
 
@@ -1423,15 +1442,17 @@ class SQLiteAdapter:
                     participant['position'],
                     result,
                     extra,
+                    collision_custom_keys,
                 )
             )
-        return identities, contents
+        return identities, contents, collision_custom_keys
 
     @staticmethod
     def _event_participation_batch_guard(
         inserts: Sequence[Competition],
         live_identities: set,
         live_contents: set,
+        exclude_custom_keys: Collection[str] = (),
     ) -> None:
         """Повторная проверка insert-строк батча участий (P4) против живой БД
         и самого батча (intra-batch first-wins). Поднимает
@@ -1439,7 +1460,9 @@ class SQLiteAdapter:
         (карточка + дисциплина); CARDLESS против живой БД — точный контент,
         внутри батча — контент-ключ (ФИО + дисциплина): оба участия одного
         файла с тем же ключом сервер не вставляет (предпросмотр показывает
-        их конфликтом строк)."""
+        их конфликтом строк). exclude_custom_keys — симметричное исключение
+        коллидирующих кастомов из customs-части контент-ключа (QA D2,
+        см. participation_content_key)."""
         batch_identities: set = set()
         batch_contents: set = set()
         batch_cardless_keys: set = set()
@@ -1454,6 +1477,7 @@ class SQLiteAdapter:
                 competition.position,
                 competition.result,
                 competition.extra_data,
+                exclude_custom_keys,
             )
             if competition.student_ref_id is not None:
                 identity = ('ref', competition.student_ref_id, dedup_discipline(competition.discipline))
@@ -1490,8 +1514,10 @@ class SQLiteAdapter:
         транзакцией."""
         with self._lock:
             try:
-                live_identities, live_contents = self._event_participation_recheck_context(event_id)
-                self._event_participation_batch_guard(inserts, live_identities, live_contents)
+                live_identities, live_contents, collision_custom_keys = self._event_participation_recheck_context(
+                    event_id
+                )
+                self._event_participation_batch_guard(inserts, live_identities, live_contents, collision_custom_keys)
                 if inserts:
                     records = competition_insert_records(inserts, review_status, owner_id)
                     self.connection.executemany(COMPETITION_INSERT_SQL, records)

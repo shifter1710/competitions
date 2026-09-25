@@ -1919,6 +1919,31 @@ async def calendar_event_page(request: Request, event_id: str):
     )
 
 
+def resolve_manual_participant_student_ref(
+    storage: SQLiteAdapter,
+    request: Request,
+    back_url: str,
+) -> tuple[int | None, HTTPResponse | None]:
+    """Явный выбор карточки студента в ручном добавлении участника события:
+    непустое значение валидируется (карточка существует и активна); невалидное
+    — отказ БЕЗ создания записи, молчаливо терять выбранную админом связь
+    нельзя. Возвращает (student_ref_id, редирект-ошибка | None)."""
+    student_ref_raw = get_form_value(request, 'student_ref_id').strip()
+    if not student_ref_raw:
+        return None, None
+    try:
+        student_ref_id = int(student_ref_raw)
+    except ValueError:
+        student_ref_id = None
+    student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
+    if student is None or not student['active']:
+        return None, build_redirect_with_message(
+            error='Выбранная карточка студента не найдена или неактивна. Сбросьте связь и выберите карточку заново.',
+            url=back_url,
+        )
+    return student_ref_id, None
+
+
 @app.post('/calendar/<event_id>/participants')
 async def add_calendar_event_participant(request: Request, event_id: str):
     # Участник добавляется как ОБЫЧНАЯ запись реестра (историчность —
@@ -1945,23 +1970,9 @@ async def add_calendar_event_participant(request: Request, event_id: str):
     event_date_to = datetime.fromisoformat(event['date_to']) if event.get('date_to') else None
     storage = get_storage(request.app)
 
-    # Явный выбор карточки студента: непустое значение валидируется (существует
-    # и активна); невалидное — отказ БЕЗ создания записи, молчаливо терять
-    # выбранную админом связь нельзя.
-    student_ref_id: int | None = None
-    student_ref_raw = get_form_value(request, 'student_ref_id').strip()
-    if student_ref_raw:
-        try:
-            student_ref_id = int(student_ref_raw)
-        except ValueError:
-            student_ref_id = None
-        student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
-        if student is None or not student['active']:
-            return build_redirect_with_message(
-                error='Выбранная карточка студента не найдена или неактивна. '
-                'Сбросьте связь и выберите карточку заново.',
-                url=back_url,
-            )
+    student_ref_id, ref_error = resolve_manual_participant_student_ref(storage, request, back_url)
+    if ref_error is not None:
+        return ref_error
 
     custom_fields = storage.get_custom_fields()
     record = {
@@ -1978,6 +1989,10 @@ async def add_calendar_event_participant(request: Request, event_id: str):
         # Место опционально («можно дописать позже»): пусто → position = 0.
         'Место': get_form_value(request, 'position'),
         'Курс': get_form_value(request, 'course'),
+        # P4: дисциплина участия — та же фиксированная колонка, что у импорта
+        # (build_competition кладёт её в базовую колонку записи); поле формы
+        # опциональное, пусто → NULL.
+        'Дисциплина': get_form_value(request, 'discipline'),
     }
 
     try:
@@ -1989,6 +2004,12 @@ async def add_calendar_event_participant(request: Request, event_id: str):
     # P2: участник события получает явную ссылку на событие — состав
     # участников читается по calendar_event_id, а не по пресету.
     competition.calendar_event_id = event['id']
+    # Глобальный matched-инвариант (P4 QA D2): второй участия той же карточки
+    # с той же дисциплиной ручной ввод создать не может — guard до любых
+    # записей (справочники/участие), существующая строка не меняется.
+    guard_error = event_participation_matched_duplicate_guard(storage, event, competition)
+    if guard_error is not None:
+        return build_redirect_with_message(error=guard_error, url=back_url)
     ensure_catalog_values(storage, [competition])
     storage.save_competitions(
         [competition],
@@ -2584,6 +2605,19 @@ def event_participant_identity(participant: dict, custom_fields: Sequence[Custom
     return ('ref', participant['student_ref_id'], dedup_discipline(discipline))
 
 
+def event_participation_collision_custom_keys(custom_fields: Sequence[CustomField]) -> set[str]:
+    """Ключи кастомов с label, коллидирующим с фиксированными колонками
+    «Дисциплина»/«Результат» (QA D2, F′ v2): их сырые значения в extra_data
+    НЕ участвуют в customs-части контент-ключа — дисциплина/результат
+    сравниваются эффективными значениями (base ?? legacy-фолбэк), и легаси-
+    строка (значение только в кастоме) не должна отличаться от вставляемой
+    (значение только в базовой колонке). Тот же набор коллизий, что у
+    legacy-фолбэка event_participation_effective_values и серверной
+    проверки apply_event_participation_batch."""
+    fold_labels = {'дисциплина', 'результат'}
+    return {field.key for field in custom_fields if collides_with_fixed_columns(field.label, fold_labels)}
+
+
 def event_participant_content(participant: dict, custom_fields: Sequence[CustomField]) -> tuple:
     """Полный контент существующего участия (единый participation_content_key
     storage — сравнение с контентом вставляемой записи символ в символ)."""
@@ -2598,11 +2632,14 @@ def event_participant_content(participant: dict, custom_fields: Sequence[CustomF
         participant['position'],
         result,
         participant.get('extra_data') or {},
+        event_participation_collision_custom_keys(custom_fields),
     )
 
 
-def competition_content(competition: Competition) -> tuple:
-    """Полный контент вставляемой записи участия (та же форма ключа)."""
+def competition_content(competition: Competition, custom_fields: Sequence[CustomField]) -> tuple:
+    """Полный контент вставляемой записи участия (та же форма ключа);
+    коллидирующие кастомы исключаются симметрично существующей строке
+    (QA D2 — см. event_participation_collision_custom_keys)."""
     return participation_content_key(
         competition.student_name,
         competition.discipline,
@@ -2613,7 +2650,35 @@ def competition_content(competition: Competition) -> tuple:
         competition.position,
         competition.result,
         competition.extra_data,
+        event_participation_collision_custom_keys(custom_fields),
     )
+
+
+def event_participation_matched_duplicate_guard(
+    storage: SQLiteAdapter,
+    event: dict,
+    competition: Competition,
+) -> str | None:
+    """Глобальный matched-инвариант участий события (P4, QA D2): у события не
+    может быть двух участий ОДНОЙ карточки с той же нормализованной
+    дисциплиной. Импорт вставляет через guarded-батч (apply_event_participation_
+    batch), ручной ввод идёт через save_competitions — эта проверка закрывает
+    его теми же ключами: list_calendar_event_participants + identity с
+    эффективной дисциплиной (legacy-фолбэк base ?? extra_data коллидирующего
+    кастома) + dedup_discipline. Второй реализации нормализации нет.
+
+    Правило НЕ применяется для cardless-строк и пустой дисциплины (для них
+    остаются F′ v2/import semantics; глобального cardless-constraint нет).
+    Возвращает текст ошибки или None (вставлять можно)."""
+    discipline = dedup_discipline(competition.discipline)
+    if competition.student_ref_id is None or not discipline:
+        return None
+    identity = ('ref', competition.student_ref_id, discipline)
+    custom_fields = storage.get_custom_fields()
+    for participant in storage.list_calendar_event_participants(event['id']):
+        if event_participant_identity(participant, custom_fields) == identity:
+            return 'Такое участие уже существует: у этого студента уже есть участие с этой дисциплиной в событии.'
+    return None
 
 
 def event_import_diff_value(value) -> str:
@@ -2672,7 +2737,7 @@ def classify_event_import_row(
             diff['result'] = (event_import_diff_value(old_result), event_import_diff_value(row.get('result')))
         return {'status': 'update-candidate', 'match': match, 'diff': diff}
     if competition is not None:
-        content = competition_content(competition)
+        content = competition_content(competition, custom_fields)
         exact = next(
             (
                 participant

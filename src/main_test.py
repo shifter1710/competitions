@@ -11001,6 +11001,126 @@ def test_calendar_participant_add_rejects_invalid_student_ref(event_import_clien
     assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 0
 
 
+def test_calendar_participant_add_matched_same_discipline_blocked(event_import_client: SanicTestClient):
+    """P4 QA D2: ручное добавление не обходит глобальный matched-инвариант —
+    второй участия той же карточки с той же (нормализованной) дисциплиной
+    создать нельзя: flash-ошибка, 0 изменений, существующая строка цела.
+    Нормализация дисциплины — та же, что у импорта (пробелы/регистр).
+    Сравнение по ЭФФЕКТИВНОЙ дисциплине: у легаси-строки base NULL, значение
+    в extra_data коллидирующего кастома."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    record_id = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='бег 100 м', position=3
+    )
+    headers = get_auth_headers()
+    for discipline in ('бег 100 м', '  БЕГ   100 М '):
+        _, response = event_import_client.post(
+            f'/calendar/{event_id}/participants',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'student_name': 'Иванов Иван Иванович',
+                'student_ref_id': str(student_id),
+                'course': '2',
+                'discipline': discipline,
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'Такое участие уже существует' in unquote_plus(response.headers['location'])
+    # 0 изменений: одна запись, существующая строка не тронута.
+    assert len(event_records_snapshot(storage)) == 1
+    row = storage.connection.execute(
+        'SELECT position, discipline, result FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()
+    assert (row['position'], row['discipline'], row['result']) == (3, 'бег 100 м', None)
+
+    # Легаси-участие той же карточки: base NULL, дисциплина только в extra_data
+    # коллидирующего кастома → сравнение по эффективной дисциплине, тоже блок.
+    storage.create_custom_field('discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    other_event_id = make_calendar_event(storage, name='Кросс 2026')
+    make_event_participation(
+        storage,
+        other_event_id,
+        'Иванов Иван Иванович',
+        student_ref=student_id,
+        position=1,
+        extra={'discipline': 'кросс 3 км'},
+    )
+    _, response = event_import_client.post(
+        f'/calendar/{other_event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_ref_id': str(student_id),
+            'course': '2',
+            'discipline': 'Кросс 3 км',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Такое участие уже существует' in unquote_plus(response.headers['location'])
+    # У события «Кросс 2026» осталась одна запись — легаси-строка без изменений.
+    participants = storage.list_calendar_event_participants(other_event_id)
+    assert len(participants) == 1
+    assert participants[0]['discipline'] is None
+    assert participants[0]['extra_data'] == {'discipline': 'кросс 3 км'}
+
+
+def test_calendar_participant_add_matched_other_discipline_and_cardless_allowed(event_import_client: SanicTestClient):
+    """P4 QA D2: правило НЕ применяется к другой дисциплине той же карточки
+    (мульти-дисциплины разрешены) и к cardless-добавлению (student_ref_id
+    пустой) — ручное добавление без карточки работает как раньше."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='бег 100 м', position=3
+    )
+    headers = get_auth_headers()
+    # Другая дисциплина той же карточки — разрешено.
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_ref_id': str(student_id),
+            'course': '2',
+            'discipline': 'бег 200 м',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Участник «Иванов Иван Иванович» добавлен' in unquote_plus(response.headers['location'])
+    # Cardless-добавление с той же дисциплиной — не блокируется (без карточки
+    # действует F′ v2/import semantics, глобального cardless-constraint нет).
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Козлов Козьма Козьмич',
+            'course': '1',
+            'discipline': 'бег 100 м',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Участник «Козлов Козьма Козьмич» добавлен' in unquote_plus(response.headers['location'])
+    rows = storage.connection.execute(
+        'SELECT student_name, student_ref_id, discipline FROM competitions ORDER BY id'
+    ).fetchall()
+    assert [(row['student_name'], row['student_ref_id'], row['discipline']) for row in rows] == [
+        ('Иванов Иван Иванович', student_id, 'бег 100 м'),
+        ('Иванов Иван Иванович', student_id, 'бег 200 м'),
+        ('Козлов Козьма Козьмич', None, 'бег 100 м'),
+    ]
+
+
 # --- Event Model, Wave 1 P2: стабильная связь «запись → событие». ---
 
 
@@ -12770,6 +12890,58 @@ def test_p4_cardless_existing_exact_duplicate_already(event_import_client: Sanic
     response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
     assert 'Добавлено участников из Excel: 0.' in unquote_plus(response.headers['location'])
     assert len(event_records_snapshot(storage)) == 1
+
+
+def test_p4_cardless_legacy_custom_only_discipline_reimport_already(event_import_client: SanicTestClient):
+    """QA D2 (cardless-легаси): существующее участие без карточки — discipline
+    NULL, значение только в extra_data коллидирующего кастома «Дисциплина».
+    Реимпорт того же контента → «уже существует» (НЕ «возможный дубль»):
+    контент-ключ сравнивает ЭФФЕКТИВНУЮ дисциплину и не учитывает сырые
+    значения коллидирующих кастомов ни у одной из сторон; «Добавить как
+    новое» нет; bulk и прямой add дубль не создают."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_custom_field('discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    make_event_participation(
+        storage,
+        event_id,
+        'Козлов Козьма Козьмич',
+        position=5,
+        sex='М',
+        institute='',
+        group='',
+        course=1,
+        extra={'discipline': '100 м'},
+    )
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': 'Козлов Козьма Козьмич', 'Пол': 'М', 'Курс': 1, 'Дисциплина': '100 м', 'Место': 5}],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    collapsed = re.sub(r'\s+', ' ', page.text)
+    assert 'готовы к добавлению: 0' in page.text
+    assert 'требуют решения: 0' in page.text
+    assert 'уже существует' in collapsed
+    assert 'возможный дубль' not in collapsed
+    # Производный статус «решено»: кнопки действий (включая «Добавить как
+    # новое») отсутствуют.
+    assert 'Добавить как новое' not in page.text
+    assert page.text.count('/row/2/add') == 0
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 0.' in unquote_plus(response.headers['location'])
+    assert len(event_records_snapshot(storage)) == 1
+    # Подделанный прямой add — отказ guard'а, дубль не создаётся.
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/add')
+    assert 'уже существует — точная копия' in unquote_plus(response.headers['location'])
+    assert len(event_records_snapshot(storage)) == 1
+    # Легаси-строка не мигрирована: NULL в базовой колонке и значение в
+    # extra_data остаются как были (compatibility-read, без dual-write).
+    row = storage.connection.execute('SELECT discipline, result, extra_data FROM competitions').fetchone()
+    assert row['discipline'] is None
+    assert row['result'] is None
+    assert json.loads(row['extra_data']) == {'discipline': '100 м'}
 
 
 def test_p4_cardless_possible_duplicate_review(event_import_client: SanicTestClient):
