@@ -118,9 +118,10 @@
     </div>
 </div>
 
-{# Связанные данные (Phase 2): записи и аккаунты, привязанные вручную через
-   сопоставление. Привязка меняет только student_ref_id — кабинет атлета,
-   отчёты и выгрузки работают по легаси-ключу sha256(ФИО) как раньше. #}
+{# Связанные данные (Phase 2 + P3): записи и аккаунты, привязанные вручную
+   через сопоставление. Привязка меняет только student_ref_id — кабинет
+   атлета с P3 читает эту связь (dual: связь + легаси-хеш ФИО), отчёты и
+   выгрузки работают по легаси-ключу sha256(ФИО) как раньше. #}
 <div class="card shadow-sm mt-4">
     <div class="card-body">
         <h5 class="card-title">Связанные данные</h5>
@@ -204,6 +205,7 @@
                 <thead>
                     <tr>
                         <th scope="col">Логин</th>
+                        <th scope="col">Видимо атлету</th>
                         <th scope="col">Действия</th>
                     </tr>
                 </thead>
@@ -212,9 +214,14 @@
                     <tr>
                         <td>{{ user.username }}</td>
                         <td>
+                            {# P3: предпросмотр кабинета атлета — счётчики считает сервер
+                               (текущий режим dual/ref): сейчас и после отвязки аккаунта. #}
+                            сейчас {{ user.visible_now }} · после отвязки {{ user.visible_after_unlink }}
+                        </td>
+                        <td>
                             <div class="d-flex flex-wrap gap-2 align-items-center">
                                 <form action="/admin/people/reconcile/users/unlink" method="post"
-                                      onsubmit="return confirm('Отвязать аккаунт {{ user.username }} от студента? Связь карточки с аккаунтом будет снята; кабинет атлета сейчас работает по ФИО и не изменится.')">
+                                      onsubmit="return confirm('{{ user.unlink_confirm }}')">
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                                     <input type="hidden" name="user_id" value="{{ user.id }}">
                                     <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>

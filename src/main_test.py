@@ -654,6 +654,10 @@ def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClie
         'Название соревнований',
         'Место',
         'Курс',
+        # Event Model, P5a: фиксированные колонки дисциплины/результата
+        # после «Курса»; прежние 10 колонок не меняются.
+        'Дисциплина',
+        'Результат',
     ]
 
 
@@ -1215,6 +1219,59 @@ def test_index_shows_counter_and_all_records(index_client: SanicTestClient):
     assert 'Реестр соревнований' in response.text
     assert 'index-filter-card' in response.text
     assert 'Показывать по' in response.text
+
+
+def test_index_linked_record_renders_event_link_and_edit_marker(index_client: SanicTestClient):
+    """P2: связанная со событием запись — имя кликабельно (страница
+    соревнования), кнопка правки несёт data-calendar-event-id (JS блокирует
+    event-owned поля); NULL-запись — прежний вид без ссылки."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event(
+        name='Кубок 2024', date='2024-03-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    # Первая запись Иванова (name = «Кубок») — связываем raw SQL, как будто
+    # это сделали будущие link/unlink.
+    storage.connection.execute(
+        'UPDATE competitions SET calendar_event_id = ? WHERE student_name = ? AND date = ?',
+        (event_id, 'Иванов Иван', '2024-03-01T00:00:00'),
+    )
+    storage.connection.commit()
+
+    _, response = index_client.get('/', headers=get_auth_headers())
+    assert response.status == 200
+    # Связанная строка: маркер для JS + ссылка на страницу соревнования.
+    assert f'data-calendar-event-id="{event_id}"' in response.text
+    assert (
+        f'<a href="/calendar/{event_id}" class="link" title="Открыть страницу соревнования">Кубок</a>' in response.text
+    )
+    # NULL-строки: маркер пуст, ссылки события в колонке имени нет.
+    assert 'data-calendar-event-id=""' in response.text
+    null_rows = [row for row in get_tbody_rows(response.text) if 'data-calendar-event-id=""' in row]
+    assert null_rows and 'Открыть страницу соревнования' not in null_rows[0]
+    # Подсказка про нецензурируемые event-owned поля — на странице.
+    assert 'они берутся из соревнования' in response.text
+
+
+def test_index_athlete_sees_linked_record_name_as_text(athlete_index_client: SanicTestClient):
+    """Атлету страница события недоступна (403) — имя связанной записи ему
+    рендерится простым текстом, без ссылки."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event(
+        name='Кубок атлета', date='2025-06-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    storage.connection.execute(
+        "UPDATE competitions SET calendar_event_id = ?, name = 'Кубок атлета' "
+        "WHERE student_name = 'Атлетов Атлет' AND date = '2025-06-01T00:00:00'",
+        (event_id,),
+    )
+    storage.connection.commit()
+
+    _, response = athlete_index_client.get('/', headers=athlete_headers())
+    assert response.status == 200
+    assert f'<a href="/calendar/{event_id}"' not in response.text
+    assert 'title="Открыть страницу соревнования"' not in response.text
+    # Само название в строке осталось (простым текстом).
+    assert 'Кубок атлета' in response.text
 
 
 def test_index_filter_by_name_substring(index_client: SanicTestClient):
@@ -3579,6 +3636,12 @@ def athlete_headers() -> dict[str, str]:
     return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
 
 
+def athlete_headers_for(username: str) -> dict[str, str]:
+    """Cookie произвольного аккаунта атлета (фикстуры создают их в БД явно)."""
+    cookie = create_auth_cookie_value(username=username, role='athlete')
+    return {'cookie': f'{settings.auth_cookie_name}={cookie}'}
+
+
 ATHLETE_RECORD_DATA = {
     'student_name': 'Спортсменов Спорт Спортович',
     'student_sex': 'М',
@@ -5541,6 +5604,7 @@ def test_upload_similar_row_goes_to_queue(client: SanicTestClient):
                 'Название соревнований': 'Кубок',
                 'Место': 2,
                 'Курс': 2,
+                'Дисциплина': 'Лыжи 10 км',
             },
         ]
     )
@@ -5570,6 +5634,8 @@ def test_upload_similar_row_goes_to_queue(client: SanicTestClient):
     app.ctx.storage.add_import_queue_entry.assert_called_once()
     payload = app.ctx.storage.add_import_queue_entry.call_args[0][0]
     assert payload['sport'] == 'Лыжи'
+    # Event Model, P5a: дисциплина строки сохраняется в payload очереди.
+    assert payload['discipline'] == 'Лыжи 10 км'
     assert app.ctx.storage.add_import_queue_entry.call_args[1]['matched_record_id'] == 7
 
 
@@ -5709,6 +5775,310 @@ def test_upload_exact_duplicate_still_skipped_as_before(client: SanicTestClient)
     app.ctx.storage.add_import_queue_entry.assert_not_called()
 
 
+# --- Event Model, P5a: дисциплина в импорте/экспорте реестра (все данные синтетические) ---
+
+
+def reset_registry_import_mocks():
+    """Моки импорта в исходное состояние (module-scoped client)."""
+    app.ctx.storage.get_field_settings.return_value = {}
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+
+
+def make_p5a_import_row(**overrides) -> dict:
+    row = {
+        'ФИО': 'Дисциплинарный Дмитрий',
+        'Пол': 'М',
+        'Институт': 'ИСИ',
+        'Группа': 'ПГС-101',
+        'Вид спорта': 'Лыжи',
+        'Дата': '15.03.2026',
+        'Уровень соревнований': 'внутривузовские',
+        'Название соревнований': 'Кубок',
+        'Место': 1,
+        'Курс': 2,
+    }
+    row.update(overrides)
+    return row
+
+
+def make_existing_p5a_competition(record_id='3', discipline=None) -> Competition:
+    return Competition(
+        record_id=record_id,
+        student_id='hash-p5a',
+        student_name='Дисциплинарный Дмитрий',
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Лыжи',
+        date=datetime(2026, 3, 15),
+        level='внутривузовские',
+        name='Кубок',
+        position=1,
+        discipline=discipline,
+    )
+
+
+def post_registry_import(client: SanicTestClient, rows: list[dict]):
+    df = pd.DataFrame(rows)
+    file_obj = BytesIO()
+    df.to_excel(file_obj, index=False)
+    file_obj.seek(0)
+    headers = get_auth_headers(role='editor')
+    _, response = client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'import.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_import_without_discipline_column_still_works(client: SanicTestClient):
+    # П1: старые файлы без колонки «Дисциплина» импортируются как раньше.
+    reset_registry_import_mocks()
+    response = post_registry_import(client, [make_p5a_import_row()])
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.discipline is None
+
+
+def test_template_contains_optional_discipline_column(client: SanicTestClient):
+    # П2: «Дисциплина» — опциональная фиксированная колонка шаблона, ровно
+    # одна, сразу после «Курса»; «Результата» в шаблоне нет.
+    app.ctx.storage.get_custom_fields.return_value = []
+    _, response = client.get('/template/empty.xlsx', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    headers = get_xlsx_headers(response.body)
+    assert headers.count('Дисциплина') == 1
+    assert headers.index('Дисциплина') == headers.index('Курс') + 1
+    assert 'Результат' not in headers
+
+
+def test_import_persists_discipline_as_typed(client: SanicTestClient):
+    # П3 (Р2): оригинальное написание (двойной пробел, регистр) хранится
+    # как введено — нормализация есть только в ключе дубля.
+    reset_registry_import_mocks()
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='Бег  100 М')])
+    assert response.status == 200
+    assert 'Импортировано записей: 1' in response.text
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.discipline == 'Бег  100 М'
+
+
+def test_two_different_disciplines_are_not_full_duplicates(client: SanicTestClient):
+    # П4: та же запись с ДРУГОЙ дисциплиной — не дубль: не пропускается
+    # молча, а уходит в очередь с указанием похожей существующей записи.
+    reset_registry_import_mocks()
+    app.ctx.storage.get_competitions.return_value = [
+        make_existing_p5a_competition(record_id='3', discipline='Бег 100 м')
+    ]
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='Лыжи 10 км')])
+    assert response.status == 200
+    assert 'Пропущено дублей' not in response.text
+    assert 'На подтверждение: 1' in response.text
+    assert app.ctx.storage.import_competitions.call_args[0][0] == []
+    app.ctx.storage.add_import_queue_entry.assert_called_once()
+    assert app.ctx.storage.add_import_queue_entry.call_args[1]['matched_record_id'] == 3
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_same_normalized_discipline_is_full_duplicate(client: SanicTestClient):
+    # П5: то же написание с другим регистром/пробелами — дубль как раньше.
+    reset_registry_import_mocks()
+    app.ctx.storage.get_competitions.return_value = [make_existing_p5a_competition(discipline='бег 100 м')]
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='БЕГ  100 м')])
+    assert response.status == 200
+    assert 'Пропущено дублей: 1' in response.text
+    assert 'На подтверждение' not in response.text
+    app.ctx.storage.add_import_queue_entry.assert_not_called()
+
+    # None против пустой ячейки — тоже дубль (нормализация обеих в '').
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = [make_existing_p5a_competition(discipline=None)]
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='   ')])
+    assert response.status == 200
+    assert 'Пропущено дублей: 1' in response.text
+    app.ctx.storage.add_import_queue_entry.assert_not_called()
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_discipline_normalization_in_duplicate_key():
+    # П6: unit по ключу — пробелы/регистр не различаются, None → ''.
+    base = {
+        'student_id': '1',
+        'student_name': 'Ключев Клим',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ПГС-101',
+        'course': 1,
+        'sport': 'Бег',
+        'date': datetime(2026, 3, 15),
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 1,
+    }
+    typed = Competition(**base, discipline='Бег  100 М')
+    retyped = Competition(**{**base, 'student_id': '2'}, discipline='бег 100 м')
+    without = Competition(**{**base, 'student_id': '3'}, discipline=None)
+    assert competition_duplicate_key(typed) == competition_duplicate_key(retyped)
+    assert competition_duplicate_key(typed)[-1] == 'бег 100 м'
+    assert competition_duplicate_key(without)[-1] == ''
+    # Оригинал в модели не искажён нормализацией ключа.
+    assert typed.discipline == 'Бег  100 М'
+    assert retyped.discipline == 'бег 100 м'
+
+
+def test_result_column_not_imported_into_base(client: SanicTestClient):
+    # П7: «Результат» из файла никогда не пишется в базовую колонку result.
+    reset_registry_import_mocks()
+    response = post_registry_import(client, [make_p5a_import_row(Результат='11.2')])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.result is None
+    assert saved.extra_data == {}
+
+    # С активным кастомным полем «Результат» значение идёт только в extra_data.
+    app.ctx.storage.get_custom_fields.return_value = [
+        CustomField(field_id=1, key='результат', label='Результат', show_in_export=True, show_in_template=True)
+    ]
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = post_registry_import(client, [make_p5a_import_row(Результат='11.2')])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.result is None
+    assert saved.extra_data == {'результат': '11.2'}
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_export_index_contains_discipline_and_result_with_null_as_empty(client: SanicTestClient):
+    # П8-П10 (П11 — прежние колонки неизменны, см. test_export_index_omits_...):
+    # значения дисциплины/результата на месте, NULL → пустая ячейка.
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Экспорт Ефим',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+            discipline='Бег 100 м',
+            result='11.2 с',
+        ),
+        Competition(
+            student_id='2',
+            student_name='Пустов Пётр',
+            student_sex='М',
+            institute='ИСИ',
+            group='ПГС-101',
+            course=2,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=2,
+            discipline=None,
+            result=None,
+        ),
+    ]
+
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    exported = pd.read_excel(BytesIO(response.body))
+    assert list(exported.columns)[-2:] == ['Дисциплина', 'Результат']
+    filled = exported.iloc[0]
+    assert filled['Дисциплина'] == 'Бег 100 м'
+    assert filled['Результат'] == '11.2 с'
+    empty = exported.iloc[1]
+    assert pd.isna(empty['Дисциплина'])
+    assert pd.isna(empty['Результат'])
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_colliding_custom_fields_excluded_from_export_and_template(client: SanicTestClient):
+    # П12 (Р1): активные кастомные «Дисциплина»/«Результат» не дублируют
+    # фиксированные колонки: в выгрузке заголовок один (значение — из базовой
+    # колонки записи), в шаблоне вторая «Дисциплина» не появляется.
+    colliding_fields = [
+        CustomField(field_id=1, key='дисциплина', label='Дисциплина', show_in_export=True, show_in_template=True),
+        CustomField(field_id=2, key='результат', label='Результат', show_in_export=True, show_in_template=True),
+    ]
+    app.ctx.storage.get_custom_fields.return_value = colliding_fields
+    app.ctx.storage.get_competitions.return_value = [make_existing_p5a_competition(discipline='Бег 100 м')]
+
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    export_headers = get_xlsx_headers(response.body)
+    assert export_headers.count('Дисциплина') == 1
+    assert export_headers.count('Результат') == 1
+    exported = pd.read_excel(BytesIO(response.body))
+    assert exported.iloc[0]['Дисциплина'] == 'Бег 100 м'
+
+    _, response = client.get('/template/empty.xlsx', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+    template_headers = get_xlsx_headers(response.body)
+    assert template_headers.count('Дисциплина') == 1
+
+    # Р5, двойная запись: «Дисциплина» из файла — и в базовой колонке, и в
+    # extra_data коллидирующего кастомного поля (self-healing, потери нет).
+    app.ctx.storage.import_competitions.reset_mock()
+    app.ctx.storage.add_import_queue_entry.reset_mock()
+    app.ctx.storage.get_competitions.return_value = []
+    response = post_registry_import(client, [make_p5a_import_row(Дисциплина='Лыжи 10 км')])
+    assert response.status == 200
+    saved = app.ctx.storage.import_competitions.call_args[0][0][0]
+    assert saved.discipline == 'Лыжи 10 км'
+    assert saved.extra_data['дисциплина'] == 'Лыжи 10 км'
+    assert saved.result is None
+    app.ctx.storage.get_custom_fields.return_value = []
+    app.ctx.storage.get_competitions.return_value = []
+
+
+def test_registry_import_export_discipline_roundtrip(client: SanicTestClient):
+    # П14 (O1 GATE): дисциплины, введённые в файле импорта, возвращаются
+    # выгрузкой реестра ровно в том же написании.
+    reset_registry_import_mocks()
+    response = post_registry_import(
+        client,
+        [
+            make_p5a_import_row(ФИО='Кругов Кирилл Кириллович', Дисциплина='Бег 100 м'),
+            make_p5a_import_row(ФИО='Кругова Карина Кирилловна', Пол='Ж', Место=2, Дисциплина='Бег  200 М'),
+        ],
+    )
+    assert response.status == 200
+    assert 'Импортировано записей: 2' in response.text
+    saved = app.ctx.storage.import_competitions.call_args[0][0]
+
+    app.ctx.storage.get_competitions.return_value = saved
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    exported = pd.read_excel(BytesIO(response.body))
+    by_name = exported.set_index('ФИО')
+    assert by_name.loc['Кругов Кирилл Кириллович', 'Дисциплина'] == 'Бег 100 м'
+    assert by_name.loc['Кругова Карина Кирилловна', 'Дисциплина'] == 'Бег  200 М'
+    app.ctx.storage.get_competitions.return_value = []
+
+
 def test_import_queue_page_admin_only_and_renders(client: SanicTestClient):
     app.ctx.storage.get_field_settings.return_value = {}
     entry_payload = {
@@ -5788,6 +6158,7 @@ def test_import_queue_accept_inserts_record_and_audits(client: SanicTestClient):
         'level': 'внутривузовские',
         'name': 'Кубок',
         'position': 2,
+        'discipline': 'Лыжи 100 м',
         'extra_data': {},
         'record_id': None,
         'created_at': '2026-03-01T00:00:00',
@@ -5820,6 +6191,8 @@ def test_import_queue_accept_inserts_record_and_audits(client: SanicTestClient):
     saved = app.ctx.storage.save_competitions.call_args[0][0][0]
     assert saved.student_name == 'Принятый Пётр'
     assert saved.sport == 'Лыжи'
+    # Event Model, P5a: дисциплина кандидата доезжает из payload очереди.
+    assert saved.discipline == 'Лыжи 100 м'
     app.ctx.storage.set_import_queue_status.assert_called_once_with(9, 'accepted')
     app.ctx.storage.add_audit_event.assert_called_once()
     audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
@@ -6004,6 +6377,8 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
             'level': 'городские',
             'name': 'Кубок edited',
             'position': '1',
+            # Event Model, P5a: дисциплина правится в той же форме.
+            'discipline': 'Коньки 500 м',
         },
         allow_redirects=False,
     )
@@ -6021,6 +6396,7 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
     assert saved.name == 'Кубок edited'
     assert saved.position == 1
     assert saved.course == 3
+    assert saved.discipline == 'Коньки 500 м'
     app.ctx.storage.set_import_queue_status.assert_called_once_with(15, 'accepted')
     audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
     assert audit_kwargs['action'] == 'import_conflict_resolved'
@@ -7984,10 +8360,11 @@ def reconcile_client(client: SanicTestClient, tmp_path):
         app.ctx.storage = previous
 
 
-def save_reconcile_record(storage, name: str, date: datetime, position: int = 1) -> int:
+def save_reconcile_record(storage, name: str, date: datetime, position: int = 1, owner_id=None) -> int:
     """Одна одобренная запись реестра; возвращает её id.
 
-    Легаси-ключ личности — sha256(ФИО), как в реальных данных.
+    Легаси-ключ личности — sha256(ФИО), как в реальных данных. owner_id —
+    владелец записи (P3: ветка owner в scope кабинета атлета).
     """
     storage.save_competitions(
         [
@@ -8005,7 +8382,8 @@ def save_reconcile_record(storage, name: str, date: datetime, position: int = 1)
                 position=position,
                 extra_data={},
             )
-        ]
+        ],
+        owner_id=owner_id,
     )
     row = storage.connection.execute('SELECT MAX(id) AS id FROM competitions').fetchone()
     return row['id']
@@ -8652,9 +9030,12 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     assert '…и ещё 3 записей (показаны первые 50).' in response.text
 
 
-def test_reconcile_link_keeps_athlete_cabinet_unchanged(reconcile_client: SanicTestClient):
-    """Runtime-совместимость: кабинет атлета считает записи по легаси
-    sha256(ФИО) из профиля — привязка student_ref_id ничего не меняет."""
+def test_reconcile_link_extends_athlete_cabinet_by_ref(reconcile_client: SanicTestClient):
+    """P3 dual-инвариант (замена test_reconcile_link_keeps_athlete_cabinet_
+    unchanged): привязка по-прежнему меняет только student_ref_id, но
+    кабинет атлета теперь читает связь (dual-read). Своя по ФИО запись
+    видима до и после привязки; чужая запись ПОЯВЛЯЕТСЯ после привязки
+    её карточки к аккаунту — плановое поведение dual-read."""
     storage = app.ctx.storage
     sportik = storage.get_user('sportik')
     storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
@@ -8674,9 +9055,12 @@ def test_reconcile_link_keeps_athlete_cabinet_unchanged(reconcile_client: SanicT
 
     _, after = reconcile_client.get('/', headers=athlete)
     assert after.status == 200
-    assert after.text == before.text
+    # Своя (по ФИО) запись не пропала...
+    assert 'Иванов Иван' in after.text
+    # ...а чужая появилась: кабинет читает стабильную связь с карточкой
+    assert 'Петров Пётр' in after.text
 
-    # Отчёт администратора тоже не изменился от привязок
+    # Отчёт администратора от привязок не изменился (снимок по записям)
     _, report_before = reconcile_client.get('/report?slice=student', headers=get_auth_headers())
     storage.unlink_competition(own_id)
     storage.unlink_competition(alien_id)
@@ -8758,6 +9142,516 @@ def test_reconcile_links_in_admin_hub_and_people(reconcile_client: SanicTestClie
     storage.link_competitions([record_id], student_id)
     _, response = reconcile_client.get('/admin/people', headers=get_auth_headers())
     assert 'badge text-bg-light border' not in response.text
+
+
+# --- P3 Runtime Identity: dual-read кабинета атлета и режим dual/ref. ---
+#
+# HTTP-сценарии на реальном SQLite-адаптере (паттерн reconcile_client):
+# ветки видимости главной (owner / student_ref_id / легаси-хеш), права на
+# запись по связи, сужение кабинета в ref, отчёт проверки и guard-переключение
+# режима. Синтетические данные.
+
+
+def test_dual_mode_visibility_branches_and_owns_by_ref(reconcile_client: SanicTestClient, tmp_path, monkeypatch):
+    """Dual: главная атлета = owner OR ref OR легаси-хеш; связь даёт и право
+    на запись (правка, вложения)."""
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_user(sportik['id'], student_id)
+
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))  # хеш
+    ref_id = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))  # связь
+    storage.link_competitions([ref_id], student_id)
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 3, 10), owner_id=sportik['id'])  # owner
+    save_reconcile_record(storage, 'Невидимый Ник', datetime(2026, 4, 10))  # мимо всех веток
+
+    headers = athlete_headers()
+    _, response = reconcile_client.get('/', headers=headers)
+    assert response.status == 200
+    assert 'Иванов Иван' in response.text
+    assert 'Петров Пётр' in response.text
+    assert 'Чужое Имя' in response.text
+    assert 'Невидимый Ник' not in response.text
+
+    # Правка записи, видимой только по связи, разрешена атлету
+    _, response = reconcile_client.post(
+        f'/competition/{ref_id}',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA, 'student_name': 'Петров Пётр'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'] == '/'
+
+    # Вложение на запись по связи тоже разрешено
+    _, response = reconcile_client.post(
+        f'/competition/{ref_id}/attachments',
+        headers=headers,
+        data=csrf_for(headers),
+        files={'file': ('diploma.png', PNG_BYTES, 'application/octet-stream')},
+    )
+    assert response.status == 200
+    assert response.text == 'Файл загружен'
+    # Связь пережила правку записи
+    assert record_ref(storage, ref_id) == student_id
+
+
+def test_ref_mode_narrows_athlete_cabinet(reconcile_client: SanicTestClient):
+    """Ref: кабинет = owner OR ref; хеши и псевдонимы ФИО не расширяют;
+    модератор видит весь реестр независимо от режима."""
+    storage = app.ctx.storage
+    storage.set_identity_mode('ref')
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    storage.add_name_alias(sportik['id'], 'Иванов И.И.')
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_user(sportik['id'], student_id)
+
+    ref_id = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))
+    storage.link_competitions([ref_id], student_id)
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))  # только хеш
+    save_reconcile_record(storage, 'Иванов И.И.', datetime(2026, 3, 10))  # псевдоним
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 4, 10), owner_id=sportik['id'])
+
+    headers = athlete_headers()
+    _, response = reconcile_client.get('/', headers=headers)
+    assert response.status == 200
+    assert 'Петров Пётр' in response.text
+    assert 'Чужое Имя' in response.text
+    assert 'Иванов Иван' not in response.text
+    assert 'Иванов И.И.' not in response.text
+
+    _, response = reconcile_client.get('/', headers=get_auth_headers())
+    for name in ('Петров Пётр', 'Чужое Имя', 'Иванов Иван', 'Иванов И.И.'):
+        assert name in response.text
+
+
+def test_namesakes_isolated_in_ref_mode(reconcile_client: SanicTestClient):
+    """Два аккаунта с одинаковым ФИО на разных карточках. Dual (легаси):
+    хеш один — оба видят обе записи (фиксируем поведение). Ref: каждый
+    видит только запись своей карточки."""
+    storage = app.ctx.storage
+    storage.create_user('twin1', 'hash', 'athlete')
+    storage.create_user('twin2', 'hash', 'athlete')
+    twin1 = storage.get_user('twin1')
+    twin2 = storage.get_user('twin2')
+    for user in (twin1, twin2):
+        storage.set_profile(user['id'], {'student_name': 'Одинаков Фамилия', 'student_sex': 'М'})
+    card1 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    card2 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    storage.link_user(twin1['id'], card1)
+    storage.link_user(twin2['id'], card2)
+
+    storage.link_competitions([save_reconcile_record(storage, 'Одинаков Фамилия', datetime(2026, 1, 10))], card1)
+    storage.link_competitions([save_reconcile_record(storage, 'Одинаков Фамилия', datetime(2026, 2, 10))], card2)
+
+    # Dual: обе записи в кабинете (даты различают записи с одинаковым ФИО)
+    _, response = reconcile_client.get('/', headers=athlete_headers_for('twin1'))
+    assert '10.01.2026' in response.text
+    assert '10.02.2026' in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=athlete_headers_for('twin1'))
+    assert '10.01.2026' in response.text
+    assert '10.02.2026' not in response.text
+
+
+def test_ref_mode_namesake_hash_cannot_edit_or_touch_attachments(
+    reconcile_client: SanicTestClient, tmp_path, monkeypatch
+):
+    """QA D2: в ref право на запись = owner OR ref ТОЛЬКО. Атлет-тёзка
+    (то же ФИО в профиле, другая карточка) при хеш-совпадении НЕ может
+    править чужую запись, загружать вложения и скачивать чужие вложения.
+    В dual легаси-хеш-ветка прав сохраняется (инвариант зафиксирован)."""
+    from src import main as main_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    storage = app.ctx.storage
+    storage.create_user('twin1', 'hash', 'athlete')
+    storage.create_user('twin2', 'hash', 'athlete')
+    twin1 = storage.get_user('twin1')
+    twin2 = storage.get_user('twin2')
+    for user in (twin1, twin2):
+        storage.set_profile(user['id'], {'student_name': 'Одинаков Фамилия', 'student_sex': 'М'})
+    card1 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    card2 = storage.create_student('Одинаков Фамилия', 'М', '', '', '')
+    storage.link_user(twin1['id'], card1)
+    storage.link_user(twin2['id'], card2)
+
+    # Запись twin1: связана с его карточкой, owner нет — для twin2 она
+    # «чужая по связи», но совпадает по легаси-хешу ФИО.
+    record_id = save_reconcile_record(storage, 'Одинаков Фамилия', datetime(2026, 1, 10))
+    storage.link_competitions([record_id], card1)
+
+    # Dual (легаси-инвариант): хеш-ветка прав разрешает правку и вложения
+    assert storage.get_identity_mode() == 'dual'
+    twin2_headers = athlete_headers_for('twin2')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=twin2_headers,
+        data={**csrf_for(twin2_headers), **ATHLETE_RECORD_DATA, 'student_name': 'Одинаков Фамилия'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}/attachments',
+        headers=twin2_headers,
+        data=csrf_for(twin2_headers),
+        files={'file': ('note.png', PNG_BYTES, 'application/octet-stream')},
+    )
+    assert response.status == 200
+    assert response.text == 'Файл загружен'
+    attachment_id = storage.get_attachments(record_id)[0]['id']
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=twin2_headers)
+    assert response.status == 200
+
+    # Ref: те же действия тёзкой — запрещены (owner OR ref только)
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=twin2_headers,
+        data={**csrf_for(twin2_headers), **ATHLETE_RECORD_DATA, 'student_name': 'Одинаков Фамилия'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}/attachments',
+        headers=twin2_headers,
+        data=csrf_for(twin2_headers),
+        files={'file': ('note2.png', PNG_BYTES, 'application/octet-stream')},
+    )
+    assert response.status == 403
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=twin2_headers)
+    assert response.status == 403
+
+    # Владелец по связи (twin1) работает в обоих режимах: правка и вложения
+    twin1_headers = athlete_headers_for('twin1')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=twin1_headers,
+        data={**csrf_for(twin1_headers), **ATHLETE_RECORD_DATA, 'student_name': 'Одинаков Фамилия'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=twin1_headers)
+    assert response.status == 200
+
+
+def test_account_without_student_card(reconcile_client: SanicTestClient):
+    """Аккаунт без карточки: dual — owner и хеши; ref — только owner."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Сидоров Сидор', 'student_sex': 'М'})
+
+    save_reconcile_record(storage, 'Сидоров Сидор', datetime(2026, 1, 10))  # хеш
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 2, 10), owner_id=sportik['id'])
+
+    headers = athlete_headers()
+    _, response = reconcile_client.get('/', headers=headers)
+    assert 'Сидоров Сидор' in response.text
+    assert 'Чужое Имя' in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=headers)
+    assert 'Сидоров Сидор' not in response.text
+    assert 'Чужое Имя' in response.text
+
+
+def test_unlinked_participation_hash_only_disappears_in_ref(reconcile_client: SanicTestClient):
+    """Запись без ref, созданная модератором: владелец видит её в обоих
+    режимах; атлет, совпадающий только по ФИО, — только в dual."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    admin = storage.get_user(settings.auth_admin_username)
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=admin['id'])
+
+    athlete = athlete_headers()
+    _, response = reconcile_client.get('/', headers=athlete)
+    assert 'Иванов Иван' in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=athlete)
+    assert 'Иванов Иван' not in response.text
+    # Владелец-модератор видит свою запись в обоих режимах
+    _, response = reconcile_client.get('/', headers=get_auth_headers())
+    assert 'Иванов Иван' in response.text
+    assert record_ref(storage, record_id) is None
+
+
+def test_person_card_relink_preview_counts(reconcile_client: SanicTestClient):
+    """Предпросмотр «Видимо атлету» следует за перепривязкой аккаунта:
+    счётчики на карточке-цели учитывают её записи."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    first = storage.create_student('Иванов Иван', 'М', '', '', '')
+    second = storage.create_student('Петров Пётр', 'Ж', '', '', '')
+    storage.link_user(sportik['id'], first)
+
+    own = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=sportik['id'])
+    storage.link_competitions([own], first)
+    alien = save_reconcile_record(storage, 'Петров Пётр', datetime(2026, 2, 10))
+    storage.link_competitions([alien], second)
+
+    _, response = reconcile_client.get(f'/admin/people/{first}', headers=get_auth_headers())
+    assert 'сейчас 1 · после отвязки 1' in response.text
+
+    # Перепривязка аккаунта на вторую карточку: кабинет читает уже её
+    assert storage.relink_user(sportik['id'], second) == (first, None)
+    _, response = reconcile_client.get(f'/admin/people/{second}', headers=get_auth_headers())
+    assert 'сейчас 2 · после отвязки 1' in response.text
+
+
+def test_person_card_unlink_preview_counts_and_confirm_variants(reconcile_client: SanicTestClient):
+    """Три варианта подтверждения отвязки: ничего не меняется / частично /
+    пропадает всё; счётчики соответствуют scope атлета."""
+    storage = app.ctx.storage
+    student = storage.create_student('Иванов Иван', 'М', '', '', '')
+
+    # Все записи карточки названы «Иванов Иван»: stable покрывает их хешем
+    # (отвязка ничего не меняет), partial/doomed теряют их целиком.
+    storage.create_user('stable', 'hash', 'athlete')
+    stable = storage.get_user('stable')
+    storage.set_profile(stable['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    storage.link_user(stable['id'], student)
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=stable['id'])
+    storage.link_competitions(
+        [
+            save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 2, 10)),
+            save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 4, 10)),
+            save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 5, 10)),
+        ],
+        student,
+    )
+
+    storage.create_user('partial', 'hash', 'athlete')
+    partial = storage.get_user('partial')
+    storage.set_profile(partial['id'], {'student_name': 'Чужое Имя', 'student_sex': 'М'})
+    storage.link_user(partial['id'], student)
+    save_reconcile_record(storage, 'Чужое Имя', datetime(2026, 3, 10), owner_id=partial['id'])
+
+    storage.create_user('doomed', 'hash', 'athlete')
+    storage.link_user(storage.get_user('doomed')['id'], student)
+
+    _, response = reconcile_client.get(f'/admin/people/{student}', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'сейчас 4 · после отвязки 4' in response.text
+    assert 'сейчас 4 · после отвязки 1' in response.text
+    assert 'сейчас 3 · после отвязки 0' in response.text
+    # Подтверждения различают три случая
+    assert 'Видимость кабинета атлета не изменится (4 записей).' in response.text
+    assert 'Атлет будет видеть 1 из 4 записей.' in response.text
+    assert 'Атлет перестанет видеть записи этого студента (сейчас 3, останется 0).' in response.text
+
+
+def test_identity_report_counts_and_tab(reconcile_client: SanicTestClient):
+    """Отчёт проверки: сводка аккаунтов, строка H, риск тёзки, пропадающие
+    записи и вкладка с бейджем hash_only_total."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    storage.create_user('free', 'hash', 'athlete')
+    free = storage.get_user('free')
+    storage.set_profile(free['id'], {'student_name': 'Безкарточкин Бес', 'student_sex': 'М'})
+
+    student = storage.create_student('Иванов Иван', 'М', '', '', '')
+    namesake_card = storage.create_student('Иванов Иван', 'Ж', '', '', '')
+    storage.link_user(sportik['id'], student)
+
+    ref_only = save_reconcile_record(storage, 'По связи', datetime(2026, 1, 10))
+    storage.link_competitions([ref_only], student)
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 2, 10))
+    namesake = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 3, 10))
+    storage.link_competitions([namesake], namesake_card)
+    save_reconcile_record(storage, 'Безкарточкин Бес', datetime(2026, 4, 10))
+
+    # H: hash_only (спорт) + namesake (спорт, чужая карточка) + free_hash (free)
+    assert storage.count_hash_only_visible() == 3
+
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Режим идентификации' in response.text
+    assert 'двойной (dual)' in response.text
+    assert 'Аккаунтов атлетов: 2, из них привязано к карточкам: 1, без карточки: 1.' in response.text
+    assert 'пропадут из кабинетов при переходе на «только связи»:' in response.text
+    assert '<strong>3</strong>' in response.text
+    assert 'риск тёзки: 1' in response.text
+    assert 'Записи, которые пропадут из кабинетов' in response.text
+    # Бейдж вкладки — на всех трёх страницах раздела
+    for url in ('/admin/people/reconcile', '/admin/people/reconcile/users', '/admin/people/reconcile/identity'):
+        _, page = reconcile_client.get(url, headers=get_auth_headers())
+        assert page.status == 200
+        assert 'Режим идентификации' in page.text
+
+
+def test_identity_flip_blocked_with_hash_only(reconcile_client: SanicTestClient):
+    """Guard: при H≥1 формы нет, POST-подделка отклоняется — flash с числом,
+    режим прежний, аудита нет."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    assert storage.count_hash_only_visible() == 1
+
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', headers=get_auth_headers())
+    assert 'заблокирован' in response.text
+    assert 'action="/admin/people/reconcile/identity/flip"' not in response.text
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'ref'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/reconcile/identity?')
+    assert '1 записей видны атлетам только по ФИО' in location
+    assert storage.get_identity_mode() == 'dual'
+    assert audit_details(storage, 'identity_mode_changed') == []
+
+
+def test_identity_flip_dual_to_ref_with_zero_hash_only(reconcile_client: SanicTestClient):
+    """Dual→ref при H=0: режим меняется, аудит пишется, кабинет атлета
+    меняется ровно на H=0 записей — то есть не меняется."""
+    storage = app.ctx.storage
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    student = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.link_user(sportik['id'], student)
+    # Всё, что видит атлет, связано с его карточкой или принадлежит ему
+    linked = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10), owner_id=sportik['id'])
+    storage.link_competitions([linked], student)
+    assert storage.count_hash_only_visible() == 0
+
+    athlete = athlete_headers()
+    _, before = reconcile_client.get('/', headers=athlete)
+    assert before.status == 200
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'ref'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_identity_mode() == 'ref'
+    assert audit_details(storage, 'identity_mode_changed') == [{'old': 'dual', 'new': 'ref', 'hash_only_visible': 0}]
+
+    _, after = reconcile_client.get('/', headers=athlete)
+    assert after.status == 200
+    assert after.text == before.text
+
+
+def test_identity_flip_ref_back_to_dual_always_allowed(reconcile_client: SanicTestClient):
+    """Ref→dual — всегда разрешён (даже при H≥1) и пишется в аудит."""
+    storage = app.ctx.storage
+    storage.set_identity_mode('ref')
+    sportik = storage.get_user('sportik')
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван', 'student_sex': 'М'})
+    # Появилась hash-only запись — возврат всё равно разрешён
+    save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+    assert storage.count_hash_only_visible() == 1
+
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'dual'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_identity_mode() == 'dual'
+    assert audit_details(storage, 'identity_mode_changed') == [{'old': 'ref', 'new': 'dual', 'hash_only_visible': 1}]
+    # Атлет снова видит запись по ФИО
+    _, response = reconcile_client.get('/', headers=athlete_headers())
+    assert 'Иванов Иван' in response.text
+
+
+def test_athlete_self_submit_visible_by_owner_in_both_modes(reconcile_client: SanicTestClient):
+    """Своя заявка атлета видна по owner в dual и в ref (модерация —
+    как раньше: новая запись уходит в pending)."""
+    storage = app.ctx.storage
+    headers = athlete_headers()
+    _, response = reconcile_client.post(
+        '/competition',
+        headers=headers,
+        data={**csrf_for(headers), **ATHLETE_RECORD_DATA},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT id, review_status, owner_id FROM competitions WHERE student_name = ?',
+        (ATHLETE_RECORD_DATA['student_name'],),
+    ).fetchone()
+    assert row['review_status'] == 'pending'
+    assert row['owner_id'] == storage.get_user('sportik')['id']
+
+    _, response = reconcile_client.get('/', headers=headers)
+    assert ATHLETE_RECORD_DATA['student_name'] in response.text
+
+    storage.set_identity_mode('ref')
+    _, response = reconcile_client.get('/', headers=headers)
+    assert ATHLETE_RECORD_DATA['student_name'] in response.text
+
+
+def test_admin_editor_semantics_unchanged_in_ref_mode(reconcile_client: SanicTestClient):
+    """Режим касается только кабинета атлета: admin/editor видят весь
+    реестр, editor правит любую запись, модерация подтверждает."""
+    storage = app.ctx.storage
+    storage.set_identity_mode('ref')
+    record_id = save_reconcile_record(storage, 'Иванов Иван', datetime(2026, 1, 10))
+
+    _, response = reconcile_client.get('/', headers=get_auth_headers(role='editor'))
+    assert 'Иванов Иван' in response.text
+
+    editor = get_auth_headers(role='editor')
+    _, response = reconcile_client.post(
+        f'/competition/{record_id}',
+        headers=editor,
+        data={**csrf_for(editor), **ATHLETE_RECORD_DATA, 'student_name': 'Иванов Иван'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    # Правка модератора подтверждает запись
+    assert storage.get_competition_review(record_id)['review_status'] == 'approved'
+
+
+def test_identity_endpoints_require_admin_and_csrf(reconcile_client: SanicTestClient):
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', headers=get_auth_headers(role='editor'))
+    assert response.status == 403
+
+    _, response = reconcile_client.get('/admin/people/reconcile/identity', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    _, response = reconcile_client.post('/admin/people/reconcile/identity/flip', data={'mode': 'ref'})
+    assert response.status == 401
+
+    # CSRF проверяет общий middleware POST-запросов
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip', headers=get_auth_headers(), data={'mode': 'ref'}
+    )
+    assert response.status == 403
+    assert 'CSRF' in response.text
+
+    # Неизвестный режим — 400, ничего не меняется
+    headers = get_auth_headers()
+    _, response = reconcile_client.post(
+        '/admin/people/reconcile/identity/flip',
+        headers=headers,
+        data={**csrf_for(headers), 'mode': 'single'},
+    )
+    assert response.status == 400
+    assert app.ctx.storage.get_identity_mode() == 'dual'
 
 
 # --- Импорт студентов из Excel (Student Identity v1, Phase 2.5). ---
@@ -10049,10 +10943,13 @@ def test_calendar_participant_add_writes_student_ref(event_import_client: SanicT
     assert response.status == 302
     assert response.headers['location'].startswith(f'/calendar/{event_id}?admin_message=')
     record = storage.connection.execute(
-        'SELECT student_name, student_sex, institute, "group", student_ref_id FROM competitions'
+        'SELECT student_name, student_sex, institute, "group", student_ref_id, calendar_event_id FROM competitions'
     ).fetchone()
-    # Снимок = значения формы (не карточки), связь — по явному выбору.
-    assert tuple(record) == ('Иванов Иван Иванович', '', '', '', student_id)
+    # Снимок = значения формы (не карточки), связь — по явному выбору;
+    # P2: участие явно связано с событием (участники читаются по ссылке).
+    assert tuple(record) == ('Иванов Иван Иванович', '', '', '', student_id, event_id)
+    # Участник виден на странице события (id-first).
+    assert [p['student_name'] for p in storage.list_calendar_event_participants(event_id)] == ['Иванов Иван Иванович']
 
     # Инлайн-правка записи (POST /competition/<id>) связь не сбрасывает.
     record_id = storage.connection.execute('SELECT id FROM competitions').fetchone()['id']
@@ -10102,6 +10999,314 @@ def test_calendar_participant_add_rejects_invalid_student_ref(event_import_clien
         assert response.status == 302
         assert 'Выбранная карточка студента не найдена или неактивна.' in unquote_plus(response.headers['location'])
     assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 0
+
+
+# --- Event Model, Wave 1 P2: стабильная связь «запись → событие». ---
+
+
+def record_identity_snapshot(storage, record_id: int) -> tuple:
+    """Сырой снимок event-owned + внутренних полей записи (byte-equivalent)."""
+    row = storage.connection.execute(
+        'SELECT name, sport, date, date_to, level, discipline, result, calendar_event_id, student_ref_id '
+        'FROM competitions WHERE id = ?',
+        (record_id,),
+    ).fetchone()
+    return tuple(row)
+
+
+def test_linked_record_edit_ignores_forged_event_fields_and_keeps_identity(event_import_client: SanicTestClient):
+    """P2 + QA O1: запись со ссылкой на событие не владеет полями
+    название/вид спорта/дата/уровень — даже подделанная форма их не меняет;
+    discipline/result (форма их не присылает) не затираются модельными None;
+    не-event-owned поля (институт/группа/место) редактируются."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_ref_id': str(student_id),
+            'course': '2',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    record_id = storage.connection.execute('SELECT id FROM competitions').fetchone()['id']
+    storage.connection.execute(
+        "UPDATE competitions SET discipline = 'Бег 100 м', result = '11.2' WHERE id = ?",
+        (record_id,),
+    )
+    storage.connection.commit()
+    before = record_identity_snapshot(storage, record_id)
+    assert before[:5] == ('Забег 2026', 'Бег', '2026-05-10T00:00:00', '2026-05-11T00:00:00', 'внутривузовские')
+
+    # Подделанная форма: чужие название/вид спорта/дата/уровень + правка
+    # обычных полей.
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-201',
+            'sport': 'Подделанный спорт',
+            'date': '01.01.2030',
+            'level': 'олимпийские',
+            'name': 'Подделанное название',
+            'position': '3',
+            'course': '3',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert record_identity_snapshot(storage, record_id) == before
+    row = storage.connection.execute(
+        'SELECT institute, "group", position, course FROM competitions WHERE id = ?',
+        (record_id,),
+    ).fetchone()
+    assert tuple(row) == ('ИСИ', 'ПГС-201', 3, 3)
+
+
+def test_null_record_edit_updates_event_owned_fields(event_import_client: SanicTestClient):
+    """QA O1 (NULL-путь): у записи без ссылки на событие event-owned поля
+    по-прежнему редактируются формой; discipline/result сохраняются."""
+    storage = app.ctx.storage
+    record = Competition(
+        student_id='id-null-record',
+        student_name='Осипов Осип',
+        student_sex='М',
+        institute='ИСИ',
+        group='ГРП-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 1, 10),
+        level='внутривузовские',
+        name='Старый кубок',
+        position=1,
+        discipline='Эстафета',
+        result='3:21',
+    )
+    storage.save_competitions([record])
+    record_id = int(storage.connection.execute('SELECT id FROM competitions').fetchone()['id'])
+
+    headers = get_auth_headers(role='editor')
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Осипов Осип',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ГРП-101',
+            'sport': 'Лыжи',
+            'date': '20.02.2026',
+            'level': 'региональные',
+            'name': 'Новый кубок',
+            'position': '2',
+            'course': '3',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert record_identity_snapshot(storage, record_id) == (
+        'Новый кубок',
+        'Лыжи',
+        '2026-02-20T00:00:00',
+        None,
+        'региональные',
+        'Эстафета',
+        '3:21',
+        None,
+        None,
+    )
+
+
+def test_calendar_edit_route_syncs_participations_and_audits(event_import_client: SanicTestClient):
+    """Правка события синхронизирует связанные записи (5 полей) и пишет
+    audit calendar_event_edited с old/new и synced_participations."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    headers = get_auth_headers()
+    for name in ('Иванов Иван Иванович', 'Петров Пётр Петрович'):
+        _, response = event_import_client.post(
+            f'/calendar/{event_id}/participants',
+            headers=headers,
+            data={**csrf_for(headers), 'student_name': name, 'course': '1'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+    # NULL-сосед с тем же старым пресетом — синхронизация его не трогает.
+    storage.save_competitions(
+        [
+            Competition(
+                student_id='id-null-neighbor',
+                student_name='Сидоров Сидор',
+                student_sex='М',
+                institute='ИСИ',
+                group='ГРП-101',
+                course=1,
+                sport='Бег',
+                date=datetime(2026, 5, 10),
+                date_to=datetime(2026, 5, 11),
+                level='внутривузовские',
+                name='Забег 2026',
+                position=1,
+            )
+        ]
+    )
+
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Забег 2026 — обновлённый',
+            'date': '20-21.06.2026',
+            'level': 'межвузовские',
+            'sport': 'Лыжи',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_message=')
+
+    event = storage.get_calendar_event(event_id)
+    assert event['name'] == 'Забег 2026 — обновлённый'
+    assert event['date'] == '2026-06-20T00:00:00'
+    assert event['date_to'] == '2026-06-21T00:00:00'
+
+    rows = storage.connection.execute(
+        'SELECT student_name, name, sport, date, date_to, level, calendar_event_id '
+        'FROM competitions ORDER BY student_name'
+    ).fetchall()
+    assert len(rows) == 3
+    for row in rows[:2]:  # Иванов/Петров — связанные, синхронизированы
+        assert tuple(row)[1:] == (
+            'Забег 2026 — обновлённый',
+            'Лыжи',
+            '2026-06-20T00:00:00',
+            '2026-06-21T00:00:00',
+            'межвузовские',
+            event_id,
+        )
+    assert tuple(rows[2])[1:] == (
+        'Забег 2026',
+        'Бег',
+        '2026-05-10T00:00:00',
+        '2026-05-11T00:00:00',
+        'внутривузовские',
+        None,
+    )
+
+    assert audit_details(storage, 'calendar_event_edited') == [
+        {
+            'event_id': event_id,
+            'name': {'old': 'Забег 2026', 'new': 'Забег 2026 — обновлённый'},
+            'date': {'old': '2026-05-10T00:00:00', 'new': '2026-06-20T00:00:00'},
+            'date_to': {'old': '2026-05-11T00:00:00', 'new': '2026-06-21T00:00:00'},
+            'sport': {'old': 'Бег', 'new': 'Лыжи'},
+            'level': {'old': 'внутривузовские', 'new': 'межвузовские'},
+            'synced_participations': 2,
+        }
+    ]
+
+
+def test_calendar_delete_blocked_by_linked_participant_real_storage(event_import_client: SanicTestClient):
+    """Удаление события с участников: блокирует ССЫЛКА (не пресет — запись
+    намеренно с другими полями); пустое событие удаляется как раньше."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(
+        storage, name='Уникальный забег', date='2027-01-10T00:00:00', date_to=None, level='', sport='Плавание'
+    )
+    # Связанная запись с РАЗОШЕДШИМСЯ пресетом: блокирует только ссылка.
+    storage.save_competitions(
+        [
+            Competition(
+                student_id='id-linked-far',
+                student_name='Далёков Далёк',
+                student_sex='М',
+                institute='ИСИ',
+                group='ГРП-101',
+                course=1,
+                sport='Бег',
+                date=datetime(2026, 2, 20),
+                level='внутривузовские',
+                name='Совсем другое название',
+                position=1,
+                calendar_event_id=event_id,
+            )
+        ]
+    )
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/delete',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'есть участники: 1.' in unquote_plus(response.headers['location'])
+    assert storage.get_calendar_event(event_id) is not None
+
+    # Пустое событие удаляется (записей по ссылке и по пресету нет).
+    empty_id = make_calendar_event(
+        storage, name='Пустой турнир', date='2027-03-01T00:00:00', date_to=None, level='', sport=''
+    )
+    _, response = event_import_client.post(
+        f'/calendar/{empty_id}/delete',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Соревнование удалено' in unquote_plus(response.headers['location'])
+    assert storage.get_calendar_event(empty_id) is None
+
+
+def test_event_import_row_add_and_create_student_write_link(event_import_client: SanicTestClient):
+    """Все явные пути импорта участников пишут calendar_event_id (row-add и
+    create-student здесь; bulk — test_event_import_relations_event_preset)."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [
+            {'ФИО': 'Иванов Иван Иванович', 'Курс': 1},
+            {'ФИО': 'Козлов Козьма Козьмич', 'Курс': 1},
+        ],
+    )
+    token = import_session_token(response)
+
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/add')
+    assert 'Строка 2: участник добавлен.' in unquote_plus(response.headers['location'])
+    response = post_event_import_action(
+        event_import_client,
+        event_id,
+        token,
+        'row/3/create-student',
+        {'full_name': 'Козлов Козьма Козьмич', 'sex': 'М', 'institute': 'ИСИ', 'group': 'Т-100', 'course': '1'},
+    )
+    assert 'студент «Козлов Козьма Козьмич» создан, участник добавлен.' in unquote_plus(response.headers['location'])
+
+    links = [
+        row['calendar_event_id']
+        for row in storage.connection.execute('SELECT calendar_event_id FROM competitions ORDER BY id').fetchall()
+    ]
+    assert links == [event_id, event_id]
+    assert [participant['student_name'] for participant in storage.list_calendar_event_participants(event_id)] == [
+        'Иванов Иван Иванович',
+        'Козлов Козьма Козьмич',
+    ]
 
 
 def test_calendar_event_page_shows_import_button_and_ref_field(event_import_client: SanicTestClient):
@@ -10525,12 +11730,14 @@ def test_event_import_existing_participation_is_informational(event_import_clien
     event_id = make_calendar_event(storage)
     student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
     save_reconcile_record(storage, 'Иванов Иван Иванович', datetime(2026, 5, 10), position=5)
-    # Существующая запись — участник того же события (пресет совпадает).
+    # Существующая запись — участник того же события: P2 — связь по
+    # calendar_event_id (пресет тоже совпадает, но состав участников
+    # читается по ссылке).
     storage.connection.execute(
         "UPDATE competitions SET name = 'Забег 2026', date = '2026-05-10T00:00:00', "
         "date_to = '2026-05-11T00:00:00', "
-        "sport = 'Бег', level = 'внутривузовские', student_ref_id = ?",
-        (student_id,),
+        "sport = 'Бег', level = 'внутривузовские', student_ref_id = ?, calendar_event_id = ?",
+        (student_id, event_id),
     )
     storage.connection.commit()
     response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1}])
@@ -10804,6 +12011,11 @@ def test_event_import_relations_event_preset(event_import_client: SanicTestClien
     assert record[7] is None
     assert record[8] == 'межвузовские'
     assert record[9] == 'Кросс весны'
+    # P2: bulk-импорт пишет явную ссылку на событие.
+    assert (
+        storage.connection.execute('SELECT calendar_event_id FROM competitions').fetchone()['calendar_event_id']
+        == event_id
+    )
     # Участник появился в списке события, счётчик обновился.
     participants = storage.list_calendar_event_participants(event_id)
     assert [participant['student_name'] for participant in participants] == ['Иванов Иван Иванович']
@@ -11885,7 +13097,9 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         custom_fields=[],
     )
     competition.student_ref_id = 42
-    # Wave 1 P1: служебные поля participation-identity тоже не отдаются.
+    # Wave 1 P1: calendar_event_id — внутренняя колонка. Event Model, P5a:
+    # дисциплина/результат отдаются фиксированными колонками «Дисциплина»/
+    # «Результат», а не внутренними ключами модели.
     competition.discipline = 'Бег 100 м'
     competition.result = '11.2'
     competition.calendar_event_id = 7
@@ -11894,6 +13108,8 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
     assert 'discipline' not in row
     assert 'result' not in row
     assert 'calendar_event_id' not in row
+    assert row['Дисциплина'] == 'Бег 100 м'
+    assert row['Результат'] == '11.2'
     assert set(row) == {
         'Код студента',
         'ФИО',
@@ -11906,6 +13122,8 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         'Уровень соревнований',
         'Название соревнований',
         'Место',
+        'Дисциплина',
+        'Результат',
     }
 
 

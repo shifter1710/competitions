@@ -15,3 +15,4 @@ data/*
 .v2c/
 .video_agent/
 .zcode/
+.zcodeignore

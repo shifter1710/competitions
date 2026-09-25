@@ -221,7 +221,19 @@
                         <td data-column-key="sport">{{ bound_cell(competition.sport, link_bindings.get('sport'), competition.extra_data) }}</td>
                         <td data-column-key="date" data-sort-value="{{ competition.date.strftime('%Y-%m-%d') }}">{{ format_date_range(competition.date, competition.date_to) }}</td>
                         <td data-column-key="level">{{ bound_cell(competition.level, link_bindings.get('level'), competition.extra_data) }}</td>
-                        <td class="competition" data-column-key="name">{{ bound_cell(competition.name, link_bindings.get('name'), competition.extra_data) }}</td>
+                        {# P2: у связанной со событием записи название — ссылка
+                           на страницу соревнования (у атлета страница события
+                           недоступна — 403, поэтому ему простой текст);
+                           NULL-записи — прежний bound_cell без изменений. #}
+                        <td class="competition" data-column-key="name">
+                        {%- if competition.calendar_event_id and not is_athlete -%}
+                            <a href="/calendar/{{ competition.calendar_event_id }}" class="link" title="Открыть страницу соревнования">{{ competition.name }}</a>
+                        {%- elif competition.calendar_event_id -%}
+                            {{ competition.name }}
+                        {%- else -%}
+                            {{ bound_cell(competition.name, link_bindings.get('name'), competition.extra_data) }}
+                        {%- endif -%}
+                        </td>
                         <td data-column-key="position">{{ competition.position }}</td>
                         <td data-column-key="course">{{ competition.course }}</td>
                         {% for field in custom_fields if field.show_in_table %}
@@ -298,6 +310,9 @@
                                 data-name="{{ competition.name }}"
                                 data-position="{{ competition.position }}"
                                 data-extra-json='{{ competition.extra_data | tojson }}'
+                                {# P2: непустая ссылка на событие — event-owned
+                                   поля строки не редактируются (script.js). #}
+                                data-calendar-event-id="{{ competition.calendar_event_id or '' }}"
                             >
                                 Редактировать
                             </button>
@@ -339,7 +354,7 @@
     {% if can_write %}
     {# Подсказка о жестах строки (замечания №5/№9): колонка действий
        закреплена, Enter/Esc работают в режиме правки. #}
-    <div class="table-gestures-hint ui-hint">Двойной клик по строке — редактирование; Enter — сохранить, Esc — отменить</div>
+    <div class="table-gestures-hint ui-hint">Двойной клик по строке — редактирование; Enter — сохранить, Esc — отменить. В строках, связанных со соревнованием, поля «Название», «Вид спорта», «Дата» и «Уровень» не редактируются — они берутся из соревнования.</div>
     {% endif %}
     {% else %}
     <div class="empty-content">{% if index_is_filtered %}Записей с текущим фильтром не найдено{% else %}Нет данных{% endif %}</div>
