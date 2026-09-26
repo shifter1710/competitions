@@ -37,6 +37,12 @@ RENAME_CATEGORIES: tuple[str, ...] = ('level', 'sport', 'institute', 'group')
 IDENTITY_MODES: tuple[str, ...] = ('dual', 'ref')
 IDENTITY_MODE_DEFAULT = 'dual'
 
+# Ревалидация полей карточки при создании из storage (create_student_and_
+# link_participation): допустимый «пол» — только М/Ж или пусто. Зеркалит
+# STUDENT_SEX_OPTIONS из src/main.py (роут не импортируется сюда, чтобы не
+# создавать цикл); изменение набора — синхронно в обоих местах.
+STUDENT_SEX_VALUES: frozenset[str] = frozenset({'', 'М', 'Ж'})
+
 # Срезы отчёта (замечание №19, docs/data-model-decisions.md «Расширение
 # отчётов»): группировка ВСЕГДА по данным записи — исторический факт на
 # момент соревнования, смена группы/института в профиле строки не склеивает.
@@ -3249,6 +3255,103 @@ class SQLiteAdapter:
             )
             self.connection.commit()
             return cursor.rowcount, None
+
+    def create_student_and_link_participation(
+        self,
+        *,
+        event_id: int,
+        record_id: int,
+        full_name: str,
+        sex: str,
+        institute: str,
+        group_name: str,
+        course: str,
+    ) -> tuple[int | None, str | None]:
+        """Создать карточку студента и сразу привязать к ней cardless-участие
+        события («Создать и связать» со страницы участника) ОДНОЙ транзакцией.
+
+        Паттерн create_calendar_event_and_link: проверки и оба шага — под
+        self._lock в одной транзакции (try/commit/except: rollback; raise);
+        сбой на любом шаге откатывает всё, карточка-сирота невозможна — в
+        отличие от последовательных create_student + link_competitions, где
+        гонка already_linked оставляла пустую карточку. Возвращает
+        (student_id, None) при успехе или (None, код ошибки) при отказе
+        (0 изменений в любом случае): record_not_found / event_mismatch /
+        already_linked / invalid_full_name / invalid_sex.
+
+        Проверки внутри транзакции:
+        - участие существует, принадлежит событию (calendar_event_id =
+          event_id) и ещё без карточки — ДО вставки, чтобы не создавать
+          студента ради отказа;
+        - поля карточки валидны (ФИО непустое после strip; пол '', «М»,
+          «Ж» — ровно parse_student_form роута): ревалидация закрывает
+          расхождение «форма проверена в роуте → create здесь»;
+        - гонку «SELECT → INSERT → UPDATE» закрывает guarded UPDATE:
+          rowcount = 0 → already_linked, откат и карточки, и связи.
+
+        P4 matched-duplicate guard (event_participation_matched_duplicate_
+        guard) здесь НЕ применяется, и это осознанно: инвариант (событие,
+        карточка, нормализованная дисциплина) сравнивает участия
+        СУЩЕСТВУЮЩИХ карточек, а у создаваемой карточки id ещё нет ни в одном
+        участии — её будущий student_ref_id не пересекается с чужими
+        identity, и после привязки у новой карточки ровно одно участие (сама
+        привязываемая запись). Дубль против существующих карточек закрывают
+        link-existing (guard в роуте POST .../link) и импорт; сценарий
+        «после create связь не нужна» (прецедент admin_reconcile_create_
+        record) неприменим — связь здесь и есть цель операции, отказа без
+        карточки не существует.
+        """
+        with self._lock:
+            try:
+                record = self.connection.execute(
+                    'SELECT id, student_ref_id, calendar_event_id FROM competitions WHERE id = ?',
+                    (int(record_id),),
+                ).fetchone()
+                if record is None:
+                    return None, 'record_not_found'
+                if record['calendar_event_id'] != int(event_id):
+                    return None, 'event_mismatch'
+                if record['student_ref_id'] is not None:
+                    return None, 'already_linked'
+                values = {
+                    'full_name': (full_name or '').strip(),
+                    'sex': (sex or '').strip(),
+                    'institute': (institute or '').strip(),
+                    'group_name': (group_name or '').strip(),
+                    'course': (course or '').strip(),
+                }
+                if not values['full_name']:
+                    return None, 'invalid_full_name'
+                if values['sex'] not in STUDENT_SEX_VALUES:
+                    return None, 'invalid_sex'
+                now = datetime.utcnow().isoformat()
+                cursor = self.connection.execute(
+                    'INSERT INTO students '
+                    '(full_name, sex, institute, group_name, course, active, created_at, updated_at) '
+                    'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+                    (
+                        values['full_name'],
+                        values['sex'],
+                        values['institute'],
+                        values['group_name'],
+                        values['course'],
+                        now,
+                        now,
+                    ),
+                )
+                student_id = cursor.lastrowid
+                linked = self.connection.execute(
+                    'UPDATE competitions SET student_ref_id = ? ' 'WHERE id = ? AND student_ref_id IS NULL',
+                    (student_id, int(record_id)),
+                )
+                if linked.rowcount == 0:
+                    self.connection.rollback()
+                    return None, 'already_linked'
+                self.connection.commit()
+                return student_id, None
+            except BaseException:
+                self.connection.rollback()
+                raise
 
     def unlink_competition(self, record_id: int) -> int | None:
         """Снять связь записи с карточкой; прежний student_ref_id (или None,
