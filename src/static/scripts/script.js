@@ -371,7 +371,7 @@ function initFlashAutoHide() {
 // (эндпоинт отвечает 403, его автоподстановка из профиля уже работает).
 //
 // Варианты двух видов: kind === "student" — активная карточка из раздела
-// Students (вторая строка с мета-данными и бейджем «Student #N»), прочие —
+// Students (вторая строка с мета-данными и бейджем «карточка»), прочие —
 // легаси-подсказки по истории участий. Опция {students: true} включает
 // карточки (страница участника события: явный выбор пишет student_ref_id);
 // без неё (инлайн-строки главной) карточки фильтруются — POST /competition
@@ -519,8 +519,9 @@ class FioResolver {
         return [athlete.sex, ...parts].filter(Boolean);
     }
 
-    // Вариант-карточка: имя + бейдж «Student #N» первой строкой, мета
-    // «институт · группа X · N курс» — второй (только непустые части,
+    // Вариант-карточка: имя + бейдж «карточка» первой строкой (без номера —
+    // карточки видит только admin, прочим ролям число ничего не говорит),
+    // мета «институт · группа X · N курс» — второй (только непустые части,
     // white-space normal — длинные подписи переносятся, а не обрезаются).
     renderStudentOption(item, athlete) {
         item.className = "combobox-option combobox-option--student";
@@ -529,7 +530,7 @@ class FioResolver {
         nameLine.textContent = athlete.name;
         const badge = document.createElement("span");
         badge.className = "badge text-bg-light border ms-1";
-        badge.textContent = `Student #${athlete.student_id}`;
+        badge.textContent = "карточка";
         nameLine.append(badge);
         const meta = [athlete.institute, athlete.group, athlete.course ? `курс ${athlete.course}` : ""].filter(Boolean);
         item.title = this.optionMeta(athlete).join(", ");
@@ -3144,7 +3145,6 @@ class ParticipantsPage {
         }
         const refInput = document.getElementById("participant-student-ref");
         const badge = document.getElementById("participant-student-badge");
-        const badgeId = document.getElementById("participant-student-badge-id");
         const resetLink = document.getElementById("participant-student-reset");
         let selectedStudent = null;
         const hintedInputs = [];
@@ -3163,9 +3163,6 @@ class ParticipantsPage {
             if (refInput) {
                 refInput.value = student ? String(student.student_id) : "";
             }
-            if (badgeId) {
-                badgeId.textContent = student ? String(student.student_id) : "";
-            }
             clearTitleHints();
             if (!student) {
                 hideBadge();
@@ -3178,7 +3175,7 @@ class ParticipantsPage {
             if (input && !input.value) {
                 input.value = value;
                 if (athlete.kind === "student") {
-                    input.title = `Подставлено из карточки Student #${athlete.student_id}`;
+                    input.title = "Подставлено из карточки студента";
                     hintedInputs.push(input);
                 }
             }
@@ -3312,8 +3309,8 @@ class ParticipantsPage {
         const studentRefId = String(dataset.studentRefId || "").trim();
         if (studentRefId) {
             const badge = document.createElement("span");
-            badge.className = "badge text-bg-primary participant-student-link";
-            badge.textContent = `Student #${studentRefId}`;
+            badge.className = "badge text-bg-secondary participant-student-link";
+            badge.textContent = "карточка студента";
             badge.title = "Связь с карточкой студента сохраняется при правке. Изменить её можно в разделе «Сопоставление данных».";
             const badgeWrap = document.createElement("div");
             badgeWrap.className = "mt-1";

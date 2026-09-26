@@ -15059,7 +15059,10 @@ def test_p7_single_participation_renders_flat_row(client: SanicTestClient):
         assert body.count('row-group-item') == 0
         # Полная строка: ФИО, снимок, бейдж карточки, дисциплина, результат
         assert 'Иванов Дмитрий Сергеевич' in body
-        assert 'Student #101' in body
+        # Viewer: нейтральный бейдж без номера карточки и без ссылки на карточку
+        assert 'participant-student-link' in body
+        assert 'Student #' not in body
+        assert 'href="/admin/people' not in body
         assert 'Бег 100 м' in body
         assert '11,2' in body
         assert 'add_participation' not in body
@@ -15080,7 +15083,10 @@ def test_p7_two_participations_render_parent_and_children(client: SanicTestClien
         assert body.count('class="row-group-item"') == 2
         # Parent: снимок первой (по серверной сортировке) linked-строки + бейдж
         assert 'Иванов Дмитрий Сергеевич' in body
-        assert 'Student #101' in body
+        # Viewer: нейтральный бейдж без номера, без ссылки на карточку
+        assert 'participant-student-link' in body
+        assert 'Student #' not in body
+        assert 'href="/admin/people' not in body
         # Children отсортированы по дисциплине: 100 м раньше 200 м
         assert body.index('Бег 100 м') < body.index('Бег 200 м')
         # Счётчики: участников 2 (группа + cardless), участий 3, без результата 2
@@ -15204,9 +15210,12 @@ def test_p7_same_name_different_refs_not_merged(client: SanicTestClient):
         body = response.body.decode()
         # Обе записи одиночные → 2 плоские строки, групп нет
         assert body.count('class="row-group"') == 0
-        assert body.count('<td>Иванов Дмитрий Сергеевич') == 2
-        assert 'Student #101' in body
-        assert 'Student #202' in body
+        # Обе строки показывают ФИО: ячейка + data-student-name строки
+        assert body.count('Иванов Дмитрий Сергеевич') == 4
+        # Бейдж «карточка студента» — у обеих linked-строк (без номера ref)
+        assert body.count('participant-student-link') == 2
+        assert 'Student #' not in body
+        assert 'href="/admin/people' not in body
         assert 'Участников: <strong>2</strong>' in body
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
@@ -15224,9 +15233,10 @@ def test_p7_cardless_same_name_not_merged(client: SanicTestClient):
         body = response.body.decode()
         assert body.count('class="row-group"') == 0
         assert body.count('row-group-item') == 0
-        assert body.count('<td>Иванов Дмитрий Сергеевич') == 2
+        # ФИО дважды на строку: ячейка + data-student-name
+        assert body.count('Иванов Дмитрий Сергеевич') == 4
         # Бейдж — только у linked-строки
-        assert body.count('Student #') == 1
+        assert body.count('participant-student-link') == 1
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
@@ -15878,6 +15888,503 @@ def test_hotfix_single_to_group_flow_via_add_participation(event_import_client: 
     body = page().text
     assert body.count('class="row-group-item"') == 2
     assert storage.count_calendar_event_participants(event_id) == 2
+
+
+# --- Student links (2026-09-26): «Student #N» убран со страницы события;
+# admin — ФИО-ссылка на карточку + кнопка «Связать со студентом» у
+# cardless-строк (отдельная страница привязки/создания карточки),
+# editor/viewer — ФИО текстом с нейтральным бейджем без номера. ---
+
+
+def test_event_page_admin_flat_linked_name_is_link(client: SanicTestClient):
+    """Admin: ФИО связанной одиночной строки — ссылка на карточку студента,
+    бейджа-«#N» больше нет; кнопки «Связать» у linked-строки нет."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = [_participants_sample()[0]]
+    try:
+        body = get_event_page(client, 7, role='admin').text
+        assert '<a href="/admin/people/101"' in body
+        assert 'Иванов Дмитрий Сергеевич</a>' in body
+        assert 'Student #' not in body
+        # Бейдж-индикатор у admin не дублируется — вместо него ссылка
+        assert 'participant-student-link' not in body
+        assert 'Связать со студентом' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_event_page_admin_parent_name_is_link(client: SanicTestClient):
+    """Admin: parent-строка группы — та же ФИО-ссылка на карточку."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        body = get_event_page(client, 7, role='admin').text
+        assert body.count('<a href="/admin/people/101"') == 1
+        assert 'Student #' not in body
+        assert 'participant-student-link' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_event_page_editor_viewer_linked_text_and_badge(client: SanicTestClient):
+    """Editor/viewer: ФИО текстом + нейтральный бейдж «карточка студента»
+    без номера и без ссылки; кнопки связывания нет ни у какой строки."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _participants_sample()
+    try:
+        for role in ('editor', 'viewer'):
+            body = get_event_page(client, 7, role=role).text
+            assert 'href="/admin/people' not in body, role
+            assert 'Student #' not in body, role
+            # Один бейдж: linked-строка есть, cardless-строка — без него
+            assert body.count('participant-student-link') == 1, role
+            assert 'title="Запись привязана к карточке студента"' in body, role
+            assert 'Связать со студентом' not in body, role
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_event_page_admin_cardless_has_link_button(client: SanicTestClient):
+    """Admin: у cardless-строки — кнопка «Связать со студентом» со ссылкой
+    на страницу привязки; у linked-строки кнопки нет."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _participants_sample()
+    try:
+        body = get_event_page(client, 7, role='admin').text
+        assert body.count('Связать со студентом') == 1
+        # Кнопка — у cardless-записи (12), не у связанной (11)
+        assert 'href="/calendar/7/participants/12/link"' in body
+        assert 'href="/calendar/7/participants/11/link"' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_event_page_add_row_and_prefill_badges_without_number(event_import_client: SanicTestClient):
+    """Резолвер и prefill «+ участие»: бейдж «карточка студента» без #N;
+    hidden student_ref_id сохраняется (логика связи не менялась)."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', position=1
+    )
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='200 м', position=2
+    )
+    # Строка добавления (editor): бейдж резолвера без номера + hidden-поле
+    body = get_event_page(event_import_client, event_id, role='editor').text
+    assert 'Выбрана карточка студента' in body
+    assert 'Student #' not in body
+    assert 'name="student_ref_id" value="" id="participant-student-ref"' in body
+    # Prefill «+ участие»: бейдж без номера, hidden ref на месте
+    body = get_event_page(event_import_client, event_id, query=f'?add_participation={student_id}').text
+    assert 'participant-student-link' in body
+    assert 'Student #' not in body
+    assert f'name="student_ref_id" value="{student_id}"' in body
+
+
+def post_participant_link(client, event_id: int, record_id: int, data: dict, *, role: str = 'admin'):
+    """POST на роуты страницы привязки участника; ответ — редирект."""
+    headers = get_auth_headers(role=role)
+    _, response = client.post(
+        f'/calendar/{event_id}/participants/{record_id}/{data.pop("_route", "link")}',
+        headers=headers,
+        data={**csrf_for(headers), **data},
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_participant_link_page_requires_admin(event_import_client: SanicTestClient):
+    """Страница/POST привязки участника — admin-only: editor/viewer — 403,
+    аноним — редирект на вход."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(storage, event_id, 'Иванов Иван Иванович')
+    for role in ('editor', 'viewer'):
+        _, response = event_import_client.get(
+            f'/calendar/{event_id}/participants/{record_id}/link',
+            headers=get_auth_headers(role=role),
+        )
+        assert response.status == 403, role
+    _, response = event_import_client.get(f'/calendar/{event_id}/participants/{record_id}/link', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+    for role in ('editor', 'viewer'):
+        response = post_participant_link(event_import_client, event_id, record_id, {'student_id': '1'}, role=role)
+        assert response.status == 403, role
+        response = post_participant_link(
+            event_import_client,
+            event_id,
+            record_id,
+            {'_route': 'create-and-link', 'full_name': 'X', 'sex': '', 'institute': '', 'group': '', 'course': ''},
+            role=role,
+        )
+        assert response.status == 403, role
+
+
+def test_participant_link_page_renders_namesakes_and_search(event_import_client: SanicTestClient):
+    """Страница привязки: снимок записи, блок «Однофамильцы» (точное ФИО +
+    псевдоним, с контекстом), поиск ?q= по подстроке, форма создания."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', discipline='100 м', position=1, result='11,2'
+    )
+    storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    other = storage.create_student('Петров Пётр Петрович', 'Ж', 'ИТМ', 'ТМб-12', '1')
+    storage.add_student_alias(other, 'Иванов Иван Иванович')
+
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/{record_id}/link', headers=get_auth_headers()
+    )
+    assert response.status == 200
+    body = response.text
+    assert 'Связать участника со студентом' in body
+    assert f'Запись №{record_id} — участник без карточки студента' in body
+    assert 'Иванов Иван Иванович' in body
+    assert '100 м' in body
+    assert '11,2' in body
+    # Однофамильцы: предупреждение — не блокер, обе карточки (ФИО + псевдоним)
+    assert 'Однофамильцы' in body
+    assert 'Проверьте: похожие карточки уже есть' in body
+    assert 'ИСЭиУ' in body
+    assert 'ЭБ-241' in body
+    assert 'псевдоним' in body
+    # Поиск: без q — подсказка, с q — результаты/пусто
+    assert 'Найти студента' in body
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/{record_id}/link?q=Петр', headers=get_auth_headers()
+    )
+    assert 'Петров Пётр Петрович' in response.text
+    assert 'Однофамильцы' in response.text
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}/participants/{record_id}/link?q=Несуще', headers=get_auth_headers()
+    )
+    assert 'По запросу «Несуще» подходящих карточек не найдено.' in response.text
+    # Форма создания предзаполнена снимком записи
+    assert 'Не нашли нужного студента?' in body
+    assert 'create-and-link' in body
+    assert 'value="Иванов Иван Иванович"' in body
+    assert record_ref(storage, record_id) is None
+
+
+def test_participant_link_page_validation_redirects(event_import_client: SanicTestClient):
+    """GET/POST привязки: неизвестная/чужая/нечисловая запись и уже
+    связанная — редирект на событие с admin_error, 0 изменений."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    other_event = make_calendar_event(storage, name='Другой забег')
+    foreign = make_event_participation(storage, other_event, 'Чужой Участник')
+    linked = make_event_participation(
+        storage,
+        event_id,
+        'Связанный Участник',
+        student_ref=storage.create_student('Связанный Участник', 'М', '', '', ''),
+    )
+    record_id = make_event_participation(storage, event_id, 'Иванов Иван Иванович')
+
+    for raw, expected in (
+        ('999999', 'Запись не найдена.'),
+        ('abc', 'Запись не найдена.'),
+        (str(foreign), 'Запись не найдена.'),
+        (str(linked), 'уже связана со студентом.'),
+    ):
+        _, response = event_import_client.get(
+            f'/calendar/{event_id}/participants/{raw}/link', headers=get_auth_headers(), allow_redirects=False
+        )
+        assert response.status == 302, raw
+        location = unquote_plus(response.headers['location'])
+        assert location.startswith(f'/calendar/{event_id}?'), raw
+        assert expected in location, raw
+
+    # POST create-and-link на уже связанной записи — тот же guard-редирект
+    response = post_participant_link(
+        event_import_client,
+        event_id,
+        linked,
+        {'_route': 'create-and-link', 'full_name': 'Новый', 'sex': '', 'institute': '', 'group': '', 'course': ''},
+    )
+    assert response.status == 302
+    assert 'уже связана со студентом.' in unquote_plus(response.headers['location'])
+    # Ничего не создано и не изменено
+    assert len(students_snapshot(storage)) == 1
+    assert record_ref(storage, record_id) is None
+
+
+def test_participant_link_post_links_and_keeps_snapshot(event_import_client: SanicTestClient):
+    """POST link: привязка меняет ТОЛЬКО student_ref_id — все прочие колонки
+    записи (снимок, дисциплина, результат, extra_data) байт-в-байт; аудит
+    competition_linked_to_student с source='event-participant-page'."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', discipline='100 м', position=1, result='11,2'
+    )
+    storage.connection.execute(
+        'UPDATE competitions SET extra_data = ? WHERE id = ?',
+        (json.dumps({'note': 'снимок'}, ensure_ascii=False), record_id),
+    )
+    storage.connection.commit()
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    before = competition_db_row(storage, record_id)
+
+    response = post_participant_link(event_import_client, event_id, record_id, {'student_id': str(student_id)})
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/calendar/{event_id}?')
+    assert 'Запись привязана к студенту «Иванов Иван Иванович»' in location
+
+    after = competition_db_row(storage, record_id)
+    assert after['student_ref_id'] == student_id
+    for column, value in before.items():
+        if column != 'student_ref_id':
+            assert after[column] == value, column
+    links = audit_details(storage, 'competition_linked_to_student')
+    assert links == [
+        {
+            'record_id': record_id,
+            'old_ref': None,
+            'new_ref': student_id,
+            'student_id': student_id,
+            'source': 'event-participant-page',
+        }
+    ]
+
+
+def test_participant_link_post_guard_and_other_rows(event_import_client: SanicTestClient):
+    """POST link: matched-guard («карточка + дисциплина») блокирует дубль —
+    0 изменений; другая дисциплина того же студента привязывается; прочие
+    cardless-строки с тем же ФИО не затрагиваются."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', position=1
+    )
+    same_discipline = make_event_participation(storage, event_id, 'Иванов Иван Иванович', discipline='  100 М ')
+    other_discipline = make_event_participation(storage, event_id, 'Иванов Иван Иванович', discipline='200 м')
+    namesake = make_event_participation(storage, event_id, 'Иванов Иван Иванович', discipline='эстафета')
+
+    # Та же нормализованная дисциплина — отказ, запись остаётся cardless
+    response = post_participant_link(event_import_client, event_id, same_discipline, {'student_id': str(student_id)})
+    assert response.status == 302
+    assert 'Такое участие уже существует' in unquote_plus(response.headers['location'])
+    assert record_ref(storage, same_discipline) is None
+
+    # Другая дисциплина — законная привязка
+    response = post_participant_link(event_import_client, event_id, other_discipline, {'student_id': str(student_id)})
+    assert response.status == 302
+    assert record_ref(storage, other_discipline) == student_id
+
+    # Третья cardless-строка с тем же ФИО не была тронута автосвязью
+    assert record_ref(storage, namesake) is None
+
+
+def test_participant_link_post_inactive_and_race_errors(event_import_client: SanicTestClient):
+    """POST link: неактивная карточка — отказ с человеко-понятным flash;
+    окно гонки already_linked — запись не меняется."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(storage, event_id, 'Иванов Иван Иванович')
+    inactive = storage.create_student('Неактивный Студент', 'М', '', '', '')
+    storage.set_student_active(inactive, False)
+
+    response = post_participant_link(event_import_client, event_id, record_id, {'student_id': str(inactive)})
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'неактивен: привязка возможна только к активным студентам' in location
+    assert record_ref(storage, record_id) is None
+
+    # Окно гонки между проверкой и UPDATE: link_competitions вернул отказ
+    student_id = storage.create_student('Гонка Гонщиков', 'М', '', '', '')
+    original_link = storage.link_competitions
+    storage.link_competitions = lambda record_ids, student_id: (0, 'already_linked')
+    try:
+        response = post_participant_link(event_import_client, event_id, record_id, {'student_id': str(student_id)})
+    finally:
+        storage.link_competitions = original_link
+    assert response.status == 302
+    assert 'уже привязана к студенту' in unquote_plus(response.headers['location'])
+    assert record_ref(storage, record_id) is None
+
+
+def test_participant_link_post_regroups_and_add_participation(event_import_client: SanicTestClient):
+    """После привязки: одиночная строка получает «+ участие»; вторая cardless
+    строка той же карточки → parent + 2 child; «#N» на странице нет."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    first = make_event_participation(storage, event_id, 'Иванов Иван Иванович', discipline='100 м', position=1)
+    second = make_event_participation(storage, event_id, 'Иванов Иван Иванович', discipline='200 м', position=2)
+
+    assert post_participant_link(event_import_client, event_id, first, {'student_id': str(student_id)}).status == 302
+    body = get_event_page(event_import_client, event_id, role='admin').text
+    assert f'add_participation={student_id}' in body
+    assert f'<a href="/admin/people/{student_id}"' in body
+    assert 'Student #' not in body
+    assert 'class="row-group"' not in body
+
+    assert post_participant_link(event_import_client, event_id, second, {'student_id': str(student_id)}).status == 302
+    body = get_event_page(event_import_client, event_id, role='admin').text
+    assert body.count('class="row-group"') == 1
+    assert body.count('class="row-group-item"') == 2
+    assert 'Участников: <strong>1</strong>' in body
+    assert 'Участий: <strong>2</strong>' in body
+
+
+def test_participant_create_and_link_happy_path(event_import_client: SanicTestClient):
+    """POST create-and-link: карточка создаётся из формы и сразу привязывается;
+    снимок записи не меняется; два аудита с source='event-participant-page'."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(storage, event_id, 'Новый Студент', discipline='100 м', position=1)
+    before = competition_db_row(storage, record_id)
+
+    response = post_participant_link(
+        event_import_client,
+        event_id,
+        record_id,
+        {
+            '_route': 'create-and-link',
+            'full_name': 'Новый Студент',
+            'sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group': 'ЭБ-241',
+            'course': '2',
+        },
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/calendar/{event_id}?')
+    assert 'Студент «Новый Студент» создан, запись привязана к нему.' in location
+
+    student_id = storage.connection.execute('SELECT MAX(id) AS id FROM students').fetchone()['id']
+    student = storage.get_student_by_id(student_id)
+    assert (student['full_name'], student['sex'], student['institute'], student['group_name']) == (
+        'Новый Студент',
+        'М',
+        'ИСЭиУ',
+        'ЭБ-241',
+    )
+    assert record_ref(storage, record_id) == student_id
+    after = competition_db_row(storage, record_id)
+    for column, value in before.items():
+        if column != 'student_ref_id':
+            assert after[column] == value, column
+    assert audit_details(storage, 'student_created') == [
+        {'student_id': student_id, 'full_name': 'Новый Студент', 'source': 'event-participant-page'}
+    ]
+    assert audit_details(storage, 'competition_linked_to_student')[0]['source'] == 'event-participant-page'
+    # Страница события перегруппировалась: linked-строка со ссылкой-ФИО
+    body = get_event_page(event_import_client, event_id, role='admin').text
+    assert f'<a href="/admin/people/{student_id}"' in body
+
+
+def test_participant_create_and_link_invalid_form_no_card(event_import_client: SanicTestClient):
+    """Невалидная форма (parse_student_form) — карточка НЕ создаётся, запись
+    не привязывается; возврат на страницу привязки с ошибкой."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(storage, event_id, 'Новый Студент')
+
+    response = post_participant_link(
+        event_import_client,
+        event_id,
+        record_id,
+        {
+            '_route': 'create-and-link',
+            'full_name': 'Новый Студент',
+            'sex': 'X',
+            'institute': '',
+            'group': '',
+            'course': '',
+        },
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/calendar/{event_id}/participants/{record_id}/link?')
+    assert 'Пол может быть' in location
+    assert students_snapshot(storage) == []
+    assert record_ref(storage, record_id) is None
+
+    # Пустое ФИО — тот же отказ до create
+    response = post_participant_link(
+        event_import_client,
+        event_id,
+        record_id,
+        {'_route': 'create-and-link', 'full_name': '', 'sex': '', 'institute': '', 'group': '', 'course': ''},
+    )
+    assert response.status == 302
+    assert 'Укажите ФИО студента.' in unquote_plus(response.headers['location'])
+    assert students_snapshot(storage) == []
+
+
+def test_participant_create_and_link_race_keeps_card(event_import_client: SanicTestClient):
+    """Окно гонки already_linked ПОСЛЕ create: карточка остаётся, запись не
+    меняется, flash объясняет (прецедент admin_reconcile_create_record)."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(storage, event_id, 'Гонка Гонщиков')
+
+    original_link = storage.link_competitions
+    storage.link_competitions = lambda record_ids, student_id: (0, 'already_linked')
+    try:
+        response = post_participant_link(
+            event_import_client,
+            event_id,
+            record_id,
+            {
+                '_route': 'create-and-link',
+                'full_name': 'Гонка Гонщиков',
+                'sex': '',
+                'institute': '',
+                'group': '',
+                'course': '',
+            },
+        )
+    finally:
+        storage.link_competitions = original_link
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert f'Студент «Гонка Гонщиков» создан, но запись №{record_id} уже была привязана другим действием.' in location
+    assert location.startswith(f'/calendar/{event_id}?')
+    created = students_snapshot(storage)
+    assert [row[1] for row in created] == ['Гонка Гонщиков']
+    assert record_ref(storage, record_id) is None
+
+
+def test_participant_link_reflected_in_identity_and_reconcile(event_import_client: SanicTestClient):
+    """Привязка со страницы события видна тем же местам, что и сопоставление:
+    hash-only счётчик режима идентификации уменьшается, запись уходит из
+    списка несопоставленных."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    sportik = storage.get_user('sportik')
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    storage.link_user(sportik['id'], student_id)
+    # Запись совпадает с профилем атлета по легаси-хешу, но без ref
+    storage.set_profile(sportik['id'], {'student_name': 'Иванов Иван Иванович', 'student_sex': 'М'})
+    record_id = make_event_participation(storage, event_id, 'Иванов Иван Иванович', discipline='100 м')
+
+    assert storage.count_hash_only_visible() == 1
+    _, response = event_import_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert f'#{record_id} <strong>Иванов Иван Иванович</strong>' in response.text
+    assert storage.count_unlinked_competitions() == 1
+
+    response = post_participant_link(event_import_client, event_id, record_id, {'student_id': str(student_id)})
+    assert response.status == 302
+
+    # Запись видна атлету по ref карточки — hash-only исчез
+    assert storage.count_hash_only_visible() == 0
+    assert storage.count_unlinked_competitions() == 0
+    assert storage.count_student_reconciliation()['records_unlinked'] == 0
+    _, response = event_import_client.get('/admin/people/reconcile', headers=get_auth_headers())
+    assert f'#{record_id} <strong>' not in response.text
 
 
 # ===== Site Help / Documentation Refresh: страницы «Инструкция простыми

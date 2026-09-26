@@ -2156,6 +2156,239 @@ async def add_calendar_event_participant(request: Request, event_id: str):
     )
 
 
+# Связывание cardless-участия события с карточкой студента со страницы
+# события (2026-09-26). Все Student-управляющие операции — admin-only
+# (editor/viewer карточек не видит, права не расширяем молча): кнопка
+# «Связать со студентом» у cardless-строки ведёт на отдельную страницу —
+# существующая карточка (поиск/однофамильцы) или создание новой из снимка
+# записи. Переиспользуются примитивы сопоставления (link_competitions,
+# find_student_candidates/search_student_candidates, create_student,
+# parse_student_form); привязка меняет ТОЛЬКО student_ref_id — снимок
+# записи остаётся байт-в-байт. Никаких bulk/автосвязей других строк.
+
+
+def event_participant_for_link(storage: SQLiteAdapter, event: dict, raw_record_id: str):
+    """Cardless-участие события для страницы/POST привязки: (Competition |
+    None, redirect-ошибка | None). Запись должна существовать, принадлежать
+    этому событию (calendar_event_id) и не иметь связи с карточкой — иначе
+    редирект на страницу события с admin_error (кнопка в строке есть только
+    у cardless, но URL открыт для гонок/ручных ссылок)."""
+    back_url = f'/calendar/{event["id"]}'
+    try:
+        record_id = int(raw_record_id)
+    except (TypeError, ValueError):
+        record_id = None
+    record = storage.get_competition_by_id(record_id) if record_id is not None else None
+    if record is None or record.calendar_event_id != event['id']:
+        return None, build_redirect_with_message(error='Запись не найдена.', url=back_url)
+    if record.student_ref_id is not None:
+        return None, build_redirect_with_message(
+            error=f'Запись №{record_id} уже связана со студентом.',
+            url=back_url,
+        )
+    return record, None
+
+
+def event_participant_link_guard(
+    storage: SQLiteAdapter,
+    event: dict,
+    record: Competition,
+    student_id: int,
+) -> str | None:
+    """Matched-инвариант привязки cardless-участия к карточке: тот же
+    event_participation_matched_duplicate_guard, что у вставки участий —
+    target-карточка подставляется в копию записи (student_ref_id),
+    дисциплина берётся ЭФФЕКТИВНАЯ (базовая колонка ?? legacy-фолбэк в
+    extra_data), сама запись исключается из сравнения (exclude_record_id).
+    Привязка не может создать второе участие той же карточки с той же
+    дисциплиной; конфликт — 0 изменений."""
+    custom_fields = storage.get_custom_fields()
+    discipline, _ = event_participation_effective_values(
+        {'discipline': record.discipline, 'result': record.result, 'extra_data': record.extra_data},
+        custom_fields,
+    )
+    guarded = record.model_copy(update={'student_ref_id': int(student_id), 'discipline': discipline or None})
+    return event_participation_matched_duplicate_guard(
+        storage,
+        event,
+        guarded,
+        exclude_record_id=int(record.record_id),
+    )
+
+
+@app.get('/calendar/<event_id>/participants/<record_id>/link')
+async def calendar_event_participant_link_page(request: Request, event_id: str, record_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    storage = get_storage(request.app)
+    record, record_error = event_participant_for_link(storage, event, record_id)
+    if record_error is not None:
+        return record_error
+
+    custom_fields = storage.get_custom_fields()
+    discipline, result = event_participation_effective_values(
+        {'discipline': record.discipline, 'result': record.result, 'extra_data': record.extra_data},
+        custom_fields,
+    )
+    # Однофамильцы — только ПРЕДЛОЖЕНИЯ (точное совпадение ФИО/псевдонима);
+    # поиск — подстрока по тем же карточкам, паттерн «Найти студента»
+    # предпросмотра импорта. Обе выборки — только активные карточки.
+    q = (get_param(dict(request.args), 'q') or '').strip()
+    search_results = storage.search_student_candidates(q) if q else []
+    return await render(
+        template_name=jinja_env.get_template('calendar_event_participant_link.html'),
+        context={
+            'request': request,
+            'event': decorate_calendar_event(event),
+            'record': record,
+            'record_id': int(record.record_id),
+            'effective_discipline': discipline,
+            'effective_result': result,
+            'namesakes': storage.find_student_candidates(record.student_name),
+            'q': q,
+            'search_results': search_results,
+            **get_flash_args(request),
+        },
+    )
+
+
+@app.post('/calendar/<event_id>/participants/<record_id>/link')
+async def calendar_event_participant_link(request: Request, event_id: str, record_id: str):
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    back_url = f'/calendar/{event["id"]}'
+    storage = get_storage(request.app)
+    record, record_error = event_participant_for_link(storage, event, record_id)
+    if record_error is not None:
+        return record_error
+
+    student_id, id_error = parse_reconcile_int(get_form_value(request, 'student_id'), 'student id')
+    if id_error is not None:
+        return id_error
+
+    # Guard ДО привязки: карточка + эффективная дисциплина уникальны в
+    # событии; конфликт — 0 изменений (сама запись и карточка не тронуты).
+    guard_error = event_participant_link_guard(storage, event, record, student_id)
+    if guard_error is not None:
+        return build_redirect_with_message(error=guard_error, url=back_url)
+
+    numeric_record_id = int(record.record_id)
+    _, link_error = storage.link_competitions([numeric_record_id], student_id)
+    if link_error is not None:
+        return build_redirect_with_message(
+            error=reconcile_link_error(storage, [numeric_record_id], student_id, link_error),
+            url=back_url,
+        )
+
+    student = storage.get_student_by_id(student_id)
+    full_name = student['full_name'] if student else ''
+    log_audit_event(
+        request,
+        'competition_linked_to_student',
+        {
+            'record_id': numeric_record_id,
+            'old_ref': None,
+            'new_ref': student_id,
+            'student_id': student_id,
+            'source': 'event-participant-page',
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Запись привязана к студенту «{full_name}»',
+        url=back_url,
+    )
+
+
+@app.post('/calendar/<event_id>/participants/<record_id>/create-and-link')
+async def calendar_event_participant_create_and_link(request: Request, event_id: str, record_id: str):
+    # Паттерн admin_reconcile_create_record: форма валидируется ДО create
+    # (невалидная — карточка не создаётся), карточка создаётся из снимка
+    # записи и сразу привязывается. already_linked после create — гонка:
+    # карточка ОСТАЁТСЯ (прецедент сопоставления), запись не трогаем.
+    auth_error = require_admin(request)
+    if auth_error is not None:
+        return auth_error
+
+    event, error = get_calendar_event_or_error(request, event_id)
+    if error is not None:
+        return error
+
+    back_url = f'/calendar/{event["id"]}'
+    storage = get_storage(request.app)
+    record, record_error = event_participant_for_link(storage, event, record_id)
+    if record_error is not None:
+        return record_error
+
+    numeric_record_id = int(record.record_id)
+    form, form_error = parse_student_form(request)
+    if form_error is not None:
+        return build_redirect_with_message(
+            error=form_error,
+            url=f'/calendar/{event["id"]}/participants/{numeric_record_id}/link',
+        )
+
+    student_id = storage.create_student(
+        form['full_name'],
+        form['sex'],
+        form['institute'],
+        form['group_name'],
+        form['course'],
+    )
+    log_audit_event(
+        request,
+        'student_created',
+        {'student_id': student_id, 'full_name': form['full_name'], 'source': 'event-participant-page'},
+    )
+    # Инвариант един для всех путей вставки/привязки (у свежей карточки
+    # участий быть не может, проверка — симметрия с POST .../link).
+    guard_error = event_participant_link_guard(storage, event, record, student_id)
+    if guard_error is not None:
+        detail = guard_error[0].lower() + guard_error[1:]
+        return build_redirect_with_message(
+            error=f'Студент «{form["full_name"]}» создан, но {detail}',
+            url=back_url,
+        )
+
+    _, link_error = storage.link_competitions([numeric_record_id], student_id)
+    if link_error is not None:
+        # Гонка: карточка уже создана (и остаётся), запись связал кто-то другой.
+        if link_error == 'already_linked':
+            message = (
+                f'Студент «{form["full_name"]}» создан, но запись №{numeric_record_id} '
+                'уже была привязана другим действием.'
+            )
+        else:
+            message = f'Студент «{form["full_name"]}» создан, но запись не найдена.'
+        return build_redirect_with_message(message=message, url=back_url)
+    log_audit_event(
+        request,
+        'competition_linked_to_student',
+        {
+            'record_id': numeric_record_id,
+            'old_ref': None,
+            'new_ref': student_id,
+            'student_id': student_id,
+            'source': 'event-participant-page',
+        },
+    )
+    return build_redirect_with_message(
+        message=f'Студент «{form["full_name"]}» создан, запись привязана к нему.',
+        url=back_url,
+    )
+
+
 @app.post('/calendar/<event_id>/delete')
 async def delete_calendar_event(request: Request, event_id: str):
     auth_error = require_moderator(request)

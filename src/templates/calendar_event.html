@@ -234,12 +234,12 @@
                         id="participant-fio" name="student_name" required aria-label="ФИО" autocomplete="off"
                         placeholder="ФИО: поиск по первым буквам"
                         title="Известные атлеты и карточки студентов подскажут пол, институт, группу и курс">
-                    {# Бейдж выбранной карточки: показывается при явном выборе Student
-                       в резолвере (script.js), «сбросить связь» чистит только
-                       student_ref_id, не автоподставленные поля. #}
+                    {# Бейдж выбранной карточки: показывается при явном выборе карточки
+                       студента в резолвере (script.js), «сбросить связь» чистит только
+                       student_ref_id, не автоподставленные поля. Номер карточки не
+                       показывается (карточки — админский раздел). #}
                     <div class="d-none mt-1" id="participant-student-badge">
-                        <span class="badge text-bg-primary">Выбран Student #<span
-                                id="participant-student-badge-id"></span></span>
+                        <span class="badge text-bg-primary">Выбрана карточка студента</span>
                         <button class="btn btn-link btn-sm p-0 align-baseline" id="participant-student-reset"
                             type="button" title="Запись не будет связана с карточкой студента">сбросить связь</button>
                     </div>
@@ -305,7 +305,7 @@
                     <span class="form-control-plaintext ps-0"><strong>{{ can_add_for.student_name }}</strong></span>
                     <div class="mt-1">
                         <span class="badge text-bg-primary participant-student-link"
-                            title="Новое участие будет связано с той же карточкой студента">Student #{{ can_add_for.student_ref_id }}</span>
+                            title="Новое участие будет связано с той же карточкой студента">карточка студента</span>
                         <span class="text-muted small">Новое участие для этого участника</span>
                     </div>
                 </td>
@@ -363,10 +363,20 @@
                визуальная, в БД/реестре каждая строка — отдельная запись. #}
             <tr class="row-group">
                 <td class="text-center">{{ loop.index }}</td>
-                <td>{{ group.student_name }}
-                    {% if group.student_ref_id %}
-                    <span class="badge text-bg-primary participant-student-link"
-                        title="Записи привязаны к карточке студента #{{ group.student_ref_id }}. Изменить связь — раздел «Сопоставление данных».">Student #{{ group.student_ref_id }}</span>
+                <td>
+                    {# Связь с карточкой студента: admin — ФИО-ссылкой на карточку
+                       (раздел «Студенты»), editor/viewer — нейтральный бейдж без
+                       номера (карточки им недоступны). Изменить связь — раздел
+                       «Сопоставление данных». #}
+                    {% if group.student_ref_id and is_admin %}
+                    <a href="/admin/people/{{ group.student_ref_id }}"
+                        title="Открыть карточку студента. Изменить связь — раздел «Сопоставление данных».">{{ group.student_name }}</a>
+                    {% elif group.student_ref_id %}
+                    {{ group.student_name }}
+                    <span class="badge text-bg-secondary participant-student-link"
+                        title="Записи привязаны к карточке студента">карточка студента</span>
+                    {% else %}
+                    {{ group.student_name }}
                     {% endif %}
                 </td>
                 <td>{{ group.student_sex }}</td>
@@ -438,12 +448,21 @@
             <tr data-record-id="{{ participation.record_id }}" data-student-name="{{ participation.student_name }}"
                 data-participation-custom='{{ (participation.extra_data or {}) | tojson }}'>
                 <td class="text-center">{{ loop.index }}</td>
-                <td>{{ participation.student_name }}
-                    {# Связь с карточкой студента (IA 2026-09): только индикатор;
-                       смена связи — раздел «Сопоставление данных». #}
-                    {% if participation.student_ref_id %}
-                    <span class="badge text-bg-primary participant-student-link"
-                        title="Запись привязана к карточке студента #{{ participation.student_ref_id }}. Изменить связь — раздел «Сопоставление данных».">Student #{{ participation.student_ref_id }}</span>
+                <td>
+                    {# Связь с карточкой студента (IA 2026-09): admin — ФИО-ссылка
+                       на карточку (раздел «Студенты»), editor/viewer — нейтральный
+                       бейдж без номера (карточки им недоступны); смена связи —
+                       раздел «Сопоставление данных» или кнопка «Связать со
+                       студентом» у cardless-строки (admin). #}
+                    {% if participation.student_ref_id and is_admin %}
+                    <a href="/admin/people/{{ participation.student_ref_id }}"
+                        title="Открыть карточку студента. Изменить связь — раздел «Сопоставление данных».">{{ participation.student_name }}</a>
+                    {% elif participation.student_ref_id %}
+                    {{ participation.student_name }}
+                    <span class="badge text-bg-secondary participant-student-link"
+                        title="Запись привязана к карточке студента">карточка студента</span>
+                    {% else %}
+                    {{ participation.student_name }}
                     {% endif %}
                 </td>
                 <td>{{ participation.student_sex }}</td>
@@ -481,6 +500,14 @@
                         <a class="btn btn-sm btn-outline-primary" title="Добавить ещё одно участие этого участника (например, другую дисциплину)"
                             href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ participation.student_ref_id }}">+
                             участие</a>
+                        {% endif %}
+                        {# Cardless-строка (admin): связать запись с существующей
+                           карточкой или создать карточку и связать — отдельная
+                           страница, снимок записи при этом не меняется. #}
+                        {% if is_admin and not participation.student_ref_id %}
+                        <a class="btn btn-sm btn-outline-secondary"
+                            title="Выбрать существующую карточку студента или создать новую и связать с этой записью"
+                            href="/calendar/{{ event.id }}/participants/{{ participation.record_id }}/link">Связать со студентом</a>
                         {% endif %}
                         {% if is_admin %}
                         <button class="btn btn-sm btn-outline-danger participant-delete-button" type="button"
