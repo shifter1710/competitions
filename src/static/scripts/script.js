@@ -3081,12 +3081,28 @@ class ParticipantsPage {
         this.table = document.querySelector("[data-participants-page]");
         this.editingRow = null;
         this.editingBackup = null;
+        this.editingSubRow = null;
         this.keydownHandler = null;
         this.activeFioResolver = null;
         // Защита от двойного сабмита правки участника (см. saveEdit).
         this.participantSaving = false;
+        // P7: participation-кастомы (label + key) — инпуты правки участия.
+        this.participationCustomFields = this.parseParticipationCustomFields();
         this.attachAddFormResolver();
         this.table.addEventListener("click", (event) => this.handleClick(event));
+    }
+
+    parseParticipationCustomFields() {
+        const raw = this.table.dataset.participationCustomFields;
+        if (!raw) {
+            return [];
+        }
+        try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (error) {
+            return [];
+        }
     }
 
     getCsrfToken() {
@@ -3120,7 +3136,10 @@ class ParticipantsPage {
     // ввода, связь имеет смысл только для выбранного написания).
     attachAddFormResolver() {
         const fioInput = document.getElementById("participant-fio");
-        if (!fioInput || document.body.dataset.role === "athlete") {
+        // P7: readonly/отсутствие поля = prefill-режим «+ участие» (ФИО —
+        // hidden-снимок) или страница без формы — резолвер не нужен.
+        if (!fioInput || fioInput.readOnly || fioInput.disabled
+            || document.body.dataset.role === "athlete") {
             return;
         }
         const refInput = document.getElementById("participant-student-ref");
@@ -3213,7 +3232,11 @@ class ParticipantsPage {
         }
         const deleteButton = event.target.closest(".participant-delete-button");
         if (deleteButton) {
-            this.deleteParticipant(deleteButton.dataset.recordId, deleteButton.dataset.studentName);
+            this.deleteParticipant(
+                deleteButton.dataset.recordId,
+                deleteButton.dataset.studentName,
+                deleteButton.dataset.discipline
+            );
         }
     }
 
@@ -3230,9 +3253,11 @@ class ParticipantsPage {
         return input;
     }
 
-    // Инлайн-правка строки участника: те же поля, что и при добавлении.
-    // Место «дописать позже» — правка и сохранение записи целиком тем же
-    // эндпоинтом, что и на главной (историчность — на сервере).
+    // Инлайн-правка строки участия (P7): и плоская строка, и child-строка
+    // «└─» раскрываются в ПОЛНУЮ строку со всеми полями — снимок участника
+    // (ФИО/пол/институт/группа/курс из данных строки/группы) редактируется
+    // вместе с полями участия (дисциплина/место/результат). Сохранение —
+    // тем же эндпоинтом, что и на главной (историчность — на сервере).
     startEdit(button) {
         if (this.editingRow) {
             return;
@@ -3240,12 +3265,15 @@ class ParticipantsPage {
         const row = button.closest("tr");
         const cells = row.querySelectorAll("td");
         const dataset = button.dataset;
-        // Ячейки: №, ФИО, Пол, Институт, Группа, Курс, Место, Результат?, Действия
+        // Ячейки: №, ФИО, Пол, Институт, Группа, Курс, Дисциплина, Место,
+        // Результат, Действия
         const sexCell = cells[2];
         const instituteCell = cells[3];
         const groupCell = cells[4];
         const courseCell = cells[5];
-        const positionCell = cells[6];
+        const disciplineCell = cells[6];
+        const positionCell = cells[7];
+        const resultCell = cells[8];
         const actionsCell = cells[cells.length - 1];
 
         this.editingBackup = row.innerHTML;
@@ -3267,6 +3295,8 @@ class ParticipantsPage {
         const positionInput = this.buildTextInput("position", dataset.position, "number");
         const instituteInput = this.buildTextInput("institute", dataset.institute);
         const groupInput = this.buildTextInput("group", dataset.group);
+        const disciplineInput = this.buildTextInput("discipline", dataset.discipline);
+        const resultInput = this.buildTextInput("result", dataset.result);
 
         instituteCell.replaceChildren(instituteInput);
         groupCell.replaceChildren(groupInput);
@@ -3274,6 +3304,8 @@ class ParticipantsPage {
         courseCell.replaceChildren(courseInput);
         positionCell.replaceChildren(positionInput);
         row.children[1].replaceChildren(fioInput);
+        disciplineCell.replaceChildren(disciplineInput);
+        resultCell.replaceChildren(resultInput);
         // Связь с карточкой студента — статичный бейдж под полем ФИО:
         // сохраняется при правке, редактировать её здесь нельзя (инструмент
         // смены связи — раздел «Сопоставление данных»).
@@ -3301,6 +3333,11 @@ class ParticipantsPage {
         cancelButton.textContent = "✗";
         cancelButton.title = "Отмена";
         actionsCell.append(saveButton, cancelButton);
+
+        // P7: participation-кастомы — sub-row под редактируемой строкой
+        // (паттерн sub-row формы добавления): значения из data-атрибута
+        // строки, имена custom__<key> — как у форм импорта/добавления.
+        this.editingSubRow = this.buildCustomFieldsSubRow(row);
 
         this.activeFioResolver = new FioResolver(fioInput, (athlete) => {
             const mapping = {sex: sexInput, institute: instituteInput, group: groupInput, course: courseInput};
@@ -3334,6 +3371,42 @@ class ParticipantsPage {
         fioInput.focus();
     }
 
+    buildCustomFieldsSubRow(row) {
+        if (!this.participationCustomFields.length) {
+            return null;
+        }
+        let values = {};
+        try {
+            const parsed = JSON.parse(row.dataset.participationCustom || "{}");
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                values = parsed;
+            }
+        } catch (error) {
+            values = {};
+        }
+        const subRow = document.createElement("tr");
+        subRow.className = "row-edit-participation-cf";
+        const cell = document.createElement("td");
+        cell.colSpan = row.children.length;
+        const wrap = document.createElement("div");
+        wrap.className = "d-flex flex-wrap gap-3 align-items-end py-2";
+        this.participationCustomFields.forEach((field) => {
+            const fieldWrap = document.createElement("div");
+            const label = document.createElement("label");
+            label.className = "form-label small mb-0";
+            label.textContent = field.label;
+            const input = this.buildTextInput(`custom__${field.key}`, values[field.key] ?? "");
+            input.id = `participant-edit-custom-${field.key}`;
+            label.htmlFor = input.id;
+            fieldWrap.append(label, input);
+            wrap.append(fieldWrap);
+        });
+        cell.append(wrap);
+        subRow.append(cell);
+        row.after(subRow);
+        return subRow;
+    }
+
     saveEdit() {
         if (!this.editingRow || this.participantSaving) {
             return;
@@ -3343,6 +3416,13 @@ class ParticipantsPage {
         this.editingRow.querySelectorAll("[data-edit-key]").forEach((input) => {
             formData.append(input.dataset.editKey, input.value);
         });
+        // Participation-кастомы живут в sub-row (строка таблицы имеет
+        // фиксированные колонки) — собираем и их.
+        if (this.editingSubRow) {
+            this.editingSubRow.querySelectorAll("[data-edit-key]").forEach((input) => {
+                formData.append(input.dataset.editKey, input.value);
+            });
+        }
         // Поля события — из пресета таблицы: в записи они не редактируются.
         ["date", "level", "name", "sport"].forEach((key) => {
             formData.append(key, this.table.dataset[`event${key.charAt(0).toUpperCase()}${key.slice(1)}`] || "");
@@ -3354,7 +3434,7 @@ class ParticipantsPage {
             body: formData,
             onSuccess: () => {
                 this.participantSaving = false;
-                this.navigateToEventWithMessage("Участник обновлён");
+                this.navigateToEventWithMessage("Участие обновлено");
             },
             onError: (message) => {
                 this.participantSaving = false;
@@ -3386,24 +3466,31 @@ class ParticipantsPage {
             this.activeFioResolver.destroy();
             this.activeFioResolver = null;
         }
+        if (this.editingSubRow) {
+            this.editingSubRow.remove();
+            this.editingSubRow = null;
+        }
         this.editingRow.innerHTML = this.editingBackup;
         this.editingRow = null;
         this.editingBackup = null;
     }
 
-    // Удаление участника из соревнования — это обычное удаление записи
+    // Удаление участия из соревнования — это обычное удаление записи
     // реестра (с правами роли: эндпоинт админский, кнопка видна только
     // админу). После удаления страница перечитается, счётчики обновятся.
-    deleteParticipant(recordId, studentName) {
+    // P7: подтверждение называет конкретное участие (ФИО — дисциплина);
+    // у участия без дисциплины — «без дисциплины».
+    deleteParticipant(recordId, studentName, discipline = "") {
+        const disciplineLabel = String(discipline || "").trim() || "без дисциплины";
         const message = studentName
-            ? `Удалить участника «${studentName}»? Будет удалена запись о соревновании вместе с результатом и вложениями — действие необратимо.`
-            : "Удалить участника? Действие необратимо.";
+            ? `Удалить участие «${studentName} — ${disciplineLabel}»? Будет удалена запись о соревновании вместе с результатом и вложениями — действие необратимо.`
+            : "Удалить участие? Действие необратимо.";
         if (!confirm(message)) {
             return;
         }
         this.request(`/competition/${recordId}/delete`, {
             body: new FormData(),
-            onSuccess: () => this.navigateToEventWithMessage("Участник удалён"),
+            onSuccess: () => this.navigateToEventWithMessage("Участие удалено"),
             onError: (message2) => notify({type: "error", text: message2 || "Ошибка удаления записи"}),
         });
     }

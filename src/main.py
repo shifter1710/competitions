@@ -18,6 +18,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 from typing import Sequence
+from urllib.parse import parse_qs
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -395,6 +396,27 @@ def get_form_value(request: Request, key: str) -> str:
     if isinstance(value, list):
         return value[0]
     return value
+
+
+def form_key_present(request: Request, key: str) -> bool:
+    """Ключ присутствует в теле формы, ДАЖЕ с пустым значением (P7).
+
+    Sanic выбрасывает пустые значения из request.form, а presence-based
+    логика правки записи различает «поле прислано пустым» (осознанная
+    очистка → NULL/'') и «поле вообще не присылалось» (восстановить из
+    существующей записи). Для urlencoded-тел читаем сырое тело с
+    keep_blank_values=True — это ровно то, что шлёт браузер; multipart
+    (загрузка файлов) presence-based логикой не пользуется.
+    """
+    if key in request.form:
+        return True
+    if 'application/x-www-form-urlencoded' not in (request.headers.get('content-type') or ''):
+        return False
+    try:
+        body = request.body.decode()
+    except UnicodeDecodeError:
+        return False
+    return key in parse_qs(body, keep_blank_values=True)
 
 
 def get_auth_user(request: Request) -> dict | None:
@@ -1866,6 +1888,79 @@ def get_calendar_event_or_error(request: Request, event_id: str):
     return event, None
 
 
+def calendar_participant_groups(
+    participants: Sequence[dict],
+    custom_fields: Sequence[CustomField],
+) -> list[dict]:
+    """Группы участий страницы события (P7) — ТОЛЬКО визуализация.
+
+    Несколько участий одной карточки студента (student_ref_id NOT NULL)
+    показываются parent-строкой + child-строками; БД и реестр остаются
+    плоскими — по записи на участие, никакой группировки там нет. Cardless-
+    участия (student_ref_id NULL) — всегда синглтоны: одинаковые ФИО у
+    разных людей не сливается (no-guess).
+
+    Группа = {'is_group', 'student_ref_id', поля студента (снимок ПЕРВОГО
+    участия в текущей серверной сортировке list_calendar_event_participants),
+    'participations'}; is_group = участий больше одного (одиночная группа
+    рендерится полной строкой, как раньше). Каждое участие получает
+    эффективные discipline/result (базовая колонка ?? legacy-фолбэк в
+    extra_data коллидирующего кастома, event_participation_effective_values,
+    только чтение). Children сортируются по (нормализованная дисциплина,
+    record_id). Ключи участий читаются через .get() — фикстуры-моки
+    присылают сокращённые словари.
+    """
+    groups: list[dict] = []
+    by_ref: dict[int, dict] = {}
+
+    def new_group(participant: dict, student_ref_id: int | None) -> dict:
+        return {
+            'student_ref_id': student_ref_id,
+            'student_name': participant.get('student_name'),
+            'student_sex': participant.get('student_sex'),
+            'institute': participant.get('institute'),
+            'group_name': participant.get('group_name'),
+            'course': participant.get('course'),
+            'participations': [],
+        }
+
+    for participant in participants:
+        discipline, result = event_participation_effective_values(participant, custom_fields)
+        participation = {**participant, 'effective_discipline': discipline, 'effective_result': result}
+        student_ref_id = participant.get('student_ref_id')
+        if student_ref_id is None:
+            groups.append(new_group(participant, None))
+            groups[-1]['participations'].append(participation)
+            continue
+        group = by_ref.get(student_ref_id)
+        if group is None:
+            group = new_group(participant, student_ref_id)
+            by_ref[student_ref_id] = group
+            groups.append(group)
+        group['participations'].append(participation)
+
+    for group in groups:
+        group['participations'].sort(
+            key=lambda item: (dedup_discipline(item['effective_discipline']), item.get('record_id'))
+        )
+        group['is_group'] = len(group['participations']) > 1
+    return groups
+
+
+def calendar_participant_prefill_group(groups: Sequence[dict], raw_ref: str | None) -> dict | None:
+    """Группа для prefill-режима «+ участие» (P7): ?add_participation=<ref>
+    ищется по карточке среди ВСЕХ групп (без учёта фильтра результата —
+    кнопка «+ участие» видна и из отфильтрованного вида). Нет/мусор в
+    параметре — None: параметр молча игнорируется."""
+    if not raw_ref:
+        return None
+    try:
+        student_ref_id = int(raw_ref)
+    except ValueError:
+        return None
+    return next((group for group in groups if group.get('student_ref_id') == student_ref_id), None)
+
+
 @app.get('/calendar/<event_id>')
 async def calendar_event_page(request: Request, event_id: str):
     # Решение по ролям — как у календаря: admin/editor — полный доступ,
@@ -1883,24 +1978,41 @@ async def calendar_event_page(request: Request, event_id: str):
         result_filter = ''
 
     storage = get_storage(request.app)
-    participants = storage.list_calendar_event_participants(event['id'])
-    total_count = len(participants)
-    no_result_count = sum(1 for participant in participants if participant['position'] == 0)
+    all_participants = storage.list_calendar_event_participants(event['id'])
+    participations_count = len(all_participants)
+    no_result_count = sum(1 for participant in all_participants if participant.get('position') == 0)
+    participants = list(all_participants)
     if result_filter == 'with':
-        participants = [participant for participant in participants if participant['position'] != 0]
+        participants = [participant for participant in participants if participant.get('position') != 0]
     elif result_filter == 'without':
-        participants = [participant for participant in participants if participant['position'] == 0]
+        participants = [participant for participant in participants if participant.get('position') == 0]
+
+    # P7: группы участий — только визуализация страницы (БД/реестр плоские).
+    # Счётчики считаются по НЕотфильтрованному списку (семантика фильтра и
+    # счётчика «без результата» не меняется); группы для отображения
+    # строятся по уже отфильтрованным участиям.
+    custom_fields = storage.get_custom_fields()
+    all_groups = calendar_participant_groups(all_participants, custom_fields)
+    participant_groups = all_groups if not result_filter else calendar_participant_groups(participants, custom_fields)
+    can_write = user_can_write(request)
 
     return await render(
         template_name=jinja_env.get_template('calendar_event.html'),
         context={
             'request': request,
             'event': decorate_calendar_event(event),
-            'participants': participants,
-            'total_count': total_count,
+            'participant_groups': participant_groups,
+            'participants_count': len(all_groups),
+            'participations_count': participations_count,
             'no_result_count': no_result_count,
             'shown_count': len(participants),
-            'can_write': user_can_write(request),
+            'can_write': can_write,
+            # Prefill-режим «+ участие» (P7): группа по ref из
+            # ?add_participation=<ref>; нет группы — параметр игнорируется.
+            # Только для пишущих ролей: viewer форму не видит вовсе.
+            'can_add_for': calendar_participant_prefill_group(all_groups, get_param(args, 'add_participation'))
+            if can_write
+            else None,
             # Кнопка удаления участника — только admin (роут /competition/<id>/delete
             # админский): без флага кнопка в шаблоне не рисовалась вовсе.
             'is_admin': user_is_admin(request),
@@ -1914,6 +2026,12 @@ async def calendar_event_page(request: Request, event_id: str):
             # Настройки полей для строки ручного добавления (required/тип
             # Курса и Места — как в реестре; ФИО всегда обязательное).
             'base_field_settings': get_base_field_settings(storage),
+            # Participation-кастомы (P7): те же правила, что у импорта
+            # участников (event_import_custom_fields) — для инпутов формы
+            # добавления/prefill и инлайн-правки на клиенте.
+            'participant_custom_fields': [
+                {'key': field.key, 'label': field.label} for field in event_import_custom_fields(custom_fields)
+            ],
             **get_flash_args(request),
         },
     )
@@ -1994,11 +2112,27 @@ async def add_calendar_event_participant(request: Request, event_id: str):
         # опциональное, пусто → NULL.
         'Дисциплина': get_form_value(request, 'discipline'),
     }
+    # P7: participation-кастомы — тот же фильтр, что у импорта участников
+    # (event_import_custom_fields: активные show_in_template без url и
+    # коллизий label с «Дисциплина»/«Результат»); шлёт их prefill-форма
+    # «+ участие», обычная строка добавления — только базовые поля.
+    record.update(
+        {
+            field.label: get_form_value(request, f'custom__{field.key}')
+            for field in event_import_custom_fields(custom_fields)
+        }
+    )
 
-    try:
-        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
-    except (TypeError, ValueError) as exc:
-        return build_redirect_with_message(error=str(exc), url=back_url)
+    # P7: результат участия — informational-колонка, присваивается ПОСЛЕ
+    # build (паттерн build_event_participant_competition импорта).
+    competition, build_error = build_event_participant_competition(
+        record,
+        custom_fields,
+        storage,
+        result=get_form_value(request, 'result'),
+    )
+    if build_error is not None:
+        return build_redirect_with_message(error=build_error, url=back_url)
 
     competition.student_ref_id = student_ref_id
     # P2: участник события получает явную ссылку на событие — состав
@@ -2658,6 +2792,8 @@ def event_participation_matched_duplicate_guard(
     storage: SQLiteAdapter,
     event: dict,
     competition: Competition,
+    *,
+    exclude_record_id: int | None = None,
 ) -> str | None:
     """Глобальный matched-инвариант участий события (P4, QA D2): у события не
     может быть двух участий ОДНОЙ карточки с той же нормализованной
@@ -2666,6 +2802,10 @@ def event_participation_matched_duplicate_guard(
     его теми же ключами: list_calendar_event_participants + identity с
     эффективной дисциплиной (legacy-фолбэк base ?? extra_data коллидирующего
     кастома) + dedup_discipline. Второй реализации нормализации нет.
+
+    exclude_record_id (P7) — правка существующего участия: сама запись из
+    сравнения исключается (смена дисциплины на собственную текущую — не
+    конфликт), остальные участия проверяются как обычно.
 
     Правило НЕ применяется для cardless-строк и пустой дисциплины (для них
     остаются F′ v2/import semantics; глобального cardless-constraint нет).
@@ -2676,6 +2816,8 @@ def event_participation_matched_duplicate_guard(
     identity = ('ref', competition.student_ref_id, discipline)
     custom_fields = storage.get_custom_fields()
     for participant in storage.list_calendar_event_participants(event['id']):
+        if exclude_record_id is not None and participant.get('record_id') == exclude_record_id:
+            continue
         if event_participant_identity(participant, custom_fields) == identity:
             return 'Такое участие уже существует: у этого студента уже есть участие с этой дисциплиной в событии.'
     return None
@@ -5547,6 +5689,160 @@ async def add_competition(request: Request):
     return redirect(to='/')
 
 
+# --- P7: presence-based правка participation-полей записи (/competition/<id>) ---
+
+
+def competition_update_discipline_collision_keys(custom_fields: Sequence[CustomField]) -> set[str]:
+    """Ключи кастомов с label-коллизией «Дисциплина» (не «Результат»: тот
+    живёт только в extra_data и восстанавливается общим циклом)."""
+    return event_participation_collision_custom_keys(custom_fields) & {
+        field.key for field in custom_fields if field.label.strip().casefold() == 'дисциплина'
+    }
+
+
+def competition_update_custom_values(
+    request: Request,
+    existing: Competition | None,
+    custom_fields: Sequence[CustomField],
+) -> tuple[dict[str, str], bool]:
+    """label → значение кастома для правки записи + флаг «дисциплина пришла
+    коллидирующим кастомом».
+
+    P7 presence-based: custom__<key> отсутствует в форме — значение
+    восстанавливается из existing.extra_data (лечит затирание кастомов
+    правкой со страницы события, которая их не шлёт, и 400 «Поле
+    обязательно» на required-кастоме). Коллизия label «Дисциплина»:
+    непустой кастом из формы — это и есть значение дисциплины (двойная
+    запись base+extra, P5a); ПУСТОЙ базовую колонку не затирает (легаси-
+    строки, где база заполнена, а кастом пуст, правка главной не должна
+    очищать), восстановление — отдельно, эффективным значением (см.
+    competition_update_discipline_value).
+    """
+    collision_keys = competition_update_discipline_collision_keys(custom_fields)
+    values: dict[str, str] = {}
+    discipline_from_form_custom = False
+    for field in custom_fields:
+        form_key = f'custom__{field.key}'
+        # Присутствие — включая пустое значение (очистка): form_key_present
+        # читает сырое тело, request.form пустые значения теряет.
+        field_in_form = form_key_present(request, form_key)
+        if field_in_form and field.key in collision_keys:
+            form_value = get_form_value(request, form_key)
+            if clean_str(form_value):
+                values[field.label] = form_value
+                discipline_from_form_custom = True
+            continue
+        if field_in_form:
+            values[field.label] = get_form_value(request, form_key)
+        elif field.key not in collision_keys and existing is not None:
+            values[field.label] = existing.extra_data.get(field.key, '')
+    return values, discipline_from_form_custom
+
+
+def competition_effective_discipline(competition_like: dict, custom_fields: Sequence[CustomField]) -> str:
+    """Эффективная дисциплина записи/снимка (базовая колонка ?? legacy-фолбэк
+    в extra_data коллидирующего кастома) — единая форма для существующей
+    записи и пересобранной формы."""
+    return event_participation_effective_values(competition_like, custom_fields)[0]
+
+
+def competition_update_discipline_value(
+    request: Request,
+    existing: Competition | None,
+    custom_fields: Sequence[CustomField],
+    discipline_from_form_custom: bool,
+) -> str:
+    """Значение колонки «Дисциплина» для правки: 'discipline' из формы (пусто
+    = NULL, осознанная очистка легальна — инпут правки со страницы события)
+    > непустой коллидирующий кастом из формы > эффективное значение
+    existing (путь O1 у главной тот же)."""
+    if form_key_present(request, 'discipline'):
+        return get_form_value(request, 'discipline')
+    if existing is not None and not discipline_from_form_custom:
+        return competition_effective_discipline(
+            {'discipline': existing.discipline, 'result': None, 'extra_data': existing.extra_data},
+            custom_fields,
+        )
+    return ''
+
+
+def competition_update_result_value(request: Request, existing: Competition | None) -> str | None:
+    """Результат после правки: 'result' из формы (пусто = NULL) или
+    существующий, если форма поле не присылала (build_competition результат
+    не читает — присвоение после build)."""
+    if form_key_present(request, 'result'):
+        return clean_str(get_form_value(request, 'result')) or None
+    return existing.result if existing is not None else None
+
+
+def competition_update_participation_guard_error(
+    storage: SQLiteAdapter,
+    existing: Competition,
+    competition: Competition,
+    custom_fields: Sequence[CustomField],
+    record_id: int,
+) -> str | None:
+    """P7 matched-guard правки участия: смена дисциплины связанной с событием
+    записи (эффективное значение с legacy-фолбэком изменилось) не должна
+    нарушать инвариант «карточка + дисциплина уникальны в событии». Сама
+    запись исключается (exclude_record_id): повтор собственной дисциплины —
+    не конфликт. Путь только fetch (инлайн-правки главной/события): конфликт
+    — 400 с текстом guard'а, клиент показывает его как есть."""
+    new_discipline = competition_effective_discipline(
+        {'discipline': competition.discipline, 'result': None, 'extra_data': competition.extra_data},
+        custom_fields,
+    )
+    old_discipline = competition_effective_discipline(
+        {'discipline': existing.discipline, 'result': None, 'extra_data': existing.extra_data},
+        custom_fields,
+    )
+    if dedup_discipline(new_discipline) == dedup_discipline(old_discipline):
+        return None
+    event = storage.get_calendar_event(existing.calendar_event_id)
+    if event is None:
+        return None
+    competition.student_ref_id = existing.student_ref_id
+    return event_participation_matched_duplicate_guard(
+        storage,
+        event,
+        competition,
+        exclude_record_id=record_id,
+    )
+
+
+def competition_update_record(
+    request: Request,
+    existing: Competition | None,
+    custom_fields: Sequence[CustomField],
+) -> dict:
+    """record для build_competition правки записи: базовые поля формы,
+    event-owned restore для связанных записей (P2), кастомы и дисциплина
+    presence-based (P7)."""
+    record = {
+        'ФИО': get_form_value(request, 'student_name'),
+        'Пол': get_form_value(request, 'student_sex'),
+        'Институт': get_form_value(request, 'institute'),
+        'Группа': get_form_value(request, 'group'),
+        'Вид спорта': get_form_value(request, 'sport'),
+        'Дата': get_form_value(request, 'date'),
+        'Уровень соревнований': get_form_value(request, 'level'),
+        'Название соревнований': get_form_value(request, 'name'),
+        'Место': get_form_value(request, 'position'),
+        'Курс': get_form_value(request, 'course'),
+    }
+    custom_values, discipline_from_form_custom = competition_update_custom_values(request, existing, custom_fields)
+    record.update(custom_values)
+    if existing is not None and existing.calendar_event_id is not None:
+        record['Название соревнований'] = existing.name
+        record['Вид спорта'] = existing.sport
+        record['Уровень соревнований'] = existing.level
+        record['Дата'] = format_date_range(existing.date, existing.date_to)
+    record['Дисциплина'] = competition_update_discipline_value(
+        request, existing, custom_fields, discipline_from_form_custom
+    )
+    return record
+
+
 @app.post('/competition/<record_id>')
 async def update_competition(request: Request, record_id: str):
     auth_error = require_writer(request)
@@ -5571,36 +5867,24 @@ async def update_competition(request: Request, record_id: str):
     # только со страницы события), подделка формы их изменить не может.
     # NULL-записи правятся прежним путём — все поля из формы.
     existing = storage.get_competition_by_id(numeric_id)
-    record = {
-        'ФИО': get_form_value(request, 'student_name'),
-        'Пол': get_form_value(request, 'student_sex'),
-        'Институт': get_form_value(request, 'institute'),
-        'Группа': get_form_value(request, 'group'),
-        'Вид спорта': get_form_value(request, 'sport'),
-        'Дата': get_form_value(request, 'date'),
-        'Уровень соревнований': get_form_value(request, 'level'),
-        'Название соревнований': get_form_value(request, 'name'),
-        'Место': get_form_value(request, 'position'),
-        'Курс': get_form_value(request, 'course'),
-    }
-    record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
-    if existing is not None and existing.calendar_event_id is not None:
-        record['Название соревнований'] = existing.name
-        record['Вид спорта'] = existing.sport
-        record['Уровень соревнований'] = existing.level
-        record['Дата'] = format_date_range(existing.date, existing.date_to)
+    record = competition_update_record(request, existing, custom_fields)
 
     try:
         competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
     except (TypeError, ValueError) as exc:
         return text(body=f'Invalid row data: {exc}', status=400)
 
-    # Серверная часть полей, которых нет в форме: discipline/result —
-    # внутренние поля participation-identity (P1), их модельные None не
-    # должны затирать сохранённые значения.
-    if existing is not None:
-        competition.discipline = existing.discipline
-        competition.result = existing.result
+    # Результат — presence-based, как дисциплина (P1/P7): модельные None не
+    # должны затирать сохранённые значения, пока форма полем не подтвердила
+    # изменение/очистку.
+    competition.result = competition_update_result_value(request, existing)
+
+    if existing is not None and existing.calendar_event_id is not None:
+        guard_error = competition_update_participation_guard_error(
+            storage, existing, competition, custom_fields, numeric_id
+        )
+        if guard_error is not None:
+            return text(body=guard_error, status=400)
 
     storage.update_competition(numeric_id, competition)
     # Роль решает статус после правки: модератор (admin/editor)

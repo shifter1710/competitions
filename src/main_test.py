@@ -7304,6 +7304,8 @@ def _event_for_page():
 
 
 def _participants_sample():
+    # P7: список участий несёт student_ref_id/discipline/result/extra_data
+    # (list_calendar_event_participants) — по ним страница строит группы.
     return [
         {
             'record_id': 11,
@@ -7313,6 +7315,10 @@ def _participants_sample():
             'group_name': 'ПГСб-41',
             'course': 4,
             'position': 1,
+            'student_ref_id': 101,
+            'discipline': 'Бег 100 м',
+            'result': '11,2',
+            'extra_data': {},
         },
         {
             'record_id': 12,
@@ -7322,6 +7328,10 @@ def _participants_sample():
             'group_name': 'ТМб-12',
             'course': 1,
             'position': 0,
+            'student_ref_id': None,
+            'discipline': None,
+            'result': None,
+            'extra_data': {},
         },
     ]
 
@@ -7339,11 +7349,15 @@ def test_calendar_event_page_shows_participants_and_counts(client: SanicTestClie
         assert '25.06.2026' in body
         assert 'внутривузовские' in body
         assert 'Бег' in body
-        # Счётчики: участников 2, без результата 1
+        # Счётчики: участников 2 (обе записи — одиночные группы), участий 2,
+        # без результата 1
         assert 'Участников: <strong>2</strong>' in body
+        assert 'Участий: <strong>2</strong>' in body
         assert 'Без результата: <strong>1</strong>' in body
-        # Бейдж «ждёт результата» у записи без места
-        assert 'ждёт результата' in body
+        # Одиночные участия — полные плоские строки (не parent/child)
+        assert 'row-group' not in body
+        assert 'Бег 100 м' in body
+        assert '11,2' in body
         # Viewer — просмотр без кнопок управления
         assert 'participant-add-form' not in body
         assert 'participant-edit-button' not in body
@@ -7363,9 +7377,11 @@ def test_calendar_event_page_result_filter(client: SanicTestClient):
         # Фильтр клиентский на списке: показан только «без результата»
         assert 'Волков Артём Игоревич' in body
         assert 'Иванов Дмитрий Сергеевич' not in body
-        # Показано 1 из 2 (между «из» и числом в шаблоне перенос строки)
+        # Показано 1 из 2 участий (счётчики — по неотфильтрованному списку)
         assert 'Показано <strong>1</strong>' in body
-        assert '<strong>2</strong> участников' in body
+        assert '<strong>2</strong> участий' in body
+        assert 'Участников: <strong>2</strong>' in body
+        assert 'Участий: <strong>2</strong>' in body
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
@@ -14970,3 +14986,774 @@ def test_import_queue_payload_round_trip_with_ref_field(client: SanicTestClient)
     assert legacy_validated.discipline is None
     assert legacy_validated.result is None
     assert legacy_validated.calendar_event_id is None
+
+
+# --- Event Model, P7: parent/child UI участий на странице события ---
+
+# Группировка НЕСКОЛЬКИХ участий одной карточки студента — только
+# визуализация страницы события: в БД и реестре каждая строка остаётся
+# отдельной записью (см. docs/data-model-decisions.md, P7).
+
+
+def _grouped_participants_sample() -> list[dict]:
+    """Две участия одной карточки (#101) + одна cardless: серверная
+    сортировка list_calendar_event_participants — с результатом выше,
+    затем по ФИО ASC (первая linked-строка отдаёт parent-снимок)."""
+    return [
+        {
+            'record_id': 11,
+            'student_name': 'Иванов Дмитрий Сергеевич',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group_name': 'ПГСб-41',
+            'course': 4,
+            'position': 1,
+            'student_ref_id': 101,
+            'discipline': 'Бег 100 м',
+            'result': '11,2',
+            'extra_data': {},
+        },
+        {
+            'record_id': 12,
+            'student_name': 'Иванов Дмитрий Сергеевич',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group_name': 'ПГСб-41',
+            'course': 4,
+            'position': 0,
+            'student_ref_id': 101,
+            'discipline': 'Бег 200 м',
+            'result': None,
+            'extra_data': {},
+        },
+        {
+            'record_id': 13,
+            'student_name': 'Волков Артём Игоревич',
+            'student_sex': 'М',
+            'institute': 'ИТМ',
+            'group_name': 'ТМб-12',
+            'course': 1,
+            'position': 0,
+            'student_ref_id': None,
+            'discipline': None,
+            'result': None,
+            'extra_data': {},
+        },
+    ]
+
+
+def get_event_page(client: SanicTestClient, event_id, query: str = '', role: str = 'admin'):
+    _, response = client.get(f'/calendar/{event_id}{query}', headers=get_auth_headers(role=role), allow_redirects=False)
+    return response
+
+
+def test_p7_single_participation_renders_flat_row(client: SanicTestClient):
+    """1 участие (пусть и linked) — полная плоская строка, без parent/child."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = [_participants_sample()[0]]
+    try:
+        response = get_event_page(client, 7, role='viewer')
+        assert response.status == 200
+        body = response.body.decode()
+        assert body.count('class="row-group"') == 0
+        assert body.count('row-group-item') == 0
+        # Полная строка: ФИО, снимок, бейдж карточки, дисциплина, результат
+        assert 'Иванов Дмитрий Сергеевич' in body
+        assert 'Student #101' in body
+        assert 'Бег 100 м' in body
+        assert '11,2' in body
+        assert 'add_participation' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_two_participations_render_parent_and_children(client: SanicTestClient):
+    """2 участия одной карточки: parent-строка + 2 child-строки «└─»."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        response = get_event_page(client, 7, role='viewer')
+        assert response.status == 200
+        body = response.body.decode()
+        assert body.count('class="row-group"') == 1
+        assert body.count('class="row-group-item"') == 2
+        # Parent: снимок первой (по серверной сортировке) linked-строки + бейдж
+        assert 'Иванов Дмитрий Сергеевич' in body
+        assert 'Student #101' in body
+        # Children отсортированы по дисциплине: 100 м раньше 200 м
+        assert body.index('Бег 100 м') < body.index('Бег 200 м')
+        # Счётчики: участников 2 (группа + cardless), участий 3, без результата 2
+        assert 'Участников: <strong>2</strong>' in body
+        assert 'Участий: <strong>3</strong>' in body
+        assert 'Без результата: <strong>2</strong>' in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_three_participations_render_parent_and_three_children(client: SanicTestClient):
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    sample = _grouped_participants_sample()
+    sample.append(
+        {
+            'record_id': 14,
+            'student_name': 'Иванов Дмитрий Сергеевич',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group_name': 'ПГСб-41',
+            'course': 4,
+            'position': 3,
+            'student_ref_id': 101,
+            'discipline': 'Эстафета 4×100 м',
+            'result': '45,0',
+            'extra_data': {},
+        }
+    )
+    app.ctx.storage.list_calendar_event_participants.return_value = sample
+    try:
+        response = get_event_page(client, 7, role='viewer')
+        assert response.status == 200
+        body = response.body.decode()
+        assert body.count('class="row-group"') == 1
+        assert body.count('class="row-group-item"') == 3
+        assert 'Участников: <strong>2</strong>' in body
+        assert 'Участий: <strong>4</strong>' in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_first_participation_is_child_too(client: SanicTestClient):
+    """Все участия группы — child-строки, включая первую (ту, что отдала
+    parent-снимок): у каждой есть своя запись/действия."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()[:2]
+    try:
+        response = get_event_page(client, 7, role='admin')
+        assert response.status == 200
+        body = response.body.decode()
+        for record_id in (11, 12):
+            assert f'data-record-id="{record_id}"' in body
+        # Parent-строка не является записью — у неё нет record_id
+        assert body.count('class="row-group"') == 1
+        parent_html = body.split('class="row-group"', 1)[1].split('</tr>', 1)[0]
+        assert 'data-record-id' not in parent_html
+        assert 'participant-edit-button' not in parent_html
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_delete_collapses_group_two_to_flat(event_import_client: SanicTestClient):
+    """Удаление одного из двух участий сворачивает группу в плоскую строку."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    first = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', position=1, result='11,2'
+    )
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='200 м', position=0
+    )
+    body = get_event_page(event_import_client, event_id).text
+    assert body.count('class="row-group"') == 1
+
+    admin = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/competition/{first}/delete', headers=admin, data=csrf_for(admin), allow_redirects=False
+    )
+    assert response.status == 302
+    body = get_event_page(event_import_client, event_id).text
+    assert 'class="row-group"' not in body
+    assert 'row-group-item' not in body
+    assert '200 м' in body
+    assert 'Участников: <strong>1</strong>' in body
+    assert 'Участий: <strong>1</strong>' in body
+
+
+def test_p7_delete_three_leaves_grouped_pair(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    record_ids = [
+        make_event_participation(
+            storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline=discipline, position=index + 1
+        )
+        for index, discipline in enumerate(('100 м', '200 м', 'Эстафета'))
+    ]
+    admin = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/competition/{record_ids[2]}/delete', headers=admin, data=csrf_for(admin), allow_redirects=False
+    )
+    assert response.status == 302
+    body = get_event_page(event_import_client, event_id).text
+    assert body.count('class="row-group"') == 1
+    assert body.count('class="row-group-item"') == 2
+    assert 'Эстафета' not in body
+
+
+def test_p7_same_name_different_refs_not_merged(client: SanicTestClient):
+    """Полные тёзки с РАЗНЫМИ карточками — разные участники (2 группы)."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    first, second = _participants_sample()[0], dict(_participants_sample()[0])
+    second = {**second, 'record_id': 21, 'student_ref_id': 202, 'institute': 'ИТМ', 'group_name': 'ТМб-12'}
+    app.ctx.storage.list_calendar_event_participants.return_value = [first, second]
+    try:
+        response = get_event_page(client, 7, role='viewer')
+        body = response.body.decode()
+        # Обе записи одиночные → 2 плоские строки, групп нет
+        assert body.count('class="row-group"') == 0
+        assert body.count('<td>Иванов Дмитрий Сергеевич') == 2
+        assert 'Student #101' in body
+        assert 'Student #202' in body
+        assert 'Участников: <strong>2</strong>' in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_cardless_same_name_not_merged(client: SanicTestClient):
+    """Cardless-участия — синглтоны: одинаковые ФИО не склеиваются (no-guess)."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    first = _participants_sample()[0]
+    second = {**first, 'record_id': 21, 'student_ref_id': None, 'discipline': None, 'result': None}
+    app.ctx.storage.list_calendar_event_participants.return_value = [first, second]
+    try:
+        response = get_event_page(client, 7, role='viewer')
+        body = response.body.decode()
+        assert body.count('class="row-group"') == 0
+        assert body.count('row-group-item') == 0
+        assert body.count('<td>Иванов Дмитрий Сергеевич') == 2
+        # Бейдж — только у linked-строки
+        assert body.count('Student #') == 1
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_discipline_and_result_displayed(client: SanicTestClient):
+    """Дисциплина и результат — в child-строках группы; пустые — «—»."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        response = get_event_page(client, 7, role='viewer')
+        body = response.body.decode()
+        assert 'Бег 100 м' in body
+        assert 'Бег 200 м' in body
+        assert '11,2' in body
+        # Cardless-участие без дисциплины — прочерк, не пустая ячейка
+        assert '<span class="text-muted">—</span>' in body
+        # Колонка-бейдж «Результат?» удалена
+        assert 'Результат?' not in body
+        assert 'ждёт результата' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_colliding_custom_no_duplicate_columns(event_import_client: SanicTestClient):
+    """Кастом с label «Дисциплина»: колонка Дисциплина в таблице одна,
+    легаси-значение (только в extra_data) показывается эффективным."""
+    storage = app.ctx.storage
+    storage.create_custom_field('discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    event_id = make_calendar_event(storage)
+    make_event_participation(storage, event_id, 'Иванов Иван Иванович', position=1, extra={'discipline': 'кросс 3 км'})
+    body = get_event_page(event_import_client, event_id).text
+    assert body.count('<th scope="col"') == 10
+    assert body.count('>Дисциплина</th>') == 1
+    # Эффективная дисциплина (base NULL → фолбэк в extra_data) отображается
+    assert 'кросс 3 км' in body
+    # Коллидирующий кастом НЕ рисуется отдельным participation-инпутом
+    assert 'name="custom__discipline"' not in body
+
+
+def test_p7_add_participation_prefill_reuses_ref(event_import_client: SanicTestClient):
+    """Кнопка «+ участие» (prefill): hidden-снимок + POST создаёт ТРЕТЬЮ
+    запись с той же карточкой; событие/пресет берутся из события."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', position=1
+    )
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='200 м', position=0
+    )
+    body = get_event_page(event_import_client, event_id).text
+    assert f'?add_participation={student_id}' in body
+
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_ref_id': str(student_id),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group': 'ЭБ-241',
+            'course': '2',
+            'position': '2',
+            'discipline': 'Бег 400 м',
+            'result': '50,1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    rows = storage.connection.execute(
+        'SELECT student_ref_id, discipline, result, calendar_event_id FROM competitions ORDER BY id'
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (student_id, '100 м', None, event_id),
+        (student_id, '200 м', None, event_id),
+        (student_id, 'Бег 400 м', '50,1', event_id),
+    ]
+    # На странице — группа из трёх участий
+    body = get_event_page(event_import_client, event_id).text
+    assert body.count('class="row-group"') == 1
+    assert body.count('class="row-group-item"') == 3
+
+
+def test_p7_prefill_other_discipline_allowed_same_blocked(event_import_client: SanicTestClient):
+    """Prefill-POST: другая дисциплина разрешена, та же нормализованная —
+    blocked (P4-guard), 0 изменений."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='бег 100 м', position=3
+    )
+    headers = get_auth_headers()
+    common = {
+        **csrf_for(headers),
+        'student_ref_id': str(student_id),
+        'student_name': 'Иванов Иван Иванович',
+        'student_sex': 'М',
+        'institute': 'ИСЭиУ',
+        'group': 'ЭБ-241',
+        'course': '2',
+        'position': '1',
+    }
+    # Та же дисциплина в другом написании — дубль, отказ
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={**common, 'discipline': '  БЕГ   100 М '},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Такое участие уже существует' in unquote_plus(response.headers['location'])
+    assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 1
+
+    # Другая дисциплина — законное второе участие
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={**common, 'discipline': 'бег 200 м'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Участник «Иванов Иван Иванович» добавлен' in unquote_plus(response.headers['location'])
+    assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 2
+
+
+def test_p7_edit_discipline_conflict_blocked_own_allowed(event_import_client: SanicTestClient):
+    """Правка участия: смена дисциплины на дисциплину ДРУГОГО участия той же
+    карточки — конфликт (exclude-self guard); повтор собственной — разрешён."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    first = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', position=1
+    )
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='200 м', position=2
+    )
+    headers = get_auth_headers()
+    base_form = {
+        **csrf_for(headers),
+        'student_name': 'Иванов Иван Иванович',
+        'student_sex': 'М',
+        'institute': 'ИСЭиУ',
+        'group': 'ЭБ-241',
+        'course': '2',
+        'position': '1',
+    }
+
+    # Дисциплина чужого участия — 400 с текстом guard'а, запись не меняется
+    _, response = event_import_client.post(
+        f'/competition/{first}',
+        headers=headers,
+        data={**base_form, 'discipline': '200 м'},
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Такое участие уже существует' in response.text
+    disciplines = storage.connection.execute('SELECT discipline FROM competitions ORDER BY id').fetchall()
+    assert [row['discipline'] for row in disciplines] == ['100 м', '200 м']
+
+    # Собственная дисциплина в форме — не конфликт (exclude-self)
+    _, response = event_import_client.post(
+        f'/competition/{first}',
+        headers=headers,
+        data={**base_form, 'discipline': '100 м'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert (
+        storage.connection.execute('SELECT discipline FROM competitions WHERE id = ?', (first,)).fetchone()[
+            'discipline'
+        ]
+        == '100 м'
+    )
+
+
+def test_p7_edit_forged_fields_and_presence_discipline_result(event_import_client: SanicTestClient):
+    """Связанная запись: подделка event-owned полей по-прежнему игнорируется;
+    discipline/result presence-based (в форме — пишутся, отсутствуют — из
+    существующей записи)."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    record_id = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', result='11,2'
+    )
+    headers = get_auth_headers()
+
+    # Форма БЕЗ discipline/result: сохраняются существующие значения
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-201',
+            'sport': 'Подделанный спорт',
+            'date': '01.01.2030',
+            'level': 'олимпийские',
+            'name': 'Подделанное название',
+            'position': '3',
+            'course': '3',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT name, sport, level, discipline, result FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()
+    assert (row['name'], row['sport'], row['level']) == ('Забег 2026', 'Бег', 'внутривузовские')
+    assert (row['discipline'], row['result']) == ('100 м', '11,2')
+
+    # Форма С discipline/result: пишутся (очистка пустым тоже легальна)
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-201',
+            'position': '3',
+            'course': '3',
+            'discipline': 'Эстафета 4×100 м',
+            'result': '43,8',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT discipline, result FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()
+    assert (row['discipline'], row['result']) == ('Эстафета 4×100 м', '43,8')
+
+    # Пустая дисциплина в форме — осознанная очистка (NULL)
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-201',
+            'position': '3',
+            'course': '3',
+            'discipline': '',
+            'result': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT discipline, result FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()
+    assert (row['discipline'], row['result']) == (None, None)
+
+
+def test_p7_place_result_edit_targets_only_one_participation(event_import_client: SanicTestClient):
+    """Правка места/результата одного участия не трогает соседние участия
+    той же карточки."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    first = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м', position=1
+    )
+    second = make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='200 м', position=2
+    )
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/competition/{first}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Иванов Иван Иванович',
+            'student_sex': 'М',
+            'institute': 'ИСЭиУ',
+            'group': 'ЭБ-241',
+            'course': '2',
+            'position': '5',
+            'discipline': '100 м',
+            'result': '11,9',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    rows = {
+        row['id']: row for row in storage.connection.execute('SELECT id, position, result FROM competitions').fetchall()
+    }
+    assert (rows[first]['position'], rows[first]['result']) == (5, '11,9')
+    assert (rows[second]['position'], rows[second]['result']) == (2, None)
+
+
+def test_p7_registry_keeps_one_row_per_participation(event_import_client: SanicTestClient):
+    """Реестр плоский: две участия одного студента — две записи, никакой
+    группировки в данных."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    for discipline in ('100 м', '200 м'):
+        make_event_participation(
+            storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline=discipline
+        )
+    rows = storage.connection.execute(
+        'SELECT COUNT(*) AS total, COUNT(DISTINCT id) AS distinct_ids FROM competitions'
+    ).fetchone()
+    assert (rows['total'], rows['distinct_ids']) == (2, 2)
+    participants = storage.list_calendar_event_participants(event_id)
+    assert [p['discipline'] for p in participants] == ['100 м', '200 м']
+
+
+def test_p7_import_two_disciplines_grouped_on_page(event_import_client: SanicTestClient):
+    """P4-регрессия × P7: импорт двух дисциплин одного студента создаёт две
+    записи; страница показывает их parent+children."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'G-101', '1')
+    make_event_participation(storage, event_id, 'Иванов Иван Иванович', student_ref=student_id, discipline='100 м')
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': 'Иванов Иван Иванович', 'Курс': 1, 'Дисциплина': '200 м', 'Место': 2}],
+    )
+    token = import_session_token(response)
+    page = get_event_preview(event_import_client, event_id, token)
+    assert 'готовы к добавлению: 1' in page.text
+    response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
+    assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
+    body = get_event_page(event_import_client, event_id).text
+    assert body.count('class="row-group"') == 1
+    assert body.count('class="row-group-item"') == 2
+    assert 'Участников: <strong>1</strong>' in body
+    assert 'Участий: <strong>2</strong>' in body
+
+
+def test_p7_linked_record_shown_flat_on_event_page(event_import_client: SanicTestClient):
+    """P5b-регрессия × P7: явно связанная NULL-запись видна на странице
+    события одиночной плоской строкой."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = save_reconcile_record(storage, 'Осипов Осип Осипович', datetime(2026, 5, 10))
+    event, link_error = storage.link_participation_to_event(record_id, event_id)
+    assert link_error is None and event is not None
+    body = get_event_page(event_import_client, event_id).text
+    assert 'Осипов Осип Осипович' in body
+    assert 'class="row-group"' not in body
+
+
+def test_p7_grouped_page_permissions(client: SanicTestClient):
+    """Группированная страница: admin — edit/delete/+ участие; editor — edit
+    и + участие без delete; viewer — просмотр; athlete — 403."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        body = get_event_page(client, 7, role='admin').text
+        assert body.count('participant-edit-button') == 3  # 2 child + 1 flat
+        assert body.count('participant-delete-button') == 3
+        assert 'add_participation=101' in body
+
+        body = get_event_page(client, 7, role='editor').text
+        assert body.count('participant-edit-button') == 3
+        assert 'participant-delete-button' not in body
+        assert 'add_participation=101' in body
+
+        body = get_event_page(client, 7, role='viewer').text
+        assert 'participant-edit-button' not in body
+        assert 'participant-delete-button' not in body
+        assert 'add_participation' not in body
+        # Колонок действий нет вовсе: 9 колонок заголовка
+        assert body.count('<th scope="col"') == 9
+        # Страница события при этом доступна для просмотра
+        assert 'Иванов Дмитрий Сергеевич' in body
+        # Prefill-параметр роли без формы ничего не включает
+        body = get_event_page(client, 7, query='?add_participation=101', role='viewer').text
+        assert 'Новое участие для этого участника' not in body
+        assert 'id="participant-fio"' not in body
+
+        _, response = client.get('/calendar/7', headers=athlete_headers(), allow_redirects=False)
+        assert response.status == 403
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_edit_presence_based_customs_restore_and_update(event_import_client: SanicTestClient):
+    """Presence-based кастомы (O1, NULL-запись): absent в форме — restored
+    из extra_data (wipe-фикс, required-кастом не роняет правку 400-й),
+    present — обновляется."""
+    storage = app.ctx.storage
+    storage.create_custom_field('zachet', 'Зачёт', 'text', False, True, True, True, 0)
+    storage.create_custom_field('coach', 'Тренер', 'text', True, True, True, True, 1)
+    record_id = save_reconcile_record(storage, 'Осипов Осип Осипович', datetime(2026, 1, 10))
+    storage.connection.execute(
+        "UPDATE competitions SET discipline = 'Эстафета', result = '3:21', "
+        "extra_data = '{\"zachet\": \"зачтено\", \"coach\": \"Тренерова Т. Т.\"}' WHERE id = ?",
+        (record_id,),
+    )
+    storage.connection.commit()
+    headers = get_auth_headers()
+    base_form = {
+        **csrf_for(headers),
+        'student_name': 'Осипов Осип Осипович',
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'ГРП-101',
+        'sport': 'Бег',
+        'date': '10.01.2026',
+        'level': 'внутривузовские',
+        'name': 'Старый кубок',
+        'position': '1',
+        'course': '2',
+    }
+
+    # Правка без кастомов/discipline/result: всё существующее сохранено
+    _, response = event_import_client.post(
+        f'/competition/{record_id}', headers=headers, data=base_form, allow_redirects=False
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT discipline, result, extra_data FROM competitions WHERE id = ?', (record_id,)
+    ).fetchone()
+    assert (row['discipline'], row['result']) == ('Эстафета', '3:21')
+    assert json.loads(row['extra_data']) == {'zachet': 'зачтено', 'coach': 'Тренерова Т. Т.'}
+
+    # Кастом в форме — обновляется (только он)
+    _, response = event_import_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={**base_form, 'custom__zachet': 'незачтено'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute('SELECT extra_data FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert json.loads(row['extra_data']) == {'zachet': 'незачтено', 'coach': 'Тренерова Т. Т.'}
+
+
+def test_p7_prefill_render_locked_fio_and_hidden_snapshot(client: SanicTestClient):
+    """Рендер prefill-режима: ФИО заблокирован (plaintext, без резолвера),
+    снимок — hidden-полями, фильтр результата в «Отмене» сохраняется;
+    неизвестный ref — параметр игнорируется (обычная строка добавления)."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        response = get_event_page(client, 7, query='?add_participation=101', role='admin')
+        assert response.status == 200
+        body = response.body.decode()
+        # Снимок — hidden-полями внешней формы
+        assert 'name="student_ref_id" value="101"' in body
+        assert 'name="student_name" value="Иванов Дмитрий Сергеевич"' in body
+        assert 'name="student_sex" value="М"' in body
+        assert 'name="institute" value="ИСИ"' in body
+        assert 'name="group" value="ПГСб-41"' in body
+        # Заблокированное ФИО: без резолвера, plaintext, подсказка режима
+        assert 'id="participant-fio"' not in body
+        assert 'placeholder="ФИО: поиск по первым буквам"' not in body
+        assert 'Новое участие для этого участника' in body
+        assert 'Добавить участие' in body
+        assert 'Отмена' in body
+        # Инпуты нового участия
+        assert 'id="participant-discipline"' in body
+        assert 'id="participant-result"' in body
+
+        # Неизвестный ref — обычная ручная форма
+        body = get_event_page(client, 7, query='?add_participation=99999', role='admin').text
+        assert 'id="participant-fio"' in body
+        assert 'Новое участие для этого участника' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_prefill_cancel_and_add_links_keep_result_filter(client: SanicTestClient):
+    """«+ участие» из отфильтрованного вида и «Отмена» сохраняют ?result=.
+    Группа построена из двух «без результата», чтобы фильтр её не схлопнул."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = [
+        {**_grouped_participants_sample()[0], 'position': 0, 'result': None},
+        _grouped_participants_sample()[1],
+    ]
+    try:
+        body = get_event_page(client, 7, query='?result=without', role='admin').text
+        assert '/calendar/7?result=without&amp;add_participation=101' in body
+        body = get_event_page(client, 7, query='?result=without&add_participation=101', role='admin').text
+        assert 'href="/calendar/7?result=without"' in body
+        # Без фильтра — обычная ссылка с единственным параметром
+        body = get_event_page(client, 7, query='?add_participation=101', role='admin').text
+        assert 'href="/calendar/7?add_participation=101"' in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_filter_and_counters_consistent_for_groups(client: SanicTestClient):
+    """Фильтр результата фильтрует УЧАСТИЯ, группы пересобираются: у группы
+    из двух участий фильтр «с результатом» оставляет одну → плоская строка.
+    Счётчики — по неотфильтрованному списку."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()[:2]
+    try:
+        body = get_event_page(client, 7, query='?result=with', role='viewer').text
+        # Группа схлопнулась: показано единственное участие с результатом
+        assert 'class="row-group"' not in body
+        assert 'Бег 100 м' in body
+        assert 'Бег 200 м' not in body
+        # Счётчики — по всем участиям события
+        assert 'Участников: <strong>1</strong>' in body
+        assert 'Участий: <strong>2</strong>' in body
+        assert 'Без результата: <strong>1</strong>' in body
+        assert 'Показано <strong>1</strong>' in body
+        assert '<strong>2</strong> участий' in body
+
+        body = get_event_page(client, 7, query='?result=without', role='viewer').text
+        assert 'class="row-group"' not in body
+        assert 'Бег 200 м' in body
+        assert 'Бег 100 м' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []

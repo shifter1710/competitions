@@ -11,10 +11,22 @@
 {% if can_write %}
 <form id="participant-add-form" method="post" action="/calendar/{{ event.id }}/participants">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    {% if can_add_for %}
+    {# Prefill «+ участие» (P7): снимок участника приходит hidden-полями,
+       видимые поля строки — только дисциплина/место/результат участия;
+       ФИО заблокирован, резолвер не нужен. #}
+    <input type="hidden" name="student_ref_id" value="{{ can_add_for.student_ref_id }}">
+    <input type="hidden" name="student_name" value="{{ can_add_for.student_name }}">
+    <input type="hidden" name="student_sex" value="{{ can_add_for.student_sex }}">
+    <input type="hidden" name="institute" value="{{ can_add_for.institute }}">
+    <input type="hidden" name="group" value="{{ can_add_for.group_name }}">
+    <input type="hidden" name="course" value="{{ can_add_for.course }}">
+    {% else %}
     {# Явный выбор карточки студента в резолвере ФИО (script.js) пишет сюда id;
        сброс связи/правка ФИО очищают поле — сервер валидирует его при непустом
        значении. #}
     <input type="hidden" name="student_ref_id" value="" id="participant-student-ref">
+    {% endif %}
 </form>
 {% endif %}
 
@@ -166,7 +178,8 @@
             {% endfor %}
         </select>
     </label>
-    <span>Участников: <strong>{{ total_count }}</strong> · Без результата: <strong>{{ no_result_count }}</strong></span>
+    <span>Участников: <strong>{{ participants_count }}</strong> · Участий: <strong>{{ participations_count }}</strong>
+        · Без результата: <strong>{{ no_result_count }}</strong></span>
     {% if can_write %}
     <a class="btn btn-outline-primary btn-sm ms-auto"
         href="/calendar/{{ event.id }}/participants/import">Импортировать участников из Excel</a>
@@ -188,7 +201,8 @@
 <div class="table-responsive">
     <table class="table table-striped table-bordered align-middle"
         data-participants-page data-event-date="{{ event.date_label }}" data-event-level="{{ event.level }}"
-        data-event-name="{{ event.name }}" data-event-sport="{{ event.sport }}">
+        data-event-name="{{ event.name }}" data-event-sport="{{ event.sport }}"
+        data-participation-custom-fields='{{ participant_custom_fields | tojson }}'>
         <thead class="table-dark">
             <tr>
                 <th scope="col" class="text-center" style="width: 48px;">№</th>
@@ -197,19 +211,21 @@
                 <th scope="col" style="width: 160px;">Институт</th>
                 <th scope="col" style="width: 140px;">Группа</th>
                 <th scope="col" style="width: 80px;">Курс</th>
+                <th scope="col" style="width: 150px;">Дисциплина</th>
                 <th scope="col" style="width: 90px;">Место</th>
-                <th scope="col" style="width: 170px;">Результат?</th>
+                <th scope="col" style="width: 170px;">Результат</th>
                 {% if can_write %}
                 <th scope="col" style="width: 240px;">Действия</th>
                 {% endif %}
             </tr>
         </thead>
         <tbody>
-            {% if can_write %}
+            {% if can_write and not can_add_for %}
             {# Строка добавления участника (прототип 16 — раскрыта сверху):
                ФИО с резолвером, место опционально; название/даты/уровень/спорт
-               берутся из события на сервере. Обязательность/тип полей — по
-               настройкам базовых полей (fs), ФИО всегда обязательное. #}
+               берутся из события на сервере. P7: дисциплина и результат —
+               поля участия (опциональные, пусто → NULL). Обязательность/тип
+               полей — по настройкам базовых полей (fs), ФИО всегда обязательное. #}
             {% set fs = base_field_settings %}
             <tr class="row-new">
                 <td class="text-center text-muted">+</td>
@@ -256,6 +272,12 @@
                         {% if fs.course.required %}required{% endif %}>
                 </td>
                 <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-discipline" name="discipline" aria-label="Дисциплина"
+                        placeholder="например, 100 м"
+                        title="Дисциплина различает участия одного человека (100 м и 200 м — два участия)">
+                </td>
+                <td>
                     <input class="form-control form-control-sm" form="participant-add-form"
                         {% if fs.position.value_type == 'number' %}type="number" min="0" step="1"
                         {% else %}type="text"{% endif %} id="participant-position" name="position"
@@ -263,60 +285,210 @@
                         {% if not fs.position.required %}title="Место можно дописать позже"{% endif %}
                         {% if fs.position.required %}required{% endif %}>
                 </td>
-                <td><span class="badge text-bg-light text-muted" title="Место можно дописать позже">ждёт результата</span>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-result" name="result" aria-label="Результат" placeholder="например, 12,3 с"
+                        title="Результат участия — информационное поле (в выгрузке — колонка «Результат»)">
                 </td>
                 <td>
                     <button class="btn btn-sm btn-success" type="submit" form="participant-add-form">Добавить</button>
                 </td>
             </tr>
-            {% endif %}
-            {% for participant in participants %}
-            <tr data-record-id="{{ participant.record_id }}" data-student-name="{{ participant.student_name }}">
-                <td class="text-center">{{ loop.index }}</td>
-                <td>{{ participant.student_name }}
-                    {# Связь с карточкой студента (IA 2026-09): только индикатор;
-                       смена связи — раздел «Сопоставление данных». #}
-                    {% if participant.student_ref_id %}
-                    <span class="badge text-bg-primary participant-student-link"
-                        title="Запись привязана к карточке студента #{{ participant.student_ref_id }}. Изменить связь — раздел «Сопоставление данных».">Student #{{ participant.student_ref_id }}</span>
-                    {% endif %}
+            {% elif can_add_for %}
+            {# Prefill «+ участие» (P7): строка добавления ВТОРОГО участия
+               существующего участника — снимок (ФИО/пол/институт/группа/курс)
+               уходит hidden-полями формы и показывается plaintext, редактируются
+               только дисциплина/место/результат нового участия. #}
+            <tr class="row-new">
+                <td class="text-center text-muted">+</td>
+                <td>
+                    <span class="form-control-plaintext ps-0"><strong>{{ can_add_for.student_name }}</strong></span>
+                    <div class="mt-1">
+                        <span class="badge text-bg-primary participant-student-link"
+                            title="Новое участие будет связано с той же карточкой студента">Student #{{ can_add_for.student_ref_id }}</span>
+                        <span class="text-muted small">Новое участие для этого участника</span>
+                    </div>
                 </td>
-                <td>{{ participant.student_sex }}</td>
-                <td>{{ participant.institute }}</td>
-                <td>{{ participant.group_name }}</td>
-                <td>{{ participant.course }}</td>
-                <td class="participant-position">
-                    {% if participant.position %}{{ participant.position }}{% else %}<span class="text-muted">—</span>{% endif %}
+                <td class="text-nowrap">{{ can_add_for.student_sex or '—' }}</td>
+                <td>{{ can_add_for.institute or '—' }}</td>
+                <td>{{ can_add_for.group_name or '—' }}</td>
+                <td>{{ can_add_for.course or '—' }}</td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-discipline" name="discipline" aria-label="Дисциплина"
+                        placeholder="например, 100 м"
+                        title="Дисциплина различает участия одного человека (100 м и 200 м — два участия)">
                 </td>
                 <td>
-                    {% if participant.position %}
-                    <span class="badge text-bg-success"><span class="badge__dot"></span>есть</span>
-                    {% else %}
-                    <span class="badge text-bg-light text-muted"
-                        title="Место можно дописать позже — участник сохранён">ждёт результата</span>
+                    <input class="form-control form-control-sm" form="participant-add-form"
+                        {% if base_field_settings.position.value_type == 'number' %}type="number" min="0" step="1"
+                        {% else %}type="text"{% endif %} id="participant-position" name="position"
+                        aria-label="Место" placeholder="—" title="Место можно дописать позже">
+                </td>
+                <td>
+                    <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                        id="participant-result" name="result" aria-label="Результат" placeholder="например, 12,3 с">
+                </td>
+                <td>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-success" type="submit" form="participant-add-form">Добавить участие</button>
+                        <a class="btn btn-sm btn-outline-secondary"
+                            href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                    </div>
+                </td>
+            </tr>
+            {% if participant_custom_fields %}
+            {# Participation-кастомы нового участия — sub-row (паттерн правки
+               предпросмотра импорта): подстрока на всю ширину таблицы. #}
+            <tr class="row-new-participation-cf">
+                <td colspan="10">
+                    <div class="d-flex flex-wrap gap-3 align-items-end py-2">
+                        {% for field in participant_custom_fields %}
+                        <div>
+                            <label class="form-label small mb-0" for="participant-custom-{{ field.key }}">{{ field.label }}</label>
+                            <input class="form-control form-control-sm" form="participant-add-form" type="text"
+                                id="participant-custom-{{ field.key }}" name="custom__{{ field.key }}"
+                                aria-label="{{ field.label }}">
+                        </div>
+                        {% endfor %}
+                    </div>
+                </td>
+            </tr>
+            {% endif %}
+            {% endif %}
+            {% for group in participant_groups %}
+            {% if group.is_group %}
+            {# Parent-строка группы участий (P7): участник + его снимок; сами
+               участия — child-строками «└─» ниже. Группировка только
+               визуальная, в БД/реестре каждая строка — отдельная запись. #}
+            <tr class="row-group">
+                <td class="text-center">{{ loop.index }}</td>
+                <td>{{ group.student_name }}
+                    {% if group.student_ref_id %}
+                    <span class="badge text-bg-primary participant-student-link"
+                        title="Записи привязаны к карточке студента #{{ group.student_ref_id }}. Изменить связь — раздел «Сопоставление данных».">Student #{{ group.student_ref_id }}</span>
                     {% endif %}
+                </td>
+                <td>{{ group.student_sex }}</td>
+                <td>{{ group.institute }}</td>
+                <td>{{ group.group_name }}</td>
+                <td>{{ group.course }}</td>
+                <td><span class="text-muted">—</span></td>
+                <td><span class="text-muted">—</span></td>
+                <td><span class="text-muted">—</span></td>
+                {% if can_write %}
+                <td>
+                    <a class="btn btn-sm btn-outline-primary" title="Добавить ещё одно участие этого участника (например, другую дисциплину)"
+                        href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ group.student_ref_id }}">+
+                        участие</a>
+                </td>
+                {% endif %}
+            </tr>
+            {% for participation in group.participations %}
+            {# Child-строка участия: «└─», поля участия (дисциплина/место/
+               результат) и действия с ЗАПИСЬЮ; поля участника — в parent.
+               data-participation-custom — значения participation-кастомов
+               для инлайн-правки (script.js). #}
+            <tr class="row-group-item" data-record-id="{{ participation.record_id }}"
+                data-participation-custom='{{ (participation.extra_data or {}) | tojson }}'>
+                <td class="text-center text-muted" aria-hidden="true">└─</td>
+                <td><span class="text-muted">—</span></td>
+                <td><span class="text-muted">—</span></td>
+                <td><span class="text-muted">—</span></td>
+                <td><span class="text-muted">—</span></td>
+                <td><span class="text-muted">—</span></td>
+                <td>
+                    {% if participation.effective_discipline %}{{ participation.effective_discipline }}{% else %}<span
+                        class="text-muted"
+                        title="Дисциплина необязательна: различает участия одного человека (100 м и 200 м — два участия)">—</span>{% endif %}
+                </td>
+                <td class="participant-position">
+                    {% if participation.position %}{{ participation.position }}{% else %}<span class="text-muted"
+                        title="Место можно дописать позже — участник сохранён">—</span>{% endif %}
+                </td>
+                <td>
+                    {% if participation.effective_result %}{{ participation.effective_result }}{% else %}<span
+                        class="text-muted">—</span>{% endif %}
                 </td>
                 {% if can_write %}
                 <td>
                     <div class="d-flex gap-1">
                         <button class="btn btn-sm btn-outline-primary participant-edit-button" type="button"
-                            data-record-id="{{ participant.record_id }}" data-student-name="{{ participant.student_name }}"
-                            data-student-sex="{{ participant.student_sex }}" data-institute="{{ participant.institute }}"
-                            data-group="{{ participant.group_name }}" data-course="{{ participant.course }}"
-                            data-position="{{ participant.position }}"
-                            data-student-ref-id="{{ participant.student_ref_id or '' }}">Редактировать</button>
+                            data-record-id="{{ participation.record_id }}" data-student-name="{{ group.student_name }}"
+                            data-student-sex="{{ group.student_sex }}" data-institute="{{ group.institute }}"
+                            data-group="{{ group.group_name }}" data-course="{{ group.course }}"
+                            data-position="{{ participation.position }}"
+                            data-discipline="{{ participation.effective_discipline }}"
+                            data-result="{{ participation.effective_result }}"
+                            data-student-ref-id="{{ group.student_ref_id or '' }}">Редактировать</button>
                         {% if is_admin %}
                         <button class="btn btn-sm btn-outline-danger participant-delete-button" type="button"
-                            data-record-id="{{ participant.record_id }}"
-                            data-student-name="{{ participant.student_name }}">Удалить</button>
+                            data-record-id="{{ participation.record_id }}" data-student-name="{{ group.student_name }}"
+                            data-discipline="{{ participation.effective_discipline }}">Удалить</button>
                         {% endif %}
                     </div>
                 </td>
                 {% endif %}
             </tr>
+            {% endfor %}
+            {% else %}
+            {# Одиночное участие — полная строка, как раньше (P7 добавил
+               колонки Дисциплина/Результат). #}
+            {% set participation = group.participations[0] %}
+            <tr data-record-id="{{ participation.record_id }}" data-student-name="{{ participation.student_name }}"
+                data-participation-custom='{{ (participation.extra_data or {}) | tojson }}'>
+                <td class="text-center">{{ loop.index }}</td>
+                <td>{{ participation.student_name }}
+                    {# Связь с карточкой студента (IA 2026-09): только индикатор;
+                       смена связи — раздел «Сопоставление данных». #}
+                    {% if participation.student_ref_id %}
+                    <span class="badge text-bg-primary participant-student-link"
+                        title="Запись привязана к карточке студента #{{ participation.student_ref_id }}. Изменить связь — раздел «Сопоставление данных».">Student #{{ participation.student_ref_id }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ participation.student_sex }}</td>
+                <td>{{ participation.institute }}</td>
+                <td>{{ participation.group_name }}</td>
+                <td>{{ participation.course }}</td>
+                <td>
+                    {% if participation.effective_discipline %}{{ participation.effective_discipline }}{% else %}<span
+                        class="text-muted"
+                        title="Дисциплина необязательна: различает участия одного человека (100 м и 200 м — два участия)">—</span>{% endif %}
+                </td>
+                <td class="participant-position">
+                    {% if participation.position %}{{ participation.position }}{% else %}<span class="text-muted">—</span>{% endif %}
+                </td>
+                <td>
+                    {% if participation.effective_result %}{{ participation.effective_result }}{% else %}<span
+                        class="text-muted">—</span>{% endif %}
+                </td>
+                {% if can_write %}
+                <td>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-sm btn-outline-primary participant-edit-button" type="button"
+                            data-record-id="{{ participation.record_id }}"
+                            data-student-name="{{ participation.student_name }}"
+                            data-student-sex="{{ participation.student_sex }}"
+                            data-institute="{{ participation.institute }}"
+                            data-group="{{ participation.group_name }}" data-course="{{ participation.course }}"
+                            data-position="{{ participation.position }}"
+                            data-discipline="{{ participation.effective_discipline }}"
+                            data-result="{{ participation.effective_result }}"
+                            data-student-ref-id="{{ participation.student_ref_id or '' }}">Редактировать</button>
+                        {% if is_admin %}
+                        <button class="btn btn-sm btn-outline-danger participant-delete-button" type="button"
+                            data-record-id="{{ participation.record_id }}"
+                            data-student-name="{{ participation.student_name }}"
+                            data-discipline="{{ participation.effective_discipline }}">Удалить</button>
+                        {% endif %}
+                    </div>
+                </td>
+                {% endif %}
+            </tr>
+            {% endif %}
             {% else %}
             <tr>
-                <td colspan="{{ 9 if can_write else 8 }}" class="text-center text-muted py-4">
+                <td colspan="{{ 10 if can_write else 9 }}" class="text-center text-muted py-4">
                     Участников пока нет{% if can_write %} — добавьте первого в строке выше{% endif %}
                 </td>
             </tr>
@@ -325,10 +497,10 @@
     </table>
 </div>
 
-{% if participants %}
+{% if participations_count %}
 <div class="table-foot">
     <span class="table-foot__count">Показано <strong>{{ shown_count }}</strong> из
-        <strong>{{ total_count }}</strong> участников</span>
+        <strong>{{ participations_count }}</strong> участий</span>
 </div>
 {% endif %}
 
@@ -336,7 +508,9 @@
 <div class="calendar-note mt-4">
     <span>Участники — обычные записи реестра: ФИО ищется по первым буквам среди известных атлетов, пол, институт,
         группа и курс подставляются (поля формы всегда имеют приоритет). Место можно дописать позже — «Редактировать»
-        в строке участника.</span>
+        в строке участника. Несколько участий одного участника (например, разные дисциплины) показываются группой:
+        общая строка — участник, строки «└─» — его участия; кнопка «+ участие» добавляет ещё одно участие к той же
+        карточке студента.</span>
 </div>
 {% endif %}
 
