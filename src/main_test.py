@@ -15878,3 +15878,74 @@ def test_hotfix_single_to_group_flow_via_add_participation(event_import_client: 
     body = page().text
     assert body.count('class="row-group-item"') == 2
     assert storage.count_calendar_event_participants(event_id) == 2
+
+
+# ===== Site Help / Documentation Refresh: страницы «Инструкция простыми
+# словами» (/admin/data-guide) и «Как работает система» (/admin/data-map)
+# остаются на прежних роутах и ролях, но пишутся пользовательским языком:
+# без названий таблиц/колонок и внутренних идентификаторов. =====
+
+HELP_DB_IDENTIFIERS = ('student_ref_id', 'extra_data', 'import_queue', 'owner_id', 'sha256')
+
+GUIDE_SECTIONS = ('Студенты', 'Календарь', 'Участники', 'Реестр', 'Импорт', 'Спортсмен', 'Отчёты')
+
+
+def test_data_guide_page_for_moderators_only(client: SanicTestClient):
+    """/admin/data-guide: admin и editor видят инструкцию со всеми разделами;
+    viewer и athlete — 403, анонимный вход — редирект на /login."""
+    _, response = client.get('/admin/data-guide', headers=get_auth_headers(role='admin'))
+    assert response.status == 200
+    body = response.text
+    for section in GUIDE_SECTIONS:
+        assert section in body, f'Раздел «{section}» пропал из инструкции'
+    # Пользовательская страница: без служебных идентификаторов и старого
+    # названия технической страницы.
+    for identifier in HELP_DB_IDENTIFIERS:
+        assert identifier not in body
+    assert 'Карта данных' not in body
+
+    _, response = client.get('/admin/data-guide', headers=get_auth_headers(role='editor'))
+    assert response.status == 200
+
+    _, response = client.get('/admin/data-guide', headers=get_auth_headers(role='viewer'))
+    assert response.status == 403
+    _, response = client.get('/admin/data-guide', headers=athlete_headers())
+    assert response.status == 403
+    _, response = client.get('/admin/data-guide', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+
+def test_data_map_page_admin_only_and_renamed(client: SanicTestClient):
+    """/admin/data-map: «Как работает система», admin-only; технический
+    SVG-постер с таблицами базы удалён вместе с идентификаторами."""
+    _, response = client.get('/admin/data-map', headers=get_auth_headers(role='admin'))
+    assert response.status == 200
+    body = response.text
+    assert 'Как работает система' in body
+    assert 'Карта данных' not in body
+    assert '<svg' not in body
+    for identifier in HELP_DB_IDENTIFIERS:
+        assert identifier not in body
+
+    for headers in (
+        get_auth_headers(role='editor'),
+        get_auth_headers(role='viewer'),
+        athlete_headers(),
+    ):
+        _, response = client.get('/admin/data-map', headers=headers)
+        assert response.status == 403
+    _, response = client.get('/admin/data-map', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'] == '/login'
+
+
+def test_admin_hub_help_cards_renamed(client: SanicTestClient):
+    """Хаб /admin: карточка «Как работает система» вместо «Карта данных»,
+    ссылка прежняя — /admin/data-map."""
+    _, response = client.get('/admin', headers=get_auth_headers(role='admin'))
+    assert response.status == 200
+    body = response.text
+    assert 'Как работает система' in body
+    assert 'Карта данных' not in body
+    assert '/admin/data-map' in body
