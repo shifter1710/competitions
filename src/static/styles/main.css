@@ -488,6 +488,22 @@ h3 { font-size: 17px; }
     --bs-table-hover-color: var(--text);
 }
 
+/* Группы участий страницы события (P7): parent-строка участника и его
+   child-строки «└─» — единая поверхность группы, зебра внутри группы
+   выключена (--bs-table-bg-state выше по цепочке Bootstrap, чем
+   клеточный --bs-table-bg-type от .table-striped), child-строки без
+   верхней границы — визуально единый блок. */
+.row-group,
+.row-group-item {
+    --bs-table-accent-bg: transparent;
+    --bs-table-bg-state: transparent;
+    background-color: var(--surface);
+}
+
+.row-group-item > td {
+    border-top: 0;
+}
+
 /* Бейджи статусов: мягкие двухцветные, как .badge--ok/--warn/--danger
    прототипа. Bootstrap-классы text-bg-* зашивают цвет через !important,
    поэтому оверрайды тоже с !important (main.css загружается последним). */
