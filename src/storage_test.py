@@ -2900,6 +2900,258 @@ def test_link_competitions_rejects_inactive_missing_student_and_records(adapter)
     assert adapter.link_competitions([1, 1], active_id) == (1, None)
 
 
+def save_cardless_participation(adapter, event_id: int, name: str) -> int:
+    """Cardless-участие события для storage-тестов create-and-link: запись
+    реестра со ссылкой calendar_event_id (make_participation ниже по модулю
+    возвращает модель, сюда — id сохранённой строки)."""
+    adapter.save_competitions([make_participation(name, event_id)])
+    return int(adapter.get_competitions()[-1].record_id)
+
+
+def test_create_student_and_link_participation_success(adapter):
+    """Успех: карточка создаётся (поля — со strip, как parse_student_form)
+    и сразу связывается с участием — одна операция, как create_and_link
+    роута страницы участника."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    record_id = save_cardless_participation(adapter, event_id, 'Иванов Иван')
+
+    student_id, error = adapter.create_student_and_link_participation(
+        event_id=event_id,
+        record_id=record_id,
+        full_name=' Иванов Иван ',
+        sex='М',
+        institute=' ИСЭиУ ',
+        group_name=' ЭБ-241 ',
+        course=' 2 ',
+    )
+    assert error is None
+    student = adapter.get_student_by_id(student_id)
+    assert (
+        student['full_name'],
+        student['sex'],
+        student['institute'],
+        student['group_name'],
+        student['course'],
+        student['active'],
+    ) == ('Иванов Иван', 'М', 'ИСЭиУ', 'ЭБ-241', '2', 1)
+    row = adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()
+    assert row['student_ref_id'] == student_id
+
+
+def test_create_student_and_link_participation_rejects_before_insert(adapter):
+    """Отказ ДО вставки: несуществующая/чужая/уже связанная запись,
+    невалидные поля — 0 изменений, карточка не создаётся."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    other_event = adapter.create_calendar_event(
+        name='Другой', date='2026-06-01T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    record_id = save_cardless_participation(adapter, event_id, 'Иванов Иван')
+    foreign_id = save_cardless_participation(adapter, other_event, 'Чужой Участник')
+    linked_id = save_cardless_participation(adapter, event_id, 'Связанный Участник')
+    prelinked = adapter.create_student('Уже Связан', 'М', '', '', '')
+    adapter.connection.execute(
+        'UPDATE competitions SET student_ref_id = ? WHERE id = ?',
+        (prelinked, linked_id),
+    )
+    adapter.connection.commit()
+
+    calls = [
+        (999999, 'record_not_found'),
+        (foreign_id, 'event_mismatch'),
+        (linked_id, 'already_linked'),
+        (record_id, 'invalid_full_name'),
+        (record_id, 'invalid_sex'),
+    ]
+    for target_id, expected in calls:
+        kwargs = {
+            'event_id': event_id,
+            'record_id': target_id,
+            'institute': '',
+            'group_name': '',
+            'course': '',
+        }
+        if expected == 'invalid_full_name':
+            result = adapter.create_student_and_link_participation(full_name='   ', sex='', **kwargs)
+        elif expected == 'invalid_sex':
+            result = adapter.create_student_and_link_participation(full_name='Новый Студент', sex='X', **kwargs)
+        else:
+            result = adapter.create_student_and_link_participation(full_name='Новый Студент', sex='', **kwargs)
+        assert result == (None, expected), expected
+
+    # Ничего не создано и не изменено: одна карточка (заранее связанная),
+    # целевая запись осталась cardless
+    students = adapter.connection.execute('SELECT id FROM students').fetchall()
+    assert [row['id'] for row in students] == [prelinked]
+    assert (
+        adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()[
+            'student_ref_id'
+        ]
+        is None
+    )
+
+
+def test_create_student_and_link_participation_race_rolls_back_student(adapter):
+    """Гонка внутри транзакции: между SELECT участия и guarded UPDATE запись
+    успевает связаться другим процессом — rowcount = 0, ПОЛНЫЙ откат:
+    карточка-сирота не остаётся, возвращает (None, 'already_linked')."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    record_id = save_cardless_participation(adapter, event_id, 'Гонка Гонщиков')
+    competitor = adapter.create_student('Конкурент Конкурентович', 'М', '', '', '')
+
+    class RacingLinkConnection:
+        """«Другой процесс» связывает ту же запись в момент guarded UPDATE
+        (одно соединение — конкурентная связь откатится вместе с
+        транзакцией; контракт операции неотличим: она целиком не
+        состоялась, карточки нет)."""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('UPDATE competitions SET student_ref_id') and 'IS NULL' in sql:
+                self._connection.execute(
+                    'UPDATE competitions SET student_ref_id = ? WHERE id = ?',
+                    (competitor, record_id),
+                )
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = RacingLinkConnection(real_connection)
+    try:
+        result = adapter.create_student_and_link_participation(
+            event_id=event_id,
+            record_id=record_id,
+            full_name='Гонка Гонщиков',
+            sex='',
+            institute='',
+            group_name='',
+            course='',
+        )
+    finally:
+        adapter.connection = real_connection
+    assert result == (None, 'already_linked')
+    students = adapter.connection.execute('SELECT id FROM students').fetchall()
+    assert [row['id'] for row in students] == [competitor]
+    assert (
+        adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()[
+            'student_ref_id'
+        ]
+        is None
+    )
+
+
+def test_create_student_and_link_participation_zero_rowcount_rolls_back(adapter):
+    """Прямая проверка ветки rowcount = 0 (UPDATE не затронул строк): откат
+    вставленного студента, отказ already_linked."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    record_id = save_cardless_participation(adapter, event_id, 'Пустой Rowcount')
+
+    class ZeroRowcountCursor:
+        rowcount = 0
+
+    class ZeroRowcountConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('UPDATE competitions SET student_ref_id'):
+                return ZeroRowcountCursor()
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = ZeroRowcountConnection(real_connection)
+    try:
+        result = adapter.create_student_and_link_participation(
+            event_id=event_id,
+            record_id=record_id,
+            full_name='Пустой Rowcount',
+            sex='Ж',
+            institute='',
+            group_name='',
+            course='',
+        )
+    finally:
+        adapter.connection = real_connection
+    assert result == (None, 'already_linked')
+    assert adapter.connection.execute('SELECT COUNT(*) AS total FROM students').fetchone()['total'] == 0
+    assert (
+        adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()[
+            'student_ref_id'
+        ]
+        is None
+    )
+
+
+def test_create_student_and_link_participation_db_failure_rolls_back(adapter):
+    """Сбой БД на INSERT студента и между INSERT и UPDATE (создана карточка,
+    UPDATE падает) — исключение наружу, полный откат: ни карточки, ни связи,
+    соединение живо (rollback)."""
+    event_id = adapter.create_calendar_event(
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    record_id = save_cardless_participation(adapter, event_id, 'Сбойный Участник')
+
+    class FailingConnection:
+        def __init__(self, connection, fail_on):
+            self._connection = connection
+            self._fail_on = fail_on
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith(self._fail_on):
+                raise RuntimeError(f'Injected failure on {self._fail_on}')
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    for fail_on in ('INSERT INTO students', 'UPDATE competitions'):
+        real_connection = adapter.connection
+        adapter.connection = FailingConnection(real_connection, fail_on)
+        try:
+            with pytest.raises(RuntimeError):
+                adapter.create_student_and_link_participation(
+                    event_id=event_id,
+                    record_id=record_id,
+                    full_name='Сбойный Участник',
+                    sex='',
+                    institute='',
+                    group_name='',
+                    course='',
+                )
+        finally:
+            adapter.connection = real_connection
+        assert adapter.connection.execute('SELECT COUNT(*) AS total FROM students').fetchone()['total'] == 0
+        assert (
+            adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()[
+                'student_ref_id'
+            ]
+            is None
+        )
+
+
 def test_unlink_and_relink_competition_return_old_ref(adapter):
     adapter.save_competitions([make_competition('Иванов Иван', datetime(2026, 1, 10))])
     first = adapter.create_student('Иванов Иван', 'М', '', '', '')

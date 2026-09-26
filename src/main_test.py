@@ -16281,8 +16281,10 @@ def test_participant_create_and_link_happy_path(event_import_client: SanicTestCl
     ]
     assert audit_details(storage, 'competition_linked_to_student')[0]['source'] == 'event-participant-page'
     # Страница события перегруппировалась: linked-строка со ссылкой-ФИО
+    # и бейджем «+ участие» (prefill для второй дисциплины карточки)
     body = get_event_page(event_import_client, event_id, role='admin').text
     assert f'<a href="/admin/people/{student_id}"' in body
+    assert f'add_participation={student_id}' in body
 
 
 def test_participant_create_and_link_invalid_form_no_card(event_import_client: SanicTestClient):
@@ -16324,15 +16326,41 @@ def test_participant_create_and_link_invalid_form_no_card(event_import_client: S
     assert students_snapshot(storage) == []
 
 
-def test_participant_create_and_link_race_keeps_card(event_import_client: SanicTestClient):
-    """Окно гонки already_linked ПОСЛЕ create: карточка остаётся, запись не
-    меняется, flash объясняет (прецедент admin_reconcile_create_record)."""
+def test_participant_create_and_link_race_atomic_no_card(event_import_client: SanicTestClient):
+    """Окно гонки already_linked ВНУТРИ транзакции: между SELECT участия и
+    guarded UPDATE запись успевает связаться другим процессом — ПОЛНЫЙ
+    откат (create_student_and_link_participation): карточка НЕ создаётся
+    (сирота невозможна), запись этим запросом не тронута, аудит не писался."""
     storage = app.ctx.storage
     event_id = make_calendar_event(storage)
     record_id = make_event_participation(storage, event_id, 'Гонка Гонщиков')
+    competitor = storage.create_student('Конкурент Конкурентович', 'М', '', '', '')
 
-    original_link = storage.link_competitions
-    storage.link_competitions = lambda record_ids, student_id: (0, 'already_linked')
+    class RacingLinkConnection:
+        """Инъекция на guarded UPDATE: «другой процесс» связывает ту же запись
+        ДО его выполнения (одно соединение — конкурентная связь откатится
+        вместе с транзакцией; контракт операции тот же: она целиком не
+        состоялась, карточки нет)."""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('UPDATE competitions SET student_ref_id') and 'IS NULL' in sql:
+                self._connection.execute(
+                    'UPDATE competitions SET student_ref_id = ? WHERE id = ?',
+                    (competitor, record_id),
+                )
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = storage.connection
+    storage.connection = RacingLinkConnection(real_connection)
     try:
         response = post_participant_link(
             event_import_client,
@@ -16348,14 +16376,58 @@ def test_participant_create_and_link_race_keeps_card(event_import_client: SanicT
             },
         )
     finally:
-        storage.link_competitions = original_link
+        storage.connection = real_connection
     assert response.status == 302
     location = unquote_plus(response.headers['location'])
-    assert f'Студент «Гонка Гонщиков» создан, но запись №{record_id} уже была привязана другим действием.' in location
+    assert f'Запись №{record_id} уже была привязана другим действием.' in location
     assert location.startswith(f'/calendar/{event_id}?')
-    created = students_snapshot(storage)
-    assert [row[1] for row in created] == ['Гонка Гонщиков']
+    # Карточка НЕ создана: осталась только карточка «конкурента»
+    assert [row[1] for row in students_snapshot(storage)] == ['Конкурент Конкурентович']
     assert record_ref(storage, record_id) is None
+    # Ложного аудита нет: операция не состоялась
+    assert audit_details(storage, 'student_created') == []
+    assert audit_details(storage, 'competition_linked_to_student') == []
+
+
+def test_participant_create_and_link_storage_error_mapping(event_import_client: SanicTestClient):
+    """Коды отказа storage → flash: record_not_found/event_mismatch —
+    «Запись не найдена.»; карточка не создаётся, аудита нет (естественным
+    путём ветка недостижима — запись уже проверена роутом; маппинг –
+    страховка от исчезновения записи между проверкой и транзакцией)."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    record_id = make_event_participation(storage, event_id, 'Пропавший Участник')
+
+    original_create = storage.create_student_and_link_participation
+    for error_code, expected in (
+        ('record_not_found', 'Запись не найдена.'),
+        ('event_mismatch', 'Запись не найдена.'),
+    ):
+        storage.create_student_and_link_participation = lambda **kwargs: (None, error_code)
+        try:
+            response = post_participant_link(
+                event_import_client,
+                event_id,
+                record_id,
+                {
+                    '_route': 'create-and-link',
+                    'full_name': 'Пропавший Участник',
+                    'sex': '',
+                    'institute': '',
+                    'group': '',
+                    'course': '',
+                },
+            )
+        finally:
+            storage.create_student_and_link_participation = original_create
+        assert response.status == 302, error_code
+        location = unquote_plus(response.headers['location'])
+        assert expected in location, error_code
+        assert location.startswith(f'/calendar/{event_id}?'), error_code
+    assert students_snapshot(storage) == []
+    assert record_ref(storage, record_id) is None
+    assert audit_details(storage, 'student_created') == []
+    assert audit_details(storage, 'competition_linked_to_student') == []
 
 
 def test_participant_link_reflected_in_identity_and_reconcile(event_import_client: SanicTestClient):

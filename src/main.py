@@ -2313,10 +2313,15 @@ async def calendar_event_participant_link(request: Request, event_id: str, recor
 
 @app.post('/calendar/<event_id>/participants/<record_id>/create-and-link')
 async def calendar_event_participant_create_and_link(request: Request, event_id: str, record_id: str):
-    # Паттерн admin_reconcile_create_record: форма валидируется ДО create
-    # (невалидная — карточка не создаётся), карточка создаётся из снимка
-    # записи и сразу привязывается. already_linked после create — гонка:
-    # карточка ОСТАЁТСЯ (прецедент сопоставления), запись не трогаем.
+    # «Создать и связать» — ОДНА транзакция (create_student_and_link_
+    # participation): форма и запись проверяются ДО неё, карточка и связь
+    # появляются вместе либо не появляется ничего — карточка-сирота
+    # невозможна (в отличие от прецедента admin_reconcile_create_record,
+    # где create и link были отдельными транзакциями). Matched-guard (P4)
+    # для НОВОЙ карточки избыточен: её свежий student_ref_id не
+    # пересекается ни с одним существующим участием, а после привязки у
+    # карточки ровно одно участие — сама запись (см. docstring метода);
+    # дубль против существующих карточек закрывает POST .../link.
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
@@ -2339,39 +2344,42 @@ async def calendar_event_participant_create_and_link(request: Request, event_id:
             url=f'/calendar/{event["id"]}/participants/{numeric_record_id}/link',
         )
 
-    student_id = storage.create_student(
-        form['full_name'],
-        form['sex'],
-        form['institute'],
-        form['group_name'],
-        form['course'],
+    student_id, create_error = storage.create_student_and_link_participation(
+        event_id=int(event['id']),
+        record_id=numeric_record_id,
+        full_name=form['full_name'],
+        sex=form['sex'],
+        institute=form['institute'],
+        group_name=form['group_name'],
+        course=form['course'],
     )
+    if create_error is not None:
+        if create_error in ('invalid_full_name', 'invalid_sex'):
+            # Ревалидация storage (страховка расхождения с parse_student_form):
+            # назад на форму, как у обычной ошибки полей.
+            form_error_text = (
+                'Укажите ФИО студента.'
+                if create_error == 'invalid_full_name'
+                else 'Пол может быть «М», «Ж» или не указан.'
+            )
+            return build_redirect_with_message(
+                error=form_error_text,
+                url=f'/calendar/{event["id"]}/participants/{numeric_record_id}/link',
+            )
+        if create_error == 'already_linked':
+            # Гонка внутри транзакции: запись связал другой процесс — полный
+            # откат, карточка НЕ создана.
+            error_text = f'Запись №{numeric_record_id} уже была привязана другим действием.'
+        else:
+            # record_not_found / event_mismatch: запись исчезла или перенесена
+            # на другое событие между проверкой роута и транзакцией.
+            error_text = 'Запись не найдена.'
+        return build_redirect_with_message(error=error_text, url=back_url)
     log_audit_event(
         request,
         'student_created',
         {'student_id': student_id, 'full_name': form['full_name'], 'source': 'event-participant-page'},
     )
-    # Инвариант един для всех путей вставки/привязки (у свежей карточки
-    # участий быть не может, проверка — симметрия с POST .../link).
-    guard_error = event_participant_link_guard(storage, event, record, student_id)
-    if guard_error is not None:
-        detail = guard_error[0].lower() + guard_error[1:]
-        return build_redirect_with_message(
-            error=f'Студент «{form["full_name"]}» создан, но {detail}',
-            url=back_url,
-        )
-
-    _, link_error = storage.link_competitions([numeric_record_id], student_id)
-    if link_error is not None:
-        # Гонка: карточка уже создана (и остаётся), запись связал кто-то другой.
-        if link_error == 'already_linked':
-            message = (
-                f'Студент «{form["full_name"]}» создан, но запись №{numeric_record_id} '
-                'уже была привязана другим действием.'
-            )
-        else:
-            message = f'Студент «{form["full_name"]}» создан, но запись не найдена.'
-        return build_redirect_with_message(message=message, url=back_url)
     log_audit_event(
         request,
         'competition_linked_to_student',
