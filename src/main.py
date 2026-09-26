@@ -4260,7 +4260,8 @@ async def admin_page(request: Request):
 
 @app.get('/admin/data-map')
 async def admin_data_map_page(request: Request):
-    """Карта данных: таблицы базы, связи и потоки (постер для владельца)."""
+    """«Как работает система»: пользовательская модель данных (студенты,
+    соревнования, участия) без служебных подробностей."""
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
@@ -4272,8 +4273,8 @@ async def admin_data_map_page(request: Request):
 
 @app.get('/admin/data-guide')
 async def admin_data_guide_page(request: Request):
-    """Инструкция простыми словами: что делает каждый раздел,
-    откуда данные и куда попадают (для администратора-тренера)."""
+    """Инструкция простыми словами по разделам: Студенты, Календарь,
+    участники соревнования, Реестр, импорт, спортсмен, отчёты."""
     auth_error = require_moderator(request)
     if auth_error is not None:
         return auth_error
