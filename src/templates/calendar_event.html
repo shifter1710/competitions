@@ -475,6 +475,13 @@
                             data-discipline="{{ participation.effective_discipline }}"
                             data-result="{{ participation.effective_result }}"
                             data-student-ref-id="{{ participation.student_ref_id or '' }}">Редактировать</button>
+                        {# D6: «+ участие» доступно и одиночной связанной
+                           строке — тот же prefill-flow, что у parent. #}
+                        {% if participation.student_ref_id %}
+                        <a class="btn btn-sm btn-outline-primary" title="Добавить ещё одно участие этого участника (например, другую дисциплину)"
+                            href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ participation.student_ref_id }}">+
+                            участие</a>
+                        {% endif %}
                         {% if is_admin %}
                         <button class="btn btn-sm btn-outline-danger participant-delete-button" type="button"
                             data-record-id="{{ participation.record_id }}"

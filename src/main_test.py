@@ -15757,3 +15757,124 @@ def test_p7_filter_and_counters_consistent_for_groups(client: SanicTestClient):
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+# --- Hotfix 2026-09-26: «+ участие» на одиночной связанной строке (D6). ---
+
+
+def test_hotfix_single_linked_row_has_add_participation(client: SanicTestClient):
+    """D6: связанный студент с 1 участием — полная строка С «+ участие»."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = [_participants_sample()[0]]
+    try:
+        for role in ('admin', 'editor'):
+            body = get_event_page(client, 7, role=role).text
+            assert 'class="row-group"' not in body
+            assert body.count('add_participation=101') == 1, role
+            # Кнопка — в ячейке действий, рядом с Редактировать
+            assert 'Редактировать' in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_hotfix_group_add_button_on_parent_only(client: SanicTestClient):
+    """Группа 2+: «+ участие» ровно один раз (parent), child — без него."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        body = get_event_page(client, 7, role='admin').text
+        assert body.count('class="row-group"') == 1
+        # Ровно одна кнопка на группу: у parent; cardless-сосед её не имеет
+        assert body.count('add_participation=101') == 1
+        assert body.count('class="row-group-item"') == 2
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_hotfix_cardless_and_viewer_have_no_add_button(client: SanicTestClient):
+    """Cardless-строка и viewer — без «+ участие» в любом виде."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _participants_sample()
+    try:
+        # admin видит кнопку только у linked-строки (101), не у cardless
+        body = get_event_page(client, 7, role='admin').text
+        assert body.count('add_participation=101') == 1
+        assert 'add_participation=None' not in body
+        # viewer не видит ни одной
+        body = get_event_page(client, 7, role='viewer').text
+        assert 'add_participation' not in body
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_hotfix_single_to_group_flow_via_add_participation(event_import_client: SanicTestClient):
+    """Переход: single linked → «+ участие» (prefill) → другая дисциплина →
+    parent + 2 child; дубль дисциплины P4-guard блокирует."""
+    storage = event_import_client.app.ctx.storage
+    event_id = make_calendar_event(storage)
+    student_id = storage.create_student('Хотфикс Один Одинович', 'М', 'ИСИ', 'ХФ-1', '1')
+    make_event_participation(
+        storage, event_id, 'Хотфикс Один Одинович', student_ref=student_id, discipline='кросс 3 км', position=1
+    )
+
+    def page(query=''):
+        return get_event_page(event_import_client, event_id, query=query, role='admin')
+
+    headers = get_auth_headers()
+    # 1) single: плоская строка с кнопкой на реальных данных
+    body = page().text
+    assert 'class="row-group"' not in body
+    assert f'add_participation={student_id}' in body
+
+    # 2) prefill-страница открывается с locked ФИО
+    body = page(f'?add_participation={student_id}').text
+    assert 'Новое участие для этого участника' in body
+
+    # 3) POST другой дисциплины → parent + 2 child
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_ref_id': str(student_id),
+            'student_name': 'Хотфикс Один Одинович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ХФ-1',
+            'course': '1',
+            'position': '2',
+            'discipline': 'кросс 5 км',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    body = page().text
+    assert body.count('class="row-group"') == 1
+    assert body.count('class="row-group-item"') == 2
+    assert 'Участий: <strong>2</strong>' in body
+
+    # 4) дубль нормализованной дисциплины — P4 guard
+    _, response = event_import_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_ref_id': str(student_id),
+            'student_name': 'Хотфикс Один Одинович',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ХФ-1',
+            'course': '1',
+            'position': '9',
+            'discipline': '  КРОСС   3 км ',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Такое участие уже существует' in unquote_plus(response.headers.get('Location', ''))
+    body = page().text
+    assert body.count('class="row-group-item"') == 2
+    assert storage.count_calendar_event_participants(event_id) == 2
