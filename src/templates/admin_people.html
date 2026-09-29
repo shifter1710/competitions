@@ -14,12 +14,18 @@
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         {# Поиск — GET-форма (паттерн журнала аудита): фильтр живёт в URL,
-           «Сброс» — просто ссылка без параметров. Кнопка создания — в той же
-           строке, открывает модал (паттерн страницы пользователей). #}
+           «Сброс» — просто ссылка без параметров (сбрасывает и q, и
+           сортировку). Скрытые sort/order не дают новому запросу скинуть
+           выбранную сортировку. Кнопка создания — в той же строке, открывает
+           модал (паттерн страницы пользователей). #}
         <div class="d-flex flex-column flex-sm-row gap-2 justify-content-between align-items-sm-center mb-3">
             <form action="/admin/people" class="d-flex flex-wrap gap-2" method="get">
-                <input aria-label="Поиск по ФИО" autocomplete="off" class="form-control" name="q"
-                       placeholder="часть ФИО" type="search" value="{{ q }}">
+                {# data-people-search — точка инициализации подсказок-карточек
+                   (script.js, FioResolver только с kind=student). #}
+                <input aria-label="Поиск по ФИО" autocomplete="off" class="form-control" data-people-search
+                       id="people-search-q" name="q" placeholder="часть ФИО" type="search" value="{{ q }}">
+                {% if sort %}<input name="sort" type="hidden" value="{{ sort }}">{% endif %}
+                {% if order %}<input name="order" type="hidden" value="{{ order }}">{% endif %}
                 <button class="btn btn-outline-primary" type="submit">Показать</button>
                 <a class="btn btn-outline-secondary" href="/admin/people">Сброс</a>
             </form>
@@ -47,14 +53,29 @@
         <div class="table-responsive">
             <table class="table table-sm align-middle">
                 <thead>
+                    {# Сортируемые колонки (ФИО/Институт/Группа): заголовок —
+                       ссылка на готовый URL из контекста (sort_urls хранит
+                       текущий q), классы sorted-asc/sorted-desc + aria-sort
+                       показывают активную сортировку, стрелки — из CSS главной
+                       (.table-header-cell::after). Остальные колонки — просто
+                       scope="col" (паттерн главной, index.html). #}
                     <tr>
-                        <th>ФИО</th>
-                        <th>Пол</th>
-                        <th>Институт</th>
-                        <th>Группа</th>
-                        <th>Курс</th>
-                        <th>Статус</th>
-                        <th class="text-end">Действия</th>
+                        <th class="table-header-cell{% if sort == 'name' %} sorted-{{ order }}{% endif %}" scope="col"
+                            {% if sort == 'name' %}aria-sort="{{ 'ascending' if order == 'asc' else 'descending' }}"{% endif %}>
+                            <a class="table-sort-link" href="{{ sort_urls.name }}">ФИО</a>
+                        </th>
+                        <th scope="col">Пол</th>
+                        <th class="table-header-cell{% if sort == 'institute' %} sorted-{{ order }}{% endif %}" scope="col"
+                            {% if sort == 'institute' %}aria-sort="{{ 'ascending' if order == 'asc' else 'descending' }}"{% endif %}>
+                            <a class="table-sort-link" href="{{ sort_urls.institute }}">Институт</a>
+                        </th>
+                        <th class="table-header-cell{% if sort == 'group' %} sorted-{{ order }}{% endif %}" scope="col"
+                            {% if sort == 'group' %}aria-sort="{{ 'ascending' if order == 'asc' else 'descending' }}"{% endif %}>
+                            <a class="table-sort-link" href="{{ sort_urls.group }}">Группа</a>
+                        </th>
+                        <th scope="col">Курс</th>
+                        <th scope="col">Статус</th>
+                        <th class="text-end" scope="col">Действия</th>
                     </tr>
                 </thead>
                 <tbody>

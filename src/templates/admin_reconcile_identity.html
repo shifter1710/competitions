@@ -212,7 +212,7 @@
                         <td>{{ item.username }}</td>
                         <td>
                             <div>#{{ item.id }} <strong>{{ item.student_name }}</strong></div>
-                            <div class="small text-muted">{{ item.sport }} · {{ format_date_range(item.date, item.date_to) }} · {{ item.name }}</div>
+                            <div class="small text-muted">{{ item.sport }} · <span class="text-nowrap">{{ format_date_range(item.date, item.date_to) }}</span> · {{ item.name }}</div>
                         </td>
                     </tr>
                     {% endfor %}

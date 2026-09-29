@@ -1192,6 +1192,17 @@ def get_index_counter(html: str) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def people_row_ids(html: str) -> list[int]:
+    """Порядок id карточек в таблице страницы «Студенты» (первая ссылка
+    строки — ФИО; ссылка «Карточка» в действиях идёт позже). Строки
+    неактивных карточек несут class — поэтому <tr…>, а не строгий <tr>."""
+    body = re.search(r'<tbody>(.*?)</tbody>', html, re.S)
+    assert body is not None, 'таблица карточек не найдена'
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', body.group(1), re.S)
+    assert rows, 'строки таблицы карточек не найдены'
+    return [int(re.findall(r'href="/admin/people/(\d+)"', row)[0]) for row in rows]
+
+
 def test_pager_items_edges_and_gaps():
     # Чистая функция пагинации: края (первая/последняя) и окно ±1 вокруг
     # текущей страницы, между непоследовательными номерами — разрыв «…».
@@ -1316,6 +1327,24 @@ def test_index_filter_rejects_invalid_date(index_client: SanicTestClient):
 
     assert response.status == 400
     assert 'Некорректная дата' in response.text
+
+
+def test_index_date_cells_rendered_nowrap(index_client: SanicTestClient):
+    """Даты реестра — одной строкой (замечание UX): span.text-nowrap вокруг
+    одиночной даты и диапазона целиком; span внутри td не мешает ни
+    клиентской сортировке (data-sort-value на td), ни выгрузке (колонки —
+    из th)."""
+    storage = app.ctx.storage
+    storage.save_competitions([make_index_record('Даточкин Данил Данилович', date=datetime(2026, 3, 19))])
+    ranged = make_index_record('Даточкин Данил Данилович', date=datetime(2026, 6, 25))
+    ranged.date_to = datetime(2026, 6, 27)
+    storage.save_competitions([ranged])
+
+    _, response = index_client.get('/', headers=get_auth_headers())
+    assert response.status == 200
+    # Одиночная дата и диапазон «25-27.06.2026» не рвутся на две строки
+    assert '<span class="text-nowrap">19.03.2026</span>' in response.text
+    assert '<span class="text-nowrap">25-27.06.2026</span>' in response.text
 
 
 def test_index_status_filter_moderator_only(index_client: SanicTestClient):
@@ -7871,7 +7900,11 @@ def create_person(client: SanicTestClient, **overrides) -> object:
 
 
 def test_admin_people_requires_admin(client: SanicTestClient):
-    _, response = client.get('/admin/people', headers=get_auth_headers(role='editor'))
+    for role in ('editor', 'viewer'):
+        _, response = client.get('/admin/people', headers=get_auth_headers(role=role))
+        assert response.status == 403
+
+    _, response = client.get('/admin/people', headers=athlete_headers(), allow_redirects=False)
     assert response.status == 403
 
     _, response = client.get('/admin/people', allow_redirects=False)
@@ -7923,6 +7956,88 @@ def test_admin_people_create_requires_full_name(people_client: SanicTestClient):
     # Ни одна из попыток не создала карточку
     _, response = people_client.get('/admin/people', headers=get_auth_headers())
     assert 'Студентов пока нет.' in response.text
+
+
+def test_admin_people_search_composes_with_sort(people_client: SanicTestClient):
+    """Композиция поиска и сортировки: q фильтрует И сортирует, ссылки
+    заголовков сохраняют q (urlencode кириллицы), скрытые sort/order в
+    форме не дают новому запросу скинуть сортировку. Полю поиска хватает
+    свободного текста — скрытых полей связи (student_ref_id) нет, выбор
+    подсказки лишь заполняет поле (браузерный smoke)."""
+    create_person(people_client, full_name='Иванов Иван Иванович', institute='ИМИ', group='СБ-202')
+    create_person(people_client, full_name='Козлов Кирилл Козлович', institute='ИСИ', group='')
+
+    # Без параметров: дефолтный порядок (ФИО ASC), маркеры сортировки нет
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert response.status == 200
+    assert people_row_ids(response.text) == [1, 2]
+    assert 'aria-sort' not in response.text
+    assert 'sorted-asc' not in response.text and 'sorted-desc' not in response.text
+    assert '<input name="sort" type="hidden"' not in response.text
+    # Контракт формы поиска: маркер для JS-подсказок + id; без скрытых связей
+    assert 'data-people-search' in response.text
+    assert 'id="people-search-q"' in response.text
+    assert 'name="student_ref_id"' not in response.text
+    assert 'name="student_id"' not in response.text
+
+    # q + sort + order вместе: список отфильтрован и отсортирован
+    params = urlencode({'q': 'ов', 'sort': 'name', 'order': 'desc'})
+    _, response = people_client.get(f'/admin/people?{params}', headers=get_auth_headers())
+    assert response.status == 200
+    assert people_row_ids(response.text) == [2, 1]
+    assert 'Найдено: 2 из 2' in response.text
+    # Активная колонка помечена классом и aria-sort
+    assert 'sorted-desc' in response.text
+    assert 'aria-sort="descending"' in response.text
+    # Ссылка активной колонки переключает направление, q сохранён
+    name_link = re.search(r'<a class="table-sort-link" href="([^"]+)">ФИО</a>', response.text)
+    assert name_link is not None
+    assert name_link.group(1).replace('&amp;', '&') == (
+        f"/admin/people?{urlencode({'sort': 'name', 'order': 'asc', 'q': 'ов'})}"
+    )
+    # Ссылка неактивной колонки начинает с asc, q тоже сохранён
+    institute_link = re.search(r'<a class="table-sort-link" href="([^"]+)">Институт</a>', response.text)
+    assert institute_link is not None
+    assert institute_link.group(1).replace('&amp;', '&') == (
+        f"/admin/people?{urlencode({'sort': 'institute', 'order': 'asc', 'q': 'ов'})}"
+    )
+    # Скрытые sort/order в форме сохраняют сортировку при новом запросе
+    assert '<input name="sort" type="hidden" value="name">' in response.text
+    assert '<input name="order" type="hidden" value="desc">' in response.text
+
+    # Узкий q — только совпадающая карточка, счётчик «Найдено: N из M»
+    _, response = people_client.get(f"/admin/people?{urlencode({'q': 'козл'})}", headers=get_auth_headers())
+    assert response.status == 200
+    assert people_row_ids(response.text) == [2]
+    assert 'Найдено: 1 из 2' in response.text
+
+
+def test_admin_people_sort_invalid_falls_back_to_default(people_client: SanicTestClient):
+    """sort/order применяются только полной валидной парой (белый список
+    из хранилища): мусор или половина пары — дефолтный порядок, страница
+    не падает."""
+    create_person(people_client, full_name='Иванов Иван Иванович')
+    create_person(people_client, full_name='Козлов Кирилл Козлович')
+
+    for query in ('sort=evil&order=up', 'sort=evil&order=asc', 'sort=name&order=up', 'sort=name'):
+        _, response = people_client.get(f'/admin/people?{query}', headers=get_auth_headers())
+        assert response.status == 200
+        # Дефолтный порядок (ФИО ASC), маркеры сортировки не рисуются
+        assert people_row_ids(response.text) == [1, 2]
+        assert 'aria-sort' not in response.text
+        assert '<input name="sort" type="hidden"' not in response.text
+
+
+def test_admin_person_card_record_date_nowrap(people_client: SanicTestClient):
+    """Дата записи на карточке студента — одной строкой: span только вокруг
+    даты (вид спорта может переноситься)."""
+    create_person(people_client)
+    record_id = save_person_record(app.ctx.storage, 'Иванов Иван Иванович')
+    app.ctx.storage.link_competitions([record_id], 1)
+
+    _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'Бег · <span class="text-nowrap">01.03.2024</span>' in response.text
 
 
 def test_admin_person_edit_updates_fields(people_client: SanicTestClient):
@@ -8178,12 +8293,15 @@ def test_admin_person_delete_removes_card_aliases_and_hides_everywhere(people_cl
     assert storage.list_student_aliases(1) == []
     assert [alias['name'] for alias in storage.list_student_aliases(2)] == ['Иванов И.И.']
 
-    # Нет в списке и в поиске страницы
+    # Нет в списке и в поиске страницы. Поиск видит и псевдонимы: q=Иванов
+    # находит ВТОРУЮ карточку (по псевдониму «Иванов И.И.»), а удалённая — нет
     _, response = people_client.get('/admin/people', headers=get_auth_headers())
     assert response.status == 200
     assert 'Иванов Иван Иванович' not in response.text
     _, response = people_client.get('/admin/people?q=Иванов', headers=get_auth_headers())
-    assert 'По запросу «Иванов» ничего не найдено.' in response.text
+    assert 'Найдено: 1 из 1' in response.text
+    assert 'Сидор Сидор Сидорович' in response.text
+    assert 'href="/admin/people/1"' not in response.text
 
     # Нет в кандидатах сопоставления и подсказках (storage-level);
     # одноимённый псевдоним ДРУГОЙ карточки по-прежнему находится

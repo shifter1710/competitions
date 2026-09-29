@@ -147,7 +147,9 @@
                     <tr>
                         <td>{{ record.id }}</td>
                         <td>{{ record.student_name }}</td>
-                        <td>{{ record.sport }} · {{ format_date_range(record.date, record.date_to) }}</td>
+                        {# Дата — одной строкой (span только вокруг даты: вид
+                           спорта может переноситься). #}
+                        <td>{{ record.sport }} · <span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td>
                         <td>{{ record.name }}</td>
                         <td>
                             <div class="d-flex flex-wrap gap-2 align-items-center">

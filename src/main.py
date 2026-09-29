@@ -50,6 +50,7 @@ from src.storage.sqlite import dedup_text
 from src.storage.sqlite import EventParticipationConflictError
 from src.storage.sqlite import participation_content_key
 from src.storage.sqlite import SQLiteAdapter
+from src.storage.sqlite import STUDENT_SORT_COLUMNS
 
 jinja_env = Environment(
     loader=PackageLoader('src'),
@@ -7157,15 +7158,41 @@ def resolve_student_id(request: Request, student_id: str):
         return None, text(body='Invalid student id', status=400)
 
 
+def parse_people_sort(args: dict) -> tuple[str, str]:
+    """Сортировка таблицы «Студенты»: sort ∈ ключей STUDENT_SORT_COLUMNS
+    (белый список), order ∈ {'asc', 'desc'}. Применяется только полной
+    валидной парой; некорректное/пустое любое из значений — дефолтный
+    порядок (паттерн parse_index_per_page)."""
+    sort = get_param(args, 'sort') or ''
+    order = get_param(args, 'order') or ''
+    if sort not in STUDENT_SORT_COLUMNS or order not in ('asc', 'desc'):
+        return '', ''
+    return sort, order
+
+
 @app.get('/admin/people')
 async def admin_people_page(request: Request):
     auth_error = require_admin(request)
     if auth_error is not None:
         return auth_error
     storage = get_storage(request.app)
-    search = (get_param(dict(request.args), 'q') or '').strip()
-    students = storage.list_students(search=search)
+    args = dict(request.args)
+    search = (get_param(args, 'q') or '').strip()
+    sort, order = parse_people_sort(args)
+    students = storage.list_students(search=search, sort=sort, order=order)
     total = len(storage.list_students())
+
+    # Ссылки сортировки сохраняют текущий q (urlencode: пробелы и кириллица,
+    # паттерн page_url сопоставления). Двухпозиционное переключение: неактивная
+    # колонка — asc, активная — смена направления; третий «несортированный»
+    # состояние отсутствует, возврат к дефолту — «Сброс».
+    def sort_url(column: str) -> str:
+        next_order = 'desc' if column == sort and order == 'asc' else 'asc'
+        params = {'sort': column, 'order': next_order}
+        if search:
+            params['q'] = search
+        return f'/admin/people?{urlencode(params)}'
+
     return await render(
         template_name=jinja_env.get_template('admin_people.html'),
         context={
@@ -7173,6 +7200,9 @@ async def admin_people_page(request: Request):
             'students': students,
             'q': search,
             'total': total,
+            'sort': sort,
+            'order': order,
+            'sort_urls': {column: sort_url(column) for column in STUDENT_SORT_COLUMNS},
             'reconcile_unlinked': storage.count_student_reconciliation()['records_unlinked'],
             **get_flash_args(request),
         },

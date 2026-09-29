@@ -54,7 +54,7 @@
                         <tr><th>Группа</th><td>{{ entry.matched.group }}</td></tr>
                         <tr><th>Курс</th><td>{{ entry.matched.course }}</td></tr>
                         <tr><th>Вид спорта</th><td>{{ entry.matched.sport }}</td></tr>
-                        <tr><th>Дата</th><td>{{ format_date_range(entry.matched.date, entry.matched.date_to) }}</td></tr>
+                        <tr><th>Дата</th><td><span class="text-nowrap">{{ format_date_range(entry.matched.date, entry.matched.date_to) }}</span></td></tr>
                         <tr><th>Уровень соревнований</th><td>{{ entry.matched.level }}</td></tr>
                         <tr><th>Название соревнований</th><td>{{ entry.matched.name }}</td></tr>
                         <tr><th>Место</th><td>{{ entry.matched.position }}</td></tr>

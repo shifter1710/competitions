@@ -67,7 +67,9 @@
                 <tbody>
                     {% for event in events %}
                     <tr>
-                        <td>{{ event.created_at }}</td>
+                        {# ISO-метка времени — одной строкой (td целиком,
+                           паттерн участников события). #}
+                        <td class="text-nowrap">{{ event.created_at }}</td>
                         <td>
                             {{ event.username }}
                             {% if event.user_id %}<span class="text-muted">#{{ event.user_id }}</span>{% endif %}

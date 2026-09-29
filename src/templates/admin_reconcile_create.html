@@ -25,7 +25,7 @@
                 <tr><th>Группа</th><td>{{ record.group or '—' }}</td></tr>
                 <tr><th>Курс</th><td>{{ record.course if record.course is not none else '—' }}</td></tr>
                 <tr><th>Вид спорта</th><td>{{ record.sport }}</td></tr>
-                <tr><th>Дата</th><td>{{ format_date_range(record.date, record.date_to) }}</td></tr>
+                <tr><th>Дата</th><td><span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td></tr>
                 <tr><th>Уровень соревнований</th><td>{{ record.level }}</td></tr>
                 <tr><th>Название соревнований</th><td>{{ record.name }}</td></tr>
                 <tr><th>Место</th><td>{{ record.position }}</td></tr>

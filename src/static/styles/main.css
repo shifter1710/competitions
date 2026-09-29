@@ -819,6 +819,18 @@ select {
     content: " ↓";
 }
 
+/* Сортируемый заголовок таблицы «Студенты»: колонка выглядит как обычный th,
+   ссылка отвечает только за клик и фокус (подчёркивание на hover/focus). */
+.table-sort-link {
+    color: inherit;
+    text-decoration: none;
+}
+
+.table-sort-link:hover,
+.table-sort-link:focus-visible {
+    text-decoration: underline;
+}
+
 .table-column-hidden {
     display: none;
 }

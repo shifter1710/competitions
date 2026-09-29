@@ -73,7 +73,7 @@
                                 {{ record['group'] or '—' }} · курс {{ record.course or '—' }}
                             </div>
                             <div class="small text-muted">
-                                {{ record.sport }} · {{ format_date_range(record.date, record.date_to) }} · {{ record.name }}
+                                {{ record.sport }} · <span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span> · {{ record.name }}
                             </div>
                         </td>
                         <td>

@@ -219,7 +219,11 @@
                         <td data-column-key="institute">{{ bound_cell(competition.institute, link_bindings.get('institute'), competition.extra_data) }}</td>
                         <td data-column-key="group">{{ bound_cell(competition.group, link_bindings.get('group'), competition.extra_data) }}</td>
                         <td data-column-key="sport">{{ bound_cell(competition.sport, link_bindings.get('sport'), competition.extra_data) }}</td>
-                        <td data-column-key="date" data-sort-value="{{ competition.date.strftime('%Y-%m-%d') }}">{{ format_date_range(competition.date, competition.date_to) }}</td>
+                        {# Диапазоны дат («19-20.03.2026») — одной строкой: span
+                           внутри td не мешает ни клиентской сортировке
+                           (data-sort-value на td), ни выгрузке (колонки —
+                           из th). #}
+                        <td data-column-key="date" data-sort-value="{{ competition.date.strftime('%Y-%m-%d') }}"><span class="text-nowrap">{{ format_date_range(competition.date, competition.date_to) }}</span></td>
                         <td data-column-key="level">{{ bound_cell(competition.level, link_bindings.get('level'), competition.extra_data) }}</td>
                         {# P2: у связанной со событием записи название — ссылка
                            на страницу соревнования (у атлета страница события
@@ -269,7 +273,7 @@
                         <td data-column-key="attachments" data-exportable="false">
                             {% for attachment in attachments_by_record.get(competition.record_id | int, []) %}
                             <div class="d-flex align-items-center gap-1">
-                                <a href="/attachment/{{ attachment.id }}" class="link-nowrap" title="{{ attachment.filename }}">{{ attachment.filename | truncate(18) }}</a>
+                                <a href="/attachment/{{ attachment.id }}" class="text-nowrap" title="{{ attachment.filename }}">{{ attachment.filename | truncate(18) }}</a>
                                 {% if is_admin %}
                                 <button
                                     class="btn btn-sm btn-outline-danger attachment-delete-button"
