@@ -137,6 +137,19 @@ class EventParticipationConflictError(Exception):
     нужно обновить и заново разобрать строки."""
 
 
+class CalendarEventDuplicateError(Exception):
+    """Guard точных дублей событий календаря (2026-09-27,
+    docs/data-model-decisions.md «Duplicate Calendar Events guard»):
+    событие с тем же identity-ключом (event_identity_key) уже существует.
+    existing — найденный дубль {id, name, date, date_to, sport, level}.
+    Новое событие не создаётся/правка не применяется; аудит успеха роуты
+    для этого пути не пишут (блок — не успех)."""
+
+    def __init__(self, existing: dict):
+        super().__init__(f'calendar event duplicate: id={existing.get("id")}')
+        self.existing = existing
+
+
 def dedup_text(value) -> str:
     """Текст ключа дедупликации участий (P4): strip + casefold."""
     if value is None:
@@ -160,6 +173,22 @@ def dedup_discipline(value) -> str:
     if not value:
         return ''
     return ' '.join(str(value).split()).casefold()
+
+
+def event_identity_key(name, date, date_to, sport, level) -> tuple:
+    """Ключ точного дубля события календаря (guard дублей 2026-09-27):
+    нормализованное название (dedup_discipline — пробелы/регистр), даты —
+    первые 10 символов (толерантность 'YYYY-MM-DD' и '…T00:00:00'), вид
+    спорта и уровень — dedup_text. NULL и '' неразличимы (пустое = нет
+    значения). Существующие дубли БД guard не трогает — только новые
+    create/update."""
+    return (
+        dedup_discipline(name),
+        (date or '')[:10],
+        (date_to or '')[:10],
+        dedup_text(sport),
+        dedup_text(level),
+    )
 
 
 def participation_content_key(
@@ -3755,6 +3784,45 @@ class SQLiteAdapter:
             f" AND COALESCE({alias}.date_to, '') = COALESCE(e.date_to, ''))"
         )
 
+    def _calendar_events_starting_on(self, date) -> list:
+        """Кандидаты guard'а дублей: события с той же датой начала — узкий
+        предфильтр substr(date,1,10), финальное сравнение идёт ключом в
+        Python. Вызывается под _lock (внутри check+write guard-методов)."""
+        return self.connection.execute(
+            'SELECT id, name, date, date_to, sport, level FROM calendar_events' ' WHERE substr(date, 1, 10) = ?',
+            ((date or '')[:10],),
+        ).fetchall()
+
+    def _find_calendar_event_duplicate(self, name, date, date_to, sport, level, exclude_id=None) -> dict | None:
+        """Точный дубль события по event_identity_key (под _lock): норма
+        названия + обе даты (день, без времени) + sport/level. exclude_id
+        выкидывает само событие — правка «на себя» дублем не считается."""
+        key = event_identity_key(name, date, date_to, sport, level)
+        for row in self._calendar_events_starting_on(date):
+            if exclude_id is not None and row['id'] == exclude_id:
+                continue
+            row_key = event_identity_key(row['name'], row['date'], row['date_to'], row['sport'], row['level'])
+            if row_key == key:
+                return dict(row)
+        return None
+
+    def find_similar_calendar_event(self, name, date, date_to, sport, level, exclude_id=None) -> dict | None:
+        """Похожее событие для НЕблокирующего предупреждения роута создания
+        (2026-09-27): то же нормализованное название и дата начала, но
+        ДРУГОЙ identity-ключ (отличаются date_to/sport/level) — вероятно,
+        дубль, но гарантии нет, поэтому создание не блокируется. Только
+        чтение (SQLite serialized + одно соединение — достаточно);
+        возвращает первое найденное {id, name, date, date_to, sport, level}
+        или None."""
+        key = event_identity_key(name, date, date_to, sport, level)
+        for row in self._calendar_events_starting_on(date):
+            if exclude_id is not None and row['id'] == exclude_id:
+                continue
+            row_key = event_identity_key(row['name'], row['date'], row['date_to'], row['sport'], row['level'])
+            if row_key[0] == key[0] and row_key != key:
+                return dict(row)
+        return None
+
     def _backfill_competition_calendar_links(self) -> dict[str, int]:
         """Проставить calendar_event_id записям с однозначным пресетом.
 
@@ -3849,7 +3917,18 @@ class SQLiteAdapter:
         sport: str,
         url: str,
     ) -> int:
+        """Новое событие календаря с guard'ом точных дублей (2026-09-27).
+
+        Проверка и INSERT — под одним _lock (атомарный check+write): событие
+        с тем же event_identity_key уже есть → CalendarEventDuplicateError
+        (existing — найденный дубль), запись не выполнялась, отката не
+        нужно. Существующие дубли БД и повторные create того же события
+        через raw SQL guard не трогает — блокируются только новые INSERT
+        через этот метод."""
         with self._lock:
+            duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level)
+            if duplicate is not None:
+                raise CalendarEventDuplicateError(duplicate)
             cursor = self.connection.execute(
                 'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
                 ' VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -3903,9 +3982,17 @@ class SQLiteAdapter:
         ссылки у них нет). Сбой любого шага — откат всего (паттерн
         import_competitions). Возвращает synced — число синхронизированных
         записей (rowcount второго UPDATE).
+
+        Guard дублей (2026-09-27): правка НЕ на себя, совпадающая с чужим
+        событием по event_identity_key → CalendarEventDuplicateError внутри
+        try (существующий rollback-путь) — 0 изменений события и связанных
+        записей, синхронизация не происходит.
         """
         with self._lock:
             try:
+                duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level, exclude_id=event_id)
+                if duplicate is not None:
+                    raise CalendarEventDuplicateError(duplicate)
                 self.connection.execute(
                     'UPDATE calendar_events'
                     ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?, url = ?'
@@ -4115,6 +4202,13 @@ class SQLiteAdapter:
         UPDATE закрывает rowcount (=0 → already_linked, откат всего).
         Возвращает (event_id, None) или (None, record_not_found /
         already_linked).
+
+        Guard дублей (2026-09-27, ДОКУМЕНТИРОВАННОЕ расширение кортежа):
+        точный дубль по event_identity_key уже существует →
+        (existing_event_id, 'duplicate_event') — слот event_id несёт id
+        СУЩЕСТВУЮЩЕГО события (роут показывает его в подсказке), новое
+        событие НЕ создаётся и запись НЕ линкуется. Проверка — до INSERT,
+        записей не было, откат не нужен.
         """
         with self._lock:
             try:
@@ -4126,6 +4220,9 @@ class SQLiteAdapter:
                     return None, 'record_not_found'
                 if record['calendar_event_id'] is not None:
                     return None, 'already_linked'
+                duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level)
+                if duplicate is not None:
+                    return int(duplicate['id']), 'duplicate_event'
                 cursor = self.connection.execute(
                     'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
                     ' VALUES (?, ?, ?, ?, ?, ?, ?)',
