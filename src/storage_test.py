@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+import threading
 from datetime import datetime
 
 import pytest
@@ -30,6 +31,31 @@ def make_competition(name: str, date: datetime, extra: dict | None = None) -> Co
 
 def make_legacy_competition(name: str, date: datetime) -> Competition:
     return make_competition(name, date)
+
+
+def insert_calendar_event_raw(adapter, **values) -> int:
+    """Вставить событие календаря мимо storage API — прецедент тестов
+    миграций (raw INSERT). Guard точных дублей (2026-09-27) блокирует
+    create_calendar_event, а тестам ambiguous-групп backfill нужны именно
+    СУЩЕСТВУЮЩИЕ дубли в БД — как оставшиеся до внедрения guard'а."""
+    row = {
+        'name': 'Кубок',
+        'date': '2026-01-10T00:00:00',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    row.update(values)
+    columns = ', '.join(row)
+    placeholders = ', '.join('?' for _ in row)
+    cursor = adapter.connection.execute(
+        f'INSERT INTO calendar_events ({columns}) VALUES ({placeholders})',
+        tuple(row.values()),
+    )
+    adapter.connection.commit()
+    return int(cursor.lastrowid)
 
 
 @pytest.fixture
@@ -2295,6 +2321,211 @@ def test_update_calendar_event_rollback_on_failure(adapter):
     assert record.sport == 'Бег'
 
 
+# --- Guard точных дублей событий календаря (2026-09-27, application-level,
+# без UNIQUE-индекса; существующие дубли БД не трогаются). ---
+
+
+def test_create_calendar_event_exact_duplicate_blocked(adapter):
+    from src.storage.sqlite import CalendarEventDuplicateError
+
+    event_id = adapter.create_calendar_event(
+        name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    with pytest.raises(CalendarEventDuplicateError) as exc_info:
+        adapter.create_calendar_event(
+            name='Кубок Университета',
+            date='2026-06-25T00:00:00',
+            date_to=None,
+            level='',
+            sport='Бег',
+            url='https://other',
+        )
+    # existing указывает на найденный дубль; url в ключ не входит.
+    assert exc_info.value.existing == {
+        'id': event_id,
+        'name': 'Кубок Университета',
+        'date': '2026-06-25T00:00:00',
+        'date_to': None,
+        'sport': 'Бег',
+        'level': '',
+    }
+    assert len(adapter.list_calendar_events()) == 1
+
+
+def test_create_calendar_event_duplicate_normalizes_name_and_date_format(adapter):
+    from src.storage.sqlite import CalendarEventDuplicateError
+
+    adapter.create_calendar_event(
+        name='  Кубок   Университета ', date='2026-06-25', date_to=None, level='', sport='бег', url=''
+    )
+    # Другие пробелы/регистр названия и дня-без-времени — тот же ключ.
+    with pytest.raises(CalendarEventDuplicateError):
+        adapter.create_calendar_event(
+            name='кубок университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='БЕГ', url=''
+        )
+    assert len(adapter.list_calendar_events()) == 1
+
+
+def test_create_calendar_event_differs_by_single_key_component(adapter):
+    """Отличие хотя бы одной компоненты ключа (sport/level/date_to) — НЕ
+    дубль: создаются оба, ни один путь создания не блокируется."""
+    adapter.create_calendar_event(name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url='')
+    adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', url=''
+    )
+    adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='региональные', sport='Бег', url=''
+    )
+    adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to='2026-06-27T00:00:00', level='', sport='Бег', url=''
+    )
+    assert len(adapter.list_calendar_events()) == 4
+
+
+def test_find_similar_calendar_event_near_miss_only(adapter):
+    """Похожее = то же нормализованное название и дата начала, но ДРУГОЙ
+    ключ целиком; точный дубль похожим не считается (guard его блокирует)."""
+    similar_id = adapter.create_calendar_event(
+        name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', url=''
+    )
+    other_day = adapter.create_calendar_event(
+        name='Кубок Университета', date='2026-07-01T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    other_name = adapter.create_calendar_event(
+        name='Кубок Ректора', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+
+    near = adapter.find_similar_calendar_event(
+        name='кубок университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', exclude_id=999
+    )
+    assert near is not None and near['id'] == similar_id
+
+    # Точный дубль похожим не является.
+    assert (
+        adapter.find_similar_calendar_event(
+            name='Кубок Университета',
+            date='2026-06-25T00:00:00',
+            date_to=None,
+            level='',
+            sport='Лыжи',
+            exclude_id=similar_id,
+        )
+        is None
+    )
+    # Другой день/название — не похожие.
+    for name, date in (('Кубок Университета', '2026-06-26T00:00:00'), ('Кубок Декана', '2026-06-25T00:00:00')):
+        assert (
+            adapter.find_similar_calendar_event(
+                name=name, date=date, date_to=None, level='', sport='Бег', exclude_id=999
+            )
+            is None
+        )
+    assert other_day != similar_id and other_name != similar_id
+
+
+def test_update_calendar_event_self_edit_allowed(adapter):
+    """Правка события «на себя» (exclude_id) дублем не считается —
+    например, смена только url/написания названия."""
+    event_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    synced = adapter.update_calendar_event(
+        event_id, name='кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url='https://x'
+    )
+    assert synced == 0
+    event = adapter.get_calendar_event(event_id)
+    assert event['name'] == 'кубок' and event['url'] == 'https://x'
+
+
+def test_update_calendar_event_duplicate_of_other_rolls_back(adapter):
+    """Правка, совпавшая с чужим событием: CalendarEventDuplicateError,
+    0 изменений события и связанных записей — sync не произошёл."""
+    from src.storage.sqlite import CalendarEventDuplicateError
+
+    first_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    second_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-07-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    adapter.save_competitions(
+        [make_calendar_record('Иванов Иван', datetime(2026, 7, 10), None, position=1, calendar_event_id=second_id)]
+    )
+
+    with pytest.raises(CalendarEventDuplicateError) as exc_info:
+        adapter.update_calendar_event(
+            second_id, name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+        )
+    assert exc_info.value.existing['id'] == first_id
+
+    # Событие и связанная запись не изменились — синхронизации не было.
+    event = adapter.get_calendar_event(second_id)
+    assert event['date'] == '2026-07-10T00:00:00'
+    record = adapter.get_competitions()[0]
+    assert record.date == datetime(2026, 7, 10, 0, 0)
+    assert record.calendar_event_id == second_id
+    assert len(adapter.list_calendar_events()) == 2
+
+
+def test_create_calendar_event_and_link_duplicate_returns_existing(adapter):
+    """P5b + guard: точный дубль → (existing_id, 'duplicate_event');
+    новое событие НЕ создаётся, запись НЕ линкуется."""
+    adapter.save_competitions([make_competition('Николаев Николай', datetime(2026, 6, 25))])
+    record_id = int(adapter.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()['id'])
+    existing_id = adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='внутривузовские', sport='Бег', url=''
+    )
+
+    event_id, error = adapter.create_calendar_event_and_link(
+        name='  Кубок ',
+        date='2026-06-25T00:00:00',
+        date_to=None,
+        level='внутривузовские',
+        sport='Бег',
+        url='',
+        record_id=record_id,
+    )
+    assert (event_id, error) == (existing_id, 'duplicate_event')
+    assert len(adapter.list_calendar_events()) == 1
+    assert adapter.get_competition_by_id(record_id).calendar_event_id is None
+
+
+def test_create_calendar_event_concurrent_double_submit_single_row(adapter):
+    """Контракт lock (2026-09-27): check+write под одним self._lock —
+    два одновременных create одного ключа (double-submit) дают ровно одну
+    строку: один поток успевает, второй получает CalendarEventDuplicateError
+    с existing уже закоммиченного события."""
+    from src.storage.sqlite import CalendarEventDuplicateError
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, int | None]] = []
+
+    def submit():
+        try:
+            barrier.wait(timeout=5)
+            event_id = adapter.create_calendar_event(
+                name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+            )
+            results.append(('created', event_id))
+        except CalendarEventDuplicateError as exc:
+            results.append(('duplicate', exc.existing['id']))
+        except BaseException as exc:  # pragma: no cover — неожиданный сбой потока
+            results.append(('error', str(exc)))
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in threads)
+
+    assert sorted(tag for tag, _ in results) == ['created', 'duplicate']
+    created_id = next(value for tag, value in results if tag == 'created')
+    duplicate_of = next(value for tag, value in results if tag == 'duplicate')
+    assert duplicate_of == created_id
+    assert [event['id'] for event in adapter.list_calendar_events()] == [created_id]
+
+
 # ---- Карточки студентов (Student Identity v1, Phase 1 — фундамент) ----
 
 
@@ -3811,10 +4042,10 @@ def test_wave1_backfill_without_match_keeps_null(adapter):
 
 
 def test_wave1_backfill_ambiguous_preset_skipped(adapter):
+    # Два события с одинаковым пресетом — существующие дубли в БД (raw
+    # INSERT: guard дублей 2026-09-27 такие create больше не пропускает).
     for _ in range(2):
-        adapter.create_calendar_event(
-            name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
-        )
+        insert_calendar_event_raw(adapter, name='Кубок', date='2026-01-10T00:00:00')
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
 
     counters = adapter._backfill_competition_calendar_links()
@@ -4173,9 +4404,7 @@ def test_calendar_link_backfill_preview_groups_and_cap(adapter):
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
 
     for _ in range(2):
-        adapter.create_calendar_event(
-            name='Дубль', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
-        )
+        insert_calendar_event_raw(adapter, name='Дубль', date='2026-02-01T00:00:00')
     daniel = make_competition('Двойной Данила', datetime(2026, 2, 1))
     daniel.name = 'Дубль'
     adapter.save_competitions([daniel])
@@ -4235,9 +4464,7 @@ def test_apply_calendar_link_backfill_links_only_matched(adapter):
         url='',
     )
     for _ in range(2):
-        adapter.create_calendar_event(
-            name='Дубль', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
-        )
+        insert_calendar_event_raw(adapter, name='Дубль', date='2026-02-01T00:00:00')
     matched = make_calendar_record('Легаси Лев', datetime(2026, 1, 10), datetime(2026, 1, 12))
     matched.name = 'Кубок'
     ambiguous = make_calendar_record('Двойной Данила', datetime(2026, 2, 1), None)

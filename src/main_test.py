@@ -209,6 +209,10 @@ def client() -> SanicTestClient:
     # Календарь соревнований (волна A, docs/feedback-live.md №23)
     fake_storage.list_calendar_events.return_value = []
     fake_storage.create_calendar_event.return_value = 1
+    # Guard дублей (2026-09-27): похожих событий по умолчанию нет — Mock без
+    # явного return_value вернул бы truthy объект и роут create полез бы в
+    # ветку предупреждения.
+    fake_storage.find_similar_calendar_event.return_value = None
     fake_storage.get_calendar_event.return_value = None
     fake_storage.update_calendar_event.return_value = None
     fake_storage.delete_calendar_event.return_value = None
@@ -10813,6 +10817,30 @@ def make_calendar_event(storage, **kwargs) -> int:
     return storage.create_calendar_event(**values)
 
 
+def insert_calendar_event_raw(storage, **values) -> int:
+    """Вставить событие календаря мимо storage API: guard точных дублей
+    (2026-09-27) блокирует create_calendar_event, а тестам ambiguous-групп
+    нужны именно СУЩЕСТВУЮЩИЕ дубли в БД (как оставшиеся до guard'а)."""
+    row = {
+        'name': 'Кубок',
+        'date': '2026-01-10T00:00:00',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+    }
+    row.update(values)
+    columns = ', '.join(row)
+    placeholders = ', '.join('?' for _ in row)
+    cursor = storage.connection.execute(
+        f'INSERT INTO calendar_events ({columns}) VALUES ({placeholders})',
+        tuple(row.values()),
+    )
+    storage.connection.commit()
+    return int(cursor.lastrowid)
+
+
 def upload_event_xlsx(
     client: SanicTestClient,
     event_id: int,
@@ -11777,10 +11805,10 @@ def test_batch_apply_never_links_ambiguous(event_import_client: SanicTestClient)
     """Неоднозначный пресет (несколько событий) автоматикой не линкуется."""
     storage = app.ctx.storage
     record_id = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 1, 10))
+    # Существующие дубли в БД — raw INSERT (guard дублей 2026-09-27 такие
+    # create больше не пропускает).
     for _ in range(2):
-        storage.create_calendar_event(
-            name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
-        )
+        insert_calendar_event_raw(storage, name='Кубок', date='2026-01-10T00:00:00')
 
     _, response = event_import_client.get('/admin/maintenance/calendar-links', headers=get_auth_headers())
     assert response.status == 200
@@ -11808,10 +11836,9 @@ def test_batch_preview_counts_and_apply_links_matched(event_import_client: Sanic
         storage, name='Кросс весны', date='2026-05-10T00:00:00', date_to=None, sport='Лыжи', level='региональные'
     )
     ambiguous_id = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 1, 10))
+    # Существующие дубли в БД — raw INSERT (guard дублей 2026-09-27).
     for _ in range(2):
-        storage.create_calendar_event(
-            name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
-        )
+        insert_calendar_event_raw(storage, name='Кубок', date='2026-01-10T00:00:00')
     unmatched_id = make_null_participation(storage, comp_name='Нет события', date=datetime(2028, 2, 2))
     linked_id = make_null_participation(storage, comp_name='Уже связан', date=datetime(2026, 7, 7))
     other_event = make_calendar_event(
@@ -12008,6 +12035,179 @@ def test_link_event_post_routes_require_csrf(event_import_client: SanicTestClien
         assert response.status == 403, path
     assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 1
     assert storage.list_calendar_events() == []
+
+
+# --- Guard точных дублей событий календаря на уровне роутов (2026-09-27). ---
+
+
+def test_calendar_create_route_blocks_exact_duplicate(event_import_client: SanicTestClient):
+    """Блок создания: точный дубль (в т.ч. другое написание названия/день без
+    времени) — 302 с admin_error в /calendar, в БД остаётся одна строка."""
+    storage = app.ctx.storage
+    make_calendar_event(
+        storage, name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': '  кубок университета ',
+            'date': '25.06.2026',
+            'level': '',
+            'sport': 'Бег',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_error=')
+    message = unquote_plus(response.headers['location'])
+    assert '«кубок университета» на 25.06.2026 уже существует' in message
+    assert 'новое не создано' in message
+    assert 'Откройте его в календаре' in message
+    assert len(storage.list_calendar_events()) == 1
+
+
+def test_calendar_create_route_similar_warning_not_blocking(event_import_client: SanicTestClient):
+    """Похожее (то же название+дата, другой sport) НЕ блокируется: успех +
+    неблокирующая подсказка о похожем событии, обе строки в БД."""
+    storage = app.ctx.storage
+    make_calendar_event(
+        storage, name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', url=''
+    )
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кубок Университета',
+            'date': '25.06.2026',
+            'level': '',
+            'sport': 'Бег',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_message=')
+    message = unquote_plus(response.headers['location'])
+    assert 'запланировано' in message
+    assert 'Похоже, уже есть похожее: «Кубок Университета» (25.06.2026)' in message
+    assert 'проверьте, не дубль ли это' in message
+    assert len(storage.list_calendar_events()) == 2
+
+
+def test_calendar_edit_route_duplicate_blocks_sync_and_audit(event_import_client: SanicTestClient):
+    """Блок правки: совпадение с чужим событием — 0 изменений события и
+    связанных записей (sync не происходит), аудита calendar_event_edited
+    нет; next внутри /calendar/ возвращает на страницу события, без next —
+    в календарь."""
+    storage = app.ctx.storage
+    make_calendar_event(storage, name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url='')
+    second = make_calendar_event(
+        storage, name='Кубок', date='2026-07-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+    )
+    record_id = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 7, 10))
+    storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (second, record_id))
+    storage.connection.commit()
+
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/calendar/{second}/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кубок',
+            'date': '25.06.2026',
+            'level': '',
+            'sport': 'Бег',
+            'url': '',
+            'next': f'/calendar/{second}',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith(f'/calendar/{second}?admin_error=')
+    message = unquote_plus(response.headers['location'])
+    assert 'уже существует. Правка не сохранена' in message
+
+    # Без next — назад в календарь.
+    _, response = event_import_client.post(
+        f'/calendar/{second}/edit',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Кубок', 'date': '25.06.2026', 'level': '', 'sport': 'Бег', 'url': ''},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_error=')
+
+    # Событие и связанная запись не изменились — синхронизации не было.
+    event = storage.get_calendar_event(second)
+    assert event['date'] == '2026-07-10T00:00:00'
+    record = storage.get_competition_by_id(record_id)
+    assert record.date == datetime(2026, 7, 10)
+    assert record.calendar_event_id == second
+    assert audit_details(storage, 'calendar_event_edited') == []
+    assert len(storage.list_calendar_events()) == 2
+
+
+def test_link_event_new_duplicate_blocked_returns_to_picker(event_import_client: SanicTestClient):
+    """P5b + guard: точный дубль — редирект на страницу связывания (выбор
+    существующих уже там), событие не создано, запись не связана, аудита
+    успеха нет; контраст — успешный «Создать и связать» аудит пишет."""
+    storage = app.ctx.storage
+    existing = make_calendar_event(
+        storage, name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+    )
+    dup_record = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 1, 10))
+
+    # Контраст аудита: успешный путь того же роута пишет оба события.
+    ok_record = make_null_participation(storage, comp_name='Турнир новичков', date=datetime(2026, 3, 3))
+    headers = get_auth_headers()
+    _, response = event_import_client.post(
+        f'/competition/{ok_record}/link-event/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Турнир новичков',
+            'date': '03.03.2026',
+            'level': '',
+            'sport': 'Бег',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert len(audit_details(storage, 'calendar_event_created')) == 1
+    assert len(audit_details(storage, 'participation_linked')) == 1
+
+    _, response = event_import_client.post(
+        f'/competition/{dup_record}/link-event/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'кубок',
+            'date': '10.01.2026',
+            'level': '',
+            'sport': '',
+            'url': '',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith(f'/competition/{dup_record}/link-event?admin_error=')
+    message = unquote_plus(response.headers['location'])
+    assert 'уже существует — новое не создано, запись не связана' in message
+    assert 'Выберите его из списка ниже' in message
+
+    # Ничего не создано и не связано; аудит успеха не пополнился.
+    assert [event['id'] for event in storage.list_calendar_events() if event['name'] == 'Кубок'] == [existing]
+    assert storage.get_competition_by_id(dup_record).calendar_event_id is None
+    assert len(audit_details(storage, 'calendar_event_created')) == 1
+    assert len(audit_details(storage, 'participation_linked')) == 1
 
 
 ONSUBMIT_CONFIRM_PREFIX = 'return confirm('

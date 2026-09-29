@@ -43,6 +43,7 @@ from src.backup import run_backup
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.settings import settings
+from src.storage.sqlite import CalendarEventDuplicateError
 from src.storage.sqlite import dedup_discipline
 from src.storage.sqlite import dedup_place
 from src.storage.sqlite import dedup_text
@@ -1720,6 +1721,12 @@ def group_calendar_events_by_month(events: Sequence[dict]) -> list[dict]:
     return groups
 
 
+def calendar_event_date_label(date_iso: str | None) -> str:
+    """День начала ISO-строки события ('YYYY-MM-DD' или '…T00:00:00') как
+    dd.mm.yyyy — сообщения guard'а дублей и похожих событий (2026-09-27)."""
+    return datetime.fromisoformat((date_iso or '')[:10]).strftime(settings.date_format)
+
+
 def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
     """Разобрать форму соревнования календаря. Возвращает (значения, ошибка).
 
@@ -1796,18 +1803,46 @@ async def create_calendar_event(request: Request):
     if error is not None:
         return text(body=error, status=400)
 
-    get_storage(request.app).create_calendar_event(
+    storage = get_storage(request.app)
+    new_date = values['date'].isoformat()
+    new_date_to = values['date_to'].isoformat() if values['date_to'] else None
+    # Guard точных дублей (2026-09-27): событие с тем же identity-ключом
+    # уже есть — новое не создаётся, аудита успеха нет (блок — не успех).
+    try:
+        event_id = storage.create_calendar_event(
+            name=values['name'],
+            date=new_date,
+            date_to=new_date_to,
+            level=values['level'],
+            sport=values['sport'],
+            url=values['url'],
+        )
+    except CalendarEventDuplicateError:
+        return build_redirect_with_message(
+            error=(
+                f'Соревнование «{values["name"]}» на {values["date"].strftime(settings.date_format)}'
+                ' уже существует — новое не создано. Откройте его в календаре.'
+            ),
+            url='/calendar',
+        )
+    message = f'Соревнование «{values["name"]}» запланировано'
+    # Неблокирующее предупреждение о похожем (то же название+дата, но
+    # другой ключ — отличились date_to/sport/level): создание прошло,
+    # решение «дубль или нет» остаётся за человеком.
+    similar = storage.find_similar_calendar_event(
         name=values['name'],
-        date=values['date'].isoformat(),
-        date_to=values['date_to'].isoformat() if values['date_to'] else None,
+        date=new_date,
+        date_to=new_date_to,
         level=values['level'],
         sport=values['sport'],
-        url=values['url'],
+        exclude_id=event_id,
     )
-    return build_redirect_with_message(
-        message=f'Соревнование «{values["name"]}» запланировано',
-        url='/calendar',
-    )
+    if similar is not None:
+        message += (
+            f'. Похоже, уже есть похожее: «{similar["name"]}»'
+            f' ({calendar_event_date_label(similar["date"])}) — проверьте, не дубль ли это.'
+        )
+    return build_redirect_with_message(message=message, url='/calendar')
 
 
 @app.post('/calendar/<event_id>/edit')
@@ -1835,15 +1870,28 @@ async def edit_calendar_event(request: Request, event_id: str):
     # P2: правка события — владелец полей участия; связанные записи (по
     # calendar_event_id) синхронизируются той же транзакцией (см.
     # SQLiteAdapter.update_calendar_event), synced — их число для аудита.
-    synced_participations = storage.update_calendar_event(
-        event_id=numeric_id,
-        name=values['name'],
-        date=new_date,
-        date_to=new_date_to,
-        level=values['level'],
-        sport=values['sport'],
-        url=values['url'],
-    )
+    # Guard дублей (2026-09-27): правка совпала с чужим событием — 0
+    # изменений и 0 sync (guard до UPDATE в storage), аудита нет.
+    try:
+        synced_participations = storage.update_calendar_event(
+            event_id=numeric_id,
+            name=values['name'],
+            date=new_date,
+            date_to=new_date_to,
+            level=values['level'],
+            sport=values['sport'],
+            url=values['url'],
+        )
+    except CalendarEventDuplicateError:
+        next_url = get_form_value(request, 'next')
+        redirect_url = next_url if next_url.startswith('/calendar/') else '/calendar'
+        return build_redirect_with_message(
+            error=(
+                f'Соревнование «{values["name"]}» на {values["date"].strftime(settings.date_format)}'
+                ' уже существует. Правка не сохранена.'
+            ),
+            url=redirect_url,
+        )
     log_audit_event(
         request,
         'calendar_event_edited',
@@ -6524,6 +6572,19 @@ async def competition_link_event_new(request: Request, record_id: str):
         return build_redirect_with_message(
             error=f'Запись №{numeric_id} уже связана с соревнованием.',
             url='/',
+        )
+    if error == 'duplicate_event':
+        # Guard дублей (2026-09-27): точный дубль уже есть — событие не
+        # создано, запись не связана; возвращаем на страницу связывания,
+        # она уже рендерит выбор существующих событий (контракт P5b).
+        # Аудита calendar_event_created/participation_linked нет (блок —
+        # не успех).
+        return build_redirect_with_message(
+            error=(
+                f'Событие «{values["name"]}» от {values["date"].strftime(settings.date_format)}'
+                ' уже существует — новое не создано, запись не связана. Выберите его из списка ниже.'
+            ),
+            url=f'/competition/{numeric_id}/link-event',
         )
 
     log_audit_event(
