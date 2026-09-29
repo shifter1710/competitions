@@ -18,31 +18,31 @@ import pandas as pd
 import pytest
 from sanic_testing.testing import SanicTestClient
 
+from src.auth import create_auth_cookie_value
 from src.auth import hash_password
 from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
 from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
 from src.main import app
-from src.main import build_competition
-from src.main import calendar_event_status
-from src.main import competition_duplicate_key
-from src.main import competition_to_export_row
-from src.main import create_auth_cookie_value
-from src.main import decorate_calendar_event
-from src.main import EVENT_IMPORT_SESSION_TTL_SECONDS
-from src.main import event_import_sessions
-from src.main import format_date_range
-from src.main import group_calendar_events_by_month
-from src.main import normalize_position
-from src.main import parse_date_value
-from src.main import split_import_competitions
-from src.main import student_import_sessions
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.student_info import StudentInfo
+from src.records import build_competition
+from src.records import competition_duplicate_key
+from src.records import competition_to_export_row
+from src.routes.calendar import calendar_event_status
+from src.routes.calendar import decorate_calendar_event
+from src.routes.calendar import EVENT_IMPORT_SESSION_TTL_SECONDS
+from src.routes.calendar import event_import_sessions
+from src.routes.calendar import group_calendar_events_by_month
+from src.routes.calendar import normalize_position
+from src.routes.registry import split_import_competitions
+from src.routes.students import student_import_sessions
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
+from src.web import format_date_range
+from src.web import parse_date_value
 
 
 def get_xlsx_headers(content: bytes) -> list[str]:
@@ -1206,7 +1206,7 @@ def people_row_ids(html: str) -> list[int]:
 def test_pager_items_edges_and_gaps():
     # Чистая функция пагинации: края (первая/последняя) и окно ±1 вокруг
     # текущей страницы, между непоследовательными номерами — разрыв «…».
-    from src.main import pager_items
+    from src.routes.registry import pager_items
 
     assert pager_items(1, 0) == []
     assert pager_items(1, 1) == [{'page': 1}]
@@ -1707,7 +1707,7 @@ def test_login_records_last_login(client: SanicTestClient):
 
 
 def test_authenticated_requests_touch_last_seen_with_throttle(client: SanicTestClient):
-    from src.main import reset_presence_tracking
+    from src.auth import reset_presence_tracking
 
     reset_presence_tracking()
     app.ctx.storage.touch_user_seen.reset_mock()
@@ -1940,7 +1940,7 @@ def test_login_rate_limit_counts_by_real_client_ip_behind_proxy(client: SanicTes
     # M1: PROXIES_COUNT=1 — бакет лимита ведётся по X-Forwarded-For (реальный
     # клиент за nginx), а не по адресу прокси. client — module-scoped:
     # сбрасываем общий login_failures до и после.
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     for _ in range(5):
@@ -1967,7 +1967,7 @@ def test_login_rate_limit_counts_by_real_client_ip_behind_proxy(client: SanicTes
 
 
 def test_login_rate_limit_locks_forwarded_client_ip(client: SanicTestClient):
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     for _ in range(5):
@@ -1995,7 +1995,7 @@ def test_login_rate_limit_uses_last_forwarded_entry(client: SanicTestClient):
     # nginx дописывает реальный IP ПОСЛЕДНИМ ($proxy_add_x_forwarded_for):
     # бакет ключуется по последней записи, подделка первой записи ничего
     # не даёт.
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     for _ in range(5):
@@ -2465,7 +2465,7 @@ def test_review_rejects_unknown_decision(client: SanicTestClient):
 
 
 def test_login_verifies_password_hash(client: SanicTestClient):
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     _, response = client.post(
@@ -3991,7 +3991,7 @@ def audit_calls():
 
 
 def test_login_success_writes_audit_event(client: SanicTestClient):
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     app.ctx.storage.add_audit_event.reset_mock()
@@ -4012,7 +4012,7 @@ def test_login_success_writes_audit_event(client: SanicTestClient):
 
 
 def test_login_failure_writes_audit_event_without_user_id(client: SanicTestClient):
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     app.ctx.storage.add_audit_event.reset_mock()
@@ -4030,7 +4030,7 @@ def test_login_failure_writes_audit_event_without_user_id(client: SanicTestClien
 
 
 def test_audit_failure_does_not_break_login(client: SanicTestClient):
-    from src.main import login_failures
+    from src.routes.auth import login_failures
 
     login_failures.clear()
     app.ctx.storage.add_audit_event.reset_mock()
@@ -5479,7 +5479,7 @@ def make_import_record(**overrides):
 
 
 def test_field_settings_defaults_lock_name_and_date():
-    from src.main import get_base_field_settings
+    from src.records import get_base_field_settings
 
     merged = get_base_field_settings(None)
     assert merged['student_name'] == {'value_type': 'text', 'required': True}
@@ -5488,7 +5488,7 @@ def test_field_settings_defaults_lock_name_and_date():
 
 
 def test_field_settings_locked_fields_survive_bad_storage_rows():
-    from src.main import get_base_field_settings
+    from src.records import get_base_field_settings
 
     storage = FakeSettingsStorage(
         {
@@ -5502,7 +5502,7 @@ def test_field_settings_locked_fields_survive_bad_storage_rows():
 
 
 def test_build_competition_text_course_graduate_case():
-    from src.main import BASE_FIELD_SETTING_DEFAULTS
+    from src.records import BASE_FIELD_SETTING_DEFAULTS
 
     settings = {
         key: {'value_type': value_type, 'required': required}
@@ -5519,7 +5519,7 @@ def test_build_competition_text_course_graduate_case():
 
 
 def test_build_competition_number_course_rejects_graduate_case():
-    from src.main import BASE_FIELD_SETTING_DEFAULTS
+    from src.records import BASE_FIELD_SETTING_DEFAULTS
 
     settings = {
         key: {'value_type': value_type, 'required': required}
@@ -5536,7 +5536,7 @@ def test_build_competition_number_course_rejects_graduate_case():
 
 
 def test_build_competition_required_text_field_rejects_empty():
-    from src.main import BASE_FIELD_SETTING_DEFAULTS
+    from src.records import BASE_FIELD_SETTING_DEFAULTS
 
     settings = {
         key: {'value_type': value_type, 'required': required}
@@ -9963,7 +9963,7 @@ def test_student_import_upload_rejects_bad_files(student_import_client: SanicTes
     assert response.status == 302
     assert 'В файле нет строк с данными.' in unquote_plus(response.headers['location'])
 
-    monkeypatch.setattr('src.main.STUDENT_IMPORT_MAX_ROWS', 3)
+    monkeypatch.setattr('src.routes.students.STUDENT_IMPORT_MAX_ROWS', 3)
     rows = [{'ФИО': f'Студентов Студент {index:02d}'} for index in range(4)]
     response = upload_student_xlsx(student_import_client, rows)
     assert response.status == 302
@@ -12562,7 +12562,7 @@ def test_event_import_upload_rejects_bad_files(event_import_client: SanicTestCli
     assert response.status == 302
     assert 'В файле нет строк с данными.' in unquote_plus(response.headers['location'])
 
-    monkeypatch.setattr('src.main.EVENT_PARTICIPANT_IMPORT_MAX_ROWS', 3)
+    monkeypatch.setattr('src.routes.calendar.EVENT_PARTICIPANT_IMPORT_MAX_ROWS', 3)
     rows = [{'ФИО': f'Студентов Студент {index:02d}'} for index in range(4)]
     response = upload_event_xlsx(event_import_client, event_id, rows)
     assert response.status == 302

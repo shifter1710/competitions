@@ -925,5 +925,5 @@ backfill'ем/явными связями. Полные бэкапы SQLite (ф�
 - README в разделе «Возможности» не упоминает календарь соревнований.
 - На производственной базе есть 5 «осиротевших» вложений (строки без
   соответствующих записей) — ждут отдельной cleanup-задачи.
-- Косметика: docstring `ensure_catalog_values` в `src/main.py` ссылается
+- Косметика: docstring `ensure_catalog_values` в `src/records.py` ссылается
   на несуществующий метод storage (`SQLiteAdapter._ensure_import_catalogs`).
