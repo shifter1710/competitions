@@ -31,9 +31,9 @@ from src.auth import MIN_PASSWORD_LENGTH
 from src.auth import PRESENCE_ONLINE_WINDOW
 from src.auth import require_admin
 from src.auth import require_moderator
-from src.auth import USER_ROLES
 from src.auth import user_is_admin
 from src.auth import user_is_moderator
+from src.auth import USER_ROLES
 from src.auth import username_error
 from src.backup import run_backup
 from src.files import attachment_source_path
@@ -49,15 +49,15 @@ from src.records import BASE_FIELD_LABELS
 from src.records import BASE_FIELD_SETTING_DEFAULTS
 from src.records import BASE_FIELD_VALUE_TYPES
 from src.records import build_index_dataframe
+from src.records import build_link_diff_rows
 from src.records import FIELD_TYPE_OPTIONS
 from src.records import get_base_field_settings
+from src.records import LINK_EVENT_FIELD_LABELS
 from src.records import LINK_TARGETABLE_BASE_KEYS
 from src.records import make_unique_custom_field_key
+from src.records import participation_field_changes
 from src.records import sanitize_spreadsheet_value
 from src.records import select_export_custom_fields
-from src.routes.calendar import build_link_diff_rows
-from src.routes.calendar import LINK_EVENT_FIELD_LABELS
-from src.routes.calendar import participation_field_changes
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
 from src.web import build_redirect_with_message
@@ -763,7 +763,10 @@ def parse_audit_filters(request: Request) -> tuple[dict, dict, str | None]:
     return filters, raw_values, None
 
 
-def register(app: Sanic) -> None:
+# C901 (осознанное подавление): mccabe суммирует сложность вложенных
+# verbatim-хендлеров, перенесённых из main.py без изменений; разбиение
+# register() — Architecture v2, не pre-merge gate.
+def register(app: Sanic) -> None:  # noqa: C901
     @app.get('/admin')
     async def admin_page(request: Request):
         auth_error = require_moderator(request)
@@ -779,7 +782,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/admin/data-map')
     async def admin_data_map_page(request: Request):
         """«Как работает система»: пользовательская модель данных (студенты,
@@ -792,7 +794,6 @@ def register(app: Sanic) -> None:
             context={'request': request},
         )
 
-
     @app.get('/admin/data-guide')
     async def admin_data_guide_page(request: Request):
         """Инструкция простыми словами по разделам: Студенты, Календарь,
@@ -804,7 +805,6 @@ def register(app: Sanic) -> None:
             template_name=jinja_env.get_template('admin_data_guide.html'),
             context={'request': request},
         )
-
 
     @app.get('/admin/fields')
     async def admin_fields_page(request: Request):
@@ -831,7 +831,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.post('/admin/fields/base')
     async def update_base_field_settings(request: Request):
         auth_error = require_admin(request)
@@ -853,7 +852,6 @@ def register(app: Sanic) -> None:
             log_audit_event(request, 'field_settings_changed', {'fields': changed})
         return redirect(to='/admin/fields?admin_message=Настройки+базовых+полей+сохранены')
 
-
     @app.get('/admin/levels')
     async def admin_levels_page(request: Request):
         auth_error = require_admin(request)
@@ -863,7 +861,6 @@ def register(app: Sanic) -> None:
         # рабочим, flash-параметры сохраняются в редиректе.
         query = request.query_string
         return redirect(f'/admin/catalogs?{query}' if query else '/admin/catalogs')
-
 
     @app.get('/admin/catalogs')
     async def admin_catalogs_page(request: Request):
@@ -885,7 +882,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/catalogs/<category>')
     async def create_catalog_value(request: Request, category: str):
@@ -910,7 +906,6 @@ def register(app: Sanic) -> None:
         get_storage(request.app).add_catalog_value(category, value)
         return build_redirect_with_message(message='Значение добавлено', url='/admin/catalogs')
 
-
     @app.post('/admin/catalogs/<category>/<value_id>/hide')
     async def hide_catalog_value(request: Request, category: str, value_id: str):
         auth_error = require_admin(request)
@@ -923,7 +918,6 @@ def register(app: Sanic) -> None:
         get_storage(request.app).hide_catalog_value(row['id'])
         return build_redirect_with_message(message='Значение скрыто из подсказок', url='/admin/catalogs')
 
-
     @app.post('/admin/catalogs/<category>/<value_id>/unhide')
     async def unhide_catalog_value(request: Request, category: str, value_id: str):
         auth_error = require_admin(request)
@@ -935,7 +929,6 @@ def register(app: Sanic) -> None:
 
         get_storage(request.app).unhide_catalog_value(row['id'])
         return build_redirect_with_message(message='Значение снова видно в подсказках', url='/admin/catalogs')
-
 
     @app.post('/admin/catalogs/<category>/<value_id>/delete')
     async def delete_catalog_value(request: Request, category: str, value_id: str):
@@ -972,7 +965,6 @@ def register(app: Sanic) -> None:
         storage.delete_catalog_value(row['id'])
         return build_redirect_with_message(message='Значение удалено', url='/admin/catalogs')
 
-
     @app.post('/admin/catalogs/institute/<institute_id>/group')
     async def create_catalog_group(request: Request, institute_id: str):
         """Добавить группу в институт (иерархия справочника, №15)."""
@@ -1007,7 +999,6 @@ def register(app: Sanic) -> None:
             url='/admin/catalogs',
         )
 
-
     @app.get('/admin/catalogs/<category>/<value_id>/rename')
     async def catalog_rename_page(request: Request, category: str, value_id: str):
         """Шаг 2 переименования без JS: подтверждение с числом записей и галочкой
@@ -1041,7 +1032,6 @@ def register(app: Sanic) -> None:
                 'records_count': storage.count_records_using(category, row['value'], parent_value=parent_value),
             },
         )
-
 
     @app.post('/admin/catalogs/<category>/<value_id>/rename')
     async def rename_catalog_value(request: Request, category: str, value_id: str):
@@ -1106,7 +1096,6 @@ def register(app: Sanic) -> None:
         message += f': обновлено записей — {records_updated}' if update_records else ' (записи не тронуты)'
         return build_redirect_with_message(message=message, url='/admin/catalogs')
 
-
     @app.get('/admin/catalogs/group/<value_id>/move')
     async def catalog_group_move_page(request: Request, value_id: str):
         """Перенос группы в другой институт (решение 2026-09-22), шаг 2 без JS:
@@ -1137,11 +1126,12 @@ def register(app: Sanic) -> None:
                 'old_institute': old_institute['value'],
                 'target_institute': target['value'],
                 'target_institute_id': target['id'],
-                'records_count': storage.count_records_using('group', group['value'], parent_value=old_institute['value']),
+                'records_count': storage.count_records_using(
+                    'group', group['value'], parent_value=old_institute['value']
+                ),
                 'students_count': storage.count_students_using_group_pair(group['value'], old_institute['value']),
             },
         )
-
 
     @app.post('/admin/catalogs/group/<value_id>/move')
     async def catalog_group_move(request: Request, value_id: str):
@@ -1192,7 +1182,6 @@ def register(app: Sanic) -> None:
             url='/admin/catalogs',
         )
 
-
     @app.get('/admin/users')
     async def admin_users_page(request: Request):
         auth_error = require_admin(request)
@@ -1218,7 +1207,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/fields')
     async def create_custom_field(request: Request):
@@ -1251,7 +1239,6 @@ def register(app: Sanic) -> None:
         except Exception as exc:
             return build_redirect_with_message(error=f'Не удалось создать поле: {exc}', url='/admin/fields')
         return build_redirect_with_message(message='Поле добавлено', url='/admin/fields')
-
 
     @app.post('/admin/fields/<field_id>')
     async def update_custom_field(request: Request, field_id: str):
@@ -1314,7 +1301,6 @@ def register(app: Sanic) -> None:
             )
         return build_redirect_with_message(message='Настройки поля сохранены', url='/admin/fields')
 
-
     @app.post('/admin/fields/<field_id>/delete')
     async def delete_custom_field(request: Request, field_id: str):
         auth_error = require_admin(request)
@@ -1329,7 +1315,6 @@ def register(app: Sanic) -> None:
         storage = get_storage(request.app)
         storage.disable_custom_field(numeric_field_id)
         return build_redirect_with_message(message='Поле отключено', url='/admin/fields')
-
 
     @app.post('/admin/users')
     async def create_user(request: Request):
@@ -1357,7 +1342,6 @@ def register(app: Sanic) -> None:
 
         storage.create_user(username, hash_password(password), role)
         return build_redirect_with_message(message='Пользователь добавлен', url='/admin/users')
-
 
     @app.post('/admin/users/<user_id>/password')
     async def reset_user_password(request: Request, user_id: str):
@@ -1388,7 +1372,6 @@ def register(app: Sanic) -> None:
         )
         return build_redirect_with_message(message='Пароль обновлён', url='/admin/users')
 
-
     @app.post('/admin/users/<user_id>/active')
     async def toggle_user_active(request: Request, user_id: str):
         auth_error = require_admin(request)
@@ -1409,7 +1392,6 @@ def register(app: Sanic) -> None:
 
         storage.set_user_active(numeric_user_id, not user['active'])
         return build_redirect_with_message(message='Статус пользователя изменён', url='/admin/users')
-
 
     @app.post('/admin/users/<user_id>/delete')
     async def delete_user(request: Request, user_id: str):
@@ -1458,7 +1440,6 @@ def register(app: Sanic) -> None:
             url='/admin/users',
         )
 
-
     @app.post('/admin/levels')
     async def create_level(request: Request):
         auth_error = require_admin(request)
@@ -1481,7 +1462,6 @@ def register(app: Sanic) -> None:
         get_storage(request.app).create_level(name)
         return build_redirect_with_message(message='Уровень добавлен', url='/admin/catalogs')
 
-
     @app.post('/admin/levels/<level_id>/delete')
     async def disable_level(request: Request, level_id: str):
         auth_error = require_admin(request)
@@ -1495,7 +1475,6 @@ def register(app: Sanic) -> None:
 
         get_storage(request.app).disable_level(numeric_level_id)
         return build_redirect_with_message(message='Уровень скрыт из списков', url='/admin/catalogs')
-
 
     @app.post('/admin/levels/<level_id>/hard-delete')
     async def hard_delete_level(request: Request, level_id: str):
@@ -1526,7 +1505,6 @@ def register(app: Sanic) -> None:
             {'category': 'level', 'value': level['name'], 'level_id': numeric_level_id},
         )
         return build_redirect_with_message(message='Уровень удалён', url='/admin/catalogs')
-
 
     @app.post('/admin/users/<user_id>/alias')
     async def add_user_alias(request: Request, user_id: str):
@@ -1560,7 +1538,6 @@ def register(app: Sanic) -> None:
         )
         return build_redirect_with_message(message=f'ФИО «{name}» привязано к аккаунту', url='/admin/users')
 
-
     # --- Карточки студентов (Student Identity v1, Phase 1 — фундамент). ---
     #
     # Отдельная таблица актуальных данных студента (ФИО/пол/институт/группа/курс)
@@ -1569,7 +1546,6 @@ def register(app: Sanic) -> None:
     # (student_ref_id не пишется, авто-создания/авто-связей нет). Правка карточки
     # меняет ТОЛЬКО актуальные «профильные» данные, исторические записи не
     # перезаписываются.
-
 
     @app.get('/admin/maintenance')
     async def admin_maintenance_page(request: Request):
@@ -1591,7 +1567,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/admin/maintenance/calendar-links')
     async def admin_maintenance_calendar_links_page(request: Request):
         auth_error = require_admin(request)
@@ -1610,7 +1585,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/maintenance/calendar-links/apply')
     async def apply_maintenance_calendar_links(request: Request):
@@ -1637,7 +1611,6 @@ def register(app: Sanic) -> None:
             message = f'Связывание завершено: связано {counters["linked"]}.'
         return build_redirect_with_message(message=message, url='/admin/maintenance/calendar-links')
 
-
     @app.get('/admin/maintenance/export')
     async def export_database(request: Request):
         auth_error = require_admin(request)
@@ -1658,7 +1631,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="{filename}"',
             },
         )
-
 
     @app.post('/admin/maintenance/wipe')
     async def wipe_database(request: Request):
@@ -1714,7 +1686,6 @@ def register(app: Sanic) -> None:
         summary = log_wipe_execution(request, params, archive, records_deleted, attachments_deleted, freed_total)
         return build_redirect_with_message(message=summary, url='/admin/maintenance')
 
-
     @app.post('/admin/maintenance/backup')
     async def backup_now(request: Request):
         """Ручной бэкап (№10): та же логика, что у таймерного scripts/backup_sqlite.py."""
@@ -1744,7 +1715,6 @@ def register(app: Sanic) -> None:
             message += f', вложения: {result["files_archive"].name}'
         return build_redirect_with_message(message=message, url='/admin/maintenance')
 
-
     @app.get('/admin/maintenance/backups/<filename>')
     async def download_backup(request: Request, filename: str):
         """Скачать файл из data/backups (архивы очисток и бэкапы).
@@ -1772,7 +1742,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="{filename}"',
             },
         )
-
 
     @app.get('/admin/audit')
     async def audit_page(request: Request):

@@ -38,21 +38,17 @@ from src.files import regulation_source_path
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.records import build_competition
+from src.records import build_link_diff_rows
 from src.records import collides_with_fixed_columns
 from src.records import competition_content
-from src.records import event_participant_content
 from src.records import ensure_catalog_values
+from src.records import event_participant_content
 from src.records import event_participant_identity
 from src.records import event_participation_effective_values
 from src.records import event_participation_matched_duplicate_guard
 from src.records import get_base_field_settings
-from src.routes.students import normalize_import_course
-from src.routes.students import normalize_student_sex
-from src.routes.students import reconcile_link_error
-from src.routes.students import parse_student_form
-from src.routes.students import STUDENT_SEX_OPTIONS
-from src.routes.students import student_catalog_hints
-from src.routes.students import student_file_group_institutes
+from src.records import LINK_EVENT_FIELD_LABELS
+from src.records import participation_field_changes
 from src.settings import settings
 from src.storage.sqlite import CalendarEventDuplicateError
 from src.storage.sqlite import dedup_discipline
@@ -60,6 +56,13 @@ from src.storage.sqlite import dedup_place
 from src.storage.sqlite import dedup_text
 from src.storage.sqlite import EventParticipationConflictError
 from src.storage.sqlite import SQLiteAdapter
+from src.students import normalize_import_course
+from src.students import normalize_student_sex
+from src.students import parse_student_form
+from src.students import reconcile_link_error
+from src.students import student_catalog_hints
+from src.students import student_file_group_institutes
+from src.students import STUDENT_SEX_OPTIONS
 from src.web import build_redirect_with_message
 from src.web import clean_str
 from src.web import forbidden
@@ -1524,16 +1527,6 @@ LINK_EVENT_CANDIDATE_CAP = 20
 LINK_EVENT_SEARCH_KEYS = ('name', 'sport', 'level', 'date_from', 'date_to')
 
 
-# Человекочитаемые метки 5 event-owned полей для диффа и подтверждений.
-LINK_EVENT_FIELD_LABELS: dict[str, str] = {
-    'name': 'название',
-    'sport': 'вид спорта',
-    'date': 'дата',
-    'date_to': 'дата окончания',
-    'level': 'уровень',
-}
-
-
 def parse_link_event_filters(args: dict) -> tuple[dict[str, str], str | None]:
     """Параметры GET-поиска событий на странице связывания: подстроки
     name/sport/level + границы периода дд.мм.гггг (валидация — как
@@ -1596,25 +1589,6 @@ def event_is_record_preset(event: dict, record: Competition) -> bool:
     )
 
 
-def participation_field_changes(
-    name: str,
-    sport: str,
-    date: str,
-    date_to: str | None,
-    level: str,
-    event: dict,
-) -> dict[str, dict[str, str | None]]:
-    """old/new по 5 event-owned полям записи против события (сырые значения,
-    паттерн аудита calendar_event_edited)."""
-    return {
-        'name': {'old': name, 'new': event['name']},
-        'sport': {'old': sport, 'new': event['sport']},
-        'date': {'old': date, 'new': event['date']},
-        'date_to': {'old': date_to, 'new': event.get('date_to')},
-        'level': {'old': level, 'new': event['level']},
-    }
-
-
 def competition_link_changes(record: Competition, event: dict) -> dict[str, dict[str, str | None]]:
     return participation_field_changes(
         record.name,
@@ -1624,36 +1598,6 @@ def competition_link_changes(record: Competition, event: dict) -> dict[str, dict
         record.level,
         event,
     )
-
-
-def format_link_diff_value(key: str, value: str | None) -> str:
-    """Отображение значения поля в диффе: даты — dd.mm.yyyy, пустое — «»."""
-    if not value:
-        return ''
-    if key in ('date', 'date_to'):
-        return datetime.fromisoformat(value).strftime(settings.date_format)
-    return value
-
-
-def build_link_diff_rows(changes: dict[str, dict[str, str | None]]) -> list[dict]:
-    """Строки диффа «после связывания» для шаблона: только отличающиеся поля;
-    очистка (было значение → станет пустым) помечается для warning-бейджа."""
-    rows = []
-    for key, label in LINK_EVENT_FIELD_LABELS.items():
-        old_value, new_value = changes[key]['old'], changes[key]['new']
-        if old_value == new_value:
-            continue
-        clears = not new_value and bool(old_value)
-        rows.append(
-            {
-                'key': key,
-                'label': label,
-                'old': format_link_diff_value(key, old_value),
-                'new': format_link_diff_value(key, new_value),
-                'clears': clears,
-            }
-        )
-    return rows
 
 
 def decorate_link_event_candidates(
@@ -1694,7 +1638,10 @@ def build_link_confirm_text(record_id: int, event_name: str, cleared_fields: Seq
     return base
 
 
-def register(app: Sanic) -> None:
+# C901 (осознанное подавление): mccabe суммирует сложность вложенных
+# verbatim-хендлеров, перенесённых из main.py без изменений; разбиение
+# register() — Architecture v2, не pre-merge gate.
+def register(app: Sanic) -> None:  # noqa: C901
     @app.get('/calendar')
     async def calendar_page(request: Request):
         # Решение по ролям: admin/editor — полный доступ, viewer — просмотр без
@@ -1731,7 +1678,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/calendar/new')
     async def create_calendar_event(request: Request):
@@ -1783,7 +1729,6 @@ def register(app: Sanic) -> None:
                 f' ({calendar_event_date_label(similar["date"])}) — проверьте, не дубль ли это.'
             )
         return build_redirect_with_message(message=message, url='/calendar')
-
 
     @app.post('/calendar/<event_id>/edit')
     async def edit_calendar_event(request: Request, event_id: str):
@@ -1853,7 +1798,6 @@ def register(app: Sanic) -> None:
             return build_redirect_with_message(message='Соревнование обновлено', url=next_url)
         return build_redirect_with_message(message='Соревнование обновлено', url='/calendar')
 
-
     @app.get('/calendar/<event_id>')
     async def calendar_event_page(request: Request, event_id: str):
         # Решение по ролям — как у календаря: admin/editor — полный доступ,
@@ -1886,7 +1830,9 @@ def register(app: Sanic) -> None:
         # строятся по уже отфильтрованным участиям.
         custom_fields = storage.get_custom_fields()
         all_groups = calendar_participant_groups(all_participants, custom_fields)
-        participant_groups = all_groups if not result_filter else calendar_participant_groups(participants, custom_fields)
+        participant_groups = (
+            all_groups if not result_filter else calendar_participant_groups(participants, custom_fields)
+        )
         can_write = user_can_write(request)
 
         return await render(
@@ -1928,7 +1874,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/calendar/<event_id>/participants')
     async def add_calendar_event_participant(request: Request, event_id: str):
@@ -2023,7 +1968,6 @@ def register(app: Sanic) -> None:
             url=back_url,
         )
 
-
     @app.get('/calendar/<event_id>/participants/<record_id>/link')
     async def calendar_event_participant_link_page(request: Request, event_id: str, record_id: str):
         auth_error = require_admin(request)
@@ -2064,7 +2008,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/calendar/<event_id>/participants/<record_id>/link')
     async def calendar_event_participant_link(request: Request, event_id: str, record_id: str):
@@ -2117,7 +2060,6 @@ def register(app: Sanic) -> None:
             message=f'Запись привязана к студенту «{full_name}»',
             url=back_url,
         )
-
 
     @app.post('/calendar/<event_id>/participants/<record_id>/create-and-link')
     async def calendar_event_participant_create_and_link(request: Request, event_id: str, record_id: str):
@@ -2204,7 +2146,6 @@ def register(app: Sanic) -> None:
             url=back_url,
         )
 
-
     @app.post('/calendar/<event_id>/delete')
     async def delete_calendar_event(request: Request, event_id: str):
         auth_error = require_moderator(request)
@@ -2242,13 +2183,11 @@ def register(app: Sanic) -> None:
         )
         return build_redirect_with_message(message='Соревнование удалено', url='/calendar')
 
-
     # Файл положения события календаря (решение 2026-09-22): один файл на событие
     # (PDF/JPEG/PNG до 5 МБ, та же валидация, что у вложений), колонки
     # calendar_events.regulation_* + файл в data/files/calendar/<event_id>/.
     # Скачивание — все не-атлеты (как страница события), замена/удаление —
     # модераторы.
-
 
     @app.get('/calendar/<event_id>/regulation')
     async def download_calendar_regulation(request: Request, event_id: str):
@@ -2276,7 +2215,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="{filename}"',
             },
         )
-
 
     @app.post('/calendar/<event_id>/regulation')
     async def upload_calendar_regulation(request: Request, event_id: str):
@@ -2333,7 +2271,6 @@ def register(app: Sanic) -> None:
             url=back_url,
         )
 
-
     @app.post('/calendar/<event_id>/regulation/delete')
     async def delete_calendar_regulation(request: Request, event_id: str):
         auth_error = require_moderator(request)
@@ -2358,7 +2295,6 @@ def register(app: Sanic) -> None:
         )
         return build_redirect_with_message(message='Положение удалено', url=back_url)
 
-
     @app.get('/calendar/<event_id>/participants/import')
     async def event_participants_import_page(request: Request, event_id: str):
         auth_error = require_moderator(request)
@@ -2375,7 +2311,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.get('/calendar/<event_id>/participants/import/template')
     async def export_event_participants_template(request: Request, event_id: str):
@@ -2403,7 +2338,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="Шаблон_участники_{now_str}.xlsx"',
             },
         )
-
 
     @app.post('/calendar/<event_id>/participants/import')
     async def event_participants_import_upload(request: Request, event_id: str):
@@ -2458,7 +2392,6 @@ def register(app: Sanic) -> None:
         )
         return redirect(event_import_preview_url(event['id'], token))
 
-
     @app.get('/calendar/<event_id>/participants/import/preview/<token>')
     async def event_participants_import_preview(request: Request, event_id: str, token: str):
         """Предпросмотр: НОЛЬ записей в БД — только чтение кандидатов/справочников.
@@ -2494,7 +2427,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/select-student')
     async def event_import_row_select_student(request: Request, event_id: str, token: str, row_number: str):
@@ -2538,7 +2470,6 @@ def register(app: Sanic) -> None:
             url=event_import_preview_url(event['id'], token),
         )
 
-
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/clear-student')
     async def event_import_row_clear_student(request: Request, event_id: str, token: str, row_number: str):
         """Сбросить карточку строки: участие будет добавлено без связи.
@@ -2567,7 +2498,6 @@ def register(app: Sanic) -> None:
             url=event_import_preview_url(event['id'], token),
         )
 
-
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/skip')
     async def event_import_row_skip(request: Request, event_id: str, token: str, row_number: str):
         """Пропустить строку (в т.ч. ошибочную — как быстрый способ убрать её
@@ -2590,7 +2520,6 @@ def register(app: Sanic) -> None:
             message=f'Строка {row["row_number"]} пропущена.',
             url=event_import_preview_url(event['id'], token),
         )
-
 
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/edit')
     async def event_import_row_edit(request: Request, event_id: str, token: str, row_number: str):
@@ -2673,7 +2602,6 @@ def register(app: Sanic) -> None:
             url=event_import_preview_url(event['id'], token),
         )
 
-
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/add')
     async def event_import_row_add(request: Request, event_id: str, token: str, row_number: str):
         """Добавить одну строку («готовую»): участие создаётся сразу, решение
@@ -2706,7 +2634,6 @@ def register(app: Sanic) -> None:
             message=f'Строка {row["row_number"]}: участник добавлен.',
             url=event_import_preview_url(event['id'], token),
         )
-
 
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/update-existing')
     async def event_import_row_update_existing(request: Request, event_id: str, token: str, row_number: str):
@@ -2785,7 +2712,6 @@ def register(app: Sanic) -> None:
             url=event_import_preview_url(event['id'], token),
         )
 
-
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/keep-existing')
     async def event_import_row_keep_existing(request: Request, event_id: str, token: str, row_number: str):
         """Оставить СУЩЕСТВУЮЩЕЕ участие как есть по строке-кандидату (P4; только
@@ -2828,7 +2754,6 @@ def register(app: Sanic) -> None:
             message=f'Строка {row["row_number"]}: оставлено существующее участие.',
             url=event_import_preview_url(event['id'], token),
         )
-
 
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/row/<row_number>/create-student')
     async def event_import_row_create_student(request: Request, event_id: str, token: str, row_number: str):
@@ -2897,7 +2822,6 @@ def register(app: Sanic) -> None:
             message=f'Строка {row["row_number"]}: студент «{full_name}» создан, участник добавлен.',
             url=event_import_preview_url(event['id'], token),
         )
-
 
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/bulk-commit')
     async def event_import_bulk_commit(request: Request, event_id: str, token: str):
@@ -2968,7 +2892,6 @@ def register(app: Sanic) -> None:
             url=f'/calendar/{event["id"]}',
         )
 
-
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/finish')
     async def event_import_finish(request: Request, event_id: str, token: str):
         """Завершить импорт: итоговое audit-событие с счётчиками (без содержимого
@@ -3030,7 +2953,6 @@ def register(app: Sanic) -> None:
             url=f'/calendar/{event["id"]}',
         )
 
-
     @app.post('/calendar/<event_id>/participants/import/preview/<token>/discard')
     async def event_import_discard(request: Request, event_id: str, token: str):
         """Отменить импорт: сессия удаляется без аудита. Уже добавленные
@@ -3053,7 +2975,6 @@ def register(app: Sanic) -> None:
                 url=f'/calendar/{event["id"]}',
             )
         return build_redirect_with_message(message='Импорт отменён.', url=f'/calendar/{event["id"]}')
-
 
     @app.get('/competition/<record_id>/link-event')
     async def competition_link_event_page(request: Request, record_id: str):
@@ -3116,7 +3037,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.post('/competition/<record_id>/link-event')
     async def competition_link_event(request: Request, record_id: str):
         auth_error = require_moderator(request)
@@ -3164,7 +3084,6 @@ def register(app: Sanic) -> None:
             message=f'Запись №{numeric_id} связана с соревнованием «{event["name"]}».',
             url='/',
         )
-
 
     @app.post('/competition/<record_id>/link-event/new')
     async def competition_link_event_new(request: Request, record_id: str):

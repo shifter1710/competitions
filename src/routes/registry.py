@@ -33,10 +33,10 @@ from src.auth import user_can_write
 from src.auth import user_is_admin
 from src.auth import user_is_athlete
 from src.auth import user_is_moderator
-from src.auth import USER_ROLES
 from src.auth import user_owns_record
-from src.files import attachments_dir
+from src.auth import USER_ROLES
 from src.files import ATTACHMENT_MAX_SIZE
+from src.files import attachments_dir
 from src.files import detect_attachment_type
 from src.files import files_dir
 from src.files import remove_attachment_record_dirs
@@ -588,7 +588,10 @@ def competition_update_record(
     return record
 
 
-def register(app: Sanic) -> None:
+# C901 (осознанное подавление): mccabe суммирует сложность вложенных
+# verbatim-хендлеров, перенесённых из main.py без изменений; разбиение
+# register() — Architecture v2, не pre-merge gate.
+def register(app: Sanic) -> None:  # noqa: C901
     @app.get('/')
     async def index(request: Request):
         storage = get_storage(request.app)
@@ -703,7 +706,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/admin/import')
     async def admin_import_page(request: Request):
         auth_error = require_moderator(request)
@@ -719,7 +721,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.get('/admin/import-queue')
     async def admin_import_queue_page(request: Request):
@@ -749,7 +750,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.post('/admin/import-queue/<entry_id>/accept')
     async def accept_import_queue_entry(request: Request, entry_id: str):
         auth_error = require_admin(request)
@@ -764,7 +764,8 @@ def register(app: Sanic) -> None:
         # Строка вставляется только по явному решению админа; если пока она
         # лежала в очереди, такая запись появилась другим путём — не дублируем.
         duplicate_now = any(
-            competition_duplicate_key(comp) == competition_duplicate_key(competition) for comp in storage.get_competitions()
+            competition_duplicate_key(comp) == competition_duplicate_key(competition)
+            for comp in storage.get_competitions()
         )
         if duplicate_now:
             storage.set_import_queue_status(entry['id'], 'skipped')
@@ -789,7 +790,6 @@ def register(app: Sanic) -> None:
         )
         return redirect(to='/admin/import-queue?admin_message=Кандидат+принят+и+добавлен+в+реестр')
 
-
     @app.post('/admin/import-queue/<entry_id>/skip')
     async def skip_import_queue_entry(request: Request, entry_id: str):
         auth_error = require_admin(request)
@@ -806,7 +806,6 @@ def register(app: Sanic) -> None:
             {'decision': 'skipped', 'queue_id': entry['id'], 'matched_record_id': entry['matched_record_id']},
         )
         return redirect(to='/admin/import-queue?admin_message=Кандидат+пропущен')
-
 
     # Замена существующей записи данными кандидата (№25): историчность обеспечивает
     # аудит old→new по полям; record_id существующей сохраняется, её владелец и
@@ -842,7 +841,6 @@ def register(app: Sanic) -> None:
             },
         )
         return redirect(to='/admin/import-queue?admin_message=Существующая+запись+заменена+данными+кандидата')
-
 
     # Ручное решение (№25, №27в): админ правит поля кандидата инлайн, кроме ФИО
     # и даты — они задают конфликт и всегда берутся из payload очереди; после
@@ -884,7 +882,8 @@ def register(app: Sanic) -> None:
         # Тот же анти-дубликат, что и у «Принять»: строка вставляется только
         # по явному решению админа.
         duplicate_now = any(
-            competition_duplicate_key(comp) == competition_duplicate_key(competition) for comp in storage.get_competitions()
+            competition_duplicate_key(comp) == competition_duplicate_key(competition)
+            for comp in storage.get_competitions()
         )
         if duplicate_now:
             storage.set_import_queue_status(entry['id'], 'skipped')
@@ -909,7 +908,6 @@ def register(app: Sanic) -> None:
             },
         )
         return redirect(to='/admin/import-queue?admin_message=Кандидат+принят+с+ручными+правками')
-
 
     @app.get('/template/empty.xlsx')
     async def export_empty_template(request: Request):
@@ -937,7 +935,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/export/index')
     async def export_index(request: Request):
         if user_is_athlete(request):
@@ -960,7 +957,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="{filename}"',
             },
         )
-
 
     @app.post('/')
     async def upload(request: Request):
@@ -1021,7 +1017,6 @@ def register(app: Sanic) -> None:
             )
         )
 
-
     @app.get('/api/athletes/search')
     async def search_athletes(request: Request):
         # №23доп (docs/feedback-live.md): резолвер атлета. Подсказки по ФИО
@@ -1079,7 +1074,6 @@ def register(app: Sanic) -> None:
         athletes = await asyncio.to_thread(combined_search)
         return json_response(athletes)
 
-
     @app.post('/competition')
     async def add_competition(request: Request):
         auth_error = require_writer(request)
@@ -1126,7 +1120,6 @@ def register(app: Sanic) -> None:
             owner_id=get_current_user_id(request),
         )
         return redirect(to='/')
-
 
     @app.post('/competition/<record_id>')
     async def update_competition(request: Request, record_id: str):
@@ -1183,7 +1176,6 @@ def register(app: Sanic) -> None:
             storage.set_competition_review(numeric_id, 'pending')
         return redirect(to='/')
 
-
     @app.post('/competition/<record_id>/review/<decision>')
     async def review_competition(request: Request, record_id: str, decision: str):
         auth_error = require_moderator(request)
@@ -1211,7 +1203,6 @@ def register(app: Sanic) -> None:
         )
         return redirect(to='/')
 
-
     @app.post('/competition/<record_id>/delete')
     async def delete_competition(request: Request, record_id: str):
         auth_error = require_admin(request)
@@ -1236,7 +1227,6 @@ def register(app: Sanic) -> None:
             logger.warning('Attachment directory of record %s still exists after record deletion', numeric_id)
         log_audit_event(request, 'record_deleted', {'record_id': numeric_id, 'student_name': student_name})
         return redirect(to='/')
-
 
     @app.post('/competition/<record_id>/attachments')
     async def upload_attachment(request: Request, record_id: str):
@@ -1283,7 +1273,6 @@ def register(app: Sanic) -> None:
         )
         return text(body='Файл загружен')
 
-
     @app.get('/attachment/<attachment_id>')
     async def download_attachment(request: Request, attachment_id: str):
         if get_auth_user(request) is None:
@@ -1313,7 +1302,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="{attachment["stored_name"]}"',
             },
         )
-
 
     @app.post('/attachment/<attachment_id>/delete')
     async def delete_attachment(request: Request, attachment_id: str):

@@ -11,7 +11,6 @@ from typing import Sequence
 from urllib.parse import urlencode
 
 import pandas as pd
-from pandas import isna
 from sanic import redirect
 from sanic import Request
 from sanic import Sanic
@@ -26,6 +25,14 @@ from src.auth import require_admin
 from src.auth import require_moderator
 from src.storage.sqlite import SQLiteAdapter
 from src.storage.sqlite import STUDENT_SORT_COLUMNS
+from src.students import normalize_import_course
+from src.students import normalize_student_sex
+from src.students import parse_student_form
+from src.students import reconcile_link_error
+from src.students import reconcile_student_error
+from src.students import student_catalog_hints
+from src.students import student_file_group_institutes
+from src.students import STUDENT_SEX_OPTIONS
 from src.web import build_redirect_with_message
 from src.web import checkbox_to_bool
 from src.web import clean_str
@@ -35,11 +42,6 @@ from src.web import get_param
 from src.web import get_storage
 from src.web import jinja_env
 from src.web import parse_reconcile_int
-
-
-# Карточки студентов (Student Identity v1, Phase 1): допустимые значения
-# поля «Пол» — только М/Ж или пусто (не указан).
-STUDENT_SEX_OPTIONS: frozenset[str] = frozenset({'', 'М', 'Ж'})
 
 
 # Импорт студентов из Excel (Student Identity v1, Phase 2.5): колонки файла
@@ -55,30 +57,6 @@ STUDENT_IMPORT_SESSION_TTL_SECONDS = 2 * 60 * 60
 
 
 RECONCILE_PAGE_SIZE = 50
-
-
-def parse_student_form(request: Request) -> tuple[dict, str | None]:
-    """Поля карточки студента из формы. None-ошибка — текст для редиректа.
-
-    Поле формы группы называется «group» (HTML-конвенция) и маппится в
-    group_name хранилища. Все значения — свободный текст со strip().
-    """
-    full_name = get_form_value(request, 'full_name').strip()
-    sex = get_form_value(request, 'sex').strip()
-    institute = get_form_value(request, 'institute').strip()
-    group_name = get_form_value(request, 'group').strip()
-    course = get_form_value(request, 'course').strip()
-    if not full_name:
-        return {}, 'Укажите ФИО студента.'
-    if sex not in STUDENT_SEX_OPTIONS:
-        return {}, 'Пол может быть «М», «Ж» или не указан.'
-    return {
-        'full_name': full_name,
-        'sex': sex,
-        'institute': institute,
-        'group_name': group_name,
-        'course': course,
-    }, None
 
 
 def student_field_changes(student: dict, form: dict) -> dict:
@@ -132,32 +110,6 @@ def reconcile_back_url(raw: str) -> str:
     return '/admin/people/reconcile'
 
 
-def reconcile_student_error(storage: SQLiteAdapter, student_id: int, code: str) -> str:
-    """Flash-текст ошибки привязки по коду хранилища (карточка/активность)."""
-    student = storage.get_student_by_id(student_id)
-    if student is None:
-        return 'Студент не найден.'
-    if code == 'student_inactive':
-        return f'Студент «{student["full_name"]}» неактивен: привязка возможна только к активным студентам.'
-    return 'Студент не найден.'
-
-
-def reconcile_link_error(
-    storage: SQLiteAdapter,
-    record_ids: list[int],
-    student_id: int,
-    code: str,
-) -> str:
-    """Flash-текст ошибки привязки записей (одиночной и массовой)."""
-    if code in ('student_not_found', 'student_inactive'):
-        return reconcile_student_error(storage, student_id, code)
-    if code == 'records_not_found':
-        return 'Запись не найдена.'
-    if len(record_ids) == 1:
-        return f'Запись №{record_ids[0]} уже привязана к студенту.'
-    return 'Ничего не привязано: часть выбранных записей уже привязана. Обновите список и повторите.'
-
-
 def reconcile_create_url(*, record_id: int | None = None, user_id: int | None = None, back: str) -> str:
     """URL страницы создания студента из записи/профиля с возвратом."""
     params = {'back': back}
@@ -183,35 +135,6 @@ def reconcile_create_url(*, record_id: int | None = None, user_id: int | None = 
 # Регистрируется ДО /admin/people/<student_id>, чтобы статические пути
 # /admin/people/import и /admin/people/import/template не разбирались
 # как id карточки.
-
-
-def normalize_import_course(value) -> str:
-    """Курс из ячейки Excel как строка: 2.0 → «2», NaN/None → «».
-
-    Числовые ячейки pandas отдаёт float'ами («2» в Excel → 2.0); целые
-    выводятся без дробной части, остальное (текст, нецелые) — как str().
-    """
-    if value is None or isna(value):
-        return ''
-    if isinstance(value, float):
-        return str(int(value)) if value.is_integer() else str(value)
-    return str(value).strip()
-
-
-def normalize_student_sex(value: str) -> str | None:
-    """Пол из ячейки Excel в каноническом виде: '' → '', м/м → «М», ж/ж → «Ж».
-
-    upper() в Python работает с кириллицей («м» → «М»); латинские m/M не
-    совпадают с кириллическими «М»/«Ж» и отвергаются естественно. Всё
-    остальное — None (ошибка строки, а не молчаливая правка).
-    """
-    if value == '':
-        return ''
-    if value.upper() == 'М':
-        return 'М'
-    if value.upper() == 'Ж':
-        return 'Ж'
-    return None
 
 
 def parse_student_import_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]:
@@ -267,126 +190,6 @@ def student_import_duplicate_rows(rows: Sequence[dict]) -> dict[int, list[int]]:
         if name:
             by_name.setdefault(name.casefold(), []).append(row['row_number'])
     return {row_number: numbers for numbers in by_name.values() if len(numbers) > 1 for row_number in numbers}
-
-
-def student_file_group_institutes(rows: Sequence[dict]) -> dict[str, list[dict]]:
-    """Карта группа → институты из строк файла импорта (по самой сессии).
-
-    Ключ — casefold(strip(группа)); значение — институты этой группы,
-    уникальные по casefold, в порядке появления (сохраняется первое
-    написание). Строки без группы или института не участвуют; статус строки
-    не важен — карта строится из ВСЕХ строк сессии при каждом рендере,
-    поэтому правка строки-«донора» меняет подсказки остальных естественно.
-    """
-    institutes: dict[str, list[dict]] = {}
-    for row in rows:
-        group = (row['group'] or '').strip()
-        institute = (row['institute'] or '').strip()
-        if not group or not institute:
-            continue
-        bucket = institutes.setdefault(group.casefold(), [])
-        if not any(item['cf'] == institute.casefold() for item in bucket):
-            bucket.append({'cf': institute.casefold(), 'raw': institute})
-    return institutes
-
-
-def canonical_group_in_institute(storage: SQLiteAdapter, institute: str, group: str) -> str:
-    """Каноническое написание группы внутри института (уникальность группы —
-    по паре институт+группа); без изменений, если пара справочнику неизвестна."""
-    institute_row = storage.find_catalog_row('institute', institute)
-    if institute_row is None:
-        return group
-    canonical = storage.find_catalog_canonical('group', group, parent_id=institute_row['id'])
-    return canonical if canonical else group
-
-
-def student_catalog_group_hints(
-    storage: SQLiteAdapter,
-    hints: dict,
-    group: str,
-    file_groups: dict[str, list[dict]] | None = None,
-) -> dict:
-    """Институт не указан, группа указана: институт — из ТЕКУЩЕГО файла
-    (file_groups, если группа встречается в нём ровно с одним институтом),
-    иначе из справочника (если группа принадлежит ровно одному институту);
-    иначе предупреждение без изменения значений.
-
-    Файл важнее справочника: импорт списков одной группы обычно идёт из
-    файла факультета. Расхождение со справочником — предупреждение, значение
-    остаётся файловым.
-    """
-    file_entry = (file_groups or {}).get(group.casefold())
-    if file_entry is not None:
-        if len(file_entry) > 1:
-            hints['warnings'].append('Институт не определён: в файле группа относится к разным институтам')
-            return hints
-        raw_institute = file_entry[0]['raw']
-        institute_value = storage.find_catalog_canonical('institute', raw_institute) or raw_institute
-        hints['institute'] = institute_value
-        hints['institute_autofilled'] = True
-        hints['institute_source'] = 'file'
-        hints['group'] = canonical_group_in_institute(storage, institute_value, group)
-        catalog_owner = storage.find_unique_group_institute(group)
-        if catalog_owner and catalog_owner.casefold() != institute_value.casefold():
-            hints['warnings'].append('Требует внимания: справочник относит группу к другому институту')
-        return hints
-    institute_value = storage.find_unique_group_institute(group)
-    if not institute_value:
-        hints['warnings'].append(
-            'Институт не определён: группа отсутствует в справочнике или относится к нескольким институтам'
-        )
-        return hints
-    hints['institute'] = institute_value
-    hints['institute_autofilled'] = True
-    hints['institute_source'] = 'catalog'
-    hints['group'] = canonical_group_in_institute(storage, institute_value, group)
-    return hints
-
-
-def student_catalog_pair_hints(storage: SQLiteAdapter, hints: dict, institute: str, group: str) -> dict:
-    """Институт и группа указаны: канонизация обоих по справочнику; группа,
-    однозначно принадлежащая ДРУГОМУ институту — предупреждение, значения
-    не переписываются."""
-    canonical_institute = storage.find_catalog_canonical('institute', institute)
-    if canonical_institute:
-        hints['institute'] = canonical_institute
-        hints['group'] = canonical_group_in_institute(storage, canonical_institute, group)
-    owner = storage.find_unique_group_institute(group)
-    if owner and owner.lower() != hints['institute'].lower():
-        hints['warnings'].append('Требует внимания: группа относится к другому институту')
-    return hints
-
-
-def student_catalog_hints(
-    storage: SQLiteAdapter,
-    institute: str,
-    group: str,
-    file_groups: dict[str, list[dict]] | None = None,
-) -> dict:
-    """Подсказки справочников для строки импорта студентов — ТОЛЬКО ЧТЕНИЕ.
-
-    Возвращает значения (возможно канонизированные по регистру), признак
-    автозаполнения института (institute_source: 'file' — из текущего файла,
-    'catalog' — из справочника) и предупреждения. Импорт студентов НИЧЕГО
-    не пишет в справочники (в отличие от импорта записей соревнований).
-    """
-    hints = {
-        'institute': institute,
-        'group': group,
-        'institute_autofilled': False,
-        'institute_source': None,
-        'warnings': [],
-    }
-
-    if not institute and group:
-        return student_catalog_group_hints(storage, hints, group, file_groups=file_groups)
-    if institute and group:
-        return student_catalog_pair_hints(storage, hints, institute, group)
-    if institute:
-        canonical_institute = storage.find_catalog_canonical('institute', institute)
-        if canonical_institute:
-            hints['institute'] = canonical_institute
-    return hints
 
 
 # Staging предпросмотра живёт в памяти (прецедент login_failures): в БД не
@@ -570,7 +373,10 @@ def replace_student_import_session(user_id: int, token: str, session: dict) -> N
     student_import_sessions[token] = session
 
 
-def register(app: Sanic) -> None:
+# C901 (осознанное подавление): mccabe суммирует сложность вложенных
+# verbatim-хендлеров, перенесённых из main.py без изменений; разбиение
+# register() — Architecture v2, не pre-merge gate.
+def register(app: Sanic) -> None:  # noqa: C901
     @app.get('/admin/students')
     async def admin_students_page(request: Request):
         auth_error = require_admin(request)
@@ -584,7 +390,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/api/students')
     async def list_students(request: Request):
         # Полный список ФИО раскрывает персональные данные других студентов —
@@ -594,7 +399,6 @@ def register(app: Sanic) -> None:
             return auth_error
         names = get_storage(request.app).get_student_names()
         return json_response(names)
-
 
     @app.get('/admin/people')
     async def admin_people_page(request: Request):
@@ -634,7 +438,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.post('/admin/people')
     async def admin_person_create(request: Request):
         auth_error = require_admin(request)
@@ -657,7 +460,6 @@ def register(app: Sanic) -> None:
             message=f'Студент «{form["full_name"]}» добавлен.',
             url=f'/admin/people/{student_id}',
         )
-
 
     @app.get('/admin/people/reconcile')
     async def admin_reconcile_page(request: Request):
@@ -716,7 +518,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/admin/people/reconcile/users')
     async def admin_reconcile_users_page(request: Request):
         auth_error = require_admin(request)
@@ -758,7 +559,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/people/reconcile/link')
     async def admin_reconcile_link(request: Request):
@@ -812,7 +612,6 @@ def register(app: Sanic) -> None:
             message = f'Привязано записей: {count} — студент «{full_name}».'
         return build_redirect_with_message(message=message, url=back)
 
-
     @app.get('/admin/people/reconcile/create')
     async def admin_reconcile_create_page(request: Request):
         """Создание карточки из записи: поля предзаполнены снимком записи."""
@@ -854,7 +653,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/people/reconcile/create')
     async def admin_reconcile_create_record(request: Request):
@@ -916,7 +714,6 @@ def register(app: Sanic) -> None:
             url=f'/admin/people/{student_id}',
         )
 
-
     @app.post('/admin/people/reconcile/unlink')
     async def admin_reconcile_unlink(request: Request):
         auth_error = require_admin(request)
@@ -955,7 +752,6 @@ def register(app: Sanic) -> None:
             url=f'/admin/people/{old_ref}',
         )
 
-
     @app.post('/admin/people/reconcile/relink')
     async def admin_reconcile_relink(request: Request):
         auth_error = require_admin(request)
@@ -991,7 +787,6 @@ def register(app: Sanic) -> None:
             message=f'Запись №{record_id} перепривязана на студента «{full_name}».',
             url=f'/admin/people/{student_id}',
         )
-
 
     @app.get('/admin/people/reconcile/users/create')
     async def admin_reconcile_user_create_page(request: Request):
@@ -1038,7 +833,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/people/reconcile/users/create')
     async def admin_reconcile_create_user(request: Request):
@@ -1090,7 +884,9 @@ def register(app: Sanic) -> None:
                     'привязан другим действием.'
                 )
             else:
-                message = f'Студент «{form["full_name"]}» создан, но аккаунт {user["username"]} недоступен для привязки.'
+                message = (
+                    f'Студент «{form["full_name"]}» создан, но аккаунт {user["username"]} недоступен для привязки.'
+                )
             return build_redirect_with_message(message=message, url=f'/admin/people/{student_id}')
         log_audit_event(
             request,
@@ -1101,7 +897,6 @@ def register(app: Sanic) -> None:
             message=f'Студент «{form["full_name"]}» создан, аккаунт {user["username"]} привязан к нему.',
             url=f'/admin/people/{student_id}',
         )
-
 
     @app.post('/admin/people/reconcile/users/link')
     async def admin_reconcile_user_link(request: Request):
@@ -1150,7 +945,6 @@ def register(app: Sanic) -> None:
             url=back,
         )
 
-
     @app.post('/admin/people/reconcile/users/unlink')
     async def admin_reconcile_user_unlink(request: Request):
         auth_error = require_admin(request)
@@ -1182,7 +976,6 @@ def register(app: Sanic) -> None:
             message=f'Аккаунт {user["username"]} отвязан от студента «{full_name}».',
             url=f'/admin/people/{old_ref}',
         )
-
 
     @app.post('/admin/people/reconcile/users/relink')
     async def admin_reconcile_user_relink(request: Request):
@@ -1224,7 +1017,6 @@ def register(app: Sanic) -> None:
             message=f'Аккаунт {username} перепривязан на студента «{full_name}».',
             url=f'/admin/people/{student_id}',
         )
-
 
     @app.get('/admin/people/reconcile/identity')
     async def admin_reconcile_identity_page(request: Request):
@@ -1281,7 +1073,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.post('/admin/people/reconcile/identity/flip')
     async def admin_reconcile_identity_flip(request: Request):
         """Переключение режима идентификации (admin). На «только связи» — только
@@ -1320,7 +1111,6 @@ def register(app: Sanic) -> None:
             message = 'Режим возвращён на двойной (dual): кабинеты атлетов снова учитывают совпадения по ФИО.'
         return build_redirect_with_message(message=message, url='/admin/people/reconcile/identity')
 
-
     @app.get('/admin/people/import')
     async def admin_student_import_page(request: Request):
         auth_error = require_admin(request)
@@ -1333,7 +1123,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.get('/admin/people/import/template')
     async def export_student_import_template(request: Request):
@@ -1353,7 +1142,6 @@ def register(app: Sanic) -> None:
                 'content-disposition': f'attachment; filename="Шаблон_студенты_{now_str}.xlsx"',
             },
         )
-
 
     @app.post('/admin/people/import')
     async def admin_student_import_upload(request: Request):
@@ -1405,7 +1193,6 @@ def register(app: Sanic) -> None:
         )
         return redirect(student_import_preview_url(token))
 
-
     @app.get('/admin/people/import/preview/<token>')
     async def admin_student_import_preview(request: Request, token: str):
         """Предпросмотр: НОЛЬ записей в БД — только чтение кандидатов/справочников."""
@@ -1425,7 +1212,6 @@ def register(app: Sanic) -> None:
                 **get_flash_args(request),
             },
         )
-
 
     @app.post('/admin/people/import/preview/<token>/bulk-create')
     async def admin_student_import_bulk_create(request: Request, token: str):
@@ -1478,7 +1264,6 @@ def register(app: Sanic) -> None:
             url=student_import_preview_url(token),
         )
 
-
     @app.post('/admin/people/import/preview/<token>/row/<row_number>/create')
     async def admin_student_import_row_create(request: Request, token: str, row_number: str):
         """Явное создание одной строки. Разрешено и при 100% совпадении —
@@ -1510,7 +1295,6 @@ def register(app: Sanic) -> None:
             message=f'Строка {row["row_number"]}: студент «{row["full_name"]}» создан.',
             url=student_import_preview_url(token),
         )
-
 
     @app.post('/admin/people/import/preview/<token>/row/<row_number>/use-existing')
     async def admin_student_import_row_use_existing(request: Request, token: str, row_number: str):
@@ -1556,7 +1340,6 @@ def register(app: Sanic) -> None:
             url=student_import_preview_url(token),
         )
 
-
     @app.post('/admin/people/import/preview/<token>/row/<row_number>/skip')
     async def admin_student_import_row_skip(request: Request, token: str, row_number: str):
         """Пропустить строку (в т.ч. ошибочную — как быстрый способ убрать её
@@ -1582,7 +1365,6 @@ def register(app: Sanic) -> None:
             message=f'Строка {row["row_number"]} пропущена.',
             url=student_import_preview_url(token),
         )
-
 
     @app.post('/admin/people/import/preview/<token>/row/<row_number>/edit')
     async def admin_student_import_row_edit(request: Request, token: str, row_number: str):
@@ -1629,7 +1411,6 @@ def register(app: Sanic) -> None:
             url=student_import_preview_url(token),
         )
 
-
     @app.post('/admin/people/import/preview/<token>/finish')
     async def admin_student_import_finish(request: Request, token: str):
         """Завершить импорт: одно audit-событие с итогами, сессия удаляется.
@@ -1663,7 +1444,6 @@ def register(app: Sanic) -> None:
             url='/admin/people',
         )
 
-
     @app.post('/admin/people/import/preview/<token>/discard')
     async def admin_student_import_discard(request: Request, token: str):
         """Отменить импорт: сессия удаляется без аудита. Уже созданные
@@ -1683,7 +1463,6 @@ def register(app: Sanic) -> None:
                 url='/admin/people',
             )
         return build_redirect_with_message(message='Импорт отменён.', url='/admin/people')
-
 
     @app.get('/admin/people/<student_id>')
     async def admin_person_card(request: Request, student_id: str):
@@ -1750,7 +1529,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.post('/admin/people/<student_id>/edit')
     async def admin_person_edit(request: Request, student_id: str):
         auth_error = require_admin(request)
@@ -1788,7 +1566,6 @@ def register(app: Sanic) -> None:
             url=f'/admin/people/{numeric_id}',
         )
 
-
     @app.post('/admin/people/<student_id>/active')
     async def admin_person_toggle_active(request: Request, student_id: str):
         auth_error = require_admin(request)
@@ -1806,13 +1583,14 @@ def register(app: Sanic) -> None:
         deactivate = bool(student['active'])
         storage.set_student_active(numeric_id, not deactivate)
         if deactivate:
-            log_audit_event(request, 'student_deactivated', {'student_id': numeric_id, 'full_name': student['full_name']})
+            log_audit_event(
+                request, 'student_deactivated', {'student_id': numeric_id, 'full_name': student['full_name']}
+            )
             message = f'Студент «{student["full_name"]}» помечен неактивным.'
         else:
             log_audit_event(request, 'student_activated', {'student_id': numeric_id, 'full_name': student['full_name']})
             message = f'Студент «{student["full_name"]}» снова активен.'
         return build_redirect_with_message(message=message, url=f'/admin/people/{numeric_id}')
-
 
     @app.post('/admin/people/<student_id>/alias')
     async def admin_person_add_alias(request: Request, student_id: str):
@@ -1840,7 +1618,6 @@ def register(app: Sanic) -> None:
             message=f'Псевдоним «{name}» добавлен.',
             url=f'/admin/people/{numeric_id}',
         )
-
 
     @app.post('/admin/people/<student_id>/alias/<alias_id>/delete')
     async def admin_person_remove_alias(request: Request, student_id: str, alias_id: str):
@@ -1876,7 +1653,6 @@ def register(app: Sanic) -> None:
             message=f'Псевдоним «{alias["name"]}» удалён.',
             url=f'/admin/people/{numeric_id}',
         )
-
 
     @app.post('/admin/people/<student_id>/delete')
     async def admin_person_delete(request: Request, student_id: str):
@@ -1929,7 +1705,6 @@ def register(app: Sanic) -> None:
             message=f'Карточка «{student["full_name"]}» (#{numeric_id}) удалена.',
             url='/admin/people',
         )
-
 
     @app.post('/admin/students/merge')
     async def merge_students(request: Request):

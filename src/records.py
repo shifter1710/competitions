@@ -533,6 +533,65 @@ def event_participation_matched_duplicate_guard(
     return None
 
 
+# Человекочитаемые метки 5 event-owned полей для диффа и подтверждений.
+LINK_EVENT_FIELD_LABELS: dict[str, str] = {
+    'name': 'название',
+    'sport': 'вид спорта',
+    'date': 'дата',
+    'date_to': 'дата окончания',
+    'level': 'уровень',
+}
+
+
+def participation_field_changes(
+    name: str,
+    sport: str,
+    date: str,
+    date_to: str | None,
+    level: str,
+    event: dict,
+) -> dict[str, dict[str, str | None]]:
+    """old/new по 5 event-owned полям записи против события (сырые значения,
+    паттерн аудита calendar_event_edited)."""
+    return {
+        'name': {'old': name, 'new': event['name']},
+        'sport': {'old': sport, 'new': event['sport']},
+        'date': {'old': date, 'new': event['date']},
+        'date_to': {'old': date_to, 'new': event.get('date_to')},
+        'level': {'old': level, 'new': event['level']},
+    }
+
+
+def format_link_diff_value(key: str, value: str | None) -> str:
+    """Отображение значения поля в диффе: даты — dd.mm.yyyy, пустое — «»."""
+    if not value:
+        return ''
+    if key in ('date', 'date_to'):
+        return datetime.fromisoformat(value).strftime(settings.date_format)
+    return value
+
+
+def build_link_diff_rows(changes: dict[str, dict[str, str | None]]) -> list[dict]:
+    """Строки диффа «после связывания» для шаблона: только отличающиеся поля;
+    очистка (было значение → станет пустым) помечается для warning-бейджа."""
+    rows = []
+    for key, label in LINK_EVENT_FIELD_LABELS.items():
+        old_value, new_value = changes[key]['old'], changes[key]['new']
+        if old_value == new_value:
+            continue
+        clears = not new_value and bool(old_value)
+        rows.append(
+            {
+                'key': key,
+                'label': label,
+                'old': format_link_diff_value(key, old_value),
+                'new': format_link_diff_value(key, new_value),
+                'clears': clears,
+            }
+        )
+    return rows
+
+
 def competition_duplicate_key(competition: Competition) -> tuple:
     # Event Model, P5a: дисциплина — пятый элемент ключа в нормализованном
     # виде (пробелы/регистр не различаются). Разные дисциплины в тот же день

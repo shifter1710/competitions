@@ -266,7 +266,6 @@ def register(app: Sanic) -> None:
             },
         )
 
-
     @app.get('/report')
     async def get_report(request: Request):
         # Доступ как раньше: всем ролям, кроме athlete (личный кабинет вместо отчётов).
@@ -297,7 +296,6 @@ def register(app: Sanic) -> None:
                 'participations_label': ru_plural(total_participations, 'участие', 'участия', 'участий'),
             },
         )
-
 
     @app.get('/export/report')
     async def export_report(request: Request):
