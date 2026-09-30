@@ -185,7 +185,8 @@ pip install -r requirements.txt
 ## Структура репозитория
 
 ```
-src/                  приложение: main.py (маршруты), auth.py, settings.py,
+src/                  приложение: main.py (сборка приложения), web.py, auth.py,
+                      records.py, files.py, routes/ (маршруты), settings.py,
                       models/, storage/ (SQLite), templates/, static/
 data/                 живые данные контейнера (БД, вложения) — в git не хранится
 deploy/nginx/         конфиг nginx (проксирование на 127.0.0.1:8081, TLS)
