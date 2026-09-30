@@ -4608,3 +4608,236 @@ def test_apply_calendar_link_backfill_skips_row_linked_after_selection(adapter):
     record = adapter.get_competitions()[0]
     assert record.calendar_event_id == other_event
     assert record.name == 'Кубок'
+
+
+# ---- Architecture v2.1: состав адаптера, переэкспорты, задокументированные асимметрии ----
+
+V21_PUBLIC_API = [
+    'add_audit_event',
+    'add_catalog_value',
+    'add_import_queue_entry',
+    'add_name_alias',
+    'add_student_alias',
+    'apply_calendar_link_backfill',
+    'apply_event_participation_batch',
+    'athlete_name_hashes',
+    'calendar_link_backfill_preview',
+    'carry_name_aliases',
+    'clean_db',
+    'clear_calendar_regulation',
+    'count_attachments',
+    'count_audit_events',
+    'count_calendar_event_participants',
+    'count_child_groups',
+    'count_competitions',
+    'count_competitions_filtered',
+    'count_competitions_visible',
+    'count_hash_only_visible',
+    'count_import_queue',
+    'count_participations_without_event',
+    'count_records_by_owner',
+    'count_records_by_student_hash',
+    'count_records_using',
+    'count_student_reconciliation',
+    'count_students_using_group_pair',
+    'count_unlinked_competitions',
+    'create_attachment',
+    'create_calendar_event',
+    'create_calendar_event_and_link',
+    'create_custom_field',
+    'create_level',
+    'create_student',
+    'create_student_and_link_participation',
+    'create_students',
+    'create_user',
+    'delete_all_attachments',
+    'delete_all_competitions',
+    'delete_attachment',
+    'delete_attachments_for_records',
+    'delete_calendar_event',
+    'delete_catalog_value',
+    'delete_competition',
+    'delete_competition_with_attachments',
+    'delete_competitions_before',
+    'delete_student',
+    'delete_user',
+    'disable_custom_field',
+    'disable_level',
+    'ensure_catalog_pair',
+    'find_athlete_fields',
+    'find_catalog_canonical',
+    'find_catalog_row',
+    'find_level_canonical',
+    'find_similar_calendar_event',
+    'find_student_candidates',
+    'find_unique_group_institute',
+    'get_attachment',
+    'get_attachments',
+    'get_attachments_for_records',
+    'get_audit_events',
+    'get_calendar_event',
+    'get_catalog_value',
+    'get_competition_by_id',
+    'get_competition_review',
+    'get_competition_student_name',
+    'get_competition_student_ref',
+    'get_competitions',
+    'get_competitions_before',
+    'get_competitions_page',
+    'get_custom_fields',
+    'get_field_settings',
+    'get_filtered',
+    'get_group_options_by_institute',
+    'get_grouped_report',
+    'get_identity_mode',
+    'get_import_queue_entry',
+    'get_level_names',
+    'get_name_aliases',
+    'get_profile',
+    'get_sport_names',
+    'get_student_by_id',
+    'get_student_names',
+    'get_unlinked_athlete_user',
+    'get_user',
+    'get_user_by_id',
+    'hard_delete_level',
+    'hide_catalog_value',
+    'identity_verification_data',
+    'import_competitions',
+    'link_competitions',
+    'link_participation_to_event',
+    'link_user',
+    'linked_athlete_users',
+    'linked_records_count',
+    'list_audit_actions',
+    'list_calendar_event_participants',
+    'list_calendar_events',
+    'list_catalog',
+    'list_catalog_all',
+    'list_catalog_tree',
+    'list_import_queue',
+    'list_levels',
+    'list_linked_records',
+    'list_student_aliases',
+    'list_students',
+    'list_unlinked_athlete_users',
+    'list_unlinked_competitions',
+    'list_users',
+    'merge_students',
+    'move_catalog_group',
+    'relink_competition',
+    'relink_user',
+    'remove_student_alias',
+    'rename_catalog_value',
+    'save_competitions',
+    'search_athletes',
+    'search_student_candidates',
+    'search_student_suggestions',
+    'set_calendar_regulation',
+    'set_competition_review',
+    'set_identity_mode',
+    'set_identity_mode_guarded',
+    'set_import_queue_status',
+    'set_profile',
+    'set_student_active',
+    'set_user_active',
+    'set_user_last_login',
+    'set_user_password',
+    'touch_user_seen',
+    'unhide_catalog_value',
+    'unlink_competition',
+    'unlink_user',
+    'update_calendar_event',
+    'update_competition',
+    'update_custom_field',
+    'update_event_participation_result',
+    'update_field_settings',
+    'update_student',
+    'vacuum',
+]
+
+
+def test_v21_adapter_composition_and_api_surface(adapter):
+    """Architecture v2.1: SQLiteAdapter собран из шести доменных примесей
+    в документированном порядке; имена между примесями не перекрываются;
+    публичная поверхность экземпляра — замороженный список 141 метода
+    (инвентаризация b0a7586 до разреза). Регрессионный pin состава."""
+    from src.storage.catalogs import CatalogsMixin
+    from src.storage.events import EventsMixin
+    from src.storage.misc import MiscMixin
+    from src.storage.participations import ParticipationsMixin
+    from src.storage.students import StudentsMixin
+    from src.storage.users import UsersMixin
+
+    documented = [MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsMixin, ParticipationsMixin]
+    mro = SQLiteAdapter.__mro__
+    assert [klass for klass in mro if klass not in (SQLiteAdapter, object)] == documented
+
+    owners: dict[str, list[type]] = {}
+    for mixin in documented:
+        for name in vars(mixin):
+            if not name.startswith('__'):
+                owners.setdefault(name, []).append(mixin)
+    assert {name: mods for name, mods in owners.items() if len(mods) > 1} == {}
+
+    import types
+
+    surface = sorted(
+        name
+        for name in dir(adapter)
+        if not name.startswith('_') and isinstance(getattr(adapter, name), types.MethodType)
+    )
+    assert surface == V21_PUBLIC_API
+
+
+def test_v21_sqlite_module_reexports_helpers():
+    """Переэкспорт из src.storage.sqlite — те же объекты, что живут в
+    src.storage.helpers: роуты продолжают импортировать dedup-функции и
+    исключения guard'ов из src.storage.sqlite (совместимость импортов)."""
+    from src.storage import helpers
+    from src.storage import sqlite
+
+    reexported = [
+        'CATALOG_CATEGORIES',
+        'RENAME_CATEGORIES',
+        'IDENTITY_MODES',
+        'IDENTITY_MODE_DEFAULT',
+        'STUDENT_SEX_VALUES',
+        'STUDENT_SORT_COLUMNS',
+        'REPORT_GROUPINGS',
+        'DEFAULT_REPORT_GROUPING',
+        'REPORT_METRIC_SELECTS',
+        'COMPETITION_SELECT_SQL',
+        'COMPETITION_INSERT_SQL',
+        'EventParticipationConflictError',
+        'CalendarEventDuplicateError',
+        'dedup_text',
+        'dedup_place',
+        'dedup_discipline',
+        'event_identity_key',
+        'participation_content_key',
+        'competition_insert_records',
+        'BASE_FIELD_SETTING_DEFAULTS',
+        'CALENDAR_LINK_PREVIEW_CAP',
+    ]
+    for name in reexported:
+        assert hasattr(sqlite, name), name
+        assert getattr(sqlite, name) is getattr(helpers, name), name
+    assert sqlite.SQLiteAdapter is SQLiteAdapter
+
+
+def test_save_competitions_does_not_sync_catalogs_pin(adapter):
+    """Задокументированная асимметрия (pin, НЕ баг): save_competitions
+    не синхронизирует справочники со вставленными значениями, а
+    import_competitions — синхронизирует (_sync_catalogs_from_records,
+    решение 2026-09-13). Тест фиксирует статус-кво до/после Architecture
+    v2.1: разрез на примеси поведения не меняет."""
+    saved = make_competition('Пинова Асимметрия', datetime(2026, 3, 1)).model_copy(
+        update={'sport': 'Пин-спорт сохранение'}
+    )
+    adapter.save_competitions([saved])
+    assert 'Пин-спорт сохранение' not in adapter.list_catalog('sport')
+
+    imported = make_competition('Пинова Импорт', datetime(2026, 3, 2)).model_copy(update={'sport': 'Пин-спорт импорт'})
+    adapter.import_competitions([imported])
+    assert 'Пин-спорт импорт' in adapter.list_catalog('sport')
