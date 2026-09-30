@@ -43,6 +43,16 @@ IDENTITY_MODE_DEFAULT = 'dual'
 # создавать цикл); изменение набора — синхронно в обоих местах.
 STUDENT_SEX_VALUES: frozenset[str] = frozenset({'', 'М', 'Ж'})
 
+# Сортировка списка карточек (GET-параметр sort страницы «Студенты»):
+# белый список GET-значение → колонка ORDER BY. Идентификаторы ORDER BY
+# никогда не собираются из сырого пользовательского ввода; main.py
+# использует тот же словарь для разбора параметров и ссылок заголовков.
+STUDENT_SORT_COLUMNS: dict[str, str] = {
+    'name': 'full_name',
+    'institute': 'institute',
+    'group': 'group_name',
+}
+
 # Срезы отчёта (замечание №19, docs/data-model-decisions.md «Расширение
 # отчётов»): группировка ВСЕГДА по данным записи — исторический факт на
 # момент соревнования, смена группы/института в профиле строки не склеивает.
@@ -2858,21 +2868,58 @@ class SQLiteAdapter:
             ).fetchone()
             return dict(row) if row else None
 
-    def list_students(self, search: str = '') -> list[dict]:
-        """Все карточки: активные сверху, по алфавиту; search — подстрока ФИО
-        (LIKE, как фильтр ФИО в отчётах)."""
+    def list_students(self, search: str = '', sort: str = '', order: str = '') -> list[dict]:
+        """Все карточки (активные И неактивные — контракт страницы «Студенты»).
+
+        Дефолтный порядок: активные сверху, внутри — по алфавиту ФИО, id ASC
+        (тёзки не переставляются между перезагрузками).
+
+        search — подстрока ФИО ИЛИ любого псевдонима (strip + casefold).
+        Сравнение — в Python: lower() в SQLite не берёт кириллицу (тот же
+        подход, что search_student_candidates); пустой/пробельный запрос —
+        без фильтра.
+
+        sort/order — сортировка таблицы «Студенты»: sort ∈ ключей
+        STUDENT_SORT_COLUMNS, order ∈ {'asc', 'desc'}. Пустые институт/группа
+        всегда внизу В ОБЕИХ направлениях; вторичный порядок — full_name ASC,
+        id ASC. Некорректные/пустые значения — дефолтный порядок.
+        """
+        target = (search or '').strip().casefold()
+        # Сортировка применяется только полной валидной парой sort+order;
+        # некорректное/отсутствующее любое из них — дефолтный порядок.
+        column = STUDENT_SORT_COLUMNS.get(sort or '') if order in ('asc', 'desc') else ''
+        direction = 'DESC' if order == 'desc' else 'ASC'
         with self._lock:
-            params: list[object] = []
-            where = ''
-            if search:
-                where = 'WHERE full_name LIKE ?'
-                params.append(f'%{search}%')
-            rows = self.connection.execute(
-                f'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
-                f'created_at, updated_at FROM students {where} ORDER BY active DESC, full_name ASC',
-                params,
+            if column == 'full_name':
+                order_by = f'{column} {direction}, id ASC'
+            elif column:
+                # Пустые институт/группа — всегда внизу: фикс-терм «пусто»
+                # ASC впереди, сама колонка меняет направление.
+                order_by = f"({column} IS NULL OR {column} = '') ASC, " f'{column} {direction}, full_name ASC, id ASC'
+            else:
+                order_by = 'active DESC, full_name ASC, id ASC'
+            rows = [
+                dict(row)
+                for row in self.connection.execute(
+                    f'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
+                    f'created_at, updated_at FROM students ORDER BY {order_by}'
+                ).fetchall()
+            ]
+            if not target:
+                return rows
+            aliases = self.connection.execute(
+                'SELECT student_id, name FROM student_aliases ORDER BY student_id ASC, name ASC'
             ).fetchall()
-            return [dict(row) for row in rows]
+        # Подстрока в любом псевдониме карточки — тоже совпадение (словарь
+        # id → найдено; порядок строк aliases детерминирован, но для
+        # подстрочного поиска порядок псевдонимов не важен).
+        alias_match: set[int] = set()
+        for row in aliases:
+            if target in (row['name'] or '').strip().casefold():
+                alias_match.add(row['student_id'])
+        return [
+            row for row in rows if target in (row['full_name'] or '').strip().casefold() or row['id'] in alias_match
+        ]
 
     def update_student(
         self,

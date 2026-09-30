@@ -375,12 +375,15 @@ function initFlashAutoHide() {
 // легаси-подсказки по истории участий. Опция {students: true} включает
 // карточки (страница участника события: явный выбор пишет student_ref_id);
 // без неё (инлайн-строки главной) карточки фильтруются — POST /competition
-// связь не пишет, и показывать её не нужно.
+// связь не пишет, и показывать её не нужно. Опция {onlyStudents: true}
+// (поиск на странице «Студенты») оставляет ТОЛЬКО карточки — легаси-подсказки
+// там не нужны: список и так перед глазами.
 class FioResolver {
     constructor(input, onSelect, options = {}) {
         this.input = input;
         this.onSelect = onSelect;
         this.includeStudents = options.students === true;
+        this.onlyStudents = options.onlyStudents === true;
         this.open = false;
         this.highlightIndex = -1;
         this.closeTimer = null;
@@ -458,7 +461,12 @@ class FioResolver {
                 return;
             }
             let visible = Array.isArray(athletes) ? athletes : [];
-            if (!this.includeStudents) {
+            // onlyStudents и includeStudents — взаимоисключающие режимы:
+            // сначала проверяем onlyStudents, иначе фильтр «не-карточки»
+            // успеет выкинуть карточки до того, как их попросили оставить.
+            if (this.onlyStudents) {
+                visible = visible.filter((item) => item.kind === "student");
+            } else if (!this.includeStudents) {
                 visible = visible.filter((item) => item.kind !== "student");
             }
             this.athletes = visible;
@@ -2780,6 +2788,14 @@ window.addEventListener("DOMContentLoaded", () => {
     new Main();
     initCalendarPeriodPickers();
     initFlashAutoHide();
+    // Страница «Студенты» (админ): подсказки в поле поиска — только карточки
+    // (onlyStudents), выбор просто подставляет ФИО в поле (onSelect пуст) —
+    // свободный ввод остаётся валидным, скрытых полей связи нет: поиск по
+    // подстроке, а не выбор конкретной карточки.
+    const peopleSearchInput = document.querySelector("[data-people-search]");
+    if (peopleSearchInput) {
+        new FioResolver(peopleSearchInput, () => {}, {onlyStudents: true});
+    }
     // Страница участников соревнования (волна B, прототип 16): резолвер ФИО
     // в строке добавления + инлайн-правка строки (место «дописать позже»).
     if (document.querySelector("[data-participants-page]")) {

@@ -2660,6 +2660,81 @@ def test_student_duplicate_full_name_allowed(adapter):
     assert len(adapter.list_students()) == 2
 
 
+def test_list_students_search_name_and_alias_casefold(adapter):
+    """Поиск страницы «Студенты»: подстрока ФИО ИЛИ любого псевдонима,
+    strip + casefold (сравнение в Python — lower() в SQLite не берёт
+    кириллицу); неактивные карточки ищутся наравне с активными."""
+    first = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+    second = adapter.create_student('Козлов Кирилл Козлович', '', 'ИМИ', 'СБ-202', '1')
+    adapter.add_student_alias(second, 'Кир Козлов-младший')
+    third = adapter.create_student('Сидоров Сидор Сидорович', '', '', '', '')
+    adapter.set_student_active(third, False)
+
+    def found(query: str) -> list[int]:
+        return [item['id'] for item in adapter.list_students(search=query)]
+
+    # Регистр запроса не важен: нижний/верхний/смешанный — одно и то же
+    assert found('иванов') == found('ИВАНОВ') == found('ИвАнОв') == [first]
+    # Подстрока в середине ФИО (начинается внутри слова, переходит в следующее)
+    assert found('нов ив') == [first]
+    # Псевдоним: full_name не содержит «младш», карточка находится по
+    # подстроке псевдонима (в обе стороны регистра), чужие не возвращаются
+    assert found('МЛАДШ') == [second]
+    assert found('козлов-младший') == [second]
+    # Пробелы вокруг запроса не мешают
+    assert found(' иванов ') == [first]
+    # Пробельный запрос — без фильтра: все карточки, включая неактивную
+    assert found('   ') == [first, second, third]
+    # Неактивная карточка находится свободным текстом
+    assert found('сидоров') == [third]
+
+
+def test_list_students_sort_whitelist_and_empty_values_last(adapter):
+    """Сортировка страницы «Студенты»: пустые институт/группа всегда внизу
+    В ОБЕИХ направлениях, вторичный порядок — full_name ASC, id ASC;
+    некорректная пара (или её половина) — дефолтный порядок."""
+    empty_all = adapter.create_student('Белов Борис Борисович', '', '', '', '')
+    imi = adapter.create_student('Иванов Иван Иванович', 'М', 'ИМИ', 'СБ-202', '1')
+    isi_kozlov = adapter.create_student('Козлов Кирилл Козлович', 'М', 'ИСИ', 'ТД-303', '2')
+    isi_empty_group = adapter.create_student('Яшин Ярослав Ярославич', '', 'ИСИ', '', '1')
+
+    def ids(sort: str = '', order: str = '') -> list[int]:
+        return [item['id'] for item in adapter.list_students(sort=sort, order=order)]
+
+    # Дефолт: активные по алфавиту ФИО, id ASC
+    assert ids() == [empty_all, imi, isi_kozlov, isi_empty_group]
+    # sort=name — прямой и обратный алфавит
+    assert ids('name', 'asc') == [empty_all, imi, isi_kozlov, isi_empty_group]
+    assert ids('name', 'desc') == [isi_empty_group, isi_kozlov, imi, empty_all]
+    # sort=institute: пустой институт последний в обоих направлениях,
+    # внутри одного института — по ФИО (Козлов раньше Яшина)
+    assert ids('institute', 'asc') == [imi, isi_kozlov, isi_empty_group, empty_all]
+    assert ids('institute', 'desc') == [isi_kozlov, isi_empty_group, imi, empty_all]
+    # sort=group: пустая группа последняя в обоих направлениях
+    assert ids('group', 'asc') == [imi, isi_kozlov, empty_all, isi_empty_group]
+    assert ids('group', 'desc') == [isi_kozlov, imi, empty_all, isi_empty_group]
+    # Мусор или половина пары — дефолтный порядок
+    assert ids('evil', 'asc') == ids('name', 'up') == ids('name') == ids()
+
+
+def test_list_students_sort_namesakes_keep_id_order(adapter):
+    """Полные тёзки (одно ФИО, разные институты): порядок детерминирован
+    по id в обоих направлениях и стабилен между повторными вызовами."""
+    first = adapter.create_student('Тёзкин Тёзок Тёзкович', 'М', 'ИМИ', 'СБ-202', '1')
+    second = adapter.create_student('Тёзкин Тёзок Тёзкович', 'М', 'ИСИ', 'ТД-303', '2')
+    third = adapter.create_student('Абрамов Артём Артёмович', 'М', 'ИМИ', 'СБ-202', '1')
+
+    def ids(sort: str = '', order: str = '') -> list[int]:
+        return [item['id'] for item in adapter.list_students(sort=sort, order=order)]
+
+    # Тёзки не переставляются между перезагрузками: id ASC
+    assert ids('name', 'asc') == ids('name', 'asc') == [third, first, second]
+    # DESC меняет ФИО, но вторичный id ASC не переворачивается
+    assert ids('name', 'desc') == [first, second, third]
+    # Внутри одного института (ИМИ) — по ФИО: Абрамов раньше Тёзкина
+    assert ids('institute', 'asc') == [third, first, second]
+
+
 def test_create_students_batch_returns_ids_in_order(adapter):
     """Массовое создание (Phase 2.5, импорт): id — в порядке входных строк."""
     ids = adapter.create_students(

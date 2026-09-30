@@ -36,7 +36,7 @@
                 <tr><th style="width: 40%">ФИО</th><td>{{ record.student_name }}</td></tr>
                 <tr><th>Название</th><td>{{ record.name }}</td></tr>
                 <tr><th>Вид спорта</th><td>{{ record.sport }}</td></tr>
-                <tr><th>Дата</th><td>{{ format_date_range(record.date, record.date_to) }}</td></tr>
+                <tr><th>Дата</th><td><span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td></tr>
                 <tr><th>Уровень</th><td>{{ record.level }}</td></tr>
             </tbody>
         </table>
