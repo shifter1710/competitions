@@ -187,7 +187,8 @@ pip install -r requirements.txt
 ```
 src/                  приложение: main.py (сборка приложения), web.py, auth.py,
                       records.py, files.py, routes/ (маршруты), settings.py,
-                      models/, storage/ (SQLite), templates/, static/
+                      models/, storage/ (SQLite: sqlite.py — ядро-адаптер
+                      SQLiteAdapter + доменные примеси и helpers), templates/, static/
 data/                 живые данные контейнера (БД, вложения) — в git не хранится
 deploy/nginx/         конфиг nginx (проксирование на 127.0.0.1:8081, TLS)
 deploy/systemd/       юниты: compose-сервис и бэкап-таймер
