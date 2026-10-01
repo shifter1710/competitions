@@ -1621,6 +1621,8 @@ def test_competitions_page_filters_combine(adapter):
     seed_page_records(adapter)
 
     assert adapter.count_competitions_filtered(name='Иван') == 1
+    # Одиночные строки — легаси-форма вызова: мульти-фильтры принимают и её
+    # (сворачивается в список из одного, см. тесты мульти-фильтров ниже).
     assert adapter.count_competitions_filtered(institute='ИСИ') == 5
     assert adapter.count_competitions_filtered(review_status='pending') == 1
     assert adapter.count_competitions_filtered(review_status='approved') == 3
@@ -1649,6 +1651,187 @@ def test_competitions_page_owner_scope_matches_get_competitions(adapter):
     page = adapter.get_competitions_page(owner_id=7)
     assert {item.student_name for item in scoped} == {item.student_name for item in page}
     assert adapter.count_competitions_filtered(owner_id=7) == len(scoped)
+
+
+# --- Мульти-фильтры главной (реестр-поиск): OR внутри фильтра, AND между ---
+# Контракт главной сменился с одиночных строк на последовательности:
+# institute/sport/level/group — Sequence[str], «col IN (…)»; одиночная
+# строка (легаси-вызовы, одиночные значения URL) сворачивается в список
+# из одного. ФИО — больше не SQL LIKE, а Python-пост-фильтр casefold
+# (кириллица регистронезависима; % и _ — литералы).
+
+
+def make_multi_filter_competition(name: str, date: datetime, **overrides) -> Competition:
+    competition = make_competition(name, date)
+    for key, value in overrides.items():
+        setattr(competition, key, value)
+    return competition
+
+
+def seed_multi_filter_records(adapter: SQLiteAdapter) -> None:
+    """Синтетика мульти-фильтров: два института × группы × три вида спорта,
+    ФИО с Ё и разным регистром."""
+    adapter.save_competitions(
+        [
+            make_multi_filter_competition(
+                'Иванов Иван', datetime(2024, 3, 1), institute='ИСИ', group='ПГС-101', sport='Бег'
+            ),
+            make_multi_filter_competition(
+                'Петров Пётр', datetime(2024, 4, 1), institute='ИСИ', group='ПГС-101', sport='Лыжи'
+            ),
+            make_multi_filter_competition(
+                'Ёршов Егор', datetime(2024, 5, 1), institute='ИСИ', group='ПГС-202', sport='Бег'
+            ),
+            make_multi_filter_competition(
+                'СИДОРОВ СИДОР', datetime(2024, 6, 1), institute='ИМИ', group='ЭК-301', sport='Шахматы'
+            ),
+            make_multi_filter_competition(
+                'Кузнецова Карина', datetime(2024, 7, 1), institute='ИМИ', group='ЭК-301', sport='Лыжи'
+            ),
+        ]
+    )
+
+
+def test_competitions_multi_filter_or_within_one_filter(adapter):
+    seed_multi_filter_records(adapter)
+
+    # Повторённые значения одного фильтра — OR (IN): ИСИ(3) + ИМИ(2) = 5.
+    assert adapter.count_competitions_filtered(institute=['ИСИ']) == 3
+    assert adapter.count_competitions_filtered(institute=['ИМИ']) == 2
+    assert adapter.count_competitions_filtered(institute=['ИСИ', 'ИМИ']) == 5
+    # Бег(2) + Шахматы(1) = 3; порядок значений не важен.
+    assert adapter.count_competitions_filtered(sport=['Бег', 'Шахматы']) == 3
+    assert adapter.count_competitions_filtered(sport=['Шахматы', 'Бег']) == 3
+
+
+def test_competitions_multi_filter_and_between_filters(adapter):
+    seed_multi_filter_records(adapter)
+
+    assert adapter.count_competitions_filtered(institute=['ИСИ'], sport=['Бег']) == 2
+    # Все институты, но группы ПГС-101(2) + ЭК-301(2): без ПГС-202 (Ёршов).
+    assert adapter.count_competitions_filtered(institute=['ИСИ', 'ИМИ'], group=['ПГС-101', 'ЭК-301']) == 4
+    # Пересечение пусто — не ошибка, а честный ноль.
+    assert adapter.count_competitions_filtered(institute=['ИСИ'], sport=['Шахматы']) == 0
+
+
+def test_competitions_multi_filter_empty_sequence_is_no_condition(adapter):
+    seed_multi_filter_records(adapter)
+
+    assert adapter.count_competitions_filtered() == 5
+    assert adapter.count_competitions_filtered(institute=[]) == 5
+    assert adapter.count_competitions_filtered(institute=(), group=[], sport=[], level=()) == 5
+
+
+def test_competitions_multi_filter_accepts_legacy_single_string(adapter):
+    # Легаси-вызовы с одиночной строкой («col = ?» раньше) эквивалентны
+    # списку из одного («col IN (?)»).
+    seed_multi_filter_records(adapter)
+
+    assert adapter.count_competitions_filtered(institute='ИСИ') == 3
+    assert adapter.count_competitions_filtered(group='ЭК-301') == 2
+    assert [comp.student_name for comp in adapter.get_competitions_page(sport='Шахматы')] == ['СИДОРОВ СИДОР']
+
+
+def test_competitions_multi_filter_unknown_value_gives_zero_rows(adapter):
+    # Значения вне справочника — не 500 и не «все записи», а пустой результат.
+    seed_multi_filter_records(adapter)
+
+    assert adapter.count_competitions_filtered(institute=['Нет такого института']) == 0
+    assert adapter.get_competitions_page(institute=['ИСИ', 'Нет такого института'], group=['Нет группы']) == []
+
+
+def test_competitions_group_filter(adapter):
+    seed_multi_filter_records(adapter)
+
+    assert adapter.count_competitions_filtered(group=['ПГС-101']) == 2
+    assert adapter.count_competitions_filtered(group=['ПГС-101', 'ПГС-202']) == 3
+    assert adapter.count_competitions_filtered(institute=['ИМИ'], group=['ЭК-301']) == 2
+    assert adapter.count_competitions_filtered(institute=['ИСИ'], group=['ЭК-301']) == 0
+
+
+def test_competitions_name_filter_casefold_cyrillic(adapter):
+    seed_multi_filter_records(adapter)
+
+    # Кириллица находится регистронезависимо (LIKE умел это только для ASCII).
+    assert adapter.count_competitions_filtered(name='Иванов') == 1
+    assert adapter.count_competitions_filtered(name='иванов') == 1
+    assert adapter.count_competitions_filtered(name='ИВАНОВ') == 1
+    assert adapter.count_competitions_filtered(name='иваНОВ') == 1
+    assert adapter.count_competitions_filtered(name='сидоров') == 1
+    # Подстрока в середине ФИО.
+    assert adapter.count_competitions_filtered(name='узнецо') == 1
+    # Ё/ё сворачиваются друг к другу.
+    assert adapter.count_competitions_filtered(name='Ёршов') == 1
+    assert adapter.count_competitions_filtered(name='ёршов') == 1
+    assert adapter.count_competitions_filtered(name='Пётр') == 1
+    assert adapter.count_competitions_filtered(name='петр') == 1
+    # Пробелы вокруг запроса не мешают.
+    assert adapter.count_competitions_filtered(name='  иванов  ') == 1
+
+
+def test_competitions_name_filter_percent_and_underscore_are_literals(adapter):
+    # Осознанное изменение vs старого LIKE: % и _ больше не wildcard.
+    # Запись с литеральными % и _ в ФИО находится ими дословно, а «%» не
+    # матчит весь реестр.
+    adapter.save_competitions(
+        [
+            make_multi_filter_competition('Процентов Процент 100%_Лучший', datetime(2024, 8, 1)),
+            make_multi_filter_competition('Обычный Олег', datetime(2024, 8, 2)),
+        ]
+    )
+
+    assert adapter.count_competitions_filtered(name='100%') == 1
+    assert adapter.count_competitions_filtered(name='100%_Лучший') == 1
+    assert adapter.count_competitions_filtered(name='%') == 1
+    assert adapter.count_competitions_filtered(name='_') == 1
+    # Подчёркивание не заменяет один произвольный символ: «О_ег» — не «Олег».
+    assert adapter.count_competitions_filtered(name='О_ег') == 0
+
+
+def test_competitions_page_pagination_applies_after_name_postfilter(adapter):
+    # limit/offset применяются к ПОСТ-фильтрованному списку (ФИО — Python):
+    # страницы «Пейджинговых» не должны захватывать чужие записи.
+    records = [
+        make_multi_filter_competition(f'Пейджингов Пётр {index:02d}', datetime(2024, 9, index + 1))
+        for index in range(6)
+    ]
+    records.append(make_multi_filter_competition('Других Друг', datetime(2024, 9, 10)))
+    adapter.save_competitions(records)
+
+    assert adapter.count_competitions_filtered(name='Пейджингов') == 6
+    first = adapter.get_competitions_page(name='Пейджингов', limit=4, offset=0)
+    second = adapter.get_competitions_page(name='Пейджингов', limit=4, offset=4)
+    assert [comp.date.day for comp in first] == [1, 2, 3, 4]
+    assert [comp.date.day for comp in second] == [5, 6]
+    # Инвариант «счётчик == сумме строк по страницам».
+    assert len(list(first) + list(second)) == adapter.count_competitions_filtered(name='Пейджингов')
+    # Страница за пределами — пустая, счётчик не меняется.
+    assert adapter.get_competitions_page(name='Пейджингов', limit=4, offset=100) == []
+
+
+def test_competitions_name_filter_combines_with_multi_filters(adapter):
+    seed_multi_filter_records(adapter)
+
+    assert adapter.count_competitions_filtered(name='Иванов', institute=['ИСИ']) == 1
+    assert adapter.count_competitions_filtered(name='Иванов', institute=['ИМИ']) == 0
+    assert adapter.count_competitions_filtered(name='пётр', group=['ПГС-101']) == 1
+    page = adapter.get_competitions_page(name='сидоров', institute=['ИМИ'])
+    assert [comp.student_name for comp in page] == ['СИДОРОВ СИДОР']
+
+
+def test_competitions_multi_filter_applies_within_owner_scope(adapter):
+    # Клаузы видимости атлета идут первыми: мульти-фильтры сужают уже свой
+    # кабинет, а не открывают чужие записи.
+    seed_multi_filter_records(adapter)
+    adapter.save_competitions(
+        [make_multi_filter_competition('Личнов Личный', datetime(2024, 10, 1), institute='ИСИ')],
+        review_status='pending',
+        owner_id=7,
+    )
+
+    assert adapter.count_competitions_filtered(owner_id=7, institute=['ИСИ']) == 1
+    assert adapter.count_competitions_filtered(owner_id=7, institute=['ИМИ']) == 0
+    assert adapter.count_competitions_filtered(owner_id=7, institute=['ИСИ', 'ИМИ']) == 1
 
 
 # --- №1.1: регистронезависимые справочники (канонические подстановки) ---

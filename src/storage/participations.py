@@ -80,6 +80,20 @@ class ParticipationsMixin:
             params.extend(student_id_hashes)
         return ['(' + ' OR '.join(clauses) + ')'], params
 
+    @staticmethod
+    def _multi_in_clause(column: str, values: Sequence[str]) -> tuple[str, list[object]]:
+        """IN-условие мульти-фильтра главной: OR внутри одного фильтра.
+
+        Одиночная строка (легаси-вызовы и одиночные значения URL)
+        сворачивается в список из одного — «col IN (?)» совпадает с прежним
+        «col = ?». Пустая последовательность — фильтр не применяется.
+        """
+        normalized: tuple[str, ...] = (values,) if isinstance(values, str) else tuple(values)
+        if not normalized:
+            return '', []
+        placeholders = ', '.join('?' for _ in normalized)
+        return f'{column} IN ({placeholders})', list(normalized)
+
     def _competition_filter_clauses(
         self,
         *,
@@ -87,10 +101,10 @@ class ParticipationsMixin:
         student_id_hashes: Sequence[str] = (),
         student_ref_id: int | None = None,
         identity_mode: str = IDENTITY_MODE_DEFAULT,
-        name: str = '',
-        institute: str = '',
-        sport: str = '',
-        level: str = '',
+        institute: Sequence[str] = (),
+        sport: Sequence[str] = (),
+        level: Sequence[str] = (),
+        group: Sequence[str] = (),
         review_status: str = '',
         unapproved_only: bool = False,
         date_from: str = '',
@@ -98,24 +112,28 @@ class ParticipationsMixin:
     ) -> tuple[str, list[object]]:
         """Общий WHERE серверных фильтров главной (прототип 02): видимость
         (P3 dual-read: owner / student_ref_id / легаси-хеши) +
-        ФИО (подстрока), институт/вид спорта/уровень (точное совпадение),
-        статус проверки и период дат (дд.мм.гггг, как в фильтрах отчёта)."""
+        институт/группа/вид спорта/уровень (мульти-выбор: OR внутри фильтра,
+        AND между фильтрами), статус проверки и период дат (дд.мм.гггг, как
+        в фильтрах отчёта).
+
+        ФИО сюда НЕ входит: SQL LIKE регистронезависим только для ASCII и
+        кириллицу не находит — подстрока по ФИО фильтруется в Python
+        (casefold) общим путём счётчика и страницы, см.
+        _fetch_filtered_competition_rows."""
         clauses, params = self._competition_scope_clauses(
             owner_id, student_id_hashes, student_ref_id=student_ref_id, identity_mode=identity_mode
         )
 
-        if name:
-            clauses.append('student_name LIKE ?')
-            params.append(f'%{name}%')
-        if institute:
-            clauses.append('institute = ?')
-            params.append(institute)
-        if sport:
-            clauses.append('sport = ?')
-            params.append(sport)
-        if level:
-            clauses.append('level = ?')
-            params.append(level)
+        for column, values in (
+            ('institute', institute),
+            ('sport', sport),
+            ('level', level),
+            ('"group"', group),
+        ):
+            clause, in_params = self._multi_in_clause(column, values)
+            if clause:
+                clauses.append(clause)
+                params.extend(in_params)
         if review_status:
             clauses.append('review_status = ?')
             params.append(review_status)
@@ -130,6 +148,55 @@ class ParticipationsMixin:
         where_clause = f'WHERE {" AND ".join(clauses)}' if clauses else ''
         return where_clause, params
 
+    def _fetch_filtered_competition_rows(
+        self,
+        *,
+        owner_id: int | None,
+        student_id_hashes: Sequence[str] = (),
+        student_ref_id: int | None = None,
+        identity_mode: str = IDENTITY_MODE_DEFAULT,
+        name: str = '',
+        institute: Sequence[str] = (),
+        sport: Sequence[str] = (),
+        level: Sequence[str] = (),
+        group: Sequence[str] = (),
+        review_status: str = '',
+        unapproved_only: bool = False,
+        date_from: str = '',
+        date_to: str = '',
+    ) -> list[sqlite3.Row]:
+        """Все строки под фильтрами главной в порядке реестра (date ASC,
+        created_at ASC) — ЕДИНЫЙ путь счётчика и страницы, инвариант
+        «счётчик == сумме строк по страницам» держится одним кодом.
+
+        ФИО — пост-фильтр в Python: casefold-подстрока находит «Иванов» по
+        «иванов»/«ИВАНОВ»/«иваНОВ» (кириллица + Ё/ё), как уже работает
+        search_student_suggestions. Полная выгрузка под _lock приемлема в
+        текущем масштабе. Побочный эффект смены LIKE → casefold: % и _ в
+        запросе теперь литералы, а не wildcard.
+        """
+        where_clause, params = self._competition_filter_clauses(
+            owner_id=owner_id,
+            student_id_hashes=student_id_hashes,
+            student_ref_id=student_ref_id,
+            identity_mode=identity_mode,
+            institute=institute,
+            sport=sport,
+            level=level,
+            group=group,
+            review_status=review_status,
+            unapproved_only=unapproved_only,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        query = f'{COMPETITION_SELECT_SQL}{where_clause}\nORDER BY date ASC, created_at ASC'
+        with self._lock:
+            rows = self.connection.execute(query, params).fetchall()
+        needle = (name or '').strip().casefold()
+        if not needle:
+            return rows
+        return [row for row in rows if needle in (row['student_name'] or '').strip().casefold()]
+
     def count_competitions_filtered(
         self,
         *,
@@ -138,9 +205,10 @@ class ParticipationsMixin:
         student_ref_id: int | None = None,
         identity_mode: str = IDENTITY_MODE_DEFAULT,
         name: str = '',
-        institute: str = '',
-        sport: str = '',
-        level: str = '',
+        institute: Sequence[str] = (),
+        sport: Sequence[str] = (),
+        level: Sequence[str] = (),
+        group: Sequence[str] = (),
         review_status: str = '',
         unapproved_only: bool = False,
         date_from: str = '',
@@ -152,8 +220,8 @@ class ParticipationsMixin:
         unapproved_only — признак «есть не подтверждённые» (видимость колонки
         «Статус» не должна зависеть от текущей страницы/фильтра).
         """
-        with self._lock:
-            where_clause, params = self._competition_filter_clauses(
+        return len(
+            self._fetch_filtered_competition_rows(
                 owner_id=owner_id,
                 student_id_hashes=student_id_hashes,
                 student_ref_id=student_ref_id,
@@ -162,16 +230,13 @@ class ParticipationsMixin:
                 institute=institute,
                 sport=sport,
                 level=level,
+                group=group,
                 review_status=review_status,
                 unapproved_only=unapproved_only,
                 date_from=date_from,
                 date_to=date_to,
             )
-            row = self.connection.execute(
-                f'SELECT COUNT(*) FROM competitions {where_clause}',
-                params,
-            ).fetchone()
-            return int(row[0])
+        )
 
     def get_competitions_page(
         self,
@@ -181,9 +246,10 @@ class ParticipationsMixin:
         student_ref_id: int | None = None,
         identity_mode: str = IDENTITY_MODE_DEFAULT,
         name: str = '',
-        institute: str = '',
-        sport: str = '',
-        level: str = '',
+        institute: Sequence[str] = (),
+        sport: Sequence[str] = (),
+        level: Sequence[str] = (),
+        group: Sequence[str] = (),
         review_status: str = '',
         date_from: str = '',
         date_to: str = '',
@@ -192,31 +258,30 @@ class ParticipationsMixin:
     ) -> list[Competition]:
         """Страница реестра с серверной фильтрацией (прототип 02).
 
-        Те же фильтры, что у count_competitions_filtered; сортировка и
-        порядок как в get_competitions (created_at ASC). limit/offset —
-        пагинация главной, None возвращает всё (совпадение с get_competitions).
+        Те же фильтры, что у count_competitions_filtered (общий путь —
+        _fetch_filtered_competition_rows); сортировка и порядок как в
+        get_competitions (created_at ASC). limit/offset применяются к
+        ПОСТ-фильтрованному списку (ФИО — Python-фильтр) — пагинация главной,
+        None возвращает всё (совпадение с get_competitions).
         """
-        with self._lock:
-            where_clause, params = self._competition_filter_clauses(
-                owner_id=owner_id,
-                student_id_hashes=student_id_hashes,
-                student_ref_id=student_ref_id,
-                identity_mode=identity_mode,
-                name=name,
-                institute=institute,
-                sport=sport,
-                level=level,
-                review_status=review_status,
-                date_from=date_from,
-                date_to=date_to,
-            )
-            query = f'{COMPETITION_SELECT_SQL}{where_clause}\nORDER BY date ASC, created_at ASC'
-            query_params = list(params)
-            if limit is not None:
-                query += '\nLIMIT ? OFFSET ?'
-                query_params.extend([limit, offset])
-            rows = self.connection.execute(query, query_params).fetchall()
+        rows = self._fetch_filtered_competition_rows(
+            owner_id=owner_id,
+            student_id_hashes=student_id_hashes,
+            student_ref_id=student_ref_id,
+            identity_mode=identity_mode,
+            name=name,
+            institute=institute,
+            sport=sport,
+            level=level,
+            group=group,
+            review_status=review_status,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        if limit is None:
             return [self._row_to_competition(row) for row in rows]
+        end = offset + limit
+        return [self._row_to_competition(row) for row in rows[offset:end]]
 
     @staticmethod
     def _build_custom_filter_clauses(

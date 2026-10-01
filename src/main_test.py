@@ -1238,6 +1238,28 @@ def test_index_shows_counter_and_all_records(index_client: SanicTestClient):
     assert 'Показывать по' in response.text
 
 
+def test_index_multi_menu_custom_toggle_not_bootstrap_data_api(index_client: SanicTestClient):
+    """Меню мульти-фильтров открывает собственный JS (класс .show на
+    .index-multi__menu + aria-expanded), а НЕ Bootstrap Dropdown: бандл
+    bootstrap.min.js не включает Popper, data-api падает в _createPopper.
+    Регрессия: на триггере не должно быть data-bs-toggle/data-bs-auto-close,
+    но обязаны остаться type="button" и aria-expanded="false"."""
+    _, response = index_client.get('/', headers=get_auth_headers())
+
+    assert response.status == 200
+    # Bootstrap Dropdown к триггеру не подключён (data-api не участвует).
+    assert 'data-bs-toggle="dropdown"' not in response.text
+    assert 'data-bs-auto-close' not in response.text
+    # Триггер — кнопка с управляемым JS состоянием раскрытия.
+    assert re.search(
+        r'<button type="button" class="btn btn-outline-secondary w-100 text-start dropdown-toggle"\s+'
+        r'aria-expanded="false"',
+        response.text,
+    )
+    # Меню остаётся под bootstrap-стилями .dropdown-menu / .dropdown-menu.show.
+    assert 'dropdown-menu index-multi__menu' in response.text
+
+
 def test_index_linked_record_renders_event_link_and_edit_marker(index_client: SanicTestClient):
     """P2: связанная со событием запись — имя кликабельно (страница
     соревнования), кнопка правки несёт data-calendar-event-id (JS блокирует
@@ -1458,6 +1480,232 @@ def test_index_athlete_filter_applies_to_own_records(athlete_index_client: Sanic
 
     _, response = athlete_index_client.get('/?' + urlencode({'sport': 'Шахматы'}), headers=athlete_headers())
     assert get_index_counter(response.text) == (1, 1)
+
+
+# --- Реестр-поиск: мульти-фильтры (повторённые GET-параметры) ---
+# Контракт: institute/group/sport/level — повторённые параметры, OR внутри
+# фильтра и AND между; одиночное значение — легаси-совместимо; пустое
+# значение фильтра не создаёт; unknown переотображается выбранным.
+# Счётчики сида (модератор без фильтра статуса видит все 15): ИСИ = 10
+# (Иванов 4, Сидоров 2, Петрова 2, Ждунов 2), ИМИ = 5 (Петрова 2, Кузнецов,
+# Иванов, Отклонов); Лыжи = 4 (Петрова 2, Иванов, отклонённый Отклонов),
+# Шахматы = 1, Бег = 10; межвузовские = 5; группы сида — «ГРП-101».
+
+
+def test_parse_index_multi_values_strips_and_dedups():
+    from src.routes.registry import parse_index_multi_values
+
+    args = {'institute': ['ИСИ', ' ИСИ ', '', 'ИМИ', 'ИСИ', '   ']}
+    assert parse_index_multi_values(args, 'institute') == ['ИСИ', 'ИМИ']
+    assert parse_index_multi_values({'institute': []}, 'institute') == []
+    assert parse_index_multi_values({}, 'group') == []
+    assert parse_index_multi_values({'sport': ['Бег']}, 'sport') == ['Бег']
+
+
+def test_build_index_query_keeps_repeated_keys():
+    from src.routes.registry import build_index_query
+
+    filters = {
+        'name': '',
+        'institute': ['ИСИ', 'ИМИ'],
+        'group': [],
+        'sport': ['Бег'],
+        'level': [],
+        'status': '',
+        'date_from': '',
+        'date_to': '',
+    }
+    # doseq: пагинация и «Показывать по» не теряют часть мульти-выбора.
+    assert build_index_query(filters, 100) == urlencode({'institute': ['ИСИ', 'ИМИ'], 'sport': ['Бег']}, doseq=True)
+    # Дефолтный per_page в URL не попадает, недефолтный — попадает.
+    assert build_index_query(filters, 10) == (
+        urlencode({'institute': ['ИСИ', 'ИМИ'], 'sport': ['Бег']}, doseq=True) + '&per_page=10'
+    )
+
+
+def test_index_multi_control_unions_catalog_and_selected():
+    from src.routes.registry import index_multi_control
+
+    control = index_multi_control('institute', 'Институт', ['ИСИ', 'ИМИ'], ['ИМИ', 'Удалённый институт'])
+    # Опции = справочник ∪ выбранное: unknown-значение доезжает до чекбокса.
+    assert [option['value'] for option in control['options']] == ['ИСИ', 'ИМИ', 'Удалённый институт']
+    assert {option['value'] for option in control['options'] if option['checked']} == {'ИМИ', 'Удалённый институт'}
+    assert {option['value'] for option in control['options'] if option['unknown']} == {'Удалённый институт'}
+
+    # Группы несут карту институтов для JS-сужения.
+    group_control = index_multi_control('group', 'Группа', ['ПГС-101'], ['ПГС-101'], {'ПГС-101': ['ИСИ']})
+    assert group_control['options'][0]['institutes'] == ['ИСИ']
+
+
+def test_index_filter_multi_value_or_within_same_key(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ', 'ИМИ']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_index_counter(response.text) == (15, 15)
+
+    # Лыжи (4, включая отклонённую) + Шахматы (1) = 5: OR внутри одного фильтра.
+    params = urlencode({'sport': ['Лыжи', 'Шахматы']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (5, 5)
+
+
+def test_index_filter_multi_value_and_between_keys(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ'], 'sport': ['Бег']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_index_counter(response.text) == (10, 10)
+
+    # Мульти-институт И уровень вместе: межвузовских 5, все в ИСИ/ИМИ.
+    params = urlencode({'institute': ['ИСИ', 'ИМИ'], 'level': ['межвузовские']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (5, 5)
+
+    # Пустое пересечение — не ошибка.
+    params = urlencode({'institute': ['ИСИ'], 'sport': ['Шахматы']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (0, 0)
+    assert 'Записей с текущим фильтром не найдено' in response.text
+
+
+def test_index_filter_empty_multi_param_is_ignored(index_client: SanicTestClient):
+    _, response = index_client.get('/?institute=', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_index_counter(response.text) == (15, 15)
+
+    # Пробельные значения тоже не создают фильтр.
+    _, response = index_client.get('/?institute=%20&group=', headers=get_auth_headers())
+    assert response.status == 200
+    assert get_index_counter(response.text) == (15, 15)
+
+
+def test_index_filter_dedups_repeated_values(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ', 'ИСИ', ' ИСИ ']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    # Повторы схлопнулись: как один ИСИ, чекбокс в форме один.
+    assert get_index_counter(response.text) == (10, 10)
+    assert response.text.count('name="institute" value="ИСИ"') == 1
+
+
+def test_index_filter_unknown_value_zero_rows_and_redisplayed(index_client: SanicTestClient):
+    params = urlencode({'institute': 'НетТакогоИнститута'})
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    # Unknown-значение: не 500, а честный пустой результат.
+    assert response.status == 200
+    assert get_index_counter(response.text) == (0, 0)
+    assert 'Записей с текущим фильтром не найдено' in response.text
+    # …и оно переотображается выбранным с пометкой «нет в справочнике».
+    assert response.text.count('name="institute" value="НетТакогоИнститута"') == 1
+    assert re.search(r'name="institute" value="НетТакогоИнститута"\s+checked', response.text)
+    assert 'title="Значение отсутствует в справочнике"' in response.text
+
+
+def test_index_filter_by_group(index_client: SanicTestClient):
+    # Все записи сида — «ГРП-101»; отдельная запись с другой группой
+    # (в справочник не добавлена — фильтр всё равно точный по записям).
+    storage = app.ctx.storage
+    other_group = make_index_record('Группов Группа', date=datetime(2025, 8, 1))
+    other_group.group = 'ЭК-301'
+    storage.save_competitions([other_group])
+
+    _, response = index_client.get('/?' + urlencode({'group': 'ГРП-101'}), headers=get_auth_headers())
+    assert get_index_counter(response.text) == (15, 15)
+
+    _, response = index_client.get('/?' + urlencode({'group': 'ЭК-301'}), headers=get_auth_headers())
+    assert get_index_counter(response.text) == (1, 1)
+
+    params = urlencode({'group': ['ГРП-101', 'ЭК-301']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (16, 16)
+    # Контрол группы на карточке несёт карту институт → группы (JS-сужение).
+    assert 'data-filter-key="group"' in response.text
+
+
+def test_index_pagination_keeps_repeated_multi_params(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ', 'ИМИ'], 'per_page': 10}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert get_index_counter(response.text) == (10, 15)
+    assert len(get_tbody_rows(response.text)) == 10
+    # Ссылки пагинации несут ПОВТОРЁННЫЕ ключи (doseq; Jinja экранирует &).
+    expected = urlencode({'institute': ['ИСИ', 'ИМИ'], 'per_page': 10}, doseq=True)
+    assert f'href="/?{expected.replace("&", "&amp;")}&amp;page=2"' in response.text
+    # Селект «Показывать по» держит фильтры (per_page ставит сам).
+    expected_query = urlencode({'institute': ['ИСИ', 'ИМИ']}, doseq=True)
+    assert f'data-query="{expected_query.replace("&", "&amp;")}"' in response.text
+    # Страница 2 под мульти-фильтром: остальные 5 записей.
+    _, response = index_client.get(f'/?{expected}&page=2', headers=get_auth_headers())
+    assert get_index_counter(response.text) == (5, 15)
+    assert len(get_tbody_rows(response.text)) == 5
+
+
+def test_index_filter_reset_is_full_url_reset(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ'], 'name': 'Иванов'}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    # Глобальный «Сбросить» — href="/": полный сброс фильтров без JS-магии.
+    assert 'class="btn btn-outline-secondary index-filter-reset" href="/"' in response.text
+
+
+def test_index_name_search_is_casefold_via_url(index_client: SanicTestClient):
+    # Регистронезависимый поиск кириллицы (раньше LIKE находил только ASCII).
+    _, response = index_client.get('/?' + urlencode({'name': 'иванов'}), headers=get_auth_headers())
+    assert response.status == 200
+    assert get_index_counter(response.text) == (5, 5)
+
+    _, response = index_client.get('/?' + urlencode({'name': 'ИВАНОВ'}), headers=get_auth_headers())
+    assert get_index_counter(response.text) == (5, 5)
+
+    # % и _ — литералы, не wildcard.
+    _, response = index_client.get('/?' + urlencode({'name': '%'}), headers=get_auth_headers())
+    assert get_index_counter(response.text) == (0, 0)
+
+
+def test_index_status_filter_combines_with_multi_filters(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ'], 'status': 'pending'}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers())
+
+    # Ждунов «на проверке» — обе записи в ИСИ.
+    assert response.status == 200
+    assert get_index_counter(response.text) == (2, 2)
+
+
+def test_index_multi_filter_available_to_viewer(index_client: SanicTestClient):
+    params = urlencode({'institute': ['ИСИ']}, doseq=True)
+    _, response = index_client.get(f'/?{params}', headers=get_auth_headers(role='viewer'))
+
+    # viewer — не модератор: селекта «Статус» нет, справочные фильтры работают.
+    assert response.status == 200
+    assert get_index_counter(response.text) == (10, 10)
+    assert 'id="index-filter-status"' not in response.text
+    assert 'data-filter-key="institute"' in response.text
+
+
+def test_index_athlete_multi_filter_applies_to_own_records(athlete_index_client: SanicTestClient):
+    storage = app.ctx.storage
+    athlete_id = storage.get_user('sportik')['id']
+    other_institute = make_index_record('Атлетов Атлет', institute='ИМИ', date=datetime(2025, 7, 2))
+    storage.save_competitions([other_institute], review_status='pending', owner_id=athlete_id)
+
+    # Мульти-фильтры сужают кабинет атлета, чужие записи не открывают:
+    # у атлета 2 записи сида в ИСИ (дефолт make_index_record) + 1 в ИМИ.
+    params = urlencode({'institute': ['ИМИ']}, doseq=True)
+    _, response = athlete_index_client.get(f'/?{params}', headers=athlete_headers())
+    assert get_index_counter(response.text) == (1, 1)
+
+    params = urlencode({'institute': ['ИСИ']}, doseq=True)
+    _, response = athlete_index_client.get(f'/?{params}', headers=athlete_headers())
+    assert get_index_counter(response.text) == (2, 2)
+
+    params = urlencode({'institute': ['ИСИ', 'ИМИ']}, doseq=True)
+    _, response = athlete_index_client.get(f'/?{params}', headers=athlete_headers())
+    assert get_index_counter(response.text) == (3, 3)
 
 
 # --- Пустое состояние атлета: первая запись создаётся прямо с главной. ---

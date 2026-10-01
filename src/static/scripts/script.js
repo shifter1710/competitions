@@ -645,6 +645,59 @@ class FioResolver {
 const EVENT_OWNED_EDIT_KEYS = ["sport", "date", "level", "name"];
 const EVENT_OWNED_FIELD_TITLE = "Изменяется в соревновании";
 
+// Мульти-фильтры главной: открытие/закрытие меню — собственная механика,
+// БЕЗ Bootstrap Dropdown. Бандл bootstrap.min.js не включает Popper, и
+// data-api падает в Dropdown.show() → _createPopper(). Триггер (кнопка без
+// data-bs-toggle) сам вешает класс .show на меню и синхронизирует
+// aria-expanded. Общие слушатели document вешаются РОВНО ОДИН раз:
+// initIndexFilterCard вызывается повторно при замене content-wrapper.
+let indexMultiDocumentListenersBound = false;
+
+function closeIndexMultiMenu(control) {
+    const menu = control.querySelector(".index-multi__menu");
+    const toggleButton = control.querySelector(".dropdown-toggle");
+    if (menu) {
+        menu.classList.remove("show");
+    }
+    if (toggleButton) {
+        toggleButton.setAttribute("aria-expanded", "false");
+    }
+}
+
+function bindIndexMultiDocumentListeners() {
+    if (indexMultiDocumentListenersBound) {
+        return;
+    }
+    indexMultiDocumentListenersBound = true;
+    // Клик вне .index-multi закрывает меню; клик внутри (чекбокс/лейбл/
+    // шапка «Выбрано: N»/«Сбросить») — нет: фильтр настраивают по одному
+    // значению без закрытия. Клик по триггеру соседнего фильтра попадает
+    // «вне» остальных — открыто остаётся максимум одно меню.
+    document.addEventListener("click", (event) => {
+        document.querySelectorAll(".index-multi").forEach((control) => {
+            if (!control.contains(event.target)) {
+                closeIndexMultiMenu(control);
+            }
+        });
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") {
+            return;
+        }
+        document.querySelectorAll(".index-multi").forEach((control) => {
+            const menu = control.querySelector(".index-multi__menu");
+            if (!menu || !menu.classList.contains("show")) {
+                return;
+            }
+            closeIndexMultiMenu(control);
+            const toggleButton = control.querySelector(".dropdown-toggle");
+            if (toggleButton) {
+                toggleButton.focus();
+            }
+        });
+    });
+}
+
 class Main {
     constructor() {
         this.currentReportUrl = null;
@@ -831,6 +884,11 @@ class Main {
     // GET-навигация, фильтры живут в URL (шарость ссылок). «Показывать по»
     // меняет per_page и сбрасывает на первую страницу. Карточка лежит вне
     // content-wrapper и не переинициализируется при обновлении таблицы.
+    // Мульти-фильтры (institute/group/sport/level) — dropdown с
+    // чекбоксами (механика открытия — наша, см. bindIndexMultiDocumentListeners):
+    // счётчики в триггере пересчитываются по фактическому DOM,
+    // локальный «Сбросить» не сабмитит; группы сужаются выбранными
+    // институтами; ФИО у admin/editor — резолвер атлета (подсказки).
     initIndexFilterCard() {
         const filterCard = document.querySelector(".index-filter-card");
         if (filterCard && filterCard.dataset.bound !== "true") {
@@ -858,6 +916,8 @@ class Main {
                 });
             }
             this.initHybridDateInputs(filterCard);
+            this.initIndexMultiSelects(filterCard);
+            this.initIndexFioAutocomplete(filterCard);
         }
         const perPageSelect = document.querySelector(".per-page-select");
         if (perPageSelect && perPageSelect.dataset.bound !== "true") {
@@ -868,6 +928,151 @@ class Main {
                 window.location.href = `/?${params.toString()}`;
             });
         }
+    }
+
+    // Мульти-фильтры главной: клик по триггеру открывает/закрывает меню
+    // (класс .show + aria-expanded, без Bootstrap data-api — Popper в бандле
+    // нет). Изменение чекбокса пересчитывает подпись
+    // триггера («Институт» / «Институт: N»), «Выбрано: N» и видимость шапки
+    // меню по фактическому DOM (querySelectorAll по checked), а не счётчиком
+    // — серверное состояние и DOM не могут разойтись. Локальный «Сбросить»
+    // снимает чекбоксы только своего фильтра и НЕ сабмитит форму.
+    initIndexMultiSelects(filterCard) {
+        bindIndexMultiDocumentListeners();
+        filterCard.querySelectorAll(".index-multi").forEach((control) => {
+            if (control.dataset.multiBound === "true") {
+                return;
+            }
+            control.dataset.multiBound = "true";
+            const key = control.dataset.filterKey;
+            const label = control.dataset.label || key;
+            const toggleButton = control.querySelector(".dropdown-toggle");
+            const valueSpan = control.querySelector(".index-multi__value");
+            const countSpan = control.querySelector(".index-multi__count");
+            const clearButton = control.querySelector(".index-multi__clear");
+            const updateState = () => {
+                const checked = Array.from(control.querySelectorAll("input[type=checkbox]:checked"));
+                const count = checked.length;
+                if (valueSpan) {
+                    valueSpan.textContent = count ? `${label}: ${count}` : label;
+                }
+                if (toggleButton) {
+                    toggleButton.title = checked.map((item) => item.value).join(", ");
+                }
+                if (countSpan) {
+                    countSpan.textContent = `Выбрано: ${count}`;
+                    countSpan.classList.toggle("d-none", count === 0);
+                }
+                if (clearButton) {
+                    clearButton.classList.toggle("d-none", count === 0);
+                }
+            };
+            control.addEventListener("change", (event) => {
+                if (!event.target.matches("input[type=checkbox]")) {
+                    return;
+                }
+                updateState();
+                if (key === "institute") {
+                    this.updateIndexGroupNarrowing(filterCard);
+                }
+            });
+            if (toggleButton) {
+                toggleButton.addEventListener("click", () => {
+                    const menu = control.querySelector(".index-multi__menu");
+                    if (!menu) {
+                        return;
+                    }
+                    const willOpen = !menu.classList.contains("show");
+                    menu.classList.toggle("show", willOpen);
+                    toggleButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+            }
+            if (clearButton) {
+                clearButton.addEventListener("click", () => {
+                    control.querySelectorAll("input[type=checkbox]:checked").forEach((item) => {
+                        item.checked = false;
+                    });
+                    updateState();
+                    if (key === "institute") {
+                        this.updateIndexGroupNarrowing(filterCard);
+                    }
+                });
+            }
+            updateState();
+        });
+        this.updateIndexGroupNarrowing(filterCard);
+    }
+
+    // Сужение групп выбранными институтами (данные — только data-карта
+    // «институт → группы» на контроле group). Группа скрывается, только
+    // если выбран хотя бы один институт, её data-institutes с ними не
+    // пересекаются и она сама не checked; выбранные вне сужения остаются
+    // видимыми (text-muted + пояснение). Без выбранных институтов видны
+    // все группы; пустой результат — пустышка «Нет групп у выбранных
+    // институтов».
+    updateIndexGroupNarrowing(filterCard) {
+        const groupControl = filterCard.querySelector('.index-multi[data-filter-key="group"]');
+        if (!groupControl) {
+            return;
+        }
+        let groupsByInstitute = {};
+        try {
+            groupsByInstitute = JSON.parse(groupControl.dataset.groupsByInstitute || "{}");
+        } catch {
+            groupsByInstitute = {};
+        }
+        const selectedInstitutes = new Set(
+            Array.from(
+                filterCard.querySelectorAll('.index-multi[data-filter-key="institute"] input[type=checkbox]:checked')
+            ).map((item) => item.value)
+        );
+        const hasInstitutes = selectedInstitutes.size > 0;
+        let visibleCount = 0;
+        groupControl.querySelectorAll(".index-multi__option").forEach((option) => {
+            const checkbox = option.querySelector("input[type=checkbox]");
+            const optionInstitutes = String(option.dataset.institutes || "")
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean);
+            const intersects = optionInstitutes.some((value) => selectedInstitutes.has(value));
+            const checked = Boolean(checkbox && checkbox.checked);
+            const hidden = hasInstitutes && !intersects && !checked;
+            option.classList.toggle("d-none", hidden);
+            if (checked && hasInstitutes && !intersects) {
+                option.classList.add("text-muted");
+                option.title = "Не входит в выбранные институты";
+            } else {
+                option.classList.remove("text-muted");
+                if (option.title === "Не входит в выбранные институты") {
+                    option.removeAttribute("title");
+                }
+            }
+            if (!hidden) {
+                visibleCount += 1;
+            }
+        });
+        const narrowEmpty = groupControl.querySelector(".index-multi__narrow-empty");
+        if (narrowEmpty) {
+            narrowEmpty.classList.toggle("d-none", !(hasInstitutes && visibleCount === 0));
+        }
+    }
+
+    // Резолвер атлета в поле «ФИО» карточки фильтров: только admin/editor
+    // (/api/athletes/search закрыт для остальных ролей). Выбор просто
+    // подставляет ФИО — фильтр остаётся свободным вводом (onSelect пуст);
+    // режим students: карточки и легаси-имена вместе — реестр знает и тех
+    // и других. Отдельный guard: карточка инициализируется повторно.
+    initIndexFioAutocomplete(filterCard) {
+        const role = document.body.dataset.role;
+        if (role !== "admin" && role !== "editor") {
+            return;
+        }
+        const input = filterCard.querySelector("[data-fio-autocomplete]");
+        if (!input || input.dataset.fioBound === "true") {
+            return;
+        }
+        input.dataset.fioBound = "true";
+        new FioResolver(input, () => {}, {students: true});
     }
 
     // Гибридные даты (замечание №13) вне инлайн-строки: поля «Дата от/до»
