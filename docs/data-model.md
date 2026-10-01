@@ -267,13 +267,14 @@ erDiagram
   group_id}` (2026-09-22);
 - `calendar_event_deleted` — удаление события календаря;
 - `calendar_event_edited` — правка события календаря (P2) `{event_id,
-  name/date/date_to/sport/level как {old,new}, synced_participations}` —
-  вместе с синхронизацией связанных записей;
+  name/date/date_to/sport/level как {old,new}, links: {old, new} —
+  итоговый состав ссылок (full-replace, Multiple Event Links),
+  synced_participations}` — вместе с синхронизацией связанных записей;
 - `calendar_regulation_uploaded` `{event_id, event_name, filename,
   replaced}` / `calendar_regulation_deleted` `{event_id, event_name,
   filename}` — файл положения события календаря (2026-09-22);
 - `calendar_event_created` — создание события календаря (P5b, со страницы
-  записи): `{event_id, name, date, date_to, sport, level, url,
+  записи): `{event_id, name, date, date_to, sport, level, links,
   linked_record_id, source: 'registry'}` (создание из самого календаря
   `/calendar/new` не аудируется);
 - `participation_linked` — явное связывание записи с событием (P5b):
@@ -325,10 +326,30 @@ erDiagram
 | `date_to` | TEXT NULL | конец; NULL = однодневное |
 | `level` | TEXT NOT NULL DEFAULT `''` | |
 | `sport` | TEXT NOT NULL DEFAULT `''` | |
-| `url` | TEXT NOT NULL DEFAULT `''` | только `http://` или `https://` (с 88ce6d7) |
+| `url` | TEXT NOT NULL DEFAULT `''` | **legacy** (Multiple Event Links): не читается и не пишется новым кодом, сохранена для rollback-безопасности; при старте непустые значения переносятся в `calendar_event_links` и очищаются (см. «Миграции») |
 | `created_at` | TEXT NOT NULL | |
 | `regulation_filename` | TEXT NULL | исходное имя файла положения для скачивания (2026-09-22) |
 | `regulation_stored_name` | TEXT NULL | служебное имя файла в `data/files/calendar/<id>/`; обе NULL = файла нет |
+
+### 9a. `calendar_event_links` — ссылки события календаря
+
+Несколько ссылок события (Multiple Event Links): у события 0..N пар
+«Название + URL» (положение, фото, регламент). Владение — Event: строки
+живут и умирают вместе с событием (правка — full-replace в транзакции
+правки, удаление события чистит его строки). Валидация (обязательность
+обих полей строки, схема `http(s)://`, кап 20 строк) — на уровне роутов;
+storage хранит как есть.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `calendar_event_id` | INTEGER NOT NULL | логический FK `calendar_events.id` (по конвенции проекта, без `PRAGMA foreign_keys`) |
+| `label` | TEXT NOT NULL | название ссылки (свободный текст) |
+| `url` | TEXT NOT NULL | адрес; роуты принимают только `http(s)://`, устоявшиеся небезопасные значения рендерятся текстом |
+| `sort_order` | INTEGER NOT NULL DEFAULT `0` | порядок строк формы 0..N-1; чтение — `ORDER BY sort_order, id` (детерминированный порядок) |
+| `created_at` | TEXT NOT NULL | |
+
+Индекс: `idx_calendar_event_links_event (calendar_event_id, sort_order, id)`.
 
 Участники события — записи реестра со ссылкой `calendar_event_id`
 (Event Model, Wave 1 P2, id-first): состав участников читается по явной
@@ -847,6 +868,13 @@ runtime кабинета атлета и прав атлета на чтение
   `+last_seen_at`, `+student_ref_id` (Phase 1; с Phase 2 наполняется вручную через сопоставление);
 - `calendar_events`: `+regulation_filename`, `+regulation_stored_name`
   (2026-09-22, файл положения события; обе NULL = файла нет);
+- Multiple Event Links: новая таблица `calendar_event_links` (раздел 9a)
+  + индекс `idx_calendar_event_links_event` + backfill-and-clear
+  legacy-`url`: каждый непустой `calendar_events.url` становится ссылкой
+  события `{label: 'Ссылка', url, sort_order: max+1}` (дедуп — по точному
+  совпадению url), затем колонка очищается; legacy-колонка не дропается
+  (rollback-безопасность: url, снова записанный старым кодом, повторным
+  стартом дописывается ссылкой без потерь и дублей);
 - Event Model, Wave 1 P0 (2026-09-24):
   - `competitions`: `+discipline`, `+result`, `+calendar_event_id` —
     аддитивно, существующие строки NULL;

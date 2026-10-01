@@ -11,6 +11,58 @@
 </svg>
 {% endmacro %}
 
+{# Repeater ссылок соревнования (Multiple Event Links): 0..N пар
+   «Название + URL». Строки добавляются/удаляются обработчиком
+   data-links-add / data-links-remove в script.js (клон из <template>),
+   Enter в инпутах — нативный сабмит. compact — инлайн-правка карточки. #}
+{% macro event_links_field(links, compact=False) %}
+<div class="col-12" data-links-field>
+    <span class="label d-block">Ссылки</span>
+    {% if not compact %}
+    <div class="text-muted small mb-2">Необязательно: положение, фото, регламент — откроются со страницы соревнования</div>
+    {% endif %}
+    <div class="d-flex flex-column gap-2" data-links-rows>
+        {% for link in links %}
+        <div class="row g-2 align-items-center" data-links-row>
+            <div class="col-md-4">
+                <input {% if compact %}class="form-control form-control-sm" {% else %}class="form-control" {% endif %}
+                    type="text" name="link_label" value="{{ link.label }}"
+                    placeholder="Название (например: Положение)" aria-label="Название ссылки" maxlength="200">
+            </div>
+            <div class="col">
+                <input {% if compact %}class="form-control form-control-sm" {% else %}class="form-control" {% endif %}
+                    type="text" name="link_url" value="{{ link.url }}" placeholder="https://…"
+                    aria-label="Адрес ссылки" autocomplete="off" inputmode="url">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-outline-danger" type="button" data-links-remove
+                    aria-label="Удалить ссылку" title="Удалить ссылку">Удалить</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <template data-links-row-template>
+        <div class="row g-2 align-items-center" data-links-row>
+            <div class="col-md-4">
+                <input {% if compact %}class="form-control form-control-sm" {% else %}class="form-control" {% endif %}
+                    type="text" name="link_label" value="" placeholder="Название (например: Положение)"
+                    aria-label="Название ссылки" maxlength="200">
+            </div>
+            <div class="col">
+                <input {% if compact %}class="form-control form-control-sm" {% else %}class="form-control" {% endif %}
+                    type="text" name="link_url" value="" placeholder="https://…" aria-label="Адрес ссылки"
+                    autocomplete="off" inputmode="url">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-outline-danger" type="button" data-links-remove
+                    aria-label="Удалить ссылку" title="Удалить ссылку">Удалить</button>
+            </div>
+        </div>
+    </template>
+    <button class="btn btn-sm btn-outline-secondary mt-2" type="button" data-links-add>+ Добавить ссылку</button>
+</div>
+{% endmacro %}
+
 {# Композиция страницы — по прототипу 15: page-head с кнопкой «+ Запланировать
    соревнование», фильтры статус/вид спорта, форма планирования СВЕРХУ,
    карточки соревнований, сгруппированные по месяцам. #}
@@ -94,11 +146,7 @@
                     {% endfor %}
                 </datalist>
             </div>
-            <div class="col-md-6">
-                <label class="label" for="calendar-new-url">Ссылка</label>
-                <input class="form-control" id="calendar-new-url" name="url" type="text" placeholder="https://… — положение, регламент">
-                <div class="text-muted small mt-1">Необязательно; откроется с карточки соревнования</div>
-            </div>
+            {{ event_links_field([{'label': '', 'url': ''}]) }}
             <div class="col-12 d-flex gap-2">
                 <button class="btn btn-primary" type="submit">Запланировать</button>
                 <button class="btn btn-outline-secondary" type="reset">Отмена</button>
@@ -155,10 +203,7 @@
                         <input class="form-control form-control-sm" name="sport" type="text" value="{{ event.sport }}"
                             list="calendar-sports" autocomplete="off">
                     </div>
-                    <div class="col-md-6">
-                        <label class="label">Ссылка</label>
-                        <input class="form-control form-control-sm" name="url" type="text" value="{{ event.url }}">
-                    </div>
+                    {{ event_links_field(event.links, compact=True) }}
                     <div class="col-12">
                         <button class="btn btn-sm btn-primary" type="submit">Сохранить</button>
                     </div>
@@ -174,8 +219,10 @@
             {% endif %}
             <span class="calendar-comp-row__count">участников: <strong>{{ event.participant_count }}</strong></span>
             <span class="calendar-comp-row__count">без результата: <strong>{{ event.no_result_count }}</strong></span>
-            {% if event.url and event.url.startswith(('http://', 'https://')) %}
-            <a class="calendar-comp-row__open" href="{{ event.url }}" target="_blank" rel="noopener"
+            {# Иконка-ссылка — по первой ссылке события (порядок строк формы);
+               небезопасные схемы не рисуем href (эшелонированная защита). #}
+            {% if event.links and event.links[0].url.startswith(('http://', 'https://')) %}
+            <a class="calendar-comp-row__open" href="{{ event.links[0].url }}" target="_blank" rel="noopener"
                 aria-label="Ссылка на соревнование" title="Ссылка на соревнование">
                 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6"
                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

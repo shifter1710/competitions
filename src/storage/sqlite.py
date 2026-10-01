@@ -225,6 +225,61 @@ class SQLiteAdapter(MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsM
                 self.connection.execute('ALTER TABLE calendar_events ADD COLUMN regulation_filename TEXT')
             if 'regulation_stored_name' not in calendar_columns:
                 self.connection.execute('ALTER TABLE calendar_events ADD COLUMN regulation_stored_name TEXT')
+            # Несколько ссылок события (Multiple Event Links): у события 0..N
+            # пар «Название + URL» в отдельной таблице; legacy-колонка url
+            # сохраняется (NOT NULL DEFAULT '' — не дропаем), но новые записи
+            # её не пишут. Порядок строк — (sort_order, id), детерминированный
+            # порядок полей формы создания/правки.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS calendar_event_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    calendar_event_id INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_calendar_event_links_event
+                ON calendar_event_links (calendar_event_id, sort_order, id)
+                '''
+            )
+            # Backfill-and-clear: каждый непустой legacy-url становится ссылкой
+            # события (label «Ссылка», В КОНЦЕ существующих — sort_order =
+            # max+1), затем колонка url очищается — очищенная колонка
+            # повторный запуск не триггерит (идемпотентность без
+            # app_settings-флага). Guard по колонке url: в вырожденной базе
+            # без неё шаг молчит. Сценарий rollback→old-code→redeploy: старый
+            # код снова написал непустой url → он ДОписывается после
+            # существующих ссылок события; дедуп — по точному совпадению url
+            # (такая ссылка уже есть → новой строки нет, очищать колонку
+            # не потеря). Всё — до общего commit _create_schema (одна
+            # транзакция).
+            if 'url' in calendar_columns:
+                self.connection.execute(
+                    '''
+                    INSERT INTO calendar_event_links (calendar_event_id, label, url, sort_order, created_at)
+                    SELECT id, 'Ссылка', url,
+                           (
+                               SELECT COALESCE(MAX(l.sort_order), -1) + 1
+                               FROM calendar_event_links l
+                               WHERE l.calendar_event_id = calendar_events.id
+                           ),
+                           ?
+                    FROM calendar_events
+                    WHERE TRIM(url) != ''
+                      AND NOT EXISTS (
+                          SELECT 1 FROM calendar_event_links l
+                          WHERE l.calendar_event_id = calendar_events.id AND l.url = calendar_events.url
+                      )
+                    ''',
+                    (datetime.utcnow().isoformat(),),
+                )
+                self.connection.execute("UPDATE calendar_events SET url = '' WHERE TRIM(url) != ''")
             # Лёгкий реестр полей (решение 2026-09-13, docs/data-model-decisions.md
             # «Реестр полей: лёгкая версия сейчас, полная запланирована»):
             # настройки ТИПА и ОБЯЗАТЕЛЬНОСТИ базовых полей. Дефолты отражают

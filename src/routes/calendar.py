@@ -11,6 +11,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import parse_qs
 
 import pandas as pd
 from pandas import isna
@@ -127,6 +128,9 @@ def decorate_calendar_event(event: dict, today=None) -> dict:
     decorated['date_to_obj'] = date_to
     decorated['date_label'] = format_date_range(date_from, date_to)
     decorated['status'] = calendar_event_status(event, today)
+    # Multiple Event Links: links читается через .get — фикстуры-моки
+    # присылают сокращённые словари без ключа (прецедент date_to выше).
+    decorated['links'] = list(event.get('links') or [])
     return decorated
 
 
@@ -162,7 +166,8 @@ def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
     """Разобрать форму соревнования календаря. Возвращает (значения, ошибка).
 
     Период — одно гибридное поле, тот же парсер, что у записей реестра
-    (решение «Даты-диапазоны: визуально одно, под капотом два»).
+    (решение «Даты-диапазоны: визуально одно, под капотом два»). Ссылки —
+    отдельный парсер parse_calendar_event_links (пары «название + адрес»).
     """
     name = clean_str(get_form_value(request, 'name'))
     if not name:
@@ -171,19 +176,72 @@ def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
         date_from, date_to = parse_date_value(get_form_value(request, 'date'), manual_input=True)
     except ValueError as exc:
         return {}, str(exc)
-    url = clean_str(get_form_value(request, 'url'))
-    # Ссылка календаря рендерится как href: принимаем только http/https,
-    # прочие схемы (javascript:, data:, vbscript:) — отказ.
-    if url and not is_http_url(url):
-        return {}, 'Ссылка должна начинаться с http:// или https://'
     return {
         'name': name,
         'date': date_from,
         'date_to': date_to,
         'level': clean_str(get_form_value(request, 'level')),
         'sport': clean_str(get_form_value(request, 'sport')),
-        'url': url,
     }, None
+
+
+# Кап числа ссылок события (Multiple Event Links): 0..N строк формы,
+# защищает и парсер, и кнопку «+ Добавить ссылку» в script.js.
+MAX_EVENT_LINKS = 20
+
+
+def _event_link_form_rows(request: Request) -> tuple[list[str], list[str]]:
+    """Значения link_label/link_url ПО РЯТАМ сабмита, включая пустые.
+
+    Sanic собирает request.form без keep_blank_values — пустые значения
+    выбрасываются, и индексное спаривание пар съезжает: строка с пустым
+    названием стыкуется с чужим адресом (DEFECT-1 QA). Для urlencoded-тел
+    читаем сырое тело с keep_blank_values=True — прецедент form_key_present
+    (src/web.py); событийные формы — обычные POST-формы urlencoded.
+    Прочие content-type (multipart — файловые роуты) — запасной getlist-путь,
+    полей ссылок там нет."""
+    if 'application/x-www-form-urlencoded' not in (request.headers.get('content-type') or ''):
+        return request.form.getlist('link_label'), request.form.getlist('link_url')
+    try:
+        body = request.body.decode()
+    except UnicodeDecodeError:
+        return request.form.getlist('link_label'), request.form.getlist('link_url')
+    rows = parse_qs(body, keep_blank_values=True)
+    return rows.get('link_label', []), rows.get('link_url', [])
+
+
+def parse_calendar_event_links(request: Request) -> tuple[list[tuple[str, str]], str | None]:
+    """Разобрать строки ссылок формы события: пары link_label/link_url
+    стыкуются по индексу РЯТАМИ сабмита (пустые значения сохранены —
+    _event_link_form_rows). Возвращает (ссылки, ошибка).
+
+    Контракт (валидация ДО обращения к storage):
+    - оба поля пустые после trim → строка игнорируется;
+    - частично заполненная (только название или только адрес) → ошибка
+      с 1-based номером строки по порядку сабмита;
+    - непустой адрес не http/https (is_http_url) → ошибка с номером строки
+      (ссылка рендерится как href: javascript:/data: — отказ);
+    - больше MAX_EVENT_LINKS непустых строк → ошибка капа.
+
+    Каждый ряд формы шлёт оба поля (repeater), списки равной длины;
+    разная длина (крафтеный POST) безопасна: короткий список паддится
+    пустыми, и частичная строка ловится той же валидацией.
+    """
+    labels, urls = _event_link_form_rows(request)
+    links: list[tuple[str, str]] = []
+    for index in range(max(len(labels), len(urls))):
+        label = clean_str(labels[index]) if index < len(labels) else ''
+        url = clean_str(urls[index]) if index < len(urls) else ''
+        if not label and not url:
+            continue
+        if not label or not url:
+            return [], f'Ссылка {index + 1}: заполните и название, и адрес — или очистите строку'
+        if not is_http_url(url):
+            return [], f'Ссылка {index + 1} должна начинаться с http:// или https://'
+        links.append((label, url))
+    if len(links) > MAX_EVENT_LINKS:
+        return [], f'Слишком много ссылок — максимум {MAX_EVENT_LINKS}'
+    return links, None
 
 
 # Страница соревнования (волна B, прототип 16): участники = записи реестра
@@ -1688,6 +1746,9 @@ def register(app: Sanic) -> None:  # noqa: C901
         values, error = parse_calendar_event_form(request)
         if error is not None:
             return text(body=error, status=400)
+        links, links_error = parse_calendar_event_links(request)
+        if links_error is not None:
+            return text(body=links_error, status=400)
 
         storage = get_storage(request.app)
         new_date = values['date'].isoformat()
@@ -1701,7 +1762,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 date_to=new_date_to,
                 level=values['level'],
                 sport=values['sport'],
-                url=values['url'],
+                links=links,
             )
         except CalendarEventDuplicateError:
             return build_redirect_with_message(
@@ -1749,6 +1810,9 @@ def register(app: Sanic) -> None:  # noqa: C901
         values, error = parse_calendar_event_form(request)
         if error is not None:
             return text(body=error, status=400)
+        links, links_error = parse_calendar_event_links(request)
+        if links_error is not None:
+            return text(body=links_error, status=400)
 
         new_date = values['date'].isoformat()
         new_date_to = values['date_to'].isoformat() if values['date_to'] else None
@@ -1765,7 +1829,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 date_to=new_date_to,
                 level=values['level'],
                 sport=values['sport'],
-                url=values['url'],
+                links=links,
             )
         except CalendarEventDuplicateError:
             next_url = get_form_value(request, 'next')
@@ -1787,6 +1851,11 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'date_to': {'old': event.get('date_to'), 'new': new_date_to},
                 'sport': {'old': event['sport'], 'new': values['sport']},
                 'level': {'old': event['level'], 'new': values['level']},
+                # Ссылки — full-replace, в аудит идёт итоговый состав.
+                'links': {
+                    'old': [dict(link) for link in event.get('links') or []],
+                    'new': [{'label': label, 'url': url} for label, url in links],
+                },
                 'synced_participations': synced_participations,
             },
         )
@@ -3104,6 +3173,9 @@ def register(app: Sanic) -> None:  # noqa: C901
         values, error = parse_calendar_event_form(request)
         if error is not None:
             return text(body=error, status=400)
+        links, links_error = parse_calendar_event_links(request)
+        if links_error is not None:
+            return text(body=links_error, status=400)
 
         new_date = values['date'].isoformat()
         new_date_to = values['date_to'].isoformat() if values['date_to'] else None
@@ -3113,7 +3185,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             date_to=new_date_to,
             level=values['level'],
             sport=values['sport'],
-            url=values['url'],
+            links=links,
             record_id=numeric_id,
         )
         if error == 'record_not_found':
@@ -3147,7 +3219,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'date_to': new_date_to,
                 'sport': values['sport'],
                 'level': values['level'],
-                'url': values['url'],
+                'links': [{'label': label, 'url': url} for label, url in links],
                 'linked_record_id': numeric_id,
                 'source': 'registry',
             },

@@ -1169,6 +1169,126 @@ def test_calendar_events_regulation_columns_migrated(tmp_path):
     assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
 
 
+def test_calendar_events_legacy_url_backfilled_to_links(tmp_path):
+    """Backfill-and-clear (Multiple Event Links): непустые legacy-url
+    становятся ссылкой «Ссылка», колонка очищается; идемпотентность и
+    сценарий rollback→old-code→redeploy без потерь и дублей.
+
+    Синтетическая легаси-схема с NULL-able url: продакшн-колонка была
+    NOT NULL DEFAULT '', NULL здесь — вырожденный случай, который миграция
+    обязана просто не трогать (TRIM(NULL) не матчится)."""
+    db_path = tmp_path / 'legacy-calendar-url.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            date_to TEXT,
+            level TEXT NOT NULL DEFAULT '',
+            sport TEXT NOT NULL DEFAULT '',
+            url TEXT,
+            created_at TEXT NOT NULL
+        )
+        '''
+    )
+    # A — непустой url, B — пустая строка, C — NULL.
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, url, created_at) '
+        "VALUES ('Кросс', '2026-06-25', 'https://example.com/cross', '2026-01-01T00:00:00')"
+    )
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, url, created_at) '
+        "VALUES ('Кубок', '2026-07-01', '', '2026-01-01T00:00:00')"
+    )
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, url, created_at) '
+        "VALUES ('Эстафета', '2026-08-01', NULL, '2026-01-01T00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    cross, cup, relay = (adapter.get_calendar_event(event_id) for event_id in (1, 2, 3))
+
+    # A: ровно одна ссылка {label «Ссылка», исходный url, sort_order 0}.
+    assert [(link['label'], link['url'], link['sort_order']) for link in cross['links']] == [
+        ('Ссылка', 'https://example.com/cross', 0)
+    ]
+    assert cross['url'] == ''
+    # B и C: 0 ссылок; пустая строка очищена, NULL фактическим UPDATE не
+    # тронут (WHERE TRIM(url) != '' не матчит NULL) — допустимое поведение.
+    assert cup['links'] == []
+    assert cup['url'] == ''
+    assert relay['links'] == []
+    assert relay['url'] is None
+
+    # Повторная инициализация адаптера на том же файле — без дублей.
+    adapter.connection.close()
+    adapter = SQLiteAdapter(str(db_path))
+    assert [adapter.get_calendar_event(event_id)['links'] for event_id in (1, 2, 3)] == [
+        [{'id': 1, 'label': 'Ссылка', 'url': 'https://example.com/cross', 'sort_order': 0}],
+        [],
+        [],
+    ]
+
+    # Сценарий rollback: старый код (не знающий calendar_event_links) снова
+    # записал непустой url событию со ссылками и создал новое с url.
+    connection = adapter.connection
+    connection.execute("UPDATE calendar_events SET url = 'https://example.com/legacy-written' WHERE id = 1")
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, url, created_at) '
+        "VALUES ('Пробег', '2026-09-01', 'https://example.com/run', '2026-01-01T00:00:00')"
+    )
+    connection.commit()
+    adapter.connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    cross = adapter.get_calendar_event(1)
+    # url ДОписался ссылкой (не потерялся), после существующих — sort_order 1.
+    assert [(link['url'], link['sort_order']) for link in cross['links']] == [
+        ('https://example.com/cross', 0),
+        ('https://example.com/legacy-written', 1),
+    ]
+    assert cross['url'] == ''
+    # Новое от старого кода событие — единственная ссылка, sort_order 0.
+    run = adapter.get_calendar_event(4)
+    assert [(link['url'], link['sort_order']) for link in run['links']] == [('https://example.com/run', 0)]
+    assert run['url'] == ''
+
+    # Rollback-волна с url, РАВНЫМ существующей ссылке: дубликата нет,
+    # потери нет (тот же url уже ссылка), колонка очищена.
+    connection = adapter.connection
+    connection.execute("UPDATE calendar_events SET url = 'https://example.com/cross' WHERE id = 1")
+    connection.commit()
+    adapter.connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    cross = adapter.get_calendar_event(1)
+    assert [link['url'] for link in cross['links']] == [
+        'https://example.com/cross',
+        'https://example.com/legacy-written',
+    ]
+    assert cross['url'] == ''
+
+    # Событие с уже существующими ссылками и пустым url не тронуто
+    # (guard NOT EXISTS + пустая колонка не триггерит backfill).
+    untouched = adapter.create_calendar_event(
+        name='Многолинковое',
+        date='2026-10-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Первая', 'https://example.com/1'), ('Вторая', 'https://example.com/2')],
+    )
+    before = adapter.get_calendar_event(untouched)['links']
+    adapter.connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    assert adapter.get_calendar_event(untouched)['links'] == before
+
+
 # --- Присутствие пользователей: last_login_at / last_seen_at (№17) ---
 
 
@@ -2021,7 +2141,7 @@ def test_calendar_event_crud(adapter):
         date_to=None,
         level='внутривузовские',
         sport='Бег',
-        url='https://example.com',
+        links=[('Положение', 'https://example.com')],
     )
     assert event_id
 
@@ -2037,7 +2157,7 @@ def test_calendar_event_crud(adapter):
         date_to='2026-09-13',
         level='региональные',
         sport='Бег',
-        url='',
+        links=[],
     )
     event = adapter.get_calendar_event(event_id)
     assert event['date_to'] == '2026-09-13'
@@ -2060,7 +2180,7 @@ def test_calendar_list_counts_participants_by_preset(adapter):
         date_to='2026-09-13T00:00:00',
         level='',
         sport='Бег',
-        url='',
+        links=[],
     )
     adapter.save_competitions(
         [
@@ -2100,7 +2220,7 @@ def test_calendar_list_matches_oneday_preset_exactly(adapter):
     записи; многодневная NULL-legacy-строка с тем же началом не подхватывается
     (P2 — состав участников читается по ссылке, не по пресету)."""
     event_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+        name='Кубок', date='2026-09-12T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions(
         [
@@ -2118,10 +2238,10 @@ def test_calendar_list_matches_oneday_preset_exactly(adapter):
 
 def test_calendar_list_orders_chronologically_and_filters_by_sport(adapter):
     adapter.create_calendar_event(
-        name='Поздний', date='2026-10-17T00:00:00', date_to=None, level='', sport='Волейбол', url=''
+        name='Поздний', date='2026-10-17T00:00:00', date_to=None, level='', sport='Волейбол', links=[]
     )
     adapter.create_calendar_event(
-        name='Ранний', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Ранний', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     assert [event['name'] for event in adapter.list_calendar_events()] == ['Ранний', 'Поздний']
     assert [event['name'] for event in adapter.list_calendar_events(sport='Бег')] == ['Ранний']
@@ -2136,10 +2256,10 @@ def test_calendar_participants_list_reads_by_link_only(adapter):
     (id-first). NULL-legacy-строка с совпадающим пресетом не показывается
     на странице события и не попадает в счётчики."""
     event_id = adapter.create_calendar_event(
-        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     other_event_id = adapter.create_calendar_event(
-        name='Другой', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Другой', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     adapter.save_competitions(
         [
@@ -2172,7 +2292,7 @@ def test_calendar_delete_blocker_counts_link_or_preset(adapter):
     # Событие без связанных записей, но с NULL-строкой по пресету
     # (make_calendar_record делает название записи = первому аргументу)
     preset_only_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     adapter.save_competitions([make_calendar_record('Кубок', datetime(2026, 1, 10), None, position=1)])
     assert adapter.list_calendar_event_participants(preset_only_id) == []
@@ -2180,7 +2300,7 @@ def test_calendar_delete_blocker_counts_link_or_preset(adapter):
 
     # Событие со связанной записью, пресет которой уже разошёлся
     linked_id = adapter.create_calendar_event(
-        name='Другое событие', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Другое событие', date='2026-02-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions(
         [make_calendar_record('Связан Сергей', datetime(2026, 3, 5), None, position=1, calendar_event_id=linked_id)]
@@ -2189,7 +2309,7 @@ def test_calendar_delete_blocker_counts_link_or_preset(adapter):
 
     # Совсем пустое событие — блокировки нет
     empty_id = adapter.create_calendar_event(
-        name='Пустое', date='2026-04-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Пустое', date='2026-04-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     assert adapter.count_calendar_event_participants(empty_id) == 0
 
@@ -2204,7 +2324,7 @@ def test_update_calendar_event_syncs_linked_records(adapter):
         date_to='2026-09-13T00:00:00',
         level='внутривузовские',
         sport='Бег',
-        url='',
+        links=[],
     )
     adapter.save_competitions(
         [
@@ -2229,7 +2349,7 @@ def test_update_calendar_event_syncs_linked_records(adapter):
         date_to=None,
         level='региональные',
         sport='Лыжи',
-        url='https://example.com',
+        links=[('Положение', 'https://example.com')],
     )
     assert synced == 2
 
@@ -2270,7 +2390,7 @@ def test_update_calendar_event_rollback_on_failure(adapter):
         date_to=None,
         level='внутривузовские',
         sport='Бег',
-        url='',
+        links=[],
     )
     adapter.save_competitions(
         [make_calendar_record('Кросс', datetime(2026, 9, 12), None, position=1, calendar_event_id=event_id)]
@@ -2305,7 +2425,7 @@ def test_update_calendar_event_rollback_on_failure(adapter):
             date_to=None,
             level='региональные',
             sport='Лыжи',
-            url='',
+            links=[],
         )
     adapter.connection = real_connection
 
@@ -2329,7 +2449,7 @@ def test_create_calendar_event_exact_duplicate_blocked(adapter):
     from src.storage.sqlite import CalendarEventDuplicateError
 
     event_id = adapter.create_calendar_event(
-        name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     with pytest.raises(CalendarEventDuplicateError) as exc_info:
         adapter.create_calendar_event(
@@ -2338,7 +2458,7 @@ def test_create_calendar_event_exact_duplicate_blocked(adapter):
             date_to=None,
             level='',
             sport='Бег',
-            url='https://other',
+            links=[('Ссылка', 'https://other')],
         )
     # existing указывает на найденный дубль; url в ключ не входит.
     assert exc_info.value.existing == {
@@ -2356,12 +2476,12 @@ def test_create_calendar_event_duplicate_normalizes_name_and_date_format(adapter
     from src.storage.sqlite import CalendarEventDuplicateError
 
     adapter.create_calendar_event(
-        name='  Кубок   Университета ', date='2026-06-25', date_to=None, level='', sport='бег', url=''
+        name='  Кубок   Университета ', date='2026-06-25', date_to=None, level='', sport='бег', links=[]
     )
     # Другие пробелы/регистр названия и дня-без-времени — тот же ключ.
     with pytest.raises(CalendarEventDuplicateError):
         adapter.create_calendar_event(
-            name='кубок университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='БЕГ', url=''
+            name='кубок университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='БЕГ', links=[]
         )
     assert len(adapter.list_calendar_events()) == 1
 
@@ -2369,15 +2489,17 @@ def test_create_calendar_event_duplicate_normalizes_name_and_date_format(adapter
 def test_create_calendar_event_differs_by_single_key_component(adapter):
     """Отличие хотя бы одной компоненты ключа (sport/level/date_to) — НЕ
     дубль: создаются оба, ни один путь создания не блокируется."""
-    adapter.create_calendar_event(name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url='')
     adapter.create_calendar_event(
-        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', url=''
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     adapter.create_calendar_event(
-        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='региональные', sport='Бег', url=''
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', links=[]
     )
     adapter.create_calendar_event(
-        name='Кубок', date='2026-06-25T00:00:00', date_to='2026-06-27T00:00:00', level='', sport='Бег', url=''
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='региональные', sport='Бег', links=[]
+    )
+    adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to='2026-06-27T00:00:00', level='', sport='Бег', links=[]
     )
     assert len(adapter.list_calendar_events()) == 4
 
@@ -2386,13 +2508,13 @@ def test_find_similar_calendar_event_near_miss_only(adapter):
     """Похожее = то же нормализованное название и дата начала, но ДРУГОЙ
     ключ целиком; точный дубль похожим не считается (guard его блокирует)."""
     similar_id = adapter.create_calendar_event(
-        name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', url=''
+        name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', links=[]
     )
     other_day = adapter.create_calendar_event(
-        name='Кубок Университета', date='2026-07-01T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок Университета', date='2026-07-01T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     other_name = adapter.create_calendar_event(
-        name='Кубок Ректора', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок Ректора', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
 
     near = adapter.find_similar_calendar_event(
@@ -2425,16 +2547,24 @@ def test_find_similar_calendar_event_near_miss_only(adapter):
 
 def test_update_calendar_event_self_edit_allowed(adapter):
     """Правка события «на себя» (exclude_id) дублем не считается —
-    например, смена только url/написания названия."""
+    например, смена только ссылок/написания названия."""
     event_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     synced = adapter.update_calendar_event(
-        event_id, name='кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url='https://x'
+        event_id,
+        name='кубок',
+        date='2026-06-25T00:00:00',
+        date_to=None,
+        level='',
+        sport='Бег',
+        links=[('Ссылка', 'https://x')],
     )
     assert synced == 0
     event = adapter.get_calendar_event(event_id)
-    assert event['name'] == 'кубок' and event['url'] == 'https://x'
+    assert event['name'] == 'кубок' and event['links'] == [
+        {'id': event['links'][0]['id'], 'label': 'Ссылка', 'url': 'https://x', 'sort_order': 0}
+    ]
 
 
 def test_update_calendar_event_duplicate_of_other_rolls_back(adapter):
@@ -2443,10 +2573,10 @@ def test_update_calendar_event_duplicate_of_other_rolls_back(adapter):
     from src.storage.sqlite import CalendarEventDuplicateError
 
     first_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     second_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-07-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-07-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     adapter.save_competitions(
         [make_calendar_record('Иванов Иван', datetime(2026, 7, 10), None, position=1, calendar_event_id=second_id)]
@@ -2454,7 +2584,7 @@ def test_update_calendar_event_duplicate_of_other_rolls_back(adapter):
 
     with pytest.raises(CalendarEventDuplicateError) as exc_info:
         adapter.update_calendar_event(
-            second_id, name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+            second_id, name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
         )
     assert exc_info.value.existing['id'] == first_id
 
@@ -2473,7 +2603,7 @@ def test_create_calendar_event_and_link_duplicate_returns_existing(adapter):
     adapter.save_competitions([make_competition('Николаев Николай', datetime(2026, 6, 25))])
     record_id = int(adapter.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()['id'])
     existing_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='внутривузовские', sport='Бег', url=''
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='внутривузовские', sport='Бег', links=[]
     )
 
     event_id, error = adapter.create_calendar_event_and_link(
@@ -2482,7 +2612,7 @@ def test_create_calendar_event_and_link_duplicate_returns_existing(adapter):
         date_to=None,
         level='внутривузовские',
         sport='Бег',
-        url='',
+        links=[],
         record_id=record_id,
     )
     assert (event_id, error) == (existing_id, 'duplicate_event')
@@ -2504,7 +2634,7 @@ def test_create_calendar_event_concurrent_double_submit_single_row(adapter):
         try:
             barrier.wait(timeout=5)
             event_id = adapter.create_calendar_event(
-                name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+                name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
             )
             results.append(('created', event_id))
         except CalendarEventDuplicateError as exc:
@@ -2524,6 +2654,342 @@ def test_create_calendar_event_concurrent_double_submit_single_row(adapter):
     duplicate_of = next(value for tag, value in results if tag == 'duplicate')
     assert duplicate_of == created_id
     assert [event['id'] for event in adapter.list_calendar_events()] == [created_id]
+
+
+# --- Несколько ссылок события (Multiple Event Links): 0..N пар
+# «Название + URL», порядок (sort_order, id), full-replace на правке. ---
+
+
+def read_event_links_raw(adapter, event_id: int) -> list[tuple]:
+    """Прямой SELECT строк ссылок мимо storage API — проверка порядка и
+    удаления на уровне БД (прецедент raw-проверок миграций)."""
+    return adapter.connection.execute(
+        'SELECT label, url, sort_order FROM calendar_event_links'
+        ' WHERE calendar_event_id = ? ORDER BY sort_order ASC, id ASC',
+        (event_id,),
+    ).fetchall()
+
+
+def test_calendar_event_links_create_read_zero_one_many(adapter):
+    """create хранит пары как есть: label — свободный текст (символы,
+    пробелы внутри), url — строка как есть. Валидация схемы/капа — уровень
+    роутов (parse_calendar_event_links), storage её не повторяет."""
+    empty_id = adapter.create_calendar_event(
+        name='Пустое', date='2026-01-01T00:00:00', date_to=None, level='', sport='', links=[]
+    )
+    assert adapter.get_calendar_event(empty_id)['links'] == []
+
+    single_id = adapter.create_calendar_event(
+        name='Одна ссылка',
+        date='2026-02-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Положение, ред. 2 (2026)', 'https://example.com/reglement')],
+    )
+    single = adapter.get_calendar_event(single_id)['links']
+    assert len(single) == 1
+    assert (single[0]['label'], single[0]['url']) == ('Положение, ред. 2 (2026)', 'https://example.com/reglement')
+    assert single[0]['sort_order'] == 0
+
+    many_id = adapter.create_calendar_event(
+        name='Несколько',
+        date='2026-03-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[
+            ('Положение', 'https://example.com/a'),
+            ('Фото-отчёт: день 1', 'ftp://files.example.com/b'),
+            ('Регламент — файл', '//example.com/c'),
+        ],
+    )
+    many = adapter.get_calendar_event(many_id)['links']
+    assert [(link['label'], link['url'], link['sort_order']) for link in many] == [
+        ('Положение', 'https://example.com/a', 0),
+        ('Фото-отчёт: день 1', 'ftp://files.example.com/b', 1),
+        ('Регламент — файл', '//example.com/c', 2),
+    ]
+
+
+def test_calendar_event_links_order_is_submission_order_in_get_and_list(adapter):
+    """Порядок чтения — (sort_order, id): порядок добавления сохраняется,
+    get_calendar_event и list_calendar_events согласованы (тот же состав
+    строк в том же порядке)."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[
+            ('Первая', 'https://example.com/1'),
+            ('Вторая', 'https://example.com/2'),
+            ('Третья', 'https://example.com/3'),
+        ],
+    )
+    # Другое событие с другими ссылками — батч list не путает владельцев.
+    adapter.create_calendar_event(
+        name='Кубок',
+        date='2026-05-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Чужая', 'https://example.com/other')],
+    )
+
+    stored = adapter.get_calendar_event(event_id)['links']
+    assert [link['label'] for link in stored] == ['Первая', 'Вторая', 'Третья']
+    assert [link['sort_order'] for link in stored] == [0, 1, 2]
+
+    listed = {event['id']: event for event in adapter.list_calendar_events()}[event_id]['links']
+    assert listed == stored
+
+
+def test_update_calendar_event_replaces_links_full_replace(adapter):
+    """Правка — full-replace (DELETE + INSERT): добавление, удаление,
+    полная очистка (0 строк — легитимные 0 ссылок) и reorder новым
+    порядком сабмита."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[
+            ('Первая', 'https://example.com/1'),
+            ('Вторая', 'https://example.com/2'),
+        ],
+    )
+
+    # Добавление в конец.
+    adapter.update_calendar_event(
+        event_id,
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[
+            ('Первая', 'https://example.com/1'),
+            ('Вторая', 'https://example.com/2'),
+            ('Третья', 'https://example.com/3'),
+        ],
+    )
+    assert [row['label'] for row in adapter.get_calendar_event(event_id)['links']] == ['Первая', 'Вторая', 'Третья']
+
+    # Удаление средней + reorder: новый порядок строк формы становится
+    # новым sort_order, а не «дорисовкой» к старому.
+    adapter.update_calendar_event(
+        event_id,
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Третья', 'https://example.com/3'), ('Первая', 'https://example.com/1')],
+    )
+    assert [(row['label'], row['sort_order']) for row in adapter.get_calendar_event(event_id)['links']] == [
+        ('Третья', 0),
+        ('Первая', 1),
+    ]
+
+    # Полная очистка — 0 строк, а не «сохранить прежние».
+    adapter.update_calendar_event(
+        event_id, name='Кросс', date='2026-04-01T00:00:00', date_to=None, level='', sport='', links=[]
+    )
+    assert adapter.get_calendar_event(event_id)['links'] == []
+    assert read_event_links_raw(adapter, event_id) == []
+
+
+def test_update_calendar_event_links_failure_rolls_back_all(adapter):
+    """Сбой вставки ссылок откатывает всю правку (одна транзакция):
+    событие, его прежние ссылки и связанные записи не изменились."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Прежняя', 'https://example.com/old')],
+    )
+    adapter.save_competitions(
+        [make_calendar_record('Иванов Иван', datetime(2026, 4, 1), None, position=1, calendar_event_id=event_id)]
+    )
+
+    class FailingLinksConnection:
+        """Все запросы идут в реальное соединение, но INSERT строк ссылок
+        (шаг между UPDATE события и UPDATE записей) падает — до commit."""
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('INSERT INTO calendar_event_links'):
+                raise RuntimeError('Injected links failure')
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = FailingLinksConnection(real_connection)
+    with pytest.raises(RuntimeError):
+        adapter.update_calendar_event(
+            event_id,
+            name='Осенний кросс',
+            date='2026-10-01T00:00:00',
+            date_to=None,
+            level='региональные',
+            sport='Лыжи',
+            links=[('Новая', 'https://example.com/new')],
+        )
+    adapter.connection = real_connection
+
+    event = adapter.get_calendar_event(event_id)
+    assert event['name'] == 'Кросс'
+    assert event['date'] == '2026-04-01T00:00:00'
+    assert event['level'] == ''
+    assert event['sport'] == ''
+    assert [(row['label'], row['url']) for row in event['links']] == [('Прежняя', 'https://example.com/old')]
+    record = adapter.get_competitions()[0]
+    # Запись не синхронизирована: name — как сохраняли (имя строки), поля
+    # события в неё не перенесены.
+    assert record.name == 'Иванов Иван'
+    assert record.date == datetime(2026, 4, 1, 0, 0)
+    assert record.date_to is None
+    assert record.level == 'внутривузовские'
+    assert record.sport == 'Бег'
+
+
+def test_update_calendar_event_duplicate_keeps_links(adapter):
+    """Guard дублей срабатывает ДО правки: ссылки события (как и его поля)
+    не тронуты, новых строк ссылок не появилось."""
+    from src.storage.sqlite import CalendarEventDuplicateError
+
+    adapter.create_calendar_event(
+        name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
+    )
+    second_id = adapter.create_calendar_event(
+        name='Другой',
+        date='2026-07-10T00:00:00',
+        date_to=None,
+        level='',
+        sport='Бег',
+        links=[('Своя', 'https://example.com/own'), ('Ещё', 'https://example.com/more')],
+    )
+
+    with pytest.raises(CalendarEventDuplicateError):
+        adapter.update_calendar_event(
+            second_id,
+            name='Кубок',
+            date='2026-06-25T00:00:00',
+            date_to=None,
+            level='',
+            sport='Бег',
+            links=[('Попытка', 'https://example.com/attempt')],
+        )
+
+    assert [(row['label'], row['url']) for row in adapter.get_calendar_event(second_id)['links']] == [
+        ('Своя', 'https://example.com/own'),
+        ('Ещё', 'https://example.com/more'),
+    ]
+
+
+def test_delete_calendar_event_removes_link_rows(adapter):
+    """Удаление события чистит и строки его ссылок (прямым SELECT)."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Первая', 'https://example.com/1'), ('Вторая', 'https://example.com/2')],
+    )
+    keeper_id = adapter.create_calendar_event(
+        name='Кубок',
+        date='2026-05-01T00:00:00',
+        date_to=None,
+        level='',
+        sport='',
+        links=[('Остаётся', 'https://example.com/keep')],
+    )
+    assert read_event_links_raw(adapter, event_id) != []
+
+    adapter.delete_calendar_event(event_id)
+
+    assert read_event_links_raw(adapter, event_id) == []
+    assert [row['label'] for row in read_event_links_raw(adapter, keeper_id)] == ['Остаётся']
+
+
+def test_create_calendar_event_and_link_stores_links(adapter):
+    """P5b-путь: create_calendar_event_and_link создаёт событие со ссылками
+    в той же транзакции, что и связывание записи."""
+    adapter.save_competitions([make_competition('Николаев Николай', datetime(2026, 6, 25))])
+    record_id = int(adapter.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()['id'])
+
+    event_id, error = adapter.create_calendar_event_and_link(
+        name='Кросс',
+        date='2026-06-25T00:00:00',
+        date_to=None,
+        level='внутривузовские',
+        sport='Бег',
+        links=[('Положение', 'https://example.com/reglement'), ('Фото', 'https://example.com/photos')],
+        record_id=record_id,
+    )
+    assert error is None
+    assert [(row['label'], row['url'], row['sort_order']) for row in adapter.get_calendar_event(event_id)['links']] == [
+        ('Положение', 'https://example.com/reglement', 0),
+        ('Фото', 'https://example.com/photos', 1),
+    ]
+    assert adapter.get_competition_by_id(record_id).calendar_event_id == event_id
+
+
+def test_update_calendar_event_with_links_keeps_sync_of_five_fields(adapter):
+    """Регрессия event-owned sync: правка со сменой ссылок по-прежнему
+    синхронизирует 5 полей связанных записей (url в sync не входит и не
+    входил) и не пишет legacy-колонку url события."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс',
+        date='2026-04-01T00:00:00',
+        date_to='2026-04-02T00:00:00',
+        level='внутривузовские',
+        sport='Бег',
+        links=[('Прежняя', 'https://example.com/old')],
+    )
+    adapter.save_competitions(
+        [
+            make_calendar_record(
+                'Иванов Иван', datetime(2026, 4, 1), datetime(2026, 4, 2), position=1, calendar_event_id=event_id
+            )
+        ]
+    )
+
+    synced = adapter.update_calendar_event(
+        event_id,
+        name='Осенний кросс',
+        date='2026-10-01T00:00:00',
+        date_to=None,
+        level='региональные',
+        sport='Лыжи',
+        links=[('Новая', 'https://example.com/new')],
+    )
+    assert synced == 1
+
+    record = adapter.get_competitions()[0]
+    assert record.name == 'Осенний кросс'
+    assert record.date == datetime(2026, 10, 1, 0, 0)
+    assert record.date_to is None
+    assert record.level == 'региональные'
+    assert record.sport == 'Лыжи'
+    # Legacy-колонка url события не пишется (DEFAULT '' при INSERT).
+    legacy_url = adapter.connection.execute('SELECT url FROM calendar_events WHERE id = ?', (event_id,)).fetchone()[
+        'url'
+    ]
+    assert legacy_url == ''
 
 
 # ---- Карточки студентов (Student Identity v1, Phase 1 — фундамент) ----
@@ -3219,7 +3685,7 @@ def test_create_student_and_link_participation_success(adapter):
     и сразу связывается с участием — одна операция, как create_and_link
     роута страницы участника."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     record_id = save_cardless_participation(adapter, event_id, 'Иванов Иван')
 
@@ -3250,10 +3716,10 @@ def test_create_student_and_link_participation_rejects_before_insert(adapter):
     """Отказ ДО вставки: несуществующая/чужая/уже связанная запись,
     невалидные поля — 0 изменений, карточка не создаётся."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     other_event = adapter.create_calendar_event(
-        name='Другой', date='2026-06-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Другой', date='2026-06-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     record_id = save_cardless_participation(adapter, event_id, 'Иванов Иван')
     foreign_id = save_cardless_participation(adapter, other_event, 'Чужой Участник')
@@ -3305,7 +3771,7 @@ def test_create_student_and_link_participation_race_rolls_back_student(adapter):
     успевает связаться другим процессом — rowcount = 0, ПОЛНЫЙ откат:
     карточка-сирота не остаётся, возвращает (None, 'already_linked')."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     record_id = save_cardless_participation(adapter, event_id, 'Гонка Гонщиков')
     competitor = adapter.create_student('Конкурент Конкурентович', 'М', '', '', '')
@@ -3362,7 +3828,7 @@ def test_create_student_and_link_participation_zero_rowcount_rolls_back(adapter)
     """Прямая проверка ветки rowcount = 0 (UPDATE не затронул строк): откат
     вставленного студента, отказ already_linked."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     record_id = save_cardless_participation(adapter, event_id, 'Пустой Rowcount')
 
@@ -3413,7 +3879,7 @@ def test_create_student_and_link_participation_db_failure_rolls_back(adapter):
     UPDATE падает) — исключение наружу, полный откат: ни карточки, ни связи,
     соединение живо (rollback)."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     record_id = save_cardless_participation(adapter, event_id, 'Сбойный Участник')
 
@@ -4068,7 +4534,7 @@ def test_wave1_reinit_idempotent(tmp_path):
     db_path = str(tmp_path / 'wave1-reinit.sqlite3')
     adapter = SQLiteAdapter(db_path)
     event_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     record = make_competition('Легаси Лев', datetime(2026, 1, 10))
     record.discipline = 'Бег 100 м'
@@ -4090,7 +4556,7 @@ def test_wave1_reinit_idempotent(tmp_path):
 
 def test_wave1_backfill_links_unique_preset(adapter):
     event_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
 
@@ -4105,7 +4571,7 @@ def test_wave1_backfill_links_unique_preset(adapter):
 
 def test_wave1_backfill_without_match_keeps_null(adapter):
     adapter.create_calendar_event(
-        name='Другой кубок', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Другой кубок', date='2026-02-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
 
@@ -4133,9 +4599,11 @@ def test_wave1_backfill_ambiguous_preset_skipped(adapter):
 def test_wave1_backfill_does_not_touch_linked_rows(tmp_path):
     db_path = str(tmp_path / 'wave1-linked.sqlite3')
     adapter = SQLiteAdapter(db_path)
-    adapter.create_calendar_event(name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url='')
+    adapter.create_calendar_event(
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
+    )
     other_event_id = adapter.create_calendar_event(
-        name='Другое событие', date='2026-02-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Другое событие', date='2026-02-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
     # Заранее выставленная ссылка (raw SQL — как будто сделана link/unlink
@@ -4149,7 +4617,7 @@ def test_wave1_backfill_does_not_touch_linked_rows(tmp_path):
 
 def test_wave1_fields_roundtrip_crud(adapter):
     event_id = adapter.create_calendar_event(
-        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     record = make_competition('Раунд Ростислав', datetime(2026, 1, 10))
     record.discipline = 'Бег 100 м'
@@ -4211,7 +4679,7 @@ def test_p4_participants_select_carries_participation_fields(adapter):
     """list_calendar_event_participants аддитивно несёт discipline/result и
     РАСПАРСЕННЫЙ extra_data — классификация повторов не ходит в JSON руками."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     record = make_participation('Иванов Иван', event_id, discipline='100 м', result='11.0')
     record.extra_data = {'note': 'прим.'}
@@ -4232,7 +4700,7 @@ def test_p4_batch_rejects_duplicate_identity_and_content(adapter):
     from src.storage.sqlite import EventParticipationConflictError
 
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     # Живое участие: карточка #1, дисциплина 100 м.
     adapter.save_competitions([make_participation('Иванов Иван', event_id, '100 м', student_ref=1)])
@@ -4292,7 +4760,7 @@ def test_p4_batch_updates_and_rollback(adapter, monkeypatch):
     from src.storage.sqlite import EventParticipationConflictError
 
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     existing = make_participation('Иванов Иван', event_id, '100 м', position=1)
     adapter.save_competitions([existing])
@@ -4311,7 +4779,7 @@ def test_p4_batch_updates_and_rollback(adapter, monkeypatch):
 
     # update чужого события (WHERE calendar_event_id) — коллизия, всё откат.
     other_event = adapter.create_calendar_event(
-        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     with pytest.raises(EventParticipationConflictError):
         adapter.apply_event_participation_batch(
@@ -4338,7 +4806,7 @@ def test_p4_update_event_participation_result_restricted(adapter):
     """update_event_participation_result: SET только position/result,
     WHERE id + calendar_event_id; чужое событие/несуществующий id — 0."""
     event_id = adapter.create_calendar_event(
-        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        name='Забег', date='2026-05-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     existing = make_participation('Иванов Иван', event_id, '100 м', result='11.0')
     adapter.save_competitions([existing])
@@ -4366,7 +4834,7 @@ def test_p4_update_event_participation_result_restricted(adapter):
 def test_link_participation_to_event_error_codes(adapter):
     """Несуществующая запись/событие — явные коды, БД не меняется."""
     event_id = adapter.create_calendar_event(
-        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', links=[]
     )
 
     event, error = adapter.link_participation_to_event(999999, event_id)
@@ -4383,10 +4851,10 @@ def test_link_participation_race_returns_already_linked(adapter):
     """Guarded UPDATE: повторное связывание уже связанной записи не
     перезаписывает ни ссылку, ни поля."""
     first_id = adapter.create_calendar_event(
-        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='А', sport='Бег', url=''
+        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='А', sport='Бег', links=[]
     )
     second_id = adapter.create_calendar_event(
-        name='Второй кросс', date='2026-10-01T00:00:00', date_to=None, level='Б', sport='Лыжи', url=''
+        name='Второй кросс', date='2026-10-01T00:00:00', date_to=None, level='Б', sport='Лыжи', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
     record_id = int(adapter.get_competitions()[0].record_id)
@@ -4437,7 +4905,7 @@ def test_create_calendar_event_and_link_atomic_rollback(adapter):
             date_to=None,
             level='',
             sport='',
-            url='',
+            links=[],
             record_id=record_id,
         )
     adapter.connection = real_connection
@@ -4450,13 +4918,13 @@ def test_create_calendar_event_and_link_checks_record_first(adapter):
     """Несуществующая/уже связанная запись отклоняется ДО вставки события —
     события-сироты не появляется."""
     event_id, error = adapter.create_calendar_event_and_link(
-        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', url='', record_id=999999
+        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', links=[], record_id=999999
     )
     assert (event_id, error) == (None, 'record_not_found')
     assert adapter.list_calendar_events() == []
 
     linked_id = adapter.create_calendar_event(
-        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', url=''
+        name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 9, 12))])
     record_id = int(adapter.get_competitions()[0].record_id)
@@ -4464,7 +4932,7 @@ def test_create_calendar_event_and_link_checks_record_first(adapter):
     adapter.connection.commit()
 
     event_id, error = adapter.create_calendar_event_and_link(
-        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', url='', record_id=record_id
+        name='Сирота', date='2026-10-01T00:00:00', date_to=None, level='', sport='', links=[], record_id=record_id
     )
     assert (event_id, error) == (None, 'already_linked')
     assert len(adapter.list_calendar_events()) == 1
@@ -4474,7 +4942,7 @@ def test_calendar_link_backfill_preview_groups_and_cap(adapter):
     """Предпросмотр: группы matched/ambiguous/unmatched + уже связанные;
     списки капнутся (200), счётчики останутся полными."""
     matched_event = adapter.create_calendar_event(
-        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
 
@@ -4490,7 +4958,7 @@ def test_calendar_link_backfill_preview_groups_and_cap(adapter):
     )
 
     linked_event = adapter.create_calendar_event(
-        name='Связанный', date='2026-04-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Связанный', date='2026-04-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions([make_competition('Связан Сергей', datetime(2026, 4, 1))])
     adapter.connection.execute(
@@ -4536,7 +5004,7 @@ def test_apply_calendar_link_backfill_links_only_matched(adapter):
         date_to='2026-01-12T00:00:00',
         level='региональные',
         sport='Лыжи',
-        url='',
+        links=[],
     )
     for _ in range(2):
         insert_calendar_event_raw(adapter, name='Дубль', date='2026-02-01T00:00:00')
@@ -4567,9 +5035,9 @@ def test_apply_calendar_link_backfill_links_only_matched(adapter):
 def test_apply_calendar_link_backfill_skips_row_linked_after_selection(adapter):
     """Гонка внутри пакета: запись связали между выборкой пар и UPDATE —
     guarded UPDATE даёт rowcount 0, строка пропускается, пакет не валится."""
-    adapter.create_calendar_event(name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url='')
+    adapter.create_calendar_event(name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', links=[])
     other_event = adapter.create_calendar_event(
-        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Другое', date='2026-06-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     adapter.save_competitions([make_competition('Легаси Лев', datetime(2026, 1, 10))])
     record_id = int(adapter.get_competitions()[0].record_id)
