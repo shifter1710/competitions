@@ -30,6 +30,51 @@
 </form>
 {% endif %}
 
+{# Repeater ссылок соревнования (Multiple Event Links): 0..N пар «Название +
+   URL». Строки добавляются/удаляются обработчиком data-links-add /
+   data-links-remove в script.js (клон из <template>), Enter — нативный сабмит. #}
+{% macro event_links_field(links) %}
+<div class="col-12" data-links-field>
+    <span class="label d-block">Ссылки</span>
+    <div class="text-muted small mb-2">Необязательно: положение, фото, регламент — откроются со страницы соревнования</div>
+    <div class="d-flex flex-column gap-2" data-links-rows>
+        {% for link in links %}
+        <div class="row g-2 align-items-center" data-links-row>
+            <div class="col-md-4">
+                <input class="form-control" type="text" name="link_label" value="{{ link.label }}"
+                    placeholder="Название (например: Положение)" aria-label="Название ссылки" maxlength="200">
+            </div>
+            <div class="col">
+                <input class="form-control" type="text" name="link_url" value="{{ link.url }}" placeholder="https://…"
+                    aria-label="Адрес ссылки" autocomplete="off" inputmode="url">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-outline-danger" type="button" data-links-remove
+                    aria-label="Удалить ссылку" title="Удалить ссылку">Удалить</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <template data-links-row-template>
+        <div class="row g-2 align-items-center" data-links-row>
+            <div class="col-md-4">
+                <input class="form-control" type="text" name="link_label" value=""
+                    placeholder="Название (например: Положение)" aria-label="Название ссылки" maxlength="200">
+            </div>
+            <div class="col">
+                <input class="form-control" type="text" name="link_url" value="" placeholder="https://…"
+                    aria-label="Адрес ссылки" autocomplete="off" inputmode="url">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-outline-danger" type="button" data-links-remove
+                    aria-label="Удалить ссылку" title="Удалить ссылку">Удалить</button>
+            </div>
+        </div>
+    </template>
+    <button class="btn btn-sm btn-outline-secondary mt-2" type="button" data-links-add>+ Добавить ссылку</button>
+</div>
+{% endmacro %}
+
 <div class="page-head d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
     <div>
         <a class="backlink" href="/calendar">← В календарь</a>
@@ -47,17 +92,25 @@
             <span class="badge text-bg-secondary"><span class="badge__dot"></span>прошло</span>
             {% endif %}
         </div>
-        {% if event.url %}
-        <p class="mt-1 mb-0">
-            Ссылка:
-            {# Устоявшиеся значения могли быть сохранены без проверки схемы:
-               безопасную ссылку рисуем <a>, прочие — обычным текстом. #}
-            {%- if event.url.startswith(('http://', 'https://')) -%}
-            <a href="{{ event.url }}" target="_blank" rel="noopener">{{ event.url }}</a>
-            {%- else -%}
-            {{ event.url }}
-            {%- endif -%}
-        </p>
+        {% if event.links %}
+        {# Ссылки события (Multiple Event Links): компактный список; уставо-
+           вшиеся значения могли быть сохранены без проверки схемы — безопасный
+           адрес рисуем <a>, прочие — обычным текстом. #}
+        <div class="mt-1">
+            <span class="text-muted">Ссылки:</span>
+            <ul class="list-unstyled mb-0 mt-1 d-flex flex-column gap-1">
+                {% for link in event.links %}
+                <li>
+                    {%- if link.url.startswith(('http://', 'https://')) -%}
+                    <a href="{{ link.url }}" target="_blank" rel="noopener">{{ link.label or link.url }}</a>
+                    {% if link.label %}<span class="text-muted small text-break">{{ link.url }}</span>{% endif %}
+                    {%- else -%}
+                    {{ link.label or link.url }} <span class="text-muted small text-break">{{ link.url }}</span>
+                    {%- endif -%}
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
         {% endif %}
     </div>
     {% if can_write %}
@@ -112,11 +165,7 @@
                 <input class="form-control" id="event-edit-sport" name="sport" type="text" value="{{ event.sport }}"
                     list="calendar-sports" autocomplete="off">
             </div>
-            <div class="col-md-6">
-                <label class="label" for="event-edit-url">Ссылка</label>
-                <input class="form-control" id="event-edit-url" name="url" type="text" value="{{ event.url }}"
-                    placeholder="https://… — положение, регламент">
-            </div>
+            {{ event_links_field(event.links) }}
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Сохранить</button>
             </div>

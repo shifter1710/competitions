@@ -360,6 +360,69 @@ function initFlashAutoHide() {
     });
 }
 
+// Repeater ссылок соревнования (Multiple Event Links): 0..N пар «Название +
+// URL» в формах создания/правки события (calendar.html, calendar_event.html,
+// competition_link.html). Делегированный обработчик на document — одна
+// привязка на страницу (прецедент initUsersPage), работает и внутри
+// collapse-форм. Кап LINK_ROWS_MAX дублирует серверный MAX_EVENT_LINKS
+// (превышение — 400 от сервера); «Удалить» не отключается никогда — 0 строк
+// валиден. Enter в инпутах строки — нативный сабмит формы.
+const LINK_ROWS_MAX = 20;
+
+function refreshLinksAddButton(field) {
+    const count = field.querySelectorAll("[data-links-row]").length;
+    const addButton = field.querySelector("[data-links-add]");
+    if (!addButton) {
+        return;
+    }
+    addButton.disabled = count >= LINK_ROWS_MAX;
+    addButton.title = count >= LINK_ROWS_MAX ? `Максимум ${LINK_ROWS_MAX} ссылок` : "";
+}
+
+function initEventLinksRepeaters() {
+    // Начальное состояние капа (например, правка события с 20 ссылками).
+    document.querySelectorAll("[data-links-field]").forEach(refreshLinksAddButton);
+    document.addEventListener("click", (event) => {
+        const addButton = event.target.closest("[data-links-add]");
+        if (addButton) {
+            const field = addButton.closest("[data-links-field]");
+            const rows = field.querySelector("[data-links-rows]");
+            const template = field.querySelector("[data-links-row-template]");
+            if (!field || !rows || !template) {
+                return;
+            }
+            rows.append(template.content.firstElementChild.cloneNode(true));
+            rows.lastElementChild.querySelector('[name="link_label"]').focus();
+            refreshLinksAddButton(field);
+            return;
+        }
+        const removeButton = event.target.closest("[data-links-remove]");
+        if (removeButton) {
+            const field = removeButton.closest("[data-links-field]");
+            removeButton.closest("[data-links-row]").remove();
+            refreshLinksAddButton(field);
+        }
+    });
+    // «Отмена» (type="reset") чистит значения, но не убирает динамически
+    // добавленные строки — оставляем первую; значения вернёт нативный reset
+    // (событие срабатывает до него).
+    document.querySelectorAll("form").forEach((form) => {
+        if (!form.querySelector("[data-links-field]")) {
+            return;
+        }
+        form.addEventListener("reset", () => {
+            form.querySelectorAll("[data-links-field]").forEach((field) => {
+                field.querySelectorAll("[data-links-row]").forEach((row, index) => {
+                    if (index > 0) {
+                        row.remove();
+                    }
+                });
+                refreshLinksAddButton(field);
+            });
+        });
+    });
+}
+
 // Резолвер атлета (№23доп, docs/feedback-live.md): тихий поиск по ФИО в
 // инлайн-строке главной. Ввод ≥2 символов — запрос /api/athletes/search
 // (троттлинг + отмена, ошибки сети тихие), выбор варианта подставляет
@@ -2993,6 +3056,7 @@ window.addEventListener("DOMContentLoaded", () => {
     new Main();
     initCalendarPeriodPickers();
     initFlashAutoHide();
+    initEventLinksRepeaters();
     // Страница «Студенты» (админ): подсказки в поле поиска — только карточки
     // (onlyStudents), выбор просто подставляет ФИО в поле (onSelect пуст) —
     // свободный ввод остаётся валидным, скрытых полей связи нет: поиск по

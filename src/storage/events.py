@@ -7,6 +7,7 @@
 self."""
 import json
 from datetime import datetime
+from typing import Sequence
 
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
 from src.storage.helpers import CalendarEventDuplicateError
@@ -68,6 +69,32 @@ class EventsMixin:
                 return dict(row)
         return None
 
+    def _insert_event_links(self, event_id: int, links: Sequence[tuple[str, str]]) -> None:
+        """Вставить строки ссылок события (Multiple Event Links).
+
+        Без собственного commit: вызывается под _lock внутри транзакции
+        создателя (create/update). sort_order 0..N-1 — порядок строк формы,
+        чтение упорядочивает по (sort_order, id). Пары уже провалидированы
+        роутом (label/url непустые, схема http/https, кап 20).
+        """
+        created_at = datetime.utcnow().isoformat()
+        for sort_order, (label, url) in enumerate(links):
+            self.connection.execute(
+                'INSERT INTO calendar_event_links (calendar_event_id, label, url, sort_order, created_at)'
+                ' VALUES (?, ?, ?, ?, ?)',
+                (event_id, label, url, sort_order, created_at),
+            )
+
+    def _calendar_event_links(self, event_id: int) -> list[dict]:
+        """Ссылки события по (sort_order, id) — детерминированный порядок
+        строк формы (вызывается под _lock)."""
+        rows = self.connection.execute(
+            'SELECT id, label, url, sort_order FROM calendar_event_links'
+            ' WHERE calendar_event_id = ? ORDER BY sort_order ASC, id ASC',
+            (event_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def create_calendar_event(
         self,
         name: str,
@@ -75,27 +102,30 @@ class EventsMixin:
         date_to: str | None,
         level: str,
         sport: str,
-        url: str,
+        links: Sequence[tuple[str, str]],
     ) -> int:
-        """Новое событие календаря с guard'ом точных дублей (2026-09-27).
+        """Новое событие календаря с 0..N ссылками и guard'ом точных дублей
+        (2026-09-27).
 
         Проверка и INSERT — под одним _lock (атомарный check+write): событие
         с тем же event_identity_key уже есть → CalendarEventDuplicateError
         (existing — найденный дубль), запись не выполнялась, отката не
         нужно. Существующие дубли БД и повторные create того же события
         через raw SQL guard не трогает — блокируются только новые INSERT
-        через этот метод."""
+        через этот метод. Legacy-колонка url не пишется (DEFAULT '')."""
         with self._lock:
             duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level)
             if duplicate is not None:
                 raise CalendarEventDuplicateError(duplicate)
             cursor = self.connection.execute(
-                'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
-                ' VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (name, date, date_to, level, sport, url, datetime.utcnow().isoformat()),
+                'INSERT INTO calendar_events (name, date, date_to, level, sport, created_at)'
+                ' VALUES (?, ?, ?, ?, ?, ?)',
+                (name, date, date_to, level, sport, datetime.utcnow().isoformat()),
             )
+            event_id = cursor.lastrowid
+            self._insert_event_links(event_id, links)
             self.connection.commit()
-            return cursor.lastrowid
+            return event_id
 
     def get_calendar_event(self, event_id: int) -> dict | None:
         with self._lock:
@@ -104,7 +134,11 @@ class EventsMixin:
                 'regulation_filename, regulation_stored_name FROM calendar_events WHERE id = ?',
                 (event_id,),
             ).fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            event = dict(row)
+            event['links'] = self._calendar_event_links(event_id)
+            return event
 
     def set_calendar_regulation(self, event_id: int, filename: str, stored_name: str) -> None:
         """Прикрепить/заменить файл положения события (колонки + имя файла)."""
@@ -132,21 +166,25 @@ class EventsMixin:
         date_to: str | None,
         level: str,
         sport: str,
-        url: str,
+        links: Sequence[tuple[str, str]],
     ) -> int:
-        """Правка события + синхронизация связанных записей одной транзакцией.
+        """Правка события + полная замена ссылок + синхронизация связанных
+        записей одной транзакцией.
 
         Event Model, Wave 1 P2: событие — владелец полей участия
         name/date/date_to/sport/level, правка пресета переносится в записи
         со ссылкой calendar_event_id (NULL-legacy-строки не трогаются —
         ссылки у них нет). Сбой любого шага — откат всего (паттерн
         import_competitions). Возвращает synced — число синхронизированных
-        записей (rowcount второго UPDATE).
+        записей (rowcount UPDATE). Ссылки — full-replace: DELETE + INSERT
+        (sort_order 0..N-1), 0 строк = легитимные 0 ссылок; url в sync НЕ
+        входит и не входил. Сами ссылки тоже в той же транзакции — сбой
+        откатывает и их.
 
         Guard дублей (2026-09-27): правка НЕ на себя, совпадающая с чужим
         событием по event_identity_key → CalendarEventDuplicateError внутри
-        try (существующий rollback-путь) — 0 изменений события и связанных
-        записей, синхронизация не происходит.
+        try (существующий rollback-путь) — 0 изменений события, ссылок и
+        связанных записей, синхронизация не происходит.
         """
         with self._lock:
             try:
@@ -155,10 +193,12 @@ class EventsMixin:
                     raise CalendarEventDuplicateError(duplicate)
                 self.connection.execute(
                     'UPDATE calendar_events'
-                    ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?, url = ?'
+                    ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?'
                     ' WHERE id = ?',
-                    (name, date, date_to, level, sport, url, event_id),
+                    (name, date, date_to, level, sport, event_id),
                 )
+                self.connection.execute('DELETE FROM calendar_event_links WHERE calendar_event_id = ?', (event_id,))
+                self._insert_event_links(event_id, links)
                 cursor = self.connection.execute(
                     'UPDATE competitions'
                     ' SET name = ?, date = ?, date_to = ?, sport = ?, level = ?'
@@ -191,7 +231,10 @@ class EventsMixin:
             return row['total']
 
     def delete_calendar_event(self, event_id: int) -> None:
+        """Удалить событие вместе со строками его ссылок (один commit).
+        Guard участников живёт в роуте и не меняется."""
         with self._lock:
+            self.connection.execute('DELETE FROM calendar_event_links WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute('DELETE FROM calendar_events WHERE id = ?', (event_id,))
             self.connection.commit()
 
@@ -199,7 +242,8 @@ class EventsMixin:
         """Все события по хронологии; рядом — счётчики участников по ссылке
         calendar_event_id (P2, id-first; NULL-legacy-строки пресета не
         считаются): participant_count — все связанные записи реестра,
-        no_result_count — из них с position = 0 («без результата»)."""
+        no_result_count — из них с position = 0 («без результата»). Каждая
+        строка несёт links — ссылки события по (sort_order, id)."""
         with self._lock:
             params: list[object] = []
             where = ''
@@ -227,7 +271,7 @@ class EventsMixin:
                 ''',
                 params,
             ).fetchall()
-            return [
+            events = [
                 {
                     'id': row['id'],
                     'name': row['name'],
@@ -242,6 +286,21 @@ class EventsMixin:
                 }
                 for row in rows
             ]
+            links_by_event: dict[int, list[dict]] = {}
+            if events:
+                placeholders = ', '.join('?' for _ in events)
+                link_rows = self.connection.execute(
+                    'SELECT id, calendar_event_id, label, url, sort_order FROM calendar_event_links'
+                    f' WHERE calendar_event_id IN ({placeholders})'
+                    ' ORDER BY calendar_event_id ASC, sort_order ASC, id ASC',
+                    tuple(event['id'] for event in events),
+                ).fetchall()
+                for link_row in link_rows:
+                    link = dict(link_row)
+                    links_by_event.setdefault(link.pop('calendar_event_id'), []).append(link)
+            for event in events:
+                event['links'] = links_by_event.get(event['id'], [])
+            return events
 
     def list_calendar_event_participants(self, event_id: int) -> list[dict]:
         """Записи реестра — участники события по ссылке calendar_event_id.
@@ -350,12 +409,12 @@ class EventsMixin:
         date_to: str | None,
         level: str,
         sport: str,
-        url: str,
+        links: Sequence[tuple[str, str]],
         record_id: int,
     ) -> tuple[int | None, str | None]:
-        """Создать событие календаря и сразу связать с ним запись.
+        """Создать событие календаря (со ссылками) и сразу связать с ним запись.
 
-        Атомарно (одна транзакция): INSERT события (без собственного
+        Атомарно (одна транзакция): INSERT события + ссылки (без собственного
         commit, паттерн create_calendar_event) + guarded UPDATE записи
         с синхронизацией 5 полей. Проверки записи (существует + ещё NULL)
         выполняются ДО вставки, чтобы не оставлять событий-сирот; гонку на
@@ -384,11 +443,12 @@ class EventsMixin:
                 if duplicate is not None:
                     return int(duplicate['id']), 'duplicate_event'
                 cursor = self.connection.execute(
-                    'INSERT INTO calendar_events (name, date, date_to, level, sport, url, created_at)'
-                    ' VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (name, date, date_to, level, sport, url, datetime.utcnow().isoformat()),
+                    'INSERT INTO calendar_events (name, date, date_to, level, sport, created_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?)',
+                    (name, date, date_to, level, sport, datetime.utcnow().isoformat()),
                 )
                 event_id = cursor.lastrowid
+                self._insert_event_links(event_id, links)
                 linked = self.connection.execute(
                     'UPDATE competitions'
                     ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'

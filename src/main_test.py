@@ -1266,7 +1266,7 @@ def test_index_linked_record_renders_event_link_and_edit_marker(index_client: Sa
     event-owned поля); NULL-запись — прежний вид без ссылки."""
     storage = app.ctx.storage
     event_id = storage.create_calendar_event(
-        name='Кубок 2024', date='2024-03-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Кубок 2024', date='2024-03-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     # Первая запись Иванова (name = «Кубок») — связываем raw SQL, как будто
     # это сделали будущие link/unlink.
@@ -1296,7 +1296,7 @@ def test_index_athlete_sees_linked_record_name_as_text(athlete_index_client: San
     рендерится простым текстом, без ссылки."""
     storage = app.ctx.storage
     event_id = storage.create_calendar_event(
-        name='Кубок атлета', date='2025-06-01T00:00:00', date_to=None, level='', sport='', url=''
+        name='Кубок атлета', date='2025-06-01T00:00:00', date_to=None, level='', sport='', links=[]
     )
     storage.connection.execute(
         "UPDATE competitions SET calendar_event_id = ?, name = 'Кубок атлета' "
@@ -7278,7 +7278,8 @@ def test_editor_can_create_calendar_event(client: SanicTestClient):
             'date': '25-27.06.2026',
             'level': 'внутривузовские',
             'sport': 'Бег',
-            'url': 'https://example.com/reglement',
+            'link_label': ['Положение', 'Фото'],
+            'link_url': ['https://example.com/reglement', 'https://example.com/photos'],
         },
     )
     assert response.status == 200
@@ -7286,7 +7287,10 @@ def test_editor_can_create_calendar_event(client: SanicTestClient):
     assert kwargs['name'] == 'Осенний кросс СибАДИ'
     assert kwargs['date'] == '2026-06-25T00:00:00'
     assert kwargs['date_to'] == '2026-06-27T00:00:00'
-    assert kwargs['url'] == 'https://example.com/reglement'
+    assert kwargs['links'] == [
+        ('Положение', 'https://example.com/reglement'),
+        ('Фото', 'https://example.com/photos'),
+    ]
 
 
 def test_calendar_create_requires_name(client: SanicTestClient):
@@ -7317,33 +7321,237 @@ def test_calendar_create_rejects_bad_date_and_reversed_range(client: SanicTestCl
     app.ctx.storage.create_calendar_event.assert_not_called()
 
 
-def test_calendar_create_rejects_non_http_url(client: SanicTestClient):
-    # M2: ссылка календаря рендерится как href — принимаем только http/https.
+def test_calendar_create_rejects_non_http_link_url(client: SanicTestClient):
+    # Ссылки события рендерятся как href — принимаем только http/https.
     app.ctx.storage.create_calendar_event.reset_mock()
     headers = get_auth_headers('editor')
     for bad_url in ('javascript:alert(1)', 'data:text/html,<b>', 'vbscript:msgbox'):
         _, response = client.post(
             '/calendar/new',
             headers=headers,
-            data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026', 'url': bad_url},
+            data={
+                **csrf_for(headers),
+                'name': 'Кросс',
+                'date': '25.06.2026',
+                'link_label': 'Положение',
+                'link_url': bad_url,
+            },
             allow_redirects=False,
         )
         assert response.status == 400
+        assert 'должна начинаться с http:// или https://' in response.text
     app.ctx.storage.create_calendar_event.assert_not_called()
 
 
-def test_calendar_create_accepts_http_https_and_empty_url(client: SanicTestClient):
+def test_calendar_create_accepts_http_https_and_no_links(client: SanicTestClient):
     app.ctx.storage.create_calendar_event.reset_mock()
     headers = get_auth_headers('editor')
-    for good_url in ('http://example.com/a', 'https://example.com', ''):
+    for good_url in ('http://example.com/a', 'https://example.com'):
         _, response = client.post(
             '/calendar/new',
             headers=headers,
-            data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026', 'url': good_url},
+            data={
+                **csrf_for(headers),
+                'name': 'Кросс',
+                'date': '25.06.2026',
+                'link_label': 'Положение',
+                'link_url': good_url,
+            },
             allow_redirects=False,
         )
         assert response.status == 302
-        assert app.ctx.storage.create_calendar_event.call_args[1]['url'] == good_url
+        assert app.ctx.storage.create_calendar_event.call_args[1]['links'] == [('Положение', good_url)]
+    # Форма без строк ссылок вовсе — легитимные 0 ссылок.
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert app.ctx.storage.create_calendar_event.call_args[1]['links'] == []
+
+
+def test_calendar_create_ignores_fully_empty_link_rows(client: SanicTestClient):
+    # Оба поля строки пустые (после trim) — строка игнорируется, а не валит
+    # форму: repeater оставляет пользовательскую пустую строку.
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['', '  ', 'Положение'],
+            'link_url': ['', '   ', 'https://example.com/reglement'],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert app.ctx.storage.create_calendar_event.call_args[1]['links'] == [
+        ('Положение', 'https://example.com/reglement')
+    ]
+
+
+def test_calendar_create_rejects_partial_link_row(client: SanicTestClient):
+    # Частично заполненная строка (только адрес) — 400 с 1-based номером
+    # строки по порядку сабмита; валидация ДО обращения к storage.
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['Положение', ''],
+            'link_url': ['https://example.com/a', 'https://example.com/orphan'],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Ссылка 2: заполните и название, и адрес' in response.text
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+
+def test_calendar_create_keeps_row_pairing_with_empty_values(client: SanicTestClient):
+    """DEFECT-1 (QA): Sanic выбрасывает пустые значения из request.form —
+    индексное спаривание link_label/link_url съезжало, и строка с пустым
+    названием стыковалась с чужим адресом. Пары читаются из сырого тела
+    с keep_blank_values=True: нумерация ошибок — по фактическим рядам
+    сабмита, «франкенштейн» не собирается."""
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+
+    # Сценарий A («франкенштейн»): пустое название + чужой адрес первой
+    # строки и голое название второй. Раньше — 302 и ссылка
+    # ('Положение', 'https://example.com/a') в storage.
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['', 'Положение'],
+            'link_url': ['https://example.com/a', ''],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Ссылка 1: заполните и название, и адрес' in response.text
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+    # Сценарий B: та же сдвинутая пара, но вторая строка с адресом —
+    # раньше 400 указывал «Ссылка 2», хотя частична строка 1.
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['', 'Положение'],
+            'link_url': ['https://example.com/a', 'https://example.com/b'],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Ссылка 1: заполните и название, и адрес' in response.text
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+
+def test_calendar_create_partial_row_in_middle_numbered_correctly(client: SanicTestClient):
+    """Частичная строка в СЕРЕДИНЕ заполненных: ошибка указывает её номер
+    (1-based по рядам сабмита), а не следующей за сдвигом строки."""
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+
+    # Пустое название + адрес — вторая из четырёх строк.
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['Первая', '', 'Вторая', 'Третья'],
+            'link_url': [
+                'https://example.com/1',
+                'https://example.com/2',
+                'https://example.com/3',
+                'https://example.com/4',
+            ],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Ссылка 2: заполните и название, и адрес' in response.text
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+    # Название + пустой адрес — третья из четырёх строк.
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['Первая', 'Вторая', 'Третья', 'Четвёртая'],
+            'link_url': ['https://example.com/1', 'https://example.com/2', '', 'https://example.com/4'],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Ссылка 3: заполните и название, и адрес' in response.text
+    app.ctx.storage.create_calendar_event.assert_not_called()
+
+
+def test_calendar_create_fully_empty_row_between_valid_keeps_order(client: SanicTestClient):
+    """Полностью пустая строка МЕЖДУ валидными сохраняет их порядок
+    (keep_blank_values не ломает «пустая строка игнорируется»)."""
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['Первая', '  ', 'Вторая'],
+            'link_url': ['https://example.com/1', '', 'https://example.com/2'],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert app.ctx.storage.create_calendar_event.call_args[1]['links'] == [
+        ('Первая', 'https://example.com/1'),
+        ('Вторая', 'https://example.com/2'),
+    ]
+
+
+def test_calendar_create_rejects_more_than_twenty_links(client: SanicTestClient):
+    app.ctx.storage.create_calendar_event.reset_mock()
+    headers = get_auth_headers('editor')
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': [f'Ссылка {index}' for index in range(21)],
+            'link_url': [f'https://example.com/{index}' for index in range(21)],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Слишком много ссылок — максимум 20' in response.text
+    app.ctx.storage.create_calendar_event.assert_not_called()
 
 
 def test_viewer_cannot_create_calendar_event(client: SanicTestClient):
@@ -7368,6 +7576,7 @@ def test_editor_can_edit_calendar_event(client: SanicTestClient):
         'sport': '',
         'url': '',
         'created_at': '2026-01-01T00:00:00',
+        'links': [{'id': 1, 'label': 'Старая', 'url': 'https://example.com/old', 'sort_order': 0}],
     }
     try:
         headers = get_auth_headers('editor')
@@ -7380,7 +7589,8 @@ def test_editor_can_edit_calendar_event(client: SanicTestClient):
                 'date': '30.01-01.02.2026',
                 'level': 'региональные',
                 'sport': 'Лыжи',
-                'url': '',
+                'link_label': 'Положение',
+                'link_url': 'https://example.com/reglement',
             },
         )
         assert response.status == 200
@@ -7389,12 +7599,13 @@ def test_editor_can_edit_calendar_event(client: SanicTestClient):
         assert kwargs['name'] == 'Осенний кросс СибАДИ'
         assert kwargs['date'] == '2026-01-30T00:00:00'
         assert kwargs['date_to'] == '2026-02-01T00:00:00'
+        assert kwargs['links'] == [('Положение', 'https://example.com/reglement')]
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
 
 
-def test_calendar_edit_rejects_non_http_url(client: SanicTestClient):
-    # Тот же парсер формы, что у создания: правка не обходит проверку схемы.
+def test_calendar_edit_rejects_non_http_link_url(client: SanicTestClient):
+    # Тот же парсер ссылок, что у создания: правка не обходит проверку схемы.
     app.ctx.storage.get_calendar_event.return_value = {
         'id': 7,
         'name': 'Кросс',
@@ -7404,6 +7615,7 @@ def test_calendar_edit_rejects_non_http_url(client: SanicTestClient):
         'sport': '',
         'url': '',
         'created_at': '2026-01-01T00:00:00',
+        'links': [],
     }
     app.ctx.storage.update_calendar_event.reset_mock()
     try:
@@ -7412,7 +7624,13 @@ def test_calendar_edit_rejects_non_http_url(client: SanicTestClient):
             _, response = client.post(
                 '/calendar/7/edit',
                 headers=headers,
-                data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026', 'url': bad_url},
+                data={
+                    **csrf_for(headers),
+                    'name': 'Кросс',
+                    'date': '25.06.2026',
+                    'link_label': 'Положение',
+                    'link_url': bad_url,
+                },
                 allow_redirects=False,
             )
             assert response.status == 400
@@ -7421,7 +7639,7 @@ def test_calendar_edit_rejects_non_http_url(client: SanicTestClient):
         app.ctx.storage.get_calendar_event.return_value = None
 
 
-def test_calendar_pages_render_unsafe_stored_url_as_text(client: SanicTestClient):
+def test_calendar_pages_render_unsafe_stored_link_url_as_text(client: SanicTestClient):
     # Эшелонированная защита: значения, сохранённые до валидации схемы,
     # рендерятся как обычный текст, а не как href.
     unsafe_event = {
@@ -7431,10 +7649,11 @@ def test_calendar_pages_render_unsafe_stored_url_as_text(client: SanicTestClient
         'date_to': None,
         'level': '',
         'sport': '',
-        'url': 'javascript:alert(1)',
+        'url': '',
         'created_at': '2026-01-01T00:00:00',
         'participant_count': 0,
         'no_result_count': 0,
+        'links': [{'id': 1, 'label': 'Опасная', 'url': 'javascript:alert(1)', 'sort_order': 0}],
     }
     app.ctx.storage.list_calendar_events.return_value = [unsafe_event]
     app.ctx.storage.get_calendar_event.return_value = unsafe_event
@@ -7453,6 +7672,121 @@ def test_calendar_pages_render_unsafe_stored_url_as_text(client: SanicTestClient
     finally:
         app.ctx.storage.list_calendar_events.return_value = []
         app.ctx.storage.get_calendar_event.return_value = None
+
+
+def make_calendar_list_event(event_id: int, links: list[dict]) -> dict:
+    """Событие для списка /calendar (list_calendar_events): ссылки —
+    «выравненные» строки storage (id/label/url/sort_order)."""
+    return {
+        'id': event_id,
+        'name': f'Кросс {event_id}',
+        'date': '2026-06-25',
+        'date_to': None,
+        'level': '',
+        'sport': '',
+        'url': '',
+        'created_at': '2026-01-01T00:00:00',
+        'participant_count': 0,
+        'no_result_count': 0,
+        'links': links,
+    }
+
+
+def test_calendar_event_page_renders_zero_one_many_links(client: SanicTestClient):
+    """Страница события: 0 ссылок — секции «Ссылки:» нет; N ссылок —
+    список <a> с подписями и адресами в порядке (sort_order, id)."""
+    headers = get_auth_headers('viewer')
+
+    app.ctx.storage.get_calendar_event.return_value = {**_event_for_page(), 'links': []}
+    try:
+        _, response = client.get('/calendar/7', headers=headers)
+        assert response.status == 200
+        assert 'Ссылки:' not in response.text
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    try:
+        _, response = client.get('/calendar/7', headers=headers)
+        assert response.status == 200
+        assert 'Ссылки:' in response.text
+        # Обе ссылки — <a> с адресом и подписью, вторая строка не съедена.
+        assert '<a href="https://example.com/reglement" target="_blank" rel="noopener">Положение</a>' in response.text
+        assert '<a href="https://example.com/photos" target="_blank" rel="noopener">Фото</a>' in response.text
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_calendar_card_link_icon_follows_first_link(client: SanicTestClient):
+    """Иконка-ссылка карточки календаря — по ПЕРВОЙ ссылке события и только
+    для схемы http/https: 0 ссылок или небезопасная первая — иконки нет."""
+    headers = get_auth_headers('viewer')
+    events = [
+        make_calendar_list_event(1, [{'id': 1, 'label': 'Положение', 'url': 'https://example.com/a', 'sort_order': 0}]),
+        make_calendar_list_event(2, []),
+        make_calendar_list_event(3, [{'id': 2, 'label': 'Опасная', 'url': 'javascript:alert(1)', 'sort_order': 0}]),
+    ]
+    app.ctx.storage.list_calendar_events.return_value = events
+    try:
+        _, response = client.get('/calendar', headers=headers)
+        assert response.status == 200
+        icon_marker = 'calendar-comp-row__open'
+        assert response.text.count(icon_marker) == 1
+        assert f'<a class="{icon_marker}" href="https://example.com/a"' in response.text
+        assert 'href="javascript:' not in response.text
+    finally:
+        app.ctx.storage.list_calendar_events.return_value = []
+
+
+def test_calendar_edit_rejects_more_than_twenty_links(client: SanicTestClient):
+    # Тот же парсер, что у создания: кап 20 строк работает и в правке.
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.update_calendar_event.reset_mock()
+    try:
+        headers = get_auth_headers('editor')
+        _, response = client.post(
+            '/calendar/7/edit',
+            headers=headers,
+            data={
+                **csrf_for(headers),
+                'name': 'Кросс',
+                'date': '25.06.2026',
+                'link_label': [f'Ссылка {index}' for index in range(21)],
+                'link_url': [f'https://example.com/{index}' for index in range(21)],
+            },
+            allow_redirects=False,
+        )
+        assert response.status == 400
+        assert 'Слишком много ссылок — максимум 20' in response.text
+        app.ctx.storage.update_calendar_event.assert_not_called()
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+
+
+def test_viewer_cannot_edit_calendar_event(client: SanicTestClient):
+    app.ctx.storage.update_calendar_event.reset_mock()
+    headers = get_auth_headers('viewer')
+    _, response = client.post(
+        '/calendar/7/edit',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Кросс', 'date': '25.06.2026'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    app.ctx.storage.update_calendar_event.assert_not_called()
+
+
+def test_calendar_new_requires_csrf_token(client: SanicTestClient):
+    # POST без csrf-токена отклоняется раньше разбора формы и storage.
+    app.ctx.storage.create_calendar_event.reset_mock()
+    _, response = client.post(
+        '/calendar/new',
+        headers=get_auth_headers('editor'),
+        data={'name': 'Кросс', 'date': '25.06.2026'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    app.ctx.storage.create_calendar_event.assert_not_called()
 
 
 def test_calendar_delete_refuses_with_participants(client: SanicTestClient):
@@ -7579,8 +7913,12 @@ def _event_for_page():
         'date_to': None,
         'level': 'внутривузовские',
         'sport': 'Бег',
-        'url': 'https://example.com/reglement',
+        'url': '',
         'created_at': '2026-01-01T00:00:00',
+        'links': [
+            {'id': 31, 'label': 'Положение', 'url': 'https://example.com/reglement', 'sort_order': 0},
+            {'id': 32, 'label': 'Фото', 'url': 'https://example.com/photos', 'sort_order': 1},
+        ],
     }
 
 
@@ -7775,7 +8113,7 @@ def upload_regulation(client, headers, event_id, filename, payload):
 
 def test_calendar_regulation_upload_download_replace_delete(calendar_client: SanicTestClient, tmp_path):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс СибАДИ', '2026-06-25', None, 'внутривузовские', 'Бег', '')
+    event_id = storage.create_calendar_event('Кросс СибАДИ', '2026-06-25', None, 'внутривузовские', 'Бег', links=[])
     admin = get_auth_headers('admin')
 
     # Страница без файла модератору: заглушка + форма прикрепления
@@ -7862,7 +8200,7 @@ def test_calendar_regulation_upload_download_replace_delete(calendar_client: San
 
 def test_calendar_regulation_rejects_invalid_files(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', '')
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
     admin = get_auth_headers('admin')
 
     # Пустая отправка
@@ -7894,7 +8232,7 @@ def test_calendar_regulation_rejects_invalid_files(calendar_client: SanicTestCli
 
 def test_calendar_regulation_access_rights(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', '')
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
     admin = get_auth_headers('admin')
     pdf_bytes = b'%PDF-1.4 ok'
     assert upload_regulation(calendar_client, admin, event_id, 'p.pdf', pdf_bytes).status == 302
@@ -7929,7 +8267,7 @@ def test_calendar_regulation_access_rights(calendar_client: SanicTestClient):
     assert response.status == 403
 
     # Нет файла положения — скачивание 404
-    other = storage.create_calendar_event('Вторая', '2026-07-01', None, '', '', '')
+    other = storage.create_calendar_event('Вторая', '2026-07-01', None, '', '', links=[])
     _, response = calendar_client.get(
         f'/calendar/{other}/regulation', headers=get_auth_headers('viewer'), allow_redirects=False
     )
@@ -7938,7 +8276,7 @@ def test_calendar_regulation_access_rights(calendar_client: SanicTestClient):
 
 def test_calendar_event_deletion_removes_regulation_file(calendar_client: SanicTestClient, tmp_path):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', '')
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
     admin = get_auth_headers('admin')
     assert upload_regulation(calendar_client, admin, event_id, 'p.pdf', b'%PDF-1.4 ok').status == 302
     regulation_dir = tmp_path / 'files' / 'calendar' / str(event_id)
@@ -11177,7 +11515,7 @@ def make_calendar_event(storage, **kwargs) -> int:
         'date_to': '2026-05-11T00:00:00',
         'level': 'внутривузовские',
         'sport': 'Бег',
-        'url': '',
+        'links': [],
     }
     values.update(kwargs)
     return storage.create_calendar_event(**values)
@@ -11703,7 +12041,8 @@ def test_calendar_edit_route_syncs_participations_and_audits(event_import_client
             'date': '20-21.06.2026',
             'level': 'межвузовские',
             'sport': 'Лыжи',
-            'url': '',
+            'link_label': ['Положение', 'Фото'],
+            'link_url': ['https://example.com/polozhenie', 'https://example.com/photos'],
         },
         allow_redirects=False,
     )
@@ -11714,6 +12053,10 @@ def test_calendar_edit_route_syncs_participations_and_audits(event_import_client
     assert event['name'] == 'Забег 2026 — обновлённый'
     assert event['date'] == '2026-06-20T00:00:00'
     assert event['date_to'] == '2026-06-21T00:00:00'
+    assert [(link['label'], link['url'], link['sort_order']) for link in event['links']] == [
+        ('Положение', 'https://example.com/polozhenie', 0),
+        ('Фото', 'https://example.com/photos', 1),
+    ]
 
     rows = storage.connection.execute(
         'SELECT student_name, name, sport, date, date_to, level, calendar_event_id '
@@ -11746,6 +12089,14 @@ def test_calendar_edit_route_syncs_participations_and_audits(event_import_client
             'date_to': {'old': '2026-05-11T00:00:00', 'new': '2026-06-21T00:00:00'},
             'sport': {'old': 'Бег', 'new': 'Лыжи'},
             'level': {'old': 'внутривузовские', 'new': 'межвузовские'},
+            # Multiple Event Links: аудит несёт итоговый состав ссылок.
+            'links': {
+                'old': [],
+                'new': [
+                    {'label': 'Положение', 'url': 'https://example.com/polozhenie'},
+                    {'label': 'Фото', 'url': 'https://example.com/photos'},
+                ],
+            },
             'synced_participations': 2,
         }
     ]
@@ -11981,6 +12332,73 @@ def test_link_event_new_creates_event_and_links(event_import_client: SanicTestCl
     assert record.level == 'региональные'
 
 
+def test_link_event_new_creates_event_with_links(event_import_client: SanicTestClient):
+    """P5b + Multiple Event Links: пары link_label/link_url формы создания
+    события со страницы записи доходят до storage в порядке сабмита;
+    аудит calendar_event_created несёт итоговый состав ссылок."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    headers = get_auth_headers()
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс весны',
+            'date': '10.04.2026',
+            'level': 'региональные',
+            'sport': 'Лыжи',
+            'link_label': ['Положение', 'Фото', '  '],
+            'link_url': ['https://example.com/reglement', 'https://example.com/photos', '   '],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+
+    events = storage.list_calendar_events()
+    assert len(events) == 1
+    assert [(link['label'], link['url'], link['sort_order']) for link in events[0]['links']] == [
+        ('Положение', 'https://example.com/reglement', 0),
+        ('Фото', 'https://example.com/photos', 1),
+    ]
+    assert [entry['links'] for entry in audit_details(storage, 'calendar_event_created')] == [
+        [
+            {'label': 'Положение', 'url': 'https://example.com/reglement'},
+            {'label': 'Фото', 'url': 'https://example.com/photos'},
+        ]
+    ]
+
+
+def test_link_event_new_rejects_partial_link_row(event_import_client: SanicTestClient):
+    """P5b-поверхность: тот же парсер строк ссылок (DEFECT-1) — частичная
+    строка (пустое название + адрес) даёт 400 с номером строки, событие
+    не создаётся и запись не связывается."""
+    storage = app.ctx.storage
+    record_id = make_null_participation(storage)
+    headers = get_auth_headers()
+
+    _, response = event_import_client.post(
+        f'/competition/{record_id}/link-event/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Кросс весны',
+            'date': '10.04.2026',
+            'level': 'региональные',
+            'sport': 'Лыжи',
+            'link_label': ['', 'Положение'],
+            'link_url': ['https://example.com/orphan', ''],
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    assert 'Ссылка 1: заполните и название, и адрес' in response.text
+
+    assert storage.list_calendar_events() == []
+    assert storage.get_competition_by_id(record_id).calendar_event_id is None
+
+
 def test_link_event_page_snapshot_search_and_preset_diff(event_import_client: SanicTestClient):
     """GET-страница: снимок записи, GET-поиск, пресет-кандидат первым с
     бейджем «предложение» и диффом «после связывания»."""
@@ -12019,7 +12437,7 @@ def test_link_event_page_caps_candidates_at_twenty(event_import_client: SanicTes
     # a..y: хронология+алфавит -> первые 20 = a..t, хвост (u..y) скрыт капом.
     for index in range(25):
         storage.create_calendar_event(
-            name=f'Серия {chr(97 + index)}', date='2026-09-01T00:00:00', date_to=None, level='', sport='', url=''
+            name=f'Серия {chr(97 + index)}', date='2026-09-01T00:00:00', date_to=None, level='', sport='', links=[]
         )
 
     _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
@@ -12360,7 +12778,7 @@ def test_link_routes_write_audit_events(event_import_client: SanicTestClient):
             'date_to': None,
             'sport': 'Бег',
             'level': 'внутривузовские',
-            'url': '',
+            'links': [],
             'linked_record_id': created_id,
             'source': 'registry',
         }
@@ -12371,7 +12789,7 @@ def test_link_routes_write_audit_events(event_import_client: SanicTestClient):
 
     batch_id = make_null_participation(storage, comp_name='Пакетный кубок', date=datetime(2026, 8, 8))
     batch_event = storage.create_calendar_event(
-        name='Пакетный кубок', date='2026-08-08T00:00:00', date_to=None, level='', sport='', url=''
+        name='Пакетный кубок', date='2026-08-08T00:00:00', date_to=None, level='', sport='', links=[]
     )
     _, response = event_import_client.post(
         '/admin/maintenance/calendar-links/apply',
@@ -12411,7 +12829,7 @@ def test_calendar_create_route_blocks_exact_duplicate(event_import_client: Sanic
     времени) — 302 с admin_error в /calendar, в БД остаётся одна строка."""
     storage = app.ctx.storage
     make_calendar_event(
-        storage, name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url=''
+        storage, name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     headers = get_auth_headers()
     _, response = event_import_client.post(
@@ -12441,7 +12859,7 @@ def test_calendar_create_route_similar_warning_not_blocking(event_import_client:
     неблокирующая подсказка о похожем событии, обе строки в БД."""
     storage = app.ctx.storage
     make_calendar_event(
-        storage, name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', url=''
+        storage, name='Кубок Университета', date='2026-06-25T00:00:00', date_to=None, level='', sport='Лыжи', links=[]
     )
     headers = get_auth_headers()
     _, response = event_import_client.post(
@@ -12472,9 +12890,11 @@ def test_calendar_edit_route_duplicate_blocks_sync_and_audit(event_import_client
     нет; next внутри /calendar/ возвращает на страницу события, без next —
     в календарь."""
     storage = app.ctx.storage
-    make_calendar_event(storage, name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', url='')
+    make_calendar_event(
+        storage, name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
+    )
     second = make_calendar_event(
-        storage, name='Кубок', date='2026-07-10T00:00:00', date_to=None, level='', sport='Бег', url=''
+        storage, name='Кубок', date='2026-07-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
     record_id = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 7, 10))
     storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (second, record_id))
@@ -12526,7 +12946,7 @@ def test_link_event_new_duplicate_blocked_returns_to_picker(event_import_client:
     успеха нет; контраст — успешный «Создать и связать» аудит пишет."""
     storage = app.ctx.storage
     existing = make_calendar_event(
-        storage, name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', url=''
+        storage, name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     dup_record = make_null_participation(storage, comp_name='Кубок', date=datetime(2026, 1, 10))
 
@@ -12604,7 +13024,7 @@ def test_link_confirm_onsubmit_is_valid_js_with_quoted_names(event_import_client
     record_id = make_null_participation(storage, comp_name='Спартакиада', date=datetime(2026, 6, 10))
     # Пустой уровень/вид спорта — в подтверждении будет «Пустыми станут: …».
     storage.create_calendar_event(
-        name='Спартакиада „ОУВООО"', date='2026-06-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Спартакиада „ОУВООО"', date='2026-06-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
     storage.create_calendar_event(
         name="Спартакиада д'Орсе",
@@ -12612,7 +13032,7 @@ def test_link_confirm_onsubmit_is_valid_js_with_quoted_names(event_import_client
         date_to=None,
         level='региональные',
         sport='Лыжи',
-        url='',
+        links=[],
     )
 
     _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
@@ -12632,7 +13052,7 @@ def test_batch_apply_confirm_onsubmit_is_valid_js(event_import_client: SanicTest
     storage = app.ctx.storage
     make_null_participation(storage, comp_name='Спартакиада „ОУВООО"', date=datetime(2026, 6, 10))
     storage.create_calendar_event(
-        name='Спартакиада „ОУВООО"', date='2026-06-10T00:00:00', date_to=None, level='', sport='', url=''
+        name='Спартакиада „ОУВООО"', date='2026-06-10T00:00:00', date_to=None, level='', sport='', links=[]
     )
 
     _, response = event_import_client.get('/admin/maintenance/calendar-links', headers=get_auth_headers())

@@ -181,10 +181,45 @@
                     {% endfor %}
                 </datalist>
             </div>
-            <div class="col-md-6">
-                <label class="label" for="link-new-url">Ссылка</label>
-                <input class="form-control" id="link-new-url" name="url" type="text"
-                    placeholder="https://… — положение, регламент">
+            {# Repeater ссылок соревнования (Multiple Event Links): 0..N пар
+               «Название + URL», строки управляются обработчиком data-links-add /
+               data-links-remove в script.js; форма создания события пустая. #}
+            <div class="col-12" data-links-field>
+                <span class="label d-block">Ссылки</span>
+                <div class="text-muted small mb-2">Необязательно: положение, фото, регламент — откроются со страницы соревнования</div>
+                <div class="d-flex flex-column gap-2" data-links-rows>
+                    <div class="row g-2 align-items-center" data-links-row>
+                        <div class="col-md-4">
+                            <input class="form-control" type="text" name="link_label" value=""
+                                placeholder="Название (например: Положение)" aria-label="Название ссылки" maxlength="200">
+                        </div>
+                        <div class="col">
+                            <input class="form-control" type="text" name="link_url" value="" placeholder="https://…"
+                                aria-label="Адрес ссылки" autocomplete="off" inputmode="url">
+                        </div>
+                        <div class="col-auto">
+                            <button class="btn btn-sm btn-outline-danger" type="button" data-links-remove
+                                aria-label="Удалить ссылку" title="Удалить ссылку">Удалить</button>
+                        </div>
+                    </div>
+                </div>
+                <template data-links-row-template>
+                    <div class="row g-2 align-items-center" data-links-row>
+                        <div class="col-md-4">
+                            <input class="form-control" type="text" name="link_label" value=""
+                                placeholder="Название (например: Положение)" aria-label="Название ссылки" maxlength="200">
+                        </div>
+                        <div class="col">
+                            <input class="form-control" type="text" name="link_url" value="" placeholder="https://…"
+                                aria-label="Адрес ссылки" autocomplete="off" inputmode="url">
+                        </div>
+                        <div class="col-auto">
+                            <button class="btn btn-sm btn-outline-danger" type="button" data-links-remove
+                                aria-label="Удалить ссылку" title="Удалить ссылку">Удалить</button>
+                        </div>
+                    </div>
+                </template>
+                <button class="btn btn-sm btn-outline-secondary mt-2" type="button" data-links-add>+ Добавить ссылку</button>
             </div>
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Создать и связать</button>
