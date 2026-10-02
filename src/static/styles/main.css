@@ -1179,6 +1179,96 @@ html.hints-off .ui-hint {
     font-size: var(--fs-sm);
 }
 
+/* Мульти-фильтры карточки главной (institute/group/sport/level):
+   dropdown с чекбоксами внутри основной GET-формы. Открытие/закрытие —
+   собственный JS (класс .show), без Bootstrap data-api. Всё — на
+   токенах темы, тёмная тема наследуется (как .combobox-dropdown). */
+.index-multi .dropdown-toggle {
+    display: flex;
+    align-items: center;
+}
+
+/* Подпись триггера («Институт» / «Институт: N») обрезается многоточием,
+   каретка Bootstrap остаётся прижатой к правому краю. */
+.index-multi__value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Позиционирование меню — самодостаточное: у bootstrap.min.css top/left
+   есть только у .dropdown-menu[data-bs-popper], а Popper в бандле нет и
+   атрибут на меню не ставится. Селектор .index-multi .index-multi__menu
+   специфичнее .dropdown-menu, значения z-index/margin-top — наши.
+   z-index — как у .combobox-dropdown: над закреплённой колонкой действий. */
+.index-multi .index-multi__menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 1060;
+    min-width: 16rem;
+    max-width: calc(100vw - 2.5rem);
+    margin-top: 0.125rem;
+    padding: 0.25rem 0;
+}
+
+/* Шапка меню «Выбрано: N» + локальный «Сбросить»: сама пустая (оба
+   элемента d-none) высоты не занимает; разделитель — на списке. */
+.index-multi__count {
+    padding: 0.25rem 0.5rem 0.25rem 0.75rem;
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+}
+
+.index-multi__clear {
+    margin-right: 0.25rem;
+    padding: 0.125rem 0.5rem;
+    font-size: var(--fs-xs);
+}
+
+.index-multi__list {
+    max-height: 18rem;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+
+/* Опция — чекбокс с переносом строк (длинные названия институтов),
+   hover как у пунктов справочника. */
+.index-multi__option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 0;
+    padding: 0.25rem 0.75rem;
+    white-space: normal;
+    cursor: pointer;
+    border-radius: 0;
+}
+
+.index-multi__option:hover {
+    background-color: var(--surface-hover);
+}
+
+.index-multi__option .form-check-input {
+    flex: none;
+    margin: 0.2rem 0 0;
+}
+
+.index-multi__option .form-check-label {
+    min-width: 0;
+}
+
+/* Пустышки: «справочник пуст» (рендер сервера) и «сужение не оставило
+   групп» (JS по выбранным институтам). */
+.index-multi__empty,
+.index-multi__narrow-empty {
+    padding: 0.25rem 0.75rem;
+    color: var(--text-3);
+    white-space: normal;
+}
+
 /* Пагинация: .pager прототипа; активная страница — акцентная, «дырки» —
    многоточием. Кнопки-ссылки ведут на страницу с сохранением фильтров. */
 .pager {

@@ -105,17 +105,34 @@ INDEX_STATUS_FILTERS: Sequence[tuple[str, str]] = (
 INDEX_STATUS_KEYS = {key for key, _ in INDEX_STATUS_FILTERS}
 
 
-def parse_index_filters(args: dict) -> tuple[dict[str, str], str | None]:
+def parse_index_multi_values(args: dict, key: str) -> list[str]:
+    """Повторённые GET-параметры мульти-фильтра главной (institute/group/
+    sport/level): точные значения справочников как есть, каждое strip,
+    пустые отбрасываются, дубли схлопываются с сохранением порядка первого
+    вхождения. Одиночное значение — список из одного (легаси-URL)."""
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_value in args.get(key, []):
+        value = str(raw_value).strip()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return values
+
+
+def parse_index_filters(args: dict) -> tuple[dict[str, object], str | None]:
     """Серверные фильтры главной (прототип 02) из GET-параметров.
 
-    ФИО — подстрока; институт/вид спорта/уровень — точное совпадение;
-    даты — дд.мм.гггг (тот же формат, что в фильтрах отчёта). Возвращает
-    сырые значения (для переотображения в форме) и текст ошибки при
-    некорректной дате. Статус обрабатывает маршрут — он ролевой.
+    ФИО — подстрока (casefold на стороне storage); институт/группа/вид
+    спорта/уровень — точные значения справочников, повторённые параметры =
+    мульти-выбор (OR внутри фильтра, AND между фильтрами); даты —
+    дд.мм.гггг (тот же формат, что в фильтрах отчёта). Возвращает сырые
+    значения (для переотображения в форме) и текст ошибки при некорректной
+    дате. Статус обрабатывает маршрут — он ролевой.
     """
-    filters: dict[str, str] = {}
-    for key in ('name', 'institute', 'sport', 'level'):
-        filters[key] = (get_param(args, key) or '').strip()
+    filters: dict[str, object] = {'name': (get_param(args, 'name') or '').strip()}
+    for key in ('institute', 'group', 'sport', 'level'):
+        filters[key] = parse_index_multi_values(args, key)
     for key in ('date_from', 'date_to'):
         raw_value = (get_param(args, key) or '').strip()
         if raw_value:
@@ -166,14 +183,44 @@ def pager_items(current: int, total: int) -> list[dict]:
     return items
 
 
-def build_index_query(filters: dict[str, str], per_page: int) -> str:
+def build_index_query(filters: dict[str, object], per_page: int) -> str:
     """GET-параметры главной без page: для ссылок пагинации (page добавит
     шаблон/маршрут) и селекта «Показывать по» (он ставит per_page сам).
-    Пустые значения и дефолтный per_page в URL не попадают — ссылки чище."""
+    Пустые значения и дефолтный per_page в URL не попадают — ссылки чище.
+    doseq: мульти-фильтры — повторённые ключи (?institute=A&institute=B),
+    без doseq пагинация и «Показывать по» теряли бы часть выбора."""
     params = {key: value for key, value in filters.items() if value}
     if per_page != INDEX_DEFAULT_PER_PAGE:
         params['per_page'] = str(per_page)
-    return urlencode(params)
+    return urlencode(params, doseq=True)
+
+
+def index_multi_control(
+    key: str,
+    label: str,
+    options: Sequence[str],
+    selected: Sequence[str],
+    institutes_by_group: dict[str, Sequence[str]] | None = None,
+) -> dict:
+    """Контекст одного мульти-фильтра главной (карточка фильтров).
+
+    Опции рендера = справочник ∪ текущие выбранные: unknown-значение (его
+    нет в справочнике — например, скрытое или удалённое) не ошибка и даёт
+    0 записей, но обязано переотображаться выбранным. У опций групп —
+    институты справочника (data-institutes для JS-сужения групп)."""
+    known = set(options)
+    values = [*options, *(value for value in selected if value not in known)]
+    selected_set = set(selected)
+    option_items = [
+        {
+            'value': value,
+            'checked': value in selected_set,
+            'unknown': value not in known,
+            'institutes': list((institutes_by_group or {}).get(value, ())),
+        }
+        for value in values
+    ]
+    return {'key': key, 'label': label, 'options': option_items, 'selected': list(selected)}
 
 
 def build_link_bindings(custom_fields: Sequence[CustomField]) -> dict[str, str]:
@@ -624,6 +671,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             identity_mode=identity_mode,
             name=index_filters['name'],
             institute=index_filters['institute'],
+            group=index_filters['group'],
             sport=index_filters['sport'],
             level=index_filters['level'],
             review_status=index_filters['status'],
@@ -653,6 +701,21 @@ def register(app: Sanic) -> None:  # noqa: C901
                 number = item['page']
                 pager.append({'label': number, 'url': page_url(number), 'active': number == page})
 
+        # Карточка фильтров (мульти-выбор): опции — справочники, группы —
+        # плоский список + карта «группа → институты» для data-institutes
+        # (JS сужает группы по выбранным институтам). Карточка вне
+        # content-wrapper: карта в data-атрибуте таблицы ей недоступна,
+        # дублируем на самой карточке.
+        levels = storage.get_level_names()
+        sport_options = storage.list_catalog('sport')
+        institute_options = storage.list_catalog('institute')
+        groups_by_institute = storage.get_group_options_by_institute()
+        group_options = sorted({group for groups in groups_by_institute.values() for group in groups})
+        institutes_by_group: dict[str, list[str]] = {}
+        for institute, groups in groups_by_institute.items():
+            for group_value in groups:
+                institutes_by_group.setdefault(group_value, []).append(institute)
+
         return await render(
             template_name=jinja_env.get_template('index.html'),
             context={
@@ -670,10 +733,18 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'is_admin': user_is_admin(request),
                 'users': storage.list_users() if user_is_admin(request) else [],
                 'user_roles': USER_ROLES,
-                'levels': storage.get_level_names(),
-                'sport_options': storage.list_catalog('sport'),
-                'institute_options': storage.list_catalog('institute'),
-                'groups_by_institute': storage.get_group_options_by_institute(),
+                'levels': levels,
+                'sport_options': sport_options,
+                'institute_options': institute_options,
+                'groups_by_institute': groups_by_institute,
+                # Мульти-фильтры карточки: institute/group/sport/level.
+                'index_multis': (
+                    index_multi_control('institute', 'Институт', institute_options, index_filters['institute']),
+                    index_multi_control('group', 'Группа', group_options, index_filters['group'], institutes_by_group),
+                    index_multi_control('sport', 'Вид спорта', sport_options, index_filters['sport']),
+                    index_multi_control('level', 'Уровень', levels, index_filters['level']),
+                ),
+                'index_groups_by_institute': groups_by_institute,
                 # «Статус»-колонка видна, если у пользователя есть хоть одна
                 # неподтверждённая запись — независимо от страницы и фильтра.
                 'has_unapproved': storage.count_competitions_filtered(
@@ -692,7 +763,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 # Композиция главной (прототип 02): фильтры, счётчик, пагинация.
                 'index_filters': index_filters,
                 'status_filter_options': INDEX_STATUS_FILTERS,
-                'index_filter_query': urlencode({key: value for key, value in index_filters.items() if value}),
+                'index_filter_query': urlencode(
+                    {key: value for key, value in index_filters.items() if value}, doseq=True
+                ),
                 'index_is_filtered': any(index_filters.values()),
                 'total_count': total_count,
                 'shown_count': len(competitions),

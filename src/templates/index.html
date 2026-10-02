@@ -42,41 +42,64 @@
 </div>
 {% endif %}
 
+{# Мульти-фильтр главной (dropdown с чекбоксами): повторённые
+   GET-параметры, OR внутри фильтра. Меню открывает собственный JS
+   (script.js, initIndexMultiSelects) — БЕЗ Bootstrap Dropdown: бандл
+   bootstrap.min.js не включает Popper, data-api падает в _createPopper.
+   Чекбоксы лежат в основной GET-форме —
+   нативная сериализация работает и без JS (checked рендерит сервер).
+   Unknown-выбранное (нет в справочнике) переотображается выбранным.
+   У групп — data-institutes (сужение по институтам, JS) и карта
+   институт → группы на самом контроле: карточка вне content-wrapper,
+   data-атрибут таблицы ей недоступен. #}
+{% macro index_multi_column(control, groups_map=None) -%}
+<div class="col-6 col-md-2">
+    <div class="form-label" id="index-filter-{{ control.key }}-label">{{ control.label }}</div>
+    <div class="dropdown index-multi" data-filter-key="{{ control.key }}" data-label="{{ control.label }}"
+         {% if control.key == 'group' %}data-groups-by-institute='{{ groups_map | tojson if groups_map is not none else "{}" }}'{% endif %}>
+        <button type="button" class="btn btn-outline-secondary w-100 text-start dropdown-toggle"
+                aria-expanded="false"
+                aria-labelledby="index-filter-{{ control.key }}-label"
+                title="{{ control.selected | join(', ') }}">
+            <span class="index-multi__value">{{ control.label }}{% if control.selected %}: {{ control.selected | length }}{% endif %}</span>
+        </button>
+        <div class="dropdown-menu index-multi__menu">
+            <span class="index-multi__count{% if not control.selected %} d-none{% endif %}">Выбрано: {{ control.selected | length }}</span>
+            <button type="button" class="btn btn-link btn-sm index-multi__clear{% if not control.selected %} d-none{% endif %}">Сбросить</button>
+            <div class="index-multi__list">
+                {% for option in control.options %}
+                <label class="dropdown-item-text form-check index-multi__option{% if option.unknown %} text-muted{% endif %}"
+                       {% if option.institutes %}data-institutes="{{ option.institutes | join(',') }}"{% endif %}
+                       {% if option.unknown %}title="Значение отсутствует в справочнике"{% endif %}>
+                    <input class="form-check-input" type="checkbox" name="{{ control.key }}" value="{{ option.value }}"
+                           {% if option.checked %}checked{% endif %}>
+                    <span class="form-check-label text-wrap">{{ option.value }}</span>
+                </label>
+                {% else %}
+                <div class="index-multi__empty dropdown-item-text">Нет доступных значений</div>
+                {% endfor %}
+                {% if control.key == 'group' %}
+                {# Пустышка JS-сужения: показывается, когда выбранные институты
+                   не оставляют ни одной видимой группы. #}
+                <div class="index-multi__narrow-empty dropdown-item-text d-none">Нет групп у выбранных институтов</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{%- endmacro %}
+
 <div class="card shadow-sm mb-4 index-filter-card">
     <div class="card-body">
         <form class="row g-3 align-items-end" method="get" action="/">
-            <div class="col-12 col-md-3">
+            <div class="col-12 col-md-4">
                 <label class="form-label" for="index-filter-name">ФИО</label>
-                <input class="form-control" id="index-filter-name" name="name" type="text"
+                <input class="form-control" id="index-filter-name" name="name" type="text" data-fio-autocomplete
                        placeholder="Начните вводить…" autocomplete="off" value="{{ index_filters.name }}">
             </div>
-            <div class="col-6 col-md-2">
-                <label class="form-label" for="index-filter-institute">Институт</label>
-                <select class="form-select" id="index-filter-institute" name="institute">
-                    <option value="">Все</option>
-                    {% for value in institute_options %}
-                    <option value="{{ value }}"{% if index_filters.institute == value %} selected{% endif %}>{{ value }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-6 col-md-2">
-                <label class="form-label" for="index-filter-sport">Вид спорта</label>
-                <select class="form-select" id="index-filter-sport" name="sport">
-                    <option value="">Все</option>
-                    {% for value in sport_options %}
-                    <option value="{{ value }}"{% if index_filters.sport == value %} selected{% endif %}>{{ value }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-6 col-md-2">
-                <label class="form-label" for="index-filter-level">Уровень</label>
-                <select class="form-select" id="index-filter-level" name="level">
-                    <option value="">Все</option>
-                    {% for value in levels %}
-                    <option value="{{ value }}"{% if index_filters.level == value %} selected{% endif %}>{{ value }}</option>
-                    {% endfor %}
-                </select>
-            </div>
+            {% for control in index_multis %}
+            {{ index_multi_column(control, index_groups_by_institute if control.key == 'group' else None) }}
+            {% endfor %}
             {% if is_moderator %}
             {# Статус — инструмент модератора; сервер параметр других ролей игнорирует. #}
             <div class="col-6 col-md-2">
@@ -109,7 +132,7 @@
                             aria-label="Выбрать дату из календаря" title="Выбрать дату из календаря">📅</button>
                 </div>
             </div>
-            <div class="col-12 col-md-4 d-flex gap-2">
+            <div class="col-12 col-md-3 d-flex gap-2">
                 <button class="btn btn-primary" type="submit">Применить</button>
                 <a class="btn btn-outline-secondary index-filter-reset" href="/">Сбросить</a>
             </div>
