@@ -32,6 +32,9 @@ SQLite (WAL), Jinja2, vanilla JS, Bootstrap.
   хуками, не трогать вовсе; попали в git однажды — вычищены.
 - Работай ТОЛЬКО в своём worktree, созданном от `dev`:
   `git worktree add ../competitions-<роль> -b feature/<имя> dev`
+- Параллельная работа: один чат = один worktree = один писатель. В чужие
+  worktree не пишем (включая основной checkout — он может быть занят чужой
+  WIP-веткой); свой worktree никому не передаём.
 - Коммить только в свою feature-ветку. В `dev`/`main` не лезешь — мержит
   аналитик после ревью.
 - `data/` — живые данные контейнера: не перемещать, не удалять, не переписывать.
@@ -41,6 +44,12 @@ SQLite (WAL), Jinja2, vanilla JS, Bootstrap.
 
 - `./venv/bin/python -m pytest src/ -q`
 - `./venv/bin/pre-commit run --all-files`
+
+Полный pytest требует явно заданного тестового AUTH-окружения:
+`AUTH_SECRET_KEY`, `AUTH_ADMIN_PASSWORD`, `AUTH_EDITOR_PASSWORD`,
+`AUTH_VIEWER_USERNAME`, `AUTH_VIEWER_PASSWORD` (синтетические значения,
+не прод-секреты). Без viewer-учётки часть permission-тестов ложно падает
+даже на чистом baseline — такие падения не являются регрессией.
 
 Локальный запуск (нужен `.env` со случайным AUTH_SECRET_KEY; дев-пароли:
 admin/dev-admin-pass, editor/dev-editor-pass, viewer/dev-viewer-pass):
