@@ -528,7 +528,11 @@ class ParticipationsMixin:
         owner_id: int | None = None,
     ):
         with self._lock:
-            records = competition_insert_records(competitions, review_status, owner_id)
+            records = competition_insert_records(
+                self._fill_admission_year_snapshots(list(competitions)),
+                review_status,
+                owner_id,
+            )
             self.connection.executemany(COMPETITION_INSERT_SQL, records)
             self.connection.commit()
 
@@ -557,7 +561,13 @@ class ParticipationsMixin:
         with self._lock:
             try:
                 if new_competitions:
-                    records = competition_insert_records(new_competitions, review_status, owner_id)
+                    # Снимок года поступления — ДО синхронизации справочников:
+                    # пары институт+группа из этого же импорта ещё не существуют
+                    # в учебных данных → у записей остаётся NULL (заполнит
+                    # backfill/последующие вставки; наполнять метаданные из
+                    # парсера названия автоматически нельзя).
+                    filled = self._fill_admission_year_snapshots(list(new_competitions))
+                    records = competition_insert_records(filled, review_status, owner_id)
                     self.connection.executemany(COMPETITION_INSERT_SQL, records)
                 self._sync_catalogs_from_records()
                 self.connection.commit()
@@ -694,7 +704,8 @@ class ParticipationsMixin:
                 )
                 self._event_participation_batch_guard(inserts, live_identities, live_contents, collision_custom_keys)
                 if inserts:
-                    records = competition_insert_records(inserts, review_status, owner_id)
+                    filled = self._fill_admission_year_snapshots(list(inserts))
+                    records = competition_insert_records(filled, review_status, owner_id)
                     self.connection.executemany(COMPETITION_INSERT_SQL, records)
                 for record_id, position, result in updates or ():
                     cursor = self.connection.execute(
@@ -722,6 +733,21 @@ class ParticipationsMixin:
             )
             self.connection.commit()
             return cursor.rowcount
+
+    def _fill_admission_year_snapshots(self, competitions: list[Competition]) -> list[Competition]:
+        """Заполнить NULL-снимки года поступления перед вставкой записей.
+
+        Course/Education Phase A: источник — ТОЛЬКО учебные данные группы
+        (строгое разрешение пары институт+группа, resolve_group_admission_
+        year). Парсер названий здесь НЕ работает и никогда не будет: он
+        предзаполнение формы и backfill-классификация, не доменная истина.
+        Уже заданное значение не перезаписывается; пара без учебных данных
+        остаётся NULL (фолбэк отображения — легаси course).
+        """
+        for item in competitions:
+            if item.admission_year is None:
+                item.admission_year = self.resolve_group_admission_year(item.institute, item.group)
+        return competitions
 
     def _sync_catalogs_from_records(self) -> None:
         """Довести справочники до значений, реально присутствующих в записях.
@@ -829,6 +855,8 @@ class ParticipationsMixin:
         result, calendar_event_id) нужны общему _row_to_competition;
         в сам xlsx-архив они НЕ попадают (competition_to_export_row
         вырезает) — ограничение pre-wipe архива см. docs/data-model.md.
+        Course/Education Phase A: admission_year — так же внутренняя
+        колонка, в архив не попадает (легаси-колонка course остаётся).
         """
         with self._lock:
             rows = self.connection.execute(
@@ -837,7 +865,7 @@ class ParticipationsMixin:
                     id, student_id, student_name, student_sex, institute, "group", course,
                     sport, date, date_to, level, name, position, created_at, extra_data,
                     review_status, owner_id, review_comment, student_ref_id,
-                    discipline, result, calendar_event_id
+                    discipline, result, calendar_event_id, admission_year
                 FROM competitions
                 WHERE date < ?
                 ORDER BY created_at ASC

@@ -44,3 +44,10 @@ class Competition(Student):
     discipline: str | None = Field(default=None)
     result: str | None = Field(default=None)
     calendar_event_id: int | None = Field(default=None)
+    # Course / Education, Phase A: замороженный снимок года поступления
+    # участия. Заполняется storage при создании записи (строгое разрешение
+    # пары институт+группа по учебным данным справочника, см.
+    # _fill_admission_year_snapshots) и backfill'ем лет; update_competition
+    # его НЕ меняет и НЕ дополняет. Отображение курса записи: сначала этот
+    # снимок (производный курс), NULL — фолбэк на легаси course.
+    admission_year: int | None = Field(default=None)

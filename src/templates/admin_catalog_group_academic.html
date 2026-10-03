@@ -1,0 +1,59 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Учебные данные группы{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/catalogs">← К справочникам</a>
+{% endblock admin_back %}
+{% block admin_description %}
+    Уровень образования, год поступления и длительность обучения группы. От года
+    поступления считается текущий курс студентов группы — в карточке студента и
+    новых записях о соревнованиях.
+{% endblock admin_description %}
+
+{% block admin_content %}
+
+{# Course / Education, Phase A. Год поступления из названия группы — ТОЛЬКО
+   предзаполнение (подсказка), сохраняется только явное значение админа. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Группа «{{ group_value }}» — институт «{{ institute_value }}»</h5>
+        <form action="/admin/catalogs/group/{{ value_id }}/academic" class="row g-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="group-academic-level">Уровень образования</label>
+                <select class="form-select" id="group-academic-level" name="education_level_id">
+                    <option value="">не задан</option>
+                    {% for level in levels %}
+                    <option value="{{ level.id }}" {% if stored and stored.education_level_id == level.id %}selected{% endif %}>{{ level.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="group-academic-year">Год поступления</label>
+                {# Сохранённое значение приоритетнее предзаполнения парсером. #}
+                {% set year_value = stored.admission_year if (stored and stored.admission_year is not none) else suggested_admission_year %}
+                <input class="form-control" id="group-academic-year" max="{{ current_year }}" min="1980"
+                       name="admission_year" type="number"
+                       {% if year_value is not none %}value="{{ year_value }}"{% endif %}>
+                {% if suggested_admission_year is not none %}
+                <div class="form-text">Предложено автоматически по названию группы — проверьте и исправьте при необходимости.</div>
+                {% endif %}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="group-academic-duration">Длительность обучения (лет)</label>
+                <input class="form-control" id="group-academic-duration" max="8" min="1"
+                       name="duration_years_override" type="number"
+                       {% if stored and stored.duration_years_override is not none %}value="{{ stored.duration_years_override }}"{% endif %}>
+                <div class="form-text">{{ duration_hint }}</div>
+            </div>
+            <div class="col-12">
+                <div class="text-muted mb-2">{{ course_preview }}</div>
+                <button class="btn btn-primary" type="submit">Сохранить</button>
+                <a class="btn btn-outline-secondary" href="/admin/catalogs">Отмена</a>
+                <div class="form-text ui-hint">От года поступления считается текущий курс студентов группы (учебный год начинается 1 сентября).</div>
+            </div>
+        </form>
+    </div>
+</div>
+
+{% endblock admin_content %}

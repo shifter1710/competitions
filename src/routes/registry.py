@@ -35,6 +35,7 @@ from src.auth import user_is_athlete
 from src.auth import user_is_moderator
 from src.auth import user_owns_record
 from src.auth import USER_ROLES
+from src.education import derive_course
 from src.files import ATTACHMENT_MAX_SIZE
 from src.files import attachments_dir
 from src.files import detect_attachment_type
@@ -234,6 +235,31 @@ def build_link_bindings(custom_fields: Sequence[CustomField]) -> dict[str, str]:
         if field.field_type == 'url' and field.link_target and field.active:
             bindings[field.link_target] = field.key
     return bindings
+
+
+def build_index_course_cells(competitions: Sequence[Competition]) -> dict[str, dict]:
+    """Course/Education Phase A: ячейки колонки «Курс» реестра с производным
+    курсом по снимку года поступления.
+
+    У записи есть admission_year → показывается производный курс НА ДАТУ
+    СОРЕВНОВАНИЯ (ok — число; future — «—» с подсказкой). Записи без снимка
+    в словарь не попадают: шаблон показывает легаси competition.course как
+    раньше (включая текстовые значения вроде «Выпускник 2025/26»).
+    Расчёт живёт только в src.education.derive_course.
+    """
+    cells: dict[str, dict] = {}
+    for competition in competitions:
+        if competition.admission_year is None:
+            continue
+        derived = derive_course(competition.admission_year, competition.date.date())
+        if derived['status'] == 'ok':
+            cells[competition.record_id] = {'value': str(derived['course'])}
+        elif derived['status'] == 'future':
+            cells[competition.record_id] = {
+                'value': '—',
+                'title': 'Год поступления позже даты соревнования',
+            }
+    return cells
 
 
 # Конфликт-режим импорта (№6/№8, docs/data-model-decisions.md «Конфликт-режим
@@ -724,6 +750,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'custom_fields': custom_fields,
                 # №24: карта «целевая колонка → ключ link-поля» для рендера.
                 'link_bindings': build_link_bindings(custom_fields),
+                # Course/Education Phase A: ячейки производного курса по
+                # снимку года поступления (нет снимка — легаси course).
+                'course_cells': build_index_course_cells(competitions),
                 'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
                 'field_type_options': FIELD_TYPE_OPTIONS,
                 'can_write': user_can_write(request),

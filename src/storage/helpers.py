@@ -94,7 +94,8 @@ COMPETITION_SELECT_SQL = '''
         student_ref_id,
         discipline,
         result,
-        calendar_event_id
+        calendar_event_id,
+        admission_year
     FROM competitions
     '''
 
@@ -126,8 +127,9 @@ COMPETITION_INSERT_SQL = '''
         student_ref_id,
         discipline,
         result,
-        calendar_event_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        calendar_event_id,
+        admission_year
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
 
 
@@ -269,6 +271,9 @@ def competition_insert_records(
             item.discipline,
             item.result,
             item.calendar_event_id,
+            # Course/Education Phase A: снимок года поступления; storage
+            # заполняет его до вставки (_fill_admission_year_snapshots).
+            item.admission_year,
         )
         for item in competitions
     ]

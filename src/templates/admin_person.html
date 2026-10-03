@@ -70,6 +70,46 @@
     </div>
 </div>
 
+{# Course / Education, Phase A: read-only сводка образования из учебных данных
+   группы справочника. Рендерится ТОЛЬКО когда пара институт+группа студента
+   резолвится и у группы заданы учебные данные (education is None — карточки
+   нет, ошибки не бывает). Поле «Курс» выше — легаси-поле карточки, не тронуто. #}
+{% if education %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Образование</h5>
+        <div class="text-muted mb-3">Данные берутся из группы в справочнике; курс рассчитывается автоматически — учебный год начинается 1 сентября.</div>
+        <dl class="row mb-0">
+            <dt class="col-sm-4 fw-normal text-muted">Уровень образования</dt>
+            <dd class="col-sm-8">{% if education.level_name %}{{ education.level_name }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
+            <dd class="col-sm-8">{{ student.institute }} · {{ student.group_name }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Год поступления</dt>
+            <dd class="col-sm-8">{% if education.admission_year %}{{ education.admission_year }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Длительность обучения (лет)</dt>
+            <dd class="col-sm-8">{% if education.effective_duration_years %}{{ education.effective_duration_years }}{% else %}<span class="text-muted">не задана</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Текущий курс</dt>
+            <dd class="col-sm-8">
+                {% if education.course %}
+                {{ education.course }} курс <span class="text-muted small">учебный год {{ education.academic_year_label }}</span>
+                {% if education.probably_finished %}
+                <span class="badge text-bg-warning">Предположительно обучение завершено</span>
+                {% endif %}
+                {% else %}
+                <span class="text-muted">не рассчитывается</span>
+                {% endif %}
+            </dd>
+        </dl>
+        {% if education.probably_finished %}
+        <div class="form-text ui-hint mt-2">
+            Курс больше длительности обучения — проверьте год поступления или длительность
+            в учебных данных группы. Карточка не архивируется автоматически.
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 {# Псевдонимы: другие написания ФИО, встречающиеся в записях и импорте. #}
 <div class="card shadow-sm">
     <div class="card-body">

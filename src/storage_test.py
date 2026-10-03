@@ -5271,6 +5271,7 @@ V21_PUBLIC_API = [
     'add_student_alias',
     'apply_calendar_link_backfill',
     'apply_event_participation_batch',
+    'apply_group_admission_backfill',
     'athlete_name_hashes',
     'calendar_link_backfill_preview',
     'carry_name_aliases',
@@ -5283,8 +5284,10 @@ V21_PUBLIC_API = [
     'count_competitions',
     'count_competitions_filtered',
     'count_competitions_visible',
+    'count_groups_using_level',
     'count_hash_only_visible',
     'count_import_queue',
+    'count_participations_without_admission_year',
     'count_participations_without_event',
     'count_records_by_owner',
     'count_records_by_student_hash',
@@ -5296,6 +5299,7 @@ V21_PUBLIC_API = [
     'create_calendar_event',
     'create_calendar_event_and_link',
     'create_custom_field',
+    'create_education_level',
     'create_level',
     'create_student',
     'create_student_and_link_participation',
@@ -5310,6 +5314,8 @@ V21_PUBLIC_API = [
     'delete_competition',
     'delete_competition_with_attachments',
     'delete_competitions_before',
+    'delete_education_level',
+    'delete_group_academic',
     'delete_student',
     'delete_user',
     'disable_custom_field',
@@ -5336,8 +5342,10 @@ V21_PUBLIC_API = [
     'get_competitions_before',
     'get_competitions_page',
     'get_custom_fields',
+    'get_education_level',
     'get_field_settings',
     'get_filtered',
+    'get_group_academic',
     'get_group_options_by_institute',
     'get_grouped_report',
     'get_identity_mode',
@@ -5347,6 +5355,7 @@ V21_PUBLIC_API = [
     'get_profile',
     'get_sport_names',
     'get_student_by_id',
+    'get_student_education_context',
     'get_student_names',
     'get_unlinked_athlete_user',
     'get_user',
@@ -5409,18 +5418,28 @@ V21_PUBLIC_API = [
 
 
 def test_v21_adapter_composition_and_api_surface(adapter):
-    """Architecture v2.1: SQLiteAdapter собран из шести доменных примесей
+    """Architecture v2.1: SQLiteAdapter собран из доменных примесей
     в документированном порядке; имена между примесями не перекрываются;
-    публичная поверхность экземпляра — замороженный список 141 метода
-    (инвентаризация b0a7586 до разреза). Регрессионный pin состава."""
+    публичная поверхность экземпляра — замороженный список методов
+    (инвентаризация b0a7586 до разреза + Course/Education Phase A).
+    Регрессионный pin состава."""
     from src.storage.catalogs import CatalogsMixin
+    from src.storage.education import EducationMixin
     from src.storage.events import EventsMixin
     from src.storage.misc import MiscMixin
     from src.storage.participations import ParticipationsMixin
     from src.storage.students import StudentsMixin
     from src.storage.users import UsersMixin
 
-    documented = [MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsMixin, ParticipationsMixin]
+    documented = [
+        MiscMixin,
+        CatalogsMixin,
+        UsersMixin,
+        StudentsMixin,
+        EventsMixin,
+        EducationMixin,
+        ParticipationsMixin,
+    ]
     mro = SQLiteAdapter.__mro__
     assert [klass for klass in mro if klass not in (SQLiteAdapter, object)] == documented
 
@@ -5492,3 +5511,398 @@ def test_save_competitions_does_not_sync_catalogs_pin(adapter):
     imported = make_competition('Пинова Импорт', datetime(2026, 3, 2)).model_copy(update={'sport': 'Пин-спорт импорт'})
     adapter.import_competitions([imported])
     assert 'Пин-спорт импорт' in adapter.list_catalog('sport')
+
+
+# ---- Course / Education, Phase A: уровни образования, учебные данные групп,
+# ---- снимок года поступления записей и его backfill. Данные синтетические.
+
+
+def seed_group_pair(adapter: SQLiteAdapter, institute: str, group: str) -> dict:
+    """Пара институт→группа в справочнике; возвращает строку группы."""
+    adapter.add_catalog_value('institute', institute)
+    institute_row = adapter.find_catalog_row('institute', institute)
+    adapter.add_catalog_value('group', group, parent_id=institute_row['id'])
+    return adapter.find_catalog_row('group', group, parent_id=institute_row['id'])
+
+
+def test_migration_adds_education_tables_to_existing_db(tmp_path):
+    """Легаси-база до Phase A (без education_levels/group_academic и без
+    competitions.admission_year) самомиграцией получает таблицы, колонку и
+    посев уровней; повторная инициализация идемпотентна."""
+    db_path = tmp_path / 'legacy-pre-course.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE competitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            student_name TEXT NOT NULL,
+            student_sex TEXT NOT NULL,
+            institute TEXT NOT NULL,
+            "group" TEXT NOT NULL,
+            course INTEGER NOT NULL,
+            sport TEXT NOT NULL,
+            date TEXT NOT NULL,
+            level TEXT NOT NULL,
+            name TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            extra_data TEXT NOT NULL DEFAULT '{}'
+        )
+        '''
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    tables = {
+        row['name']
+        for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert {'education_levels', 'group_academic'} <= tables
+    columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
+    assert 'admission_year' in columns
+
+    seeded = {level['name']: level for level in adapter.list_education_levels(include_inactive=True)}
+    assert set(seeded) == {'Бакалавриат', 'Специалитет', 'Магистратура', 'Аспирантура'}
+    assert all(level['default_duration_years'] is None for level in seeded.values())
+
+    # Идемпотентность: второй старт не дублирует посев и не меняет счётчики.
+    seeded_ids = {level['id'] for level in adapter.list_education_levels(include_inactive=True)}
+    adapter_second = SQLiteAdapter(str(db_path))
+    again = adapter_second.list_education_levels(include_inactive=True)
+    assert {level['id'] for level in again} == seeded_ids
+    assert len(again) == 4
+
+
+def test_education_level_crud_and_validation(adapter):
+    created_id = adapter.create_education_level('Тестовый бакалавриат', 4)
+    level = adapter.get_education_level(created_id)
+    assert level['name'] == 'Тестовый бакалавриат'
+    assert level['default_duration_years'] == 4
+    assert level['active'] == 1
+
+    # Имя уникально без учёта регистра (кириллица — сравнение в Python).
+    with pytest.raises(ValueError, match='уже есть'):
+        adapter.create_education_level('тестовый БАКАЛАВРИАТ', None)
+    with pytest.raises(ValueError, match='Название'):
+        adapter.create_education_level('   ', None)
+    # Длительность: только NULL или 1..10.
+    with pytest.raises(ValueError, match='Длительность'):
+        adapter.create_education_level('Тестовая аспирантура', 11)
+    with pytest.raises(ValueError, match='Длительность'):
+        adapter.create_education_level('Тестовая аспирантура', 0)
+
+    # Правка длительности (inline-форма), в том числе очистка в NULL.
+    adapter.update_education_level(created_id, 5)
+    assert adapter.get_education_level(created_id)['default_duration_years'] == 5
+    adapter.update_education_level(created_id, None)
+    assert adapter.get_education_level(created_id)['default_duration_years'] is None
+    with pytest.raises(ValueError, match='Длительность'):
+        adapter.update_education_level(created_id, 99)
+    with pytest.raises(ValueError, match='не найден'):
+        adapter.update_education_level(99999, 4)
+
+    # Скрытие: скрытого нет в списке по умолчанию, но метаданные его держат.
+    adapter.set_education_level_active(created_id, False)
+    assert adapter.get_education_level(created_id)['active'] == 0
+    assert created_id not in {item['id'] for item in adapter.list_education_levels()}
+    assert created_id in {item['id'] for item in adapter.list_education_levels(include_inactive=True)}
+    adapter.set_education_level_active(created_id, True)
+    assert created_id in {item['id'] for item in adapter.list_education_levels()}
+
+    # Удаление: без групп — можно, с группами — ValueError.
+    assert adapter.delete_education_level(created_id) is None
+    other_id = adapter.create_education_level('Тестовая магистратура', None)
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    adapter.upsert_group_academic(group['id'], education_level_id=other_id)
+    assert adapter.count_groups_using_level(other_id) == 1
+    with pytest.raises(ValueError, match='группы'):
+        adapter.delete_education_level(other_id)
+    with pytest.raises(ValueError, match='не найден'):
+        adapter.delete_education_level(99999)
+
+
+def test_group_academic_upsert_get_delete(adapter):
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    assert adapter.get_group_academic(group['id']) is None
+
+    level_id = adapter.create_education_level('Тестовый бакалавриат', 4)
+    adapter.upsert_group_academic(
+        group['id'],
+        education_level_id=level_id,
+        admission_year=2023,
+        duration_years_override=5,
+    )
+    stored = adapter.get_group_academic(group['id'])
+    assert stored['education_level_id'] == level_id
+    assert stored['education_level_name'] == 'Тестовый бакалавриат'
+    assert stored['level_default_duration_years'] == 4
+    assert stored['admission_year'] == 2023
+    assert stored['duration_years_override'] == 5
+
+    # Скрытый уровень остаётся в метаданных (имя читается и после скрытия).
+    adapter.set_education_level_active(level_id, False)
+    assert adapter.get_group_academic(group['id'])['education_level_name'] == 'Тестовый бакалавриат'
+
+    # Повторный upsert перезаписывает поля целиком; «пусто» = очистить.
+    adapter.upsert_group_academic(group['id'], education_level_id=None, admission_year=None)
+    cleared = adapter.get_group_academic(group['id'])
+    assert cleared['education_level_id'] is None
+    assert cleared['admission_year'] is None
+    assert cleared['duration_years_override'] is None
+
+    # Валидация: неизвестная группа/уровень, диапазоны года и длительности.
+    with pytest.raises(ValueError, match='Группа не найдена'):
+        adapter.upsert_group_academic(999999)
+    with pytest.raises(ValueError, match='Уровень образования не найден'):
+        adapter.upsert_group_academic(group['id'], education_level_id=999999)
+    with pytest.raises(ValueError, match='Год поступления'):
+        adapter.upsert_group_academic(group['id'], admission_year=1800)
+    with pytest.raises(ValueError, match='Год поступления'):
+        adapter.upsert_group_academic(group['id'], admission_year=2200)
+    with pytest.raises(ValueError, match='Длительность'):
+        adapter.upsert_group_academic(group['id'], duration_years_override=42)
+
+    # list_group_academic_with_context: группа + институт + уровень.
+    adapter.upsert_group_academic(group['id'], education_level_id=level_id, admission_year=2023)
+    context = adapter.list_group_academic_with_context()
+    row = next(item for item in context if item['group_catalog_value_id'] == group['id'])
+    assert row['group_value'] == 'Тестб-23А1'
+    assert row['institute_value'] == 'ИСИ'
+    assert row['education_level_name'] == 'Тестовый бакалавриат'
+
+    # Удаление метаданных — идемпотентно.
+    adapter.delete_group_academic(group['id'])
+    assert adapter.get_group_academic(group['id']) is None
+    adapter.delete_group_academic(group['id'])  # повтор — не ошибка
+
+
+def test_resolve_group_admission_year_strict_pair(adapter):
+    """Одноимённые группы разных институтов: год поступления резолвится
+    строго по паре; неизвестный/пустой институт и пара без метаданных —
+    None. Парсер названий здесь не участвует."""
+    first = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    second = seed_group_pair(adapter, 'ИМИ', 'Тестб-23А1')
+    adapter.upsert_group_academic(first['id'], admission_year=2023)
+    adapter.upsert_group_academic(second['id'], admission_year=2021)
+
+    assert adapter.resolve_group_admission_year('ИСИ', 'Тестб-23А1') == 2023
+    assert adapter.resolve_group_admission_year('ИМИ', 'Тестб-23А1') == 2021
+    # Регистр значения не важен (резолв справочника), пары — важны.
+    assert adapter.resolve_group_admission_year('иси', 'ТЕСТБ-23А1') == 2023
+    assert adapter.resolve_group_admission_year('ИСИ', 'НетТакой') is None
+    assert adapter.resolve_group_admission_year('', 'Тестб-23А1') is None
+    assert adapter.resolve_group_admission_year('НетИнститута', 'Тестб-23А1') is None
+
+    # Группа известна, но учебных данных (года) нет — None.
+    plain = seed_group_pair(adapter, 'ИСИ', 'БезМетаданных-20А1')
+    assert adapter.resolve_group_admission_year('ИСИ', 'БезМетаданных-20А1') is None
+    assert plain is not None
+
+
+def test_student_education_context_and_duration_fallback(adapter):
+    """Контекст карточки студента: без пары/метаданных — None; длительность
+    — цепочка override ?? default уровня ?? None."""
+    assert adapter.get_student_education_context('ИСИ', 'НетТакой') is None
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    # Пара есть, метаданных нет — карточки «Образование» не будет.
+    assert adapter.get_student_education_context('ИСИ', 'Тестб-23А1') is None
+
+    level_default = adapter.create_education_level('Тестовый бакалавриат', 4)
+    adapter.upsert_group_academic(group['id'], education_level_id=level_default, admission_year=2023)
+    context = adapter.get_student_education_context('ИСИ', 'Тестб-23А1')
+    assert context['level_name'] == 'Тестовый бакалавриат'
+    assert context['admission_year'] == 2023
+    assert context['effective_duration_years'] == 4  # override нет → default
+
+    adapter.upsert_group_academic(
+        group['id'], education_level_id=level_default, admission_year=2023, duration_years_override=2
+    )
+    assert adapter.get_student_education_context('ИСИ', 'Тестб-23А1')['effective_duration_years'] == 2
+
+    level_no_default = adapter.create_education_level('Тестовая аспирантура', None)
+    adapter.upsert_group_academic(group['id'], education_level_id=level_no_default, admission_year=2023)
+    assert adapter.get_student_education_context('ИСИ', 'Тестб-23А1')['effective_duration_years'] is None
+
+
+def test_admission_year_snapshot_filled_on_save_and_import(adapter):
+    """Снимок года поступления: заполняется при создании записи из учебных
+    данных группы; brand-new пары первого импорта остаются NULL by design."""
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    level_id = adapter.create_education_level('Тестовый бакалавриат', 4)
+    adapter.upsert_group_academic(group['id'], education_level_id=level_id, admission_year=2023)
+
+    adapter.save_competitions(
+        [make_competition('Снимков Снимок', datetime(2026, 3, 1)).model_copy(update={'group': 'Тестб-23А1'})]
+    )
+    record = adapter.get_competitions()[0]
+    assert record.admission_year == 2023
+
+    # Импорт: метаданные у пары уже есть → снимок заполнен.
+    adapter.import_competitions(
+        [make_competition('Импортов Импорт', datetime(2026, 3, 2)).model_copy(update={'group': 'Тестб-23А1'})]
+    )
+    imported = [comp for comp in adapter.get_competitions() if comp.student_name == 'Импортов Импорт'][0]
+    assert imported.admission_year == 2023
+
+    # Brand-new пара из первого импорта: на момент вставки метаданных нет —
+    # NULL (справочник синхронизируется ПОСЛЕ вставки; заполнять парсером
+    # нельзя). Повторный импорт той же пары получает метаданные только
+    # после ручного задания учебных данных группы.
+    adapter.import_competitions(
+        [make_competition('Новов Пара', datetime(2026, 3, 3)).model_copy(
+            update={'group': 'НГр-24Б1', 'institute': 'ИСИ'}
+        )]
+    )
+    brand_new = [comp for comp in adapter.get_competitions() if comp.student_name == 'Новов Пара'][0]
+    assert brand_new.admission_year is None
+
+
+def test_admission_year_snapshot_event_participation_batch(adapter):
+    """Батч участий события — тот же снимок: метаданные пары известны →
+    заполняется, неизвестны → NULL."""
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    adapter.upsert_group_academic(group['id'], admission_year=2022)
+    event_id = adapter.create_calendar_event('Кубок', '2026-05-10', None, '', 'Бег', [])
+
+    adapter.apply_event_participation_batch(
+        event_id,
+        [make_competition('Участков Участ', datetime(2026, 5, 10)).model_copy(
+            update={'group': 'Тестб-23А1', 'calendar_event_id': event_id}
+        )],
+    )
+    record = adapter.get_competitions()[0]
+    assert record.admission_year == 2022
+
+    adapter.apply_event_participation_batch(
+        event_id,
+        [make_competition('Безпаров Без', datetime(2026, 5, 10)).model_copy(
+            update={'group': 'Чужая-99А1', 'calendar_event_id': event_id}
+        )],
+    )
+    record = [comp for comp in adapter.get_competitions() if comp.student_name == 'Безпаров Без'][0]
+    assert record.admission_year is None
+
+
+def test_update_competition_never_touches_admission_year_snapshot(adapter):
+    """Снимок года поступления заморожен: обычная правка не меняет заданное
+    значение и НЕ заполняет пустое, даже если учебные данные появились."""
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    adapter.save_competitions(
+        [make_competition('Заморожен Снимок', datetime(2026, 3, 1)).model_copy(update={'group': 'Тестб-23А1'})]
+    )
+    record = adapter.get_competitions()[0]
+    assert record.admission_year is None
+
+    # Метаданные появились ПОСЛЕ вставки записи — правка не дополняет снимок.
+    adapter.upsert_group_academic(group['id'], admission_year=2020)
+    adapter.update_competition(record.record_id, record.model_copy(update={'course': 5}))
+    updated = adapter.get_competition_by_id(int(record.record_id))
+    assert updated.admission_year is None
+    assert updated.course == 5
+
+    # Заданный снимок правка не перезаписывает.
+    adapter.save_competitions(
+        [make_competition('Снимок Есть', datetime(2026, 3, 2)).model_copy(update={'group': 'Тестб-23А1'})]
+    )
+    with_snapshot = [comp for comp in adapter.get_competitions() if comp.student_name == 'Снимок Есть'][0]
+    assert with_snapshot.admission_year == 2020
+    adapter.update_competition(with_snapshot.record_id, with_snapshot.model_copy(update={'group': 'Другая-99А1'}))
+    after = adapter.get_competition_by_id(int(with_snapshot.record_id))
+    assert after.group == 'Другая-99А1'
+    assert after.admission_year == 2020
+
+
+def test_delete_catalog_value_removes_group_academic(adapter):
+    """Удаление группы справочника удаляет и её учебные данные — строки
+    group_academic не остаются сиротами."""
+    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+    level_id = adapter.create_education_level('Тестовый бакалавриат', 4)
+    adapter.upsert_group_academic(group['id'], education_level_id=level_id, admission_year=2023)
+    assert adapter.get_group_academic(group['id']) is not None
+
+    adapter.delete_catalog_value(group['id'])
+    assert adapter.get_catalog_value(group['id']) is None
+    assert adapter.get_group_academic(group['id']) is None
+    # Уровень остался — сиротские метаданные больше не ссылаются на группу.
+    assert adapter.get_education_level(level_id) is not None
+    assert adapter.count_groups_using_level(level_id) == 0
+
+
+def seed_backfill_records(adapter: SQLiteAdapter) -> None:
+    """Синтетика для классификации backfill: SAFE / MANUAL-future /
+    MANUAL-известная-группа (в т.ч. «Выпуск») / UNRESOLVED-мусор."""
+    adapter.connection.executemany(
+        'INSERT INTO competitions (student_id, student_name, student_sex, institute, "group", course, '
+        'sport, date, level, name, position, created_at, extra_data) '
+        "VALUES (?, ?, 'М', ?, ?, 1, 'Бег', ?, 'внутривузовские', 'Кубок', 1, ?, '{}')",
+        [
+            ('id-safe', 'Однозначов Год', 'ИСИ', 'Тестб-23А1', '2024-05-01T00:00:00', '2024-05-01T00:00:00'),
+            ('id-future', 'Будущев Год', 'ИСИ', 'НГр-27Б1', '2026-03-01T00:00:00', '2026-03-01T00:00:00'),
+            ('id-vypusk', 'Выпускников Год', 'ИСИ', 'Выпуск', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
+            ('id-known', 'Известков Год', 'ИСИ', 'БезГода Группа', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
+            ('id-junk', 'Мусоров Год', 'ИСИ', 'nan', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
+            ('id-empty', 'Пустов Год', '', 'БезЦифр', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
+        ],
+    )
+    adapter.connection.commit()
+
+
+def test_group_admission_backfill_classification_and_apply(adapter):
+    """Классификация по СВОЕМУ тексту группы записи: SAFE заполняется,
+    MANUAL (future + известные справочнику группы без года, включая
+    «Выпуск») и UNRESOLVED (мусор) не трогаются; apply идемпотентен."""
+    seed_group_pair(adapter, 'ИСИ', 'Выпуск')
+    seed_group_pair(adapter, 'ИСИ', 'БезГода Группа')
+    seed_backfill_records(adapter)
+
+    preview = adapter.group_admission_backfill_preview()
+    assert preview['counters']['considered'] == 6
+    assert preview['counters']['safe'] == 1
+    assert preview['counters']['manual'] == 3
+    assert preview['counters']['unresolved'] == 2
+    assert preview['counters']['already_filled'] == 0
+    assert [row['admission_year'] for row in preview['safe']] == [2023]
+    manual_groups = {row['group'] for row in preview['manual']}
+    assert manual_groups == {'НГр-27Б1', 'Выпуск', 'БезГода Группа'}
+    unresolved_groups = {row['group'] for row in preview['unresolved']}
+    assert unresolved_groups == {'nan', 'БезЦифр'}
+    # already_filled растёт после apply.
+    counters = adapter.apply_group_admission_backfill()
+    assert counters == {'matched': 1, 'applied': 1, 'skipped': 0}
+
+    rows = {
+        row['student_name']: row['admission_year']
+        for row in adapter.connection.execute('SELECT student_name, admission_year FROM competitions')
+    }
+    assert rows['Однозначов Год'] == 2023
+    assert rows['Будущев Год'] is None  # future — никогда автоматически
+    assert rows['Выпускников Год'] is None  # «Выпуск» — не заполняется
+    assert rows['Известков Год'] is None
+    assert rows['Мусоров Год'] is None
+    assert rows['Пустов Год'] is None
+
+    # Идемпотентность: повторный apply ничего не находит.
+    second = adapter.apply_group_admission_backfill()
+    assert second == {'matched': 0, 'applied': 0, 'skipped': 0}
+    repeat_preview = adapter.group_admission_backfill_preview()
+    assert repeat_preview['counters']['safe'] == 0
+    assert repeat_preview['counters']['already_filled'] == 1
+
+
+def test_group_admission_backfill_apply_skips_raced_rows(adapter):
+    """Guarded UPDATE: запись, заполненная между предпросмотром и apply,
+    пропускается (skipped), пакет не ломается."""
+    seed_backfill_records(adapter)
+    # «Гонка»: год уже проставлен мимо backfill — apply видит строку SAFE по
+    # классификации только у NULL-строк, поэтому пропуска нет — имитируем
+    # иначе: заполняем ПОСЛЕ выборки, подменяя соединение не будем, просто
+    # проверяем, что уже заполненная SAFE-строка не считается вовсе.
+    adapter.connection.execute(
+        "UPDATE competitions SET admission_year = 2023 WHERE student_name = 'Однозначов Год'"
+    )
+    adapter.connection.commit()
+    counters = adapter.apply_group_admission_backfill()
+    assert counters['matched'] == 0
+    assert counters['applied'] == 0

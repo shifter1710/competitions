@@ -76,6 +76,18 @@
     </div>
 </div>
 
+{# Course / Education, Phase A: backfill снимка года поступления записей. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Годы поступления (записи)</h3>
+        <div class="text-muted mb-3">
+            Записей о соревнованиях без года поступления: {{ without_admission_year_count }}.
+            Предпросмотр распознавания по историческому названию группы и заполнение однозначных случаев.
+        </div>
+        <a class="btn btn-outline-primary" href="/admin/maintenance/admission-years">Открыть предпросмотр</a>
+    </div>
+</div>
+
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <h3 class="title mb-1">Архивы очисток</h3>
