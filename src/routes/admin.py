@@ -6,6 +6,7 @@ import logging
 import re
 import shutil
 import zipfile
+from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -36,6 +37,15 @@ from src.auth import user_is_moderator
 from src.auth import USER_ROLES
 from src.auth import username_error
 from src.backup import run_backup
+from src.education import academic_year_label
+from src.education import derive_course
+from src.education import effective_duration_years
+from src.education import MAX_ADMISSION_YEAR
+from src.education import MAX_DURATION_YEARS
+from src.education import MIN_ADMISSION_YEAR
+from src.education import MIN_DURATION_YEARS
+from src.education import parse_group_admission_year
+from src.education import parse_group_admission_year_evidence
 from src.files import attachment_source_path
 from src.files import attachments_files_bytes
 from src.files import backups_dir
@@ -287,6 +297,80 @@ def format_login_moment(raw_value) -> str:
     except ValueError:
         return '—'
     return moment.strftime('%d.%m.%Y %H:%M')
+
+
+# --- Course / Education, Phase A: уровни образования и учебные данные групп. ---
+
+
+def build_education_level_entries(storage: SQLiteAdapter) -> list[dict]:
+    """Уровни образования для страницы «Справочники»: каждый со счётчиком
+    групп, у которых задан этот уровень."""
+    return [
+        {**level, 'groups_count': storage.count_groups_using_level(level['id'])}
+        for level in storage.list_education_levels(include_inactive=True)
+    ]
+
+
+def resolve_group_academic_target(request: Request, value_id: str) -> tuple[dict | None, dict | None, str | None]:
+    """Группа учебных данных + её институт: ((group, institute), None) или
+    (None, None, redirect с ошибкой на /admin/catalogs)."""
+    try:
+        numeric_value_id = int(value_id)
+    except ValueError:
+        return None, None, text(body='Invalid value id', status=400)
+    storage = get_storage(request.app)
+    group = storage.get_catalog_value(numeric_value_id)
+    if group is None or group['category'] != GROUP_CATEGORY or not group.get('parent_id'):
+        return None, None, build_redirect_with_message(error='Группа не найдена', url='/admin/catalogs')
+    institute = storage.get_catalog_value(group['parent_id'])
+    if institute is None or institute['category'] != 'institute':
+        return None, None, build_redirect_with_message(error='Институт группы не найден', url='/admin/catalogs')
+    return group, institute, None
+
+
+def parse_optional_int_form(request: Request, key: str, *, label: str) -> tuple[int | None, str | None]:
+    """Необязательное целое из формы: (значение, ошибка).
+
+    Пусто → (None, None) — «очистить поле»; нечисло → (None, текст ошибки).
+    Диапазонную валидацию выполняет storage (год поступления, длительности).
+    """
+    raw_value = get_form_value(request, key).strip()
+    if not raw_value:
+        return None, None
+    try:
+        return int(raw_value), None
+    except ValueError:
+        return None, f'{label} должно быть целым числом'
+
+
+def group_academic_duration_hint(stored: dict | None) -> str:
+    """Подсказка поля «Длительность обучения»: что будет, если оставить
+    пусто (по СООХРАНЁННОМУ уровню — без JS страница не знает выбор)."""
+    if not stored or stored.get('education_level_id') is None:
+        return 'Пусто — уровень не выбран, длительность неизвестна.'
+    level_name = stored.get('education_level_name') or ''
+    default = stored.get('level_default_duration_years')
+    if default is None:
+        return 'Пусто — у выбранного уровня длительность по умолчанию не задана.'
+    return f'Пусто — используется длительность уровня «{level_name}» по умолчанию ({default}).'
+
+
+def group_academic_course_preview(stored: dict | None) -> str:
+    """Строка предпросмотра «какой курс сейчас» по сохранённым данным."""
+    if stored is None or stored.get('admission_year') is None:
+        return 'Курс пока не рассчитывается: не указан год поступления.'
+    duration = effective_duration_years(
+        stored.get('duration_years_override'), stored.get('level_default_duration_years')
+    )
+    derived = derive_course(stored['admission_year'], date.today(), duration)
+    if derived['status'] == 'future':
+        return 'Курс пока не рассчитывается: год поступления позже текущей даты.'
+    if derived['status'] != 'ok' or derived['course'] is None:
+        return 'Курс пока не рассчитывается: не указан год поступления.'
+    return (
+        f'По сохранённым данным сейчас: {derived["course"]} курс '
+        f'(учебный год {academic_year_label(derived["academic_year_start"])}).'
+    )
 
 
 def describe_presence(last_seen_raw, *, now: datetime | None = None) -> dict:
@@ -879,6 +963,8 @@ def register(app: Sanic) -> None:  # noqa: C901
                     {**level, 'records_count': storage.count_records_using('level', level['name'])}
                     for level in storage.list_levels()
                 ],
+                # Course/Education Phase A: уровни образования + счётчик групп.
+                'education_levels': build_education_level_entries(storage),
                 **get_flash_args(request),
             },
         )
@@ -1180,6 +1266,206 @@ def register(app: Sanic) -> None:  # noqa: C901
                 f'карточек студентов — {counts["students_updated"]}'
             ),
             url='/admin/catalogs',
+        )
+
+    # --- Course / Education, Phase A: уровни образования (admin CRUD). ---
+
+    @app.post('/admin/education-levels')
+    async def create_education_level(request: Request):
+        """Добавить уровень образования; длительность по умолчанию —
+        необязательная (NULL = «не задана», курс считается без границы)."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+
+        name = get_form_value(request, 'name').strip()
+        if not name:
+            return build_redirect_with_message(error='Название уровня обязательно', url='/admin/catalogs')
+        duration, duration_error = parse_optional_int_form(request, 'default_duration_years', label='Длительность')
+        if duration_error is not None:
+            return build_redirect_with_message(error=duration_error, url='/admin/catalogs')
+
+        storage = get_storage(request.app)
+        try:
+            storage.create_education_level(name, duration)
+        except ValueError as exc:
+            return build_redirect_with_message(error=str(exc), url='/admin/catalogs')
+        return build_redirect_with_message(message=f'Уровень «{name}» добавлен', url='/admin/catalogs')
+
+    def resolve_education_level(request: Request, level_id: str) -> tuple[dict | None, str | None]:
+        """Уровень образования по id: (уровень, ошибка-текст/None)."""
+        try:
+            numeric_level_id = int(level_id)
+        except ValueError:
+            return None, text(body='Invalid level id', status=400)
+        level = get_storage(request.app).get_education_level(numeric_level_id)
+        if level is None:
+            return None, build_redirect_with_message(error='Уровень образования не найден', url='/admin/catalogs')
+        return level, None
+
+    @app.post('/admin/education-levels/<level_id>/duration')
+    async def update_education_level_duration(request: Request, level_id: str):
+        """Inline-правка длительности по умолчанию (пусто = убрать)."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        level, error = resolve_education_level(request, level_id)
+        if error is not None:
+            return error
+
+        duration, duration_error = parse_optional_int_form(request, 'default_duration_years', label='Длительность')
+        if duration_error is not None:
+            return build_redirect_with_message(error=duration_error, url='/admin/catalogs')
+        try:
+            get_storage(request.app).update_education_level(level['id'], duration)
+        except ValueError as exc:
+            return build_redirect_with_message(error=str(exc), url='/admin/catalogs')
+        return build_redirect_with_message(message='Длительность уровня сохранена', url='/admin/catalogs')
+
+    @app.post('/admin/education-levels/<level_id>/hide')
+    async def hide_education_level(request: Request, level_id: str):
+        """Скрыть уровень: не выбирается в новых учебных данных групп,
+        остаётся у групп, где уже задан."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        level, error = resolve_education_level(request, level_id)
+        if error is not None:
+            return error
+
+        get_storage(request.app).set_education_level_active(level['id'], False)
+        return build_redirect_with_message(message='Уровень скрыт', url='/admin/catalogs')
+
+    @app.post('/admin/education-levels/<level_id>/unhide')
+    async def unhide_education_level(request: Request, level_id: str):
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        level, error = resolve_education_level(request, level_id)
+        if error is not None:
+            return error
+
+        get_storage(request.app).set_education_level_active(level['id'], True)
+        return build_redirect_with_message(message='Уровень снова виден', url='/admin/catalogs')
+
+    @app.post('/admin/education-levels/<level_id>/delete')
+    async def delete_education_level(request: Request, level_id: str):
+        """Удалить уровень — только если ни одна группа на него не ссылается."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        level, error = resolve_education_level(request, level_id)
+        if error is not None:
+            return error
+
+        storage = get_storage(request.app)
+        try:
+            storage.delete_education_level(level['id'])
+        except ValueError as exc:
+            return build_redirect_with_message(error=str(exc), url='/admin/catalogs')
+        log_audit_event(
+            request,
+            'education_level_deleted',
+            {'level_id': level['id'], 'name': level['name']},
+        )
+        return build_redirect_with_message(message='Уровень удалён', url='/admin/catalogs')
+
+    # --- Course / Education, Phase A: учебные данные группы. ---
+
+    @app.get('/admin/catalogs/group/<value_id>/academic')
+    async def catalog_group_academic_page(request: Request, value_id: str):
+        """Учебные данные группы: уровень образования, год поступления,
+        длительность. Год из названия группы — ТОЛЬКО предзаполнение."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        group, institute, error = resolve_group_academic_target(request, value_id)
+        if error is not None:
+            return error
+
+        storage = get_storage(request.app)
+        stored = storage.get_group_academic(group['id'])
+        suggested_year = (
+            parse_group_admission_year(group['value'])
+            if stored is None or stored.get('admission_year') is None
+            else None
+        )
+        return await render(
+            template_name=jinja_env.get_template('admin_catalog_group_academic.html'),
+            context={
+                'request': request,
+                'value_id': group['id'],
+                'group_value': group['value'],
+                'institute_value': institute['value'],
+                'levels': storage.list_education_levels(),
+                'stored': stored,
+                'suggested_admission_year': suggested_year,
+                'suggested_evidence': parse_group_admission_year_evidence(group['value'])
+                if suggested_year is not None
+                else None,
+                'duration_hint': group_academic_duration_hint(stored),
+                'course_preview': group_academic_course_preview(stored),
+                'min_admission_year': MIN_ADMISSION_YEAR,
+                'max_admission_year': MAX_ADMISSION_YEAR,
+                'min_duration_years': MIN_DURATION_YEARS,
+                'max_duration_years': MAX_DURATION_YEARS,
+                **get_flash_args(request),
+            },
+        )
+
+    @app.post('/admin/catalogs/group/<value_id>/academic')
+    async def catalog_group_academic_save(request: Request, value_id: str):
+        """Сохранить учебные данные группы одной upsert-транзакцией."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        group, institute, error = resolve_group_academic_target(request, value_id)
+        if error is not None:
+            return error
+        back_url = f'/admin/catalogs/group/{group["id"]}/academic'
+
+        raw_level = get_form_value(request, 'education_level_id').strip()
+        education_level_id = None
+        if raw_level:
+            education_level_id, level_error = parse_optional_int_form(
+                request, 'education_level_id', label='Уровень образования'
+            )
+            if level_error is not None:
+                return build_redirect_with_message(error=level_error, url=back_url)
+        admission_year, year_error = parse_optional_int_form(request, 'admission_year', label='Год поступления')
+        if year_error is not None:
+            return build_redirect_with_message(error=year_error, url=back_url)
+        duration_override, duration_error = parse_optional_int_form(
+            request, 'duration_years_override', label='Длительность обучения'
+        )
+        if duration_error is not None:
+            return build_redirect_with_message(error=duration_error, url=back_url)
+
+        try:
+            get_storage(request.app).upsert_group_academic(
+                group['id'],
+                education_level_id=education_level_id,
+                admission_year=admission_year,
+                duration_years_override=duration_override,
+            )
+        except ValueError as exc:
+            return build_redirect_with_message(error=str(exc), url=back_url)
+
+        log_audit_event(
+            request,
+            'group_academic_updated',
+            {
+                'group_id': group['id'],
+                'group': group['value'],
+                'institute': institute['value'],
+                'education_level_id': education_level_id,
+                'admission_year': admission_year,
+                'duration_years_override': duration_override,
+            },
+        )
+        return build_redirect_with_message(
+            message=f'Учебные данные группы «{group["value"]}» сохранены.',
+            url=back_url,
         )
 
     @app.get('/admin/users')
@@ -1562,6 +1848,8 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'records_count': storage.count_competitions(),
                 'attachments_count': storage.count_attachments(),
                 'unlinked_records_count': storage.count_participations_without_event(),
+                # Course/Education Phase A: записи без снимка года поступления.
+                'without_admission_year_count': storage.count_participations_without_admission_year(),
                 'stats': stats,
                 **get_flash_args(request),
             },
@@ -1610,6 +1898,77 @@ def register(app: Sanic) -> None:  # noqa: C901
         else:
             message = f'Связывание завершено: связано {counters["linked"]}.'
         return build_redirect_with_message(message=message, url='/admin/maintenance/calendar-links')
+
+    # --- Course / Education, Phase A: backfill снимка года поступления. ---
+
+    def decorate_admission_year_preview(preview: dict) -> dict:
+        """Строки предпросмотра с датами-подписями и «уликой» парсера."""
+
+        def decorate_record_row(row: dict) -> dict:
+            return {
+                **row,
+                'record_date_label': format_date_range(
+                    datetime.fromisoformat(row['date']),
+                    None,
+                ),
+                'evidence': parse_group_admission_year_evidence(row['group']),
+            }
+
+        return {
+            'counters': preview['counters'],
+            'safe': [decorate_record_row(row) for row in preview['safe']],
+            'manual': [decorate_record_row(row) for row in preview['manual']],
+            'unresolved': [decorate_record_row(row) for row in preview['unresolved']],
+            'apply_confirm_text': (
+                f'Заполнить год поступления у {preview["counters"]["safe"]} записей? '
+                'Обновится только снимок года поступления в записях о соревнованиях.'
+            ),
+        }
+
+    @app.get('/admin/maintenance/admission-years')
+    async def admin_maintenance_admission_years_page(request: Request):
+        """Предпросмотр заполнения года поступления у записей без снимка:
+        классификация по историческому названию группы в самой записи."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        storage = get_storage(request.app)
+        preview = decorate_admission_year_preview(storage.group_admission_backfill_preview())
+        return await render(
+            template_name=jinja_env.get_template('admin_maintenance_admission_years.html'),
+            context={
+                'request': request,
+                'preview': preview,
+                **get_flash_args(request),
+            },
+        )
+
+    @app.post('/admin/maintenance/admission-years/apply')
+    async def apply_maintenance_admission_years(request: Request):
+        """Заполнить год поступления ТОЛЬКО у однозначных (SAFE) записей.
+
+        Классификация пересчитывается в момент применения; записи, которые
+        успели получить год между предпросмотром и кликом, пропускаются
+        (guarded UPDATE), пакет не ломается.
+        """
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+
+        counters = get_storage(request.app).apply_group_admission_backfill()
+        log_audit_event(
+            request,
+            'group_admission_backfill_applied',
+            {
+                'applied': counters['applied'],
+                'skipped': counters['skipped'],
+                'matched': counters['matched'],
+            },
+        )
+        message = f'Годы поступления заполнены: {counters["applied"]} записей.'
+        if counters['skipped']:
+            message += f' пропущено {counters["skipped"]} (год уже задан или данные изменились).'
+        return build_redirect_with_message(message=message, url='/admin/maintenance/admission-years')
 
     @app.get('/admin/maintenance/export')
     async def export_database(request: Request):

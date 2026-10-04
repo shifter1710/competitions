@@ -421,7 +421,23 @@ class CatalogsMixin:
             self.connection.commit()
 
     def delete_catalog_value(self, value_id: int) -> None:
+        """Удалить значение справочника одной транзакцией.
+
+        Course/Education Phase A: у удаляемой группы заодно удаляются её
+        учебные данные (group_academic ссылается на строку по id — без
+        этого она осталась бы сиротой; записей у такой группы быть не
+        может, удаление уже запрещено роутом при records_count > 0).
+        """
         with self._lock:
+            row = self.connection.execute(
+                'SELECT category FROM catalog_values WHERE id = ?',
+                (value_id,),
+            ).fetchone()
+            if row is not None and row['category'] == 'group':
+                self.connection.execute(
+                    'DELETE FROM group_academic WHERE group_catalog_value_id = ?',
+                    (value_id,),
+                )
             self.connection.execute('DELETE FROM catalog_values WHERE id = ?', (value_id,))
             self.connection.commit()
 

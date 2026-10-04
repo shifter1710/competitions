@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import secrets
 import time
+from datetime import date
 from datetime import datetime
 from io import BytesIO
 from typing import Sequence
@@ -23,6 +24,8 @@ from src.auth import get_current_user_id
 from src.auth import log_audit_event
 from src.auth import require_admin
 from src.auth import require_moderator
+from src.education import academic_year_label
+from src.education import derive_course
 from src.storage.sqlite import SQLiteAdapter
 from src.storage.sqlite import STUDENT_SORT_COLUMNS
 from src.students import normalize_import_course
@@ -1477,6 +1480,28 @@ def register(app: Sanic) -> None:  # noqa: C901
         student = storage.get_student_by_id(numeric_id)
         if student is None:
             return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+        # Course/Education Phase A: read-only карточка «Образование» —
+        # учебный контекст группы студента (пара институт+группа строго
+        # резолвится справочником). Нет пары или учебных данных группы —
+        # карточки нет вообще (образование не выводится из имени группы).
+        education = None
+        education_context = storage.get_student_education_context(
+            student.get('institute') or '', student.get('group_name') or ''
+        )
+        if education_context is not None:
+            derived = derive_course(
+                education_context['admission_year'],
+                date.today(),
+                education_context['effective_duration_years'],
+            )
+            education = {
+                **education_context,
+                'course': derived['course'],
+                'academic_year_label': academic_year_label(derived['academic_year_start'])
+                if derived['academic_year_start'] is not None
+                else '',
+                'probably_finished': derived['probably_finished'],
+            }
         linked_records = storage.list_linked_records(numeric_id, limit=50)
         for record in linked_records:
             # Даты — datetime для format_date_range в шаблоне.
@@ -1521,6 +1546,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'request': request,
                 'student': student,
                 'aliases': storage.list_student_aliases(numeric_id),
+                'education': education,
                 'linked_records_count': storage.linked_records_count(numeric_id),
                 'linked_records': linked_records,
                 'linked_users': linked_users,

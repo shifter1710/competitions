@@ -136,7 +136,7 @@
                                         <td>{{ rename_form('group', group.id, group.value) }}</td>
                                         <td>{{ group.records_count }}</td>
                                         <td>{% if group.active %}<span class="badge text-bg-success">активна</span>{% else %}<span class="badge text-bg-secondary">скрыта</span>{% endif %}</td>
-                                        <td class="d-flex gap-2">
+                                        <td class="d-flex flex-wrap gap-2">
                                             {% if group.active %}
                                             <form action="/admin/catalogs/group/{{ group.id }}/hide" method="post">
                                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -163,6 +163,9 @@
                                                 <button class="btn btn-sm btn-outline-primary text-nowrap" type="submit">Перенести…</button>
                                             </form>
                                             {% endif %}
+                                            {# Course/Education Phase A: учебные данные группы —
+                                               уровень образования, год поступления, длительность. #}
+                                            <a class="btn btn-sm btn-outline-secondary text-nowrap" href="/admin/catalogs/group/{{ group.id }}/academic">Обучение…</a>
                                             {% if not group.records_count %}
                                             <form action="/admin/catalogs/group/{{ group.id }}/delete" method="post">
                                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -215,6 +218,90 @@
         <div class="text-muted">Удалить можно только значение, на котором не висит ни одной записи (у группы — по паре с институтом); скрытое не показывается в подсказках форм, но остаётся в записях и отчётах.</div>
         {% else %}
         <div class="text-muted">Институтов пока нет — они появятся автоматически из новых записей и импорта.</div>
+        {% endif %}
+    </div>
+</div>
+
+{# Course / Education, Phase A: уровни образования (бакалавриат/магистратура…)
+   — справочник для учебных данных групп; длительности задаёт админ (без
+   хардкода). Скрытый уровень не выбирается в новых данных групп, но остаётся
+   у групп, где уже задан; удаление — только без групп. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Уровни образования</h5>
+
+        <form action="/admin/education-levels" class="row g-2 align-items-end mb-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="education-level-name">Название уровня</label>
+                <input class="form-control" id="education-level-name" name="name" type="text" required>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="education-level-duration">Длительность по умолчанию (лет)</label>
+                <input class="form-control input-num" id="education-level-duration" min="1" max="8" name="default_duration_years" type="number">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" type="submit">Добавить</button>
+            </div>
+        </form>
+
+        {% if education_levels %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th>Уровень</th>
+                        <th>Длительность по умолчанию</th>
+                        <th>Групп</th>
+                        <th>Статус</th>
+                        <th>Действия</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for level in education_levels %}
+                    <tr {% if not level.active %}class="table-secondary"{% endif %}>
+                        <td>{{ level.name }}</td>
+                        <td>
+                            {# Inline-правка длительности: пусто = «не задана»
+                               (курс считается без границы «обучение завершено»). #}
+                            <form action="/admin/education-levels/{{ level.id }}/duration" class="d-flex gap-1 align-items-center" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input aria-label="Длительность по умолчанию" class="form-control form-control-sm input-num"
+                                       min="1" max="8" name="default_duration_years" type="number"
+                                       {% if level.default_duration_years is not none %}value="{{ level.default_duration_years }}"{% endif %}>
+                                <button class="btn btn-sm btn-outline-primary text-nowrap" type="submit">Сохранить</button>
+                            </form>
+                        </td>
+                        <td>{{ level.groups_count }}</td>
+                        <td>{% if level.active %}<span class="badge text-bg-success">активен</span>{% else %}<span class="badge text-bg-secondary">скрыт</span>{% endif %}</td>
+                        <td class="d-flex gap-2">
+                            {% if level.active %}
+                            <form action="/admin/education-levels/{{ level.id }}/hide" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-warning" type="submit">Скрыть</button>
+                            </form>
+                            {% else %}
+                            <form action="/admin/education-levels/{{ level.id }}/unhide" method="post">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-success" type="submit">Показать</button>
+                            </form>
+                            {% endif %}
+                            {% if not level.groups_count %}
+                            <form action="/admin/education-levels/{{ level.id }}/delete" method="post"
+                                  onsubmit="return confirm('Удалить уровень «{{ level.name }}» безвозвратно?')">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="text-muted">Скрытый уровень не выбирается в учебных данных групп, но остаётся у групп, где уже задан. Удалить можно только уровень без групп.</div>
+        {% else %}
+        <div class="text-muted">Уровней образования пока нет — добавьте первый выше.</div>
         {% endif %}
     </div>
 </div>

@@ -8,6 +8,7 @@ from pathlib import Path
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.storage.catalogs import CatalogsMixin
+from src.storage.education import EducationMixin
 from src.storage.events import EventsMixin
 from src.storage.helpers import BASE_FIELD_SETTING_DEFAULTS  # noqa: F401
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP  # noqa: F401
@@ -48,14 +49,18 @@ logger = logging.getLogger(__name__)
 # UsersMixin (аккаунты, профили, псевдонимы ФИО, режим идентичности),
 # StudentsMixin (карточки студентов),
 # EventsMixin (календарь соревнований),
+# EducationMixin (уровни образования, учебные данные групп, снимок года
+# поступления записей и его backfill — Course/Education Phase A),
 # ParticipationsMixin (записи соревнований: выборки, отчёты, импорт).
 # Порядок баз — только читаемость, перекрытий имён между примесями нет.
 # Контракт примеси: не создаёт соединение и блокировку (self.connection /
 # self._lock принадлежат SQLiteAdapter), не импортирует соседние доменные
-# модули src.storage.* (кроме src.storage.helpers), междоменные вызовы —
+# модули src/storage.* (кроме src/storage.helpers), междоменные вызовы —
 # только через self. Тесты патчат методы на самом SQLiteAdapter — патч
 # ложится раньше примесей в MRO и перехватывает вызовы через self.
-class SQLiteAdapter(MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsMixin, ParticipationsMixin):
+class SQLiteAdapter(
+    MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsMixin, EducationMixin, ParticipationsMixin
+):
     def __init__(self, database_path: str):
         db_path = Path(database_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,6 +347,37 @@ class SQLiteAdapter(MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsM
                 )
                 '''
             )
+            # Course / Education, Phase A: уровни образования и учебные
+            # данные групп. FK объявлены декларативно (PRAGMA foreign_keys
+            # приложение не включает — конвенция проекта, ссылки держит
+            # код). Посев уровней — INSERT OR IGNORE (паттерн app_settings):
+            # длительности по умолчанию НЕ хардкодятся (решение владельца),
+            # повторные старты не дублируют и не перезаписывают.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS education_levels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    default_duration_years INTEGER,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS group_academic (
+                    group_catalog_value_id INTEGER PRIMARY KEY REFERENCES catalog_values(id),
+                    education_level_id INTEGER REFERENCES education_levels(id),
+                    admission_year INTEGER,
+                    duration_years_override INTEGER,
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    updated_at TEXT NOT NULL
+                )
+                '''
+            )
+            self._populate_default_education_levels()
             user_columns = {row['name'] for row in self.connection.execute('PRAGMA table_info(users)').fetchall()}
             if 'pwd_ver' not in user_columns:
                 self.connection.execute('ALTER TABLE users ADD COLUMN pwd_ver INTEGER NOT NULL DEFAULT 0')
@@ -418,6 +454,17 @@ class SQLiteAdapter(MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsM
             self.connection.execute('ALTER TABLE competitions ADD COLUMN result TEXT')
         if 'calendar_event_id' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN calendar_event_id INTEGER')
+        self._migrate_competitions_course_columns(columns)
+
+    def _migrate_competitions_course_columns(self, columns: set[str]) -> None:
+        """Course / Education, Phase A: замороженный снимок года поступления
+        участия. Пишется при создании записи из учебных данных группы
+        (строгое разрешение пары институт+группа) и backfill'ем лет; обычная
+        правка записи НЕ меняет и НЕ дополняет его (историчность).
+        Существующие строки остаются NULL — легаси-колонка course
+        продолжает работать как фолбэк отображения."""
+        if 'admission_year' not in columns:
+            self.connection.execute('ALTER TABLE competitions ADD COLUMN admission_year INTEGER')
 
     def _migrate_custom_fields_columns(self):
         """№24 (docs/feedback-live.md): колонка link_target у кастомных полей.
@@ -553,6 +600,7 @@ class SQLiteAdapter(MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsM
                 'discipline': row['discipline'],
                 'result': row['result'],
                 'calendar_event_id': row['calendar_event_id'],
+                'admission_year': row['admission_year'],
             }
         )
 

@@ -262,7 +262,11 @@
                         {%- endif -%}
                         </td>
                         <td data-column-key="position">{{ competition.position }}</td>
-                        <td data-column-key="course">{{ competition.course }}</td>
+                        {# Course/Education Phase A: у записи со снимком года
+                           поступления показывается ПРОИЗВОДНЫЙ курс на дату
+                           соревнования; без снимка — легаси-курс записи как
+                           раньше (включая текстовые значения). #}
+                        <td data-column-key="course">{% set course_cell = course_cells.get(competition.record_id) %}{% if course_cell %}{% if course_cell.title %}<span title="{{ course_cell.title }}">{{ course_cell.value }}</span>{% else %}{{ course_cell.value }}{% endif %}{% else %}{{ competition.course }}{% endif %}</td>
                         {% for field in custom_fields if field.show_in_table %}
                         <td data-column-key="{{ field.key }}" {% if field.key in bound_link_keys %}class="d-none"{% endif %}>
                             {%- set field_value = competition.extra_data.get(field.key, '') -%}
