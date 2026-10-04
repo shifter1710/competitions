@@ -11,6 +11,7 @@ from typing import Sequence
 
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
 from src.storage.helpers import CalendarEventDuplicateError
+from src.storage.helpers import dedup_text
 from src.storage.helpers import event_identity_key
 
 
@@ -95,6 +96,86 @@ class EventsMixin:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    # ---- Командные результаты события (Team Results). ----
+    #
+    # Отдельная сущность, принадлежащая событию календаря: 0..N строк
+    # «категория (свободный текст) + место команды (целое)» — итоги
+    # командного зачёта. НЕ participation/Student/Registry: к записям
+    # реестра отношения не имеет. Порядок строк — порядок добавления
+    # (sort_order = max+1, чтение по (sort_order, id)); правка строки
+    # порядок не меняет (reorder-методов нет — UI не просит).
+
+    def _calendar_event_team_results(self, event_id: int) -> list[dict]:
+        """Командные результаты события по (sort_order, id) — детерминированный
+        порядок добавления (вызывается под _lock)."""
+        rows = self.connection.execute(
+            'SELECT id, label, place, sort_order FROM calendar_event_team_results'
+            ' WHERE calendar_event_id = ? ORDER BY sort_order ASC, id ASC',
+            (event_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_calendar_event_team_result(self, event_id: int, label: str, place: int) -> tuple[int | None, str | None]:
+        """Добавить строку командного результата: (result_id, None) или
+        (None, 'duplicate_label').
+
+        Check+write под одним _lock (паттерн guard'а дублей событий): категория
+        с тем же нормализованным текстом (strip + casefold, dedup_text) уже
+        есть у ЭТОГО события → дубль, записи не было. Существование события
+        проверяет роут. sort_order = COALESCE(MAX, -1)+1 — новая строка в
+        конец; timestamps — datetime.utcnow().isoformat()."""
+        with self._lock:
+            for row in self._calendar_event_team_results(event_id):
+                if dedup_text(row['label']) == dedup_text(label):
+                    return None, 'duplicate_label'
+            cursor = self.connection.execute(
+                'INSERT INTO calendar_event_team_results'
+                ' (calendar_event_id, label, place, sort_order, created_at, updated_at)'
+                ' VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order)'
+                '     FROM calendar_event_team_results WHERE calendar_event_id = ?), -1) + 1, ?, ?)',
+                (event_id, label, int(place), event_id, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+            )
+            self.connection.commit()
+            return cursor.lastrowid, None
+
+    def update_calendar_event_team_result(
+        self, event_id: int, result_id: int, label: str, place: int
+    ) -> tuple[bool, str | None]:
+        """Правка строки командного результата: (True, None),
+        (False, 'not_found') или (False, 'duplicate_label').
+
+        Дубль проверяется против СОСЕДНИХ строк события (исключая себя —
+        переименование в то же значение легально). Ownership — в WHERE
+        UPDATE (id AND calendar_event_id, прецедент update_event_participation_
+        result): чужой result_id/другое событие → 0 строк → not_found."""
+        with self._lock:
+            rows = self._calendar_event_team_results(event_id)
+            if not any(row['id'] == int(result_id) for row in rows):
+                return False, 'not_found'
+            new_label = dedup_text(label)
+            for row in rows:
+                if row['id'] != int(result_id) and dedup_text(row['label']) == new_label:
+                    return False, 'duplicate_label'
+            cursor = self.connection.execute(
+                'UPDATE calendar_event_team_results'
+                ' SET label = ?, place = ?, updated_at = ? WHERE id = ? AND calendar_event_id = ?',
+                (label, int(place), datetime.utcnow().isoformat(), int(result_id), int(event_id)),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0, None
+
+    def delete_calendar_event_team_result(self, event_id: int, result_id: int) -> bool:
+        """Удалить строку командного результата (ownership — в WHERE):
+        True — удалена, False — не найдена/чужая. Порядок остальных строк
+        не пересчитывается (дыры в sort_order чтению не мешают)."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'DELETE FROM calendar_event_team_results WHERE id = ? AND calendar_event_id = ?',
+                (int(result_id), int(event_id)),
+            )
+            self.connection.commit()
+            return cursor.rowcount > 0
+
     def create_calendar_event(
         self,
         name: str,
@@ -138,6 +219,9 @@ class EventsMixin:
                 return None
             event = dict(row)
             event['links'] = self._calendar_event_links(event_id)
+            # Team Results: отдельная сущность события (не participation);
+            # чтение через ключ — фикстуры-моки не присылают его.
+            event['team_results'] = self._calendar_event_team_results(event_id)
             return event
 
     def set_calendar_regulation(self, event_id: int, filename: str, stored_name: str) -> None:
@@ -231,10 +315,12 @@ class EventsMixin:
             return row['total']
 
     def delete_calendar_event(self, event_id: int) -> None:
-        """Удалить событие вместе со строками его ссылок (один commit).
-        Guard участников живёт в роуте и не меняется."""
+        """Удалить событие вместе со строками его ссылок и командных
+        результатов (один commit). Guard участников живёт в роуте и не
+        меняется."""
         with self._lock:
             self.connection.execute('DELETE FROM calendar_event_links WHERE calendar_event_id = ?', (event_id,))
+            self.connection.execute('DELETE FROM calendar_event_team_results WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute('DELETE FROM calendar_events WHERE id = ?', (event_id,))
             self.connection.commit()
 

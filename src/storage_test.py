@@ -3108,6 +3108,210 @@ def test_delete_calendar_event_removes_link_rows(adapter):
     assert [row['label'] for row in read_event_links_raw(adapter, keeper_id)] == ['Остаётся']
 
 
+# --- Командные результаты события (Team Results): 0..N строк «категория +
+# место команды», дубли label, ownership правки/удаления, каскад. ---
+
+
+def read_team_results_raw(adapter, event_id: int) -> list[tuple]:
+    """Прямой SELECT строк командных результатов мимо storage API —
+    проверка порядка и каскада на уровне БД (прецедент read_event_links_raw)."""
+    return adapter.connection.execute(
+        'SELECT id, label, place, sort_order FROM calendar_event_team_results'
+        ' WHERE calendar_event_id = ? ORDER BY sort_order ASC, id ASC',
+        (event_id,),
+    ).fetchall()
+
+
+def make_team_results_event(adapter, name: str, date: str) -> int:
+    return adapter.create_calendar_event(name=name, date=date, date_to=None, level='', sport='', links=[])
+
+
+def test_team_results_add_read_zero_one_many_and_order(adapter):
+    """add/get: 0/1/N строк; порядок добавления (sort_order, id) переживает
+    перечитывание; get_calendar_event аттачит team_results; другое событие
+    своих/чужих строк не путает."""
+    empty_id = make_team_results_event(adapter, 'Пустое', '2026-01-01T00:00:00')
+    assert adapter.get_calendar_event(empty_id)['team_results'] == []
+
+    event_id = make_team_results_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    first, error = adapter.add_calendar_event_team_result(event_id, 'Общий зачёт', 1)
+    assert error is None and first is not None
+    second, error = adapter.add_calendar_event_team_result(event_id, 'Мужчины', 3)
+    assert error is None and second is not None
+    third, error = adapter.add_calendar_event_team_result(event_id, 'Женщины', 2)
+    assert error is None
+
+    rows = adapter.get_calendar_event(event_id)['team_results']
+    assert [(row['label'], row['place'], row['sort_order']) for row in rows] == [
+        ('Общий зачёт', 1, 0),
+        ('Мужчины', 3, 1),
+        ('Женщины', 2, 2),
+    ]
+    assert [row['id'] for row in rows] == [first, second, third]
+
+    # То же — прямым SELECT (БД-уровень).
+    assert [(row['label'], row['place'], row['sort_order']) for row in read_team_results_raw(adapter, event_id)] == [
+        ('Общий зачёт', 1, 0),
+        ('Мужчины', 3, 1),
+        ('Женщины', 2, 2),
+    ]
+
+    # Другое событие: та же категория легальна, чтения не смешиваются.
+    other_id = make_team_results_event(adapter, 'Кубок', '2026-03-01T00:00:00')
+    adapter.add_calendar_event_team_result(other_id, 'Общий зачёт', 5)
+    assert [row['label'] for row in adapter.get_calendar_event(other_id)['team_results']] == ['Общий зачёт']
+    assert len(adapter.get_calendar_event(event_id)['team_results']) == 3
+
+
+def test_team_results_duplicate_label_rejected_casefold_and_spaces(adapter):
+    """Дубль категории — strip + casefold («Мужчины» == «  мужчины »);
+    разные категории — ок; дубли проверяются ВНУТРИ события."""
+    event_id = make_team_results_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    result_id, error = adapter.add_calendar_event_team_result(event_id, 'Мужчины', 1)
+    assert error is None
+
+    duplicate_id, error = adapter.add_calendar_event_team_result(event_id, '  мужчины ', 2)
+    assert (duplicate_id, error) == (None, 'duplicate_label')
+    duplicate_id, error = adapter.add_calendar_event_team_result(event_id, 'МУЖЧИНЫ', 2)
+    assert (duplicate_id, error) == (None, 'duplicate_label')
+
+    other_id, error = adapter.add_calendar_event_team_result(event_id, 'Женщины', 1)
+    assert error is None and other_id != result_id
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(event_id)['team_results']] == [
+        ('Мужчины', 1),
+        ('Женщины', 1),
+    ]
+
+
+def test_team_results_update_changes_values_not_found_self_exclude(adapter):
+    """update: смена значений; переименование «в себя» легально (исключая
+    себя из дубль-проверки); дубль против соседа отклонён; чужой result_id
+    или другое событие → not_found без изменений чужих строк."""
+    event_id = make_team_results_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    first, _ = adapter.add_calendar_event_team_result(event_id, 'Общий зачёт', 1)
+    second, _ = adapter.add_calendar_event_team_result(event_id, 'Мужчины', 2)
+
+    updated, error = adapter.update_calendar_event_team_result(event_id, second, 'Юноши', 7)
+    assert (updated, error) == (True, None)
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 1),
+        ('Юноши', 7),
+    ]
+
+    # Переименование в то же значение (casefold-равное) — не дубль себя;
+    # пишется присланное значение.
+    updated, error = adapter.update_calendar_event_team_result(event_id, second, 'юноши', 7)
+    assert (updated, error) == (True, None)
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 1),
+        ('юноши', 7),
+    ]
+
+    # Дубль против соседней строки — отказ без изменений.
+    updated, error = adapter.update_calendar_event_team_result(event_id, second, 'Общий зачёт', 3)
+    assert (updated, error) == (False, 'duplicate_label')
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 1),
+        ('юноши', 7),
+    ]
+
+    # Ownership: чужой result_id / другое событие / несуществующий.
+    other_id = make_team_results_event(adapter, 'Кубок', '2026-03-01T00:00:00')
+    other_row, _ = adapter.add_calendar_event_team_result(other_id, 'Общий зачёт', 4)
+    assert adapter.update_calendar_event_team_result(other_id, second, 'Взлом', 9) == (False, 'not_found')
+    assert adapter.update_calendar_event_team_result(event_id, other_row, 'Взлом', 9) == (False, 'not_found')
+    assert adapter.update_calendar_event_team_result(event_id, 999999, 'Нет такого', 1) == (False, 'not_found')
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(other_id)['team_results']] == [
+        ('Общий зачёт', 4)
+    ]
+
+
+def test_team_results_delete_row_and_missing(adapter):
+    """delete: строка удаляется (соседние остаются); несуществующая/чужая →
+    False, порядок оставшихся не меняется."""
+    event_id = make_team_results_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    first, _ = adapter.add_calendar_event_team_result(event_id, 'Общий зачёт', 1)
+    second, _ = adapter.add_calendar_event_team_result(event_id, 'Мужчины', 2)
+
+    assert adapter.delete_calendar_event_team_result(event_id, first) is True
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(event_id)['team_results']] == [
+        ('Мужчины', 2)
+    ]
+
+    assert adapter.delete_calendar_event_team_result(event_id, first) is False
+    assert adapter.delete_calendar_event_team_result(event_id, 999999) is False
+    other_id = make_team_results_event(adapter, 'Кубок', '2026-03-01T00:00:00')
+    assert adapter.delete_calendar_event_team_result(other_id, second) is False
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(event_id)['team_results']] == [
+        ('Мужчины', 2)
+    ]
+
+
+def test_delete_calendar_event_removes_team_results(adapter):
+    """Каскад: удаление события чистит его командные результаты (прямым
+    SELECT), строки другого события остаются (паттерн links-cascade)."""
+    event_id = make_team_results_event(adapter, 'Кросс', '2026-04-01T00:00:00')
+    adapter.add_calendar_event_team_result(event_id, 'Общий зачёт', 1)
+    adapter.add_calendar_event_team_result(event_id, 'Мужчины', 2)
+    keeper_id = make_team_results_event(adapter, 'Кубок', '2026-05-01T00:00:00')
+    adapter.add_calendar_event_team_result(keeper_id, 'Остаётся', 3)
+    assert read_team_results_raw(adapter, event_id) != []
+
+    adapter.delete_calendar_event(event_id)
+
+    assert read_team_results_raw(adapter, event_id) == []
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(keeper_id)['team_results']] == [
+        ('Остаётся', 3)
+    ]
+
+
+def test_calendar_event_team_results_table_migrated(tmp_path):
+    """Миграция: легаси-БД без таблицы получает её при старте; повторный
+    старт идемпотентен (паттерн test_calendar_events_regulation_columns_
+    migrated); существующие события остаются с 0 строк."""
+    import sqlite3
+
+    db_path = tmp_path / 'legacy-team-results.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            date_to TEXT,
+            level TEXT NOT NULL DEFAULT '',
+            sport TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        '''
+    )
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, level, sport, url, created_at) '
+        "VALUES ('Кросс', '2026-06-25', 'внутривузовские', 'Бег', '', '2026-01-01T00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    assert adapter.get_calendar_event(1)['team_results'] == []
+    result_id, error = adapter.add_calendar_event_team_result(1, 'Общий зачёт', 2)
+    assert error is None
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(1)['team_results']] == [
+        ('Общий зачёт', 2)
+    ]
+
+    # Повторный старт на том же файле — идемпотентен, данные на месте.
+    adapter.connection.close()
+    adapter = SQLiteAdapter(str(db_path))
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(1)['team_results']] == [
+        ('Общий зачёт', 2)
+    ]
+    assert result_id == read_team_results_raw(adapter, 1)[0]['id']
+    adapter.connection.close()
+
+
 def test_create_calendar_event_and_link_stores_links(adapter):
     """P5b-путь: create_calendar_event_and_link создаёт событие со ссылками
     в той же транзакции, что и связывание записи."""
@@ -5265,6 +5469,7 @@ def test_apply_calendar_link_backfill_skips_row_linked_after_selection(adapter):
 
 V21_PUBLIC_API = [
     'add_audit_event',
+    'add_calendar_event_team_result',
     'add_catalog_value',
     'add_import_queue_entry',
     'add_name_alias',
@@ -5310,6 +5515,7 @@ V21_PUBLIC_API = [
     'delete_attachment',
     'delete_attachments_for_records',
     'delete_calendar_event',
+    'delete_calendar_event_team_result',
     'delete_catalog_value',
     'delete_competition',
     'delete_competition_with_attachments',
@@ -5413,6 +5619,7 @@ V21_PUBLIC_API = [
     'unlink_competition',
     'unlink_user',
     'update_calendar_event',
+    'update_calendar_event_team_result',
     'update_competition',
     'update_custom_field',
     'update_education_level',
@@ -5428,7 +5635,8 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     """Architecture v2.1: SQLiteAdapter собран из доменных примесей
     в документированном порядке; имена между примесями не перекрываются;
     публичная поверхность экземпляра — замороженный список методов
-    (инвентаризация b0a7586 до разреза + Course/Education Phase A).
+    (инвентаризация b0a7586 до разреза + Course/Education Phase A
+    + Team Results: calendar_event_team_results).
     Регрессионный pin состава."""
     from src.storage.catalogs import CatalogsMixin
     from src.storage.education import EducationMixin

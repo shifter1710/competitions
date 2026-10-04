@@ -8296,6 +8296,412 @@ def test_calendar_event_deletion_removes_regulation_file(calendar_client: SanicT
     assert not regulation_dir.exists()
 
 
+# ---- Командные результаты события (Team Results): секция страницы события,
+# add/edit/delete модераторами, валидация, кап 50, права, каскад. ----
+
+
+def add_team_result(client: SanicTestClient, headers: dict, event_id: int, label: str, place):
+    """POST добавления строки командного результата (без follow)."""
+    _, response = client.post(
+        f'/calendar/{event_id}/team-results',
+        headers=headers,
+        data={**csrf_for(headers), 'label': label, 'place': str(place)},
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_team_results_add_edit_delete_flow(calendar_client: SanicTestClient):
+    """Editor: add → строка в БД + аудит; edit → значения обновлены + аудит;
+    delete → строка удалена + аудит со СТАРЫМИ значениями. Редиректы — на
+    страницу события с flash."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс СибАДИ', '2026-06-25', None, 'внутривузовские', 'Бег', links=[])
+    editor = get_auth_headers('editor')
+
+    response = add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 1)
+    assert response.status == 302
+    assert 'Командный результат добавлен' in unquote_plus(response.headers['location'])
+    rows = storage.get_calendar_event(event_id)['team_results']
+    assert [(row['label'], row['place']) for row in rows] == [('Общий зачёт', 1)]
+    result_id = rows[0]['id']
+    assert audit_details(storage, 'calendar_event_team_result_added') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кросс СибАДИ',
+            'result_id': result_id,
+            'label': 'Общий зачёт',
+            'place': 1,
+        }
+    ]
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{result_id}/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'label': 'Мужчины', 'place': '3'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Командный результат обновлён' in unquote_plus(response.headers['location'])
+    assert [(row['label'], row['place']) for row in storage.get_calendar_event(event_id)['team_results']] == [
+        ('Мужчины', 3)
+    ]
+    assert audit_details(storage, 'calendar_event_team_result_edited') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кросс СибАДИ',
+            'result_id': result_id,
+            'label': 'Мужчины',
+            'place': 3,
+        }
+    ]
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{result_id}/delete',
+        headers=editor,
+        data=csrf_for(editor),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Командный результат удалён' in unquote_plus(response.headers['location'])
+    assert storage.get_calendar_event(event_id)['team_results'] == []
+    assert audit_details(storage, 'calendar_event_team_result_deleted') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кросс СибАДИ',
+            'result_id': result_id,
+            'label': 'Мужчины',
+            'place': 3,
+        }
+    ]
+
+
+def test_team_results_section_roles_and_readonly(calendar_client: SanicTestClient):
+    """Модератор видит таблицу и форму добавления; viewer — таблицу без форм
+    и колонки действий; пустое событие viewer'у секцию не рисует; POST
+    viewer'а → 403, аноним POST → 401, аноним GET → редирект на вход."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 2)
+
+    _, response = calendar_client.get(f'/calendar/{event_id}', headers=editor)
+    body = response.body.decode()
+    assert 'Командные результаты' in body
+    assert 'Общий зачёт' in body
+    assert f'action="/calendar/{event_id}/team-results"' in body
+
+    _, response = calendar_client.get(f'/calendar/{event_id}', headers=get_auth_headers('viewer'))
+    body = response.body.decode()
+    assert 'Командные результаты' in body
+    assert 'Общий зачёт' in body
+    # Read-only: ни формы добавления, ни форм правки/удаления строки
+    # (статический id="team-results" самой секции остаётся).
+    assert f'action="/calendar/{event_id}/team-results"' not in body
+    assert 'team-result-edit-form' not in body
+    assert 'edit_team_result=' not in body
+
+    viewer = get_auth_headers('viewer')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results',
+        headers=viewer,
+        data={**csrf_for(viewer), 'label': 'Мужчины', 'place': '1'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    assert [(row['label'], row['place']) for row in storage.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 2)
+    ]
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results', data={'label': 'Мужчины', 'place': '1'}, allow_redirects=False
+    )
+    assert response.status == 401
+    _, response = calendar_client.get(f'/calendar/{event_id}', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    empty_id = storage.create_calendar_event('Пустой', '2026-07-01', None, '', '', links=[])
+    _, response = calendar_client.get(f'/calendar/{empty_id}', headers=get_auth_headers('viewer'))
+    assert 'Командные результаты' not in response.body.decode()
+    _, response = calendar_client.get(f'/calendar/{empty_id}', headers=editor)
+    body = response.body.decode()
+    assert 'Командных результатов пока нет — добавьте первый ниже.' in body
+    assert f'action="/calendar/{empty_id}/team-results"' in body
+
+
+def test_team_results_athlete_post_denied_and_boundaries(calendar_client: SanicTestClient):
+    """Атлет не пишет team results (страница события ему и так 403);
+    точные границы label=200/place=9999/1 принимаются; POST в
+    несуществующее событие → 404."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 2)
+    row_id = storage.get_calendar_event(event_id)['team_results'][0]['id']
+
+    athlete = athlete_headers()
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results',
+        headers=athlete,
+        data={**csrf_for(athlete), 'label': 'Мужчины', 'place': '1'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{row_id}/edit',
+        headers=athlete,
+        data={**csrf_for(athlete), 'label': 'Женщины', 'place': '3'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{row_id}/delete',
+        headers=athlete,
+        data=csrf_for(athlete),
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    assert [(row['label'], row['place']) for row in storage.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 2)
+    ]
+
+    # Точные границы валидны: label 200 символов, место 1 и 9999
+    boundary_label = 'Категория ' + 'а' * 190
+    assert len(boundary_label) == 200
+    response = add_team_result(calendar_client, editor, event_id, boundary_label, 9999)
+    assert response.status == 302
+    response = add_team_result(calendar_client, editor, event_id, 'Мужчины', 1)
+    assert response.status == 302
+    stored = {row['label']: row['place'] for row in storage.get_calendar_event(event_id)['team_results']}
+    assert stored[boundary_label] == 9999
+    assert stored['Мужчины'] == 1
+
+    response = add_team_result(calendar_client, editor, 999999, 'Общий зачёт', 1)
+    assert response.status == 404
+
+
+def test_team_results_csrf_required(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    for path, payload in (
+        ('', {'label': 'Общий зачёт', 'place': '1'}),
+        ('/1/edit', {'label': 'Общий зачёт', 'place': '2'}),
+        ('/1/delete', {}),
+    ):
+        _, response = calendar_client.post(
+            f'/calendar/{event_id}/team-results{path}', headers=editor, data=payload, allow_redirects=False
+        )
+        assert response.status == 403
+    assert storage.get_calendar_event(event_id)['team_results'] == []
+
+
+@pytest.mark.parametrize(
+    'label,place,expected_error',
+    [
+        ('', '1', 'Укажите категорию командного результата'),
+        ('   ', '1', 'Укажите категорию командного результата'),
+        ('а' * 201, '1', 'Категория не может быть длиннее 200 символов'),
+        ('Общий зачёт', 'abc', 'Место команды должно быть целым числом от 1 до 9999'),
+        ('Общий зачёт', '0', 'Место команды должно быть целым числом от 1 до 9999'),
+        ('Общий зачёт', '-1', 'Место команды должно быть целым числом от 1 до 9999'),
+        ('Общий зачёт', '10000', 'Место команды должно быть целым числом от 1 до 9999'),
+        ('Общий зачёт', '1.5', 'Место команды должно быть целым числом от 1 до 9999'),
+    ],
+)
+def test_team_results_add_validation_flash_errors(calendar_client: SanicTestClient, label, place, expected_error):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+
+    response = add_team_result(calendar_client, editor, event_id, label, place)
+
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith(f'/calendar/{event_id}')
+    assert 'admin_error=' in response.headers['location']
+    assert expected_error in location
+    assert storage.get_calendar_event(event_id)['team_results'] == []
+
+
+def test_team_results_duplicate_label_via_route(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    assert add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 1).status == 302
+
+    response = add_team_result(calendar_client, editor, event_id, 'общий ЗАЧЁТ', 2)
+
+    assert response.status == 302
+    assert 'Категория «общий ЗАЧЁТ» уже есть в командных результатах' in unquote_plus(response.headers['location'])
+    assert len(storage.get_calendar_event(event_id)['team_results']) == 1
+
+
+def test_team_results_limit_fifty_per_event(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    for index in range(50):
+        assert add_team_result(calendar_client, editor, event_id, f'Категория {index}', index + 1).status == 302
+    assert len(storage.get_calendar_event(event_id)['team_results']) == 50
+
+    response = add_team_result(calendar_client, editor, event_id, 'Лишняя', 1)
+
+    assert response.status == 302
+    assert 'Достигнут предел — не более 50 командных результатов на соревнование' in unquote_plus(
+        response.headers['location']
+    )
+    assert len(storage.get_calendar_event(event_id)['team_results']) == 50
+
+
+def test_team_results_edit_mode_param_rendering(calendar_client: SanicTestClient):
+    """?edit_team_result=<id>: модератору — внешняя форма + инпуты строки
+    (form="team-result-edit-form"); viewer и чужой/мусорный id — параметр
+    молча игнорируется (обычный список)."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    other_id = storage.create_calendar_event('Кубок', '2026-07-01', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 1)
+    add_team_result(calendar_client, editor, other_id, 'Чужая', 5)
+    result_id = storage.get_calendar_event(event_id)['team_results'][0]['id']
+    foreign_result_id = storage.get_calendar_event(other_id)['team_results'][0]['id']
+
+    _, response = calendar_client.get(f'/calendar/{event_id}?edit_team_result={result_id}', headers=editor)
+    body = response.body.decode()
+    assert 'team-result-edit-form' in body
+    assert f'action="/calendar/{event_id}/team-results/{result_id}/edit"' in body
+    # Инпуты строки привязаны к внешней форме, категория предзаполнена.
+    assert 'form="team-result-edit-form"' in body
+    assert 'value="Общий зачёт"' in body
+
+    _, response = calendar_client.get(
+        f'/calendar/{event_id}?edit_team_result={result_id}', headers=get_auth_headers('viewer')
+    )
+    assert 'Командные результаты' in response.body.decode()
+    assert 'team-result-edit-form' not in response.body.decode()
+
+    _, response = calendar_client.get(f'/calendar/{event_id}?edit_team_result={foreign_result_id}', headers=editor)
+    assert 'team-result-edit-form' not in response.body.decode()
+
+    _, response = calendar_client.get(f'/calendar/{event_id}?edit_team_result=abc', headers=editor)
+    assert 'team-result-edit-form' not in response.body.decode()
+
+
+def test_team_results_edit_validation_keeps_edit_mode(calendar_client: SanicTestClient):
+    """Ошибка валидации/дубля при правке — редирект в режим правки той же
+    строки (edit_team_result) с сохранением result-фильтра; значения в БД
+    не меняются."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 1)
+    result_id = storage.get_calendar_event(event_id)['team_results'][0]['id']
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{result_id}/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'label': 'Общий зачёт', 'place': 'abc', 'result': 'with'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    assert f'/calendar/{event_id}?result=with&edit_team_result={result_id}' in location
+    assert 'Место команды должно быть целым числом от 1 до 9999' in unquote_plus(location)
+    assert [(row['label'], row['place']) for row in storage.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 1)
+    ]
+
+    # Дубль против соседней строки — та же стратегия (режим правки).
+    add_team_result(calendar_client, editor, event_id, 'Мужчины', 2)
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{result_id}/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'label': 'Мужчины', 'place': '5'},
+        allow_redirects=False,
+    )
+    location = unquote_plus(response.headers['location'])
+    assert f'edit_team_result={result_id}' in location
+    assert 'уже есть в командных результатах' in location
+    assert [(row['label'], row['place']) for row in storage.get_calendar_event(event_id)['team_results']] == [
+        ('Общий зачёт', 1),
+        ('Мужчины', 2),
+    ]
+
+
+def test_team_results_edit_delete_not_found_and_invalid_id(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/999/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'label': 'Общий зачёт', 'place': '1'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Командный результат не найден' in unquote_plus(response.headers['location'])
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/999/delete',
+        headers=editor,
+        data=csrf_for(editor),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Командный результат не найден' in unquote_plus(response.headers['location'])
+
+    # Мусорный result_id — 400 по существующему паттерну URL-id.
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/abc/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'label': 'Общий зачёт', 'place': '1'},
+        allow_redirects=False,
+    )
+    assert response.status == 400
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/abc/delete',
+        headers=editor,
+        data=csrf_for(editor),
+        allow_redirects=False,
+    )
+    assert response.status == 400
+
+
+def test_team_results_event_delete_cascade_and_block(calendar_client: SanicTestClient):
+    """Удаление события без участников чистит его командные результаты; с
+    участниками — блокируется как раньше, строки остаются."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 1)
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/delete', headers=editor, data=csrf_for(editor), allow_redirects=False
+    )
+    assert response.status == 302
+    assert storage.get_calendar_event(event_id) is None
+    remaining = storage.connection.execute(
+        'SELECT COUNT(*) AS total FROM calendar_event_team_results WHERE calendar_event_id = ?', (event_id,)
+    ).fetchone()['total']
+    assert remaining == 0
+
+    blocked_id = storage.create_calendar_event('Кубок', '2026-07-01', None, '', '', links=[])
+    add_team_result(calendar_client, editor, blocked_id, 'Общий зачёт', 2)
+    storage.save_competitions([make_calendar_participant('Иванов Дмитрий Сергеевич', event_name='Кубок', day=1)])
+    record_id = storage.connection.execute('SELECT id FROM competitions ORDER BY id DESC LIMIT 1').fetchone()['id']
+    storage.connection.execute('UPDATE competitions SET calendar_event_id = ? WHERE id = ?', (blocked_id, record_id))
+    storage.connection.commit()
+    _, response = calendar_client.post(
+        f'/calendar/{blocked_id}/delete', headers=editor, data=csrf_for(editor), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'есть участники' in unquote_plus(response.headers['location'])
+    assert len(storage.get_calendar_event(blocked_id)['team_results']) == 1
+
+
 def test_delete_competition_writes_record_deleted_audit(calendar_client: SanicTestClient):
     storage = app.ctx.storage
     storage.save_competitions([make_calendar_participant('Иванов Дмитрий Сергеевич')])
@@ -16263,7 +16669,9 @@ def test_p7_colliding_custom_no_duplicate_columns(event_import_client: SanicTest
     event_id = make_calendar_event(storage)
     make_event_participation(storage, event_id, 'Иванов Иван Иванович', position=1, extra={'discipline': 'кросс 3 км'})
     body = get_event_page(event_import_client, event_id).text
-    assert body.count('<th scope="col"') == 10
+    # 10 колонок таблицы участников + 3 заголовка секции «Командные результаты»
+    # (Категория, Место команды, Действия — клиент с правами модератора)
+    assert body.count('<th scope="col"') == 13
     assert body.count('>Дисциплина</th>') == 1
     # Эффективная дисциплина (base NULL → фолбэк в extra_data) отображается
     assert 'кросс 3 км' in body
