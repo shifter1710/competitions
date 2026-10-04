@@ -253,6 +253,33 @@ class SQLiteAdapter(
                 ON calendar_event_links (calendar_event_id, sort_order, id)
                 '''
             )
+            # Командные результаты соревнования (Team Results): у события 0..N
+            # строк «категория + место команды» — итоги командного зачёта,
+            # отдельно от личных мест участников (записей реестра). Владение —
+            # Event: строки живут и умирают вместе с событием (удаление
+            # события чистит их тем же commit). Логический FK по конвенции
+            # проекта (PRAGMA foreign_keys не включается); без UNIQUE —
+            # уникальность label внутри события держит приложение. Миграция
+            # чисто аддитивная и идемпотентная, без backfill.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS calendar_event_team_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    calendar_event_id INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    place INTEGER NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_calendar_event_team_results_event
+                ON calendar_event_team_results (calendar_event_id, sort_order, id)
+                '''
+            )
             # Backfill-and-clear: каждый непустой legacy-url становится ссылкой
             # события (label «Ссылка», В КОНЦЕ существующих — sort_order =
             # max+1), затем колонка url очищается — очищенная колонка

@@ -131,6 +131,8 @@ def decorate_calendar_event(event: dict, today=None) -> dict:
     # Multiple Event Links: links читается через .get — фикстуры-моки
     # присылают сокращённые словари без ключа (прецедент date_to выше).
     decorated['links'] = list(event.get('links') or [])
+    # Team Results: тот же mock-safe паттерн.
+    decorated['team_results'] = list(event.get('team_results') or [])
     return decorated
 
 
@@ -242,6 +244,37 @@ def parse_calendar_event_links(request: Request) -> tuple[list[tuple[str, str]],
     if len(links) > MAX_EVENT_LINKS:
         return [], f'Слишком много ссылок — максимум {MAX_EVENT_LINKS}'
     return links, None
+
+
+# Командные результаты события (Team Results): у события 0..N строк
+# «категория (свободный текст) + место команды» — итоги командного зачёта.
+# Отдельная сущность события (НЕ participation/Student/Registry):
+# редактируется секцией на странице события, форма создания/правки события
+# их не касается.
+MAX_TEAM_RESULT_LABEL = 200
+MAX_TEAM_RESULT_PLACE = 9999
+MAX_EVENT_TEAM_RESULTS = 50
+
+
+def parse_team_result_form(request: Request) -> tuple[str | None, int | None, str | None]:
+    """Разобрать поля формы командного результата: (label, place, ошибка).
+
+    label — непустой после strip и не длиннее MAX_TEAM_RESULT_LABEL (синхрон
+    с maxlength инпута); place — целое 1..MAX_TEAM_RESULT_PLACE. Ошибка
+    возвращается текстом для flash-редиректа (не 400 — паттерн
+    add-participation)."""
+    label = clean_str(get_form_value(request, 'label'))
+    if not label:
+        return None, None, 'Укажите категорию командного результата'
+    if len(label) > MAX_TEAM_RESULT_LABEL:
+        return None, None, f'Категория не может быть длиннее {MAX_TEAM_RESULT_LABEL} символов'
+    try:
+        place = int(get_form_value(request, 'place'))
+    except ValueError:
+        return None, None, f'Место команды должно быть целым числом от 1 до {MAX_TEAM_RESULT_PLACE}'
+    if not 1 <= place <= MAX_TEAM_RESULT_PLACE:
+        return None, None, f'Место команды должно быть целым числом от 1 до {MAX_TEAM_RESULT_PLACE}'
+    return label, place, None
 
 
 # Страница соревнования (волна B, прототип 16): участники = записи реестра
@@ -1903,12 +1936,31 @@ def register(app: Sanic) -> None:  # noqa: C901
             all_groups if not result_filter else calendar_participant_groups(participants, custom_fields)
         )
         can_write = user_can_write(request)
+        can_manage = user_is_moderator(request)
+        decorated_event = decorate_calendar_event(event)
+
+        # Team Results: режим правки строки — ?edit_team_result=<id>
+        # (паттерн add_participation): валиден только для can_manage и только
+        # id из ЭТОГО события; мусор/чужой id молча игнорируются.
+        edit_team_result = None
+        if can_manage:
+            raw_edit = (get_param(args, 'edit_team_result') or '').strip()
+            if raw_edit:
+                try:
+                    edit_id = int(raw_edit)
+                except ValueError:
+                    edit_id = None
+                if edit_id is not None:
+                    edit_team_result = next(
+                        (row for row in decorated_event['team_results'] if row.get('id') == edit_id),
+                        None,
+                    )
 
         return await render(
             template_name=jinja_env.get_template('calendar_event.html'),
             context={
                 'request': request,
-                'event': decorate_calendar_event(event),
+                'event': decorated_event,
                 'participant_groups': participant_groups,
                 'participants_count': len(all_groups),
                 'participations_count': participations_count,
@@ -1926,7 +1978,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'is_admin': user_is_admin(request),
                 # Управление файлом положения — модераторы (admin/editor);
                 # can_write сюда не годится: он включает атлета.
-                'can_manage': user_is_moderator(request),
+                'can_manage': can_manage,
+                # Team Results: строка в режиме правки (dict) или None.
+                'edit_team_result': edit_team_result,
                 'result_filter': result_filter,
                 'result_filter_options': CALENDAR_RESULT_FILTERS,
                 'sport_options': storage.list_catalog('sport'),
@@ -2036,6 +2090,142 @@ def register(app: Sanic) -> None:  # noqa: C901
             message=f'Участник «{student_name}» добавлен',
             url=back_url,
         )
+
+    # Командные результаты события (Team Results): add/edit/delete строк
+    # «категория + место команды» со страницы события. Права — модераторы
+    # (require_moderator, как у управления положением); ошибки валидации —
+    # flash-редирект, не 400 (паттерн add-participation).
+
+    @app.post('/calendar/<event_id>/team-results')
+    async def add_calendar_event_team_result(request: Request, event_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        back_url = f'/calendar/{event["id"]}'
+        label, place, form_error = parse_team_result_form(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=back_url)
+
+        # Кап строк (прецедент MAX_EVENT_LINKS): считаем по событию из того
+        # же чтения; предел мягкий — окно между чтением и INSERT двух
+        # одновременных модераторов может дать +1 строку, это допустимо.
+        if len(event.get('team_results') or []) >= MAX_EVENT_TEAM_RESULTS:
+            return build_redirect_with_message(
+                error=f'Достигнут предел — не более {MAX_EVENT_TEAM_RESULTS} командных результатов на соревнование',
+                url=back_url,
+            )
+
+        result_id, add_error = get_storage(request.app).add_calendar_event_team_result(event['id'], label, place)
+        if add_error == 'duplicate_label':
+            return build_redirect_with_message(
+                error=f'Категория «{label}» уже есть в командных результатах',
+                url=back_url,
+            )
+        log_audit_event(
+            request,
+            'calendar_event_team_result_added',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'result_id': result_id,
+                'label': label,
+                'place': place,
+            },
+        )
+        return build_redirect_with_message(message='Командный результат добавлен', url=back_url)
+
+    @app.post('/calendar/<event_id>/team-results/<result_id>/edit')
+    async def edit_calendar_event_team_result(request: Request, event_id: str, result_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_result_id = int(result_id)
+        except ValueError:
+            return text(body='Invalid team result id', status=400)
+
+        # Ошибка валидации/дубля — назад в режим правки той же строки
+        # (edit_team_result), с сохранением result-фильтра (hidden-поле формы).
+        result_filter = (get_form_value(request, 'result') or '').strip()
+        if result_filter in {key for key, _ in CALENDAR_RESULT_FILTERS if key}:
+            edit_url = f"/calendar/{event['id']}?result={result_filter}&edit_team_result={numeric_result_id}"
+        else:
+            edit_url = f"/calendar/{event['id']}?edit_team_result={numeric_result_id}"
+        back_url = f'/calendar/{event["id"]}'
+
+        label, place, form_error = parse_team_result_form(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=edit_url)
+
+        updated, update_error = get_storage(request.app).update_calendar_event_team_result(
+            event['id'], numeric_result_id, label, place
+        )
+        if update_error == 'not_found':
+            return build_redirect_with_message(error='Командный результат не найден', url=back_url)
+        if update_error == 'duplicate_label':
+            return build_redirect_with_message(
+                error=f'Категория «{label}» уже есть в командных результатах',
+                url=edit_url,
+            )
+        log_audit_event(
+            request,
+            'calendar_event_team_result_edited',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'result_id': numeric_result_id,
+                'label': label,
+                'place': place,
+            },
+        )
+        return build_redirect_with_message(message='Командный результат обновлён', url=back_url)
+
+    @app.post('/calendar/<event_id>/team-results/<result_id>/delete')
+    async def delete_calendar_event_team_result(request: Request, event_id: str, result_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_result_id = int(result_id)
+        except ValueError:
+            return text(body='Invalid team result id', status=400)
+
+        back_url = f'/calendar/{event["id"]}'
+        # Старые значения — в аудит (до удаления, из строки ЭТОГО события).
+        existing = next(
+            (row for row in event.get('team_results') or [] if row.get('id') == numeric_result_id),
+            None,
+        )
+        if existing is None:
+            return build_redirect_with_message(error='Командный результат не найден', url=back_url)
+
+        deleted = get_storage(request.app).delete_calendar_event_team_result(event['id'], numeric_result_id)
+        if not deleted:
+            return build_redirect_with_message(error='Командный результат не найден', url=back_url)
+        log_audit_event(
+            request,
+            'calendar_event_team_result_deleted',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'result_id': numeric_result_id,
+                'label': existing['label'],
+                'place': existing['place'],
+            },
+        )
+        return build_redirect_with_message(message='Командный результат удалён', url=back_url)
 
     @app.get('/calendar/<event_id>/participants/<record_id>/link')
     async def calendar_event_participant_link_page(request: Request, event_id: str, record_id: str):

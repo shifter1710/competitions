@@ -217,6 +217,106 @@
 </section>
 {% endif %}
 
+{# Командные результаты (Team Results): итоги командного зачёта события —
+   категория + место команды, отдельно от личных мест участников ниже.
+   Форма правки строки живёт вне таблицы: инпуты строки ссылаются на неё
+   через form="team-result-edit-form" (валидная разметка внутри <table>,
+   паттерн participant-add-form). #}
+{% if can_manage and edit_team_result %}
+<form id="team-result-edit-form" method="post"
+      action="/calendar/{{ event.id }}/team-results/{{ edit_team_result.id }}/edit">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <input type="hidden" name="result" value="{{ result_filter }}">
+</form>
+{% endif %}
+{% if event.team_results or can_manage %}
+<section class="card shadow-sm mb-4" id="team-results">
+    <div class="card-body">
+        <h3 class="title mb-1">Командные результаты</h3>
+        <div class="text-muted small mb-2">Итоги командного зачёта по категориям — отдельно от личных мест
+            участников ниже.
+        </div>
+        <table class="table table-sm table-striped align-middle mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th scope="col">Категория</th>
+                    <th scope="col" class="text-center" style="width: 120px;">Место команды</th>
+                    {% if can_manage %}
+                    <th scope="col" style="width: 210px;">Действия</th>
+                    {% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in event.team_results %}
+                {% if can_manage and edit_team_result and edit_team_result.id == row.id %}
+                {# Строка в режиме правки: инпуты привязаны к внешней форме
+                   team-result-edit-form; «Отмена» возвращает к списку с
+                   сохранением result-фильтра. #}
+                <tr>
+                    <td>
+                        <input class="form-control form-control-sm" form="team-result-edit-form" type="text"
+                            name="label" value="{{ row.label }}" maxlength="200" required aria-label="Категория">
+                    </td>
+                    <td>
+                        <input class="form-control form-control-sm input-num" form="team-result-edit-form"
+                            type="number" name="place" value="{{ row.place }}" min="1" max="9999" step="1" required
+                            aria-label="Место команды">
+                    </td>
+                    <td>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-success" type="submit"
+                                form="team-result-edit-form">Сохранить</button>
+                            <a class="btn btn-sm btn-outline-secondary"
+                                href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td class="text-break">{{ row.label }}</td>
+                    <td class="text-center text-nowrap">{{ row.place }}</td>
+                    {% if can_manage %}
+                    <td>
+                        <div class="d-flex gap-1">
+                            <a class="btn btn-sm btn-outline-primary"
+                                href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}edit_team_result={{ row.id }}">Изменить</a>
+                            <form action="/calendar/{{ event.id }}/team-results/{{ row.id }}/delete" method="post"
+                                  onsubmit='return confirm({{ ('Удалить командный результат «' ~ row.label ~ '»? Строка будет удалена безвозвратно.') | tojson }})'>
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                        </div>
+                    </td>
+                    {% endif %}
+                </tr>
+                {% endif %}
+                {% else %}
+                {# Пусто: секция без строк рендерится только can_manage
+                   (условие выше), поэтому подсказка адресована ему. #}
+                <tr>
+                    <td colspan="{{ 3 if can_manage else 2 }}" class="text-center text-muted py-4">
+                        Командных результатов пока нет — добавьте первый ниже.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if can_manage %}
+        <form class="d-flex flex-wrap gap-2 align-items-center mt-3" method="post"
+              action="/calendar/{{ event.id }}/team-results">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input class="form-control" style="flex: 1 1 240px;" type="text" name="label"
+                placeholder="Категория (например: Общий зачёт)" aria-label="Категория" maxlength="200" required>
+            <input class="form-control input-num" style="flex: 0 1 120px;" type="number" name="place" placeholder="1"
+                aria-label="Место команды" min="1" max="9999" step="1" required>
+            <button class="btn btn-sm btn-success" type="submit">Добавить</button>
+            <span class="form-text ui-hint">Например: Общий зачёт, Мужчины, Женщины. До 50 строк.</span>
+        </form>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
 <div class="table-meta d-flex flex-wrap align-items-center gap-3 mb-2">
     <label class="d-flex align-items-center gap-2 mb-0">
         Показать:

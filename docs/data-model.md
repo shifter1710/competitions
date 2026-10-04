@@ -553,6 +553,34 @@ NULL-записей по предикату стартового backfill'а: «
 `participation_batch_linked` `{linked, skipped, items[{record_id,
 event_id, event_name}]}`.
 
+### 9b. `calendar_event_team_results` — командные результаты события
+
+Командные результаты соревнования (Team Results): у события 0..N строк
+«категория + место команды» — итоги командного зачёта (например, «Общий
+зачёт», «Мужчины», «Женщины», «Команда ИМИ»). Отдельная сущность,
+принадлежащая событию календаря: к participation/Student/Registry
+отношения не имеет, в отчёты и импорт/экспорт не попадает. Владение —
+Event: строки живут и умирают вместе с событием (удаление события чистит
+их тем же commit). Редактируются отдельной секцией на странице события
+(`POST /calendar/<id>/team-results` + `/<result_id>/edit` + `/delete`,
+модераторы); форма создания/правки события их не касается.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `calendar_event_id` | INTEGER NOT NULL | логический FK `calendar_events.id` (по конвенции проекта, без `PRAGMA foreign_keys`) |
+| `label` | TEXT NOT NULL | категория (свободный текст); непустая, до 200 символов — валидация роута; уникальность внутри события (strip + casefold, без табличного UNIQUE) держит приложение (`duplicate_label`) |
+| `place` | INTEGER NOT NULL | место команды, целое 1..9999 — валидация роута |
+| `sort_order` | INTEGER NOT NULL DEFAULT `0` | порядок добавления (`max+1`); чтение — `ORDER BY sort_order, id`; правка/удаление порядок не пересчитывают (дыры не мешают) |
+| `created_at` | TEXT NOT NULL | |
+| `updated_at` | TEXT NOT NULL | меняется при правке строки |
+
+Индекс: `idx_calendar_event_team_results_event (calendar_event_id,
+sort_order, id)`. Кап строк — 50 на событие (роут). Аудит —
+`calendar_event_team_result_added` / `calendar_event_team_result_edited`
+(новые значения) / `calendar_event_team_result_deleted` (старые значения)
+`{event_id, event_name, result_id, label, place}`.
+
 ### 10. `import_queue` — очередь конфликтов импорта
 
 | Колонка | Тип / ограничение | Смысл |
@@ -939,6 +967,10 @@ runtime кабинета атлета и прав атлета на чтение
   совпадению url), затем колонка очищается; legacy-колонка не дропается
   (rollback-безопасность: url, снова записанный старым кодом, повторным
   стартом дописывается ссылкой без потерь и дублей);
+- Team Results: новая таблица `calendar_event_team_results` (раздел 9b)
+  + индекс `idx_calendar_event_team_results_event` — чисто аддитивная
+  идемпотентная миграция (`CREATE TABLE/INDEX IF NOT EXISTS`), без
+  backfill (легаси-концепта «командное место» в коде не было);
 - Event Model, Wave 1 P0 (2026-09-24):
   - `competitions`: `+discipline`, `+result`, `+calendar_event_id` —
     аддитивно, существующие строки NULL;
