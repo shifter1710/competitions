@@ -218,6 +218,13 @@ def client() -> SanicTestClient:
     fake_storage.delete_calendar_event.return_value = None
     fake_storage.count_calendar_event_participants.return_value = 0
     fake_storage.list_calendar_event_participants.return_value = []
+    # Course/Education Phase A: дефолты учебных данных — Mock без них вернул
+    # бы неитерируемый объект в build_education_level_entries (500 на
+    # /admin/catalogs) и мусор вместо счётчика на /admin/maintenance.
+    fake_storage.list_education_levels.return_value = []
+    fake_storage.count_groups_using_level.return_value = 0
+    fake_storage.count_participations_without_admission_year.return_value = 0
+    fake_storage.get_student_education_context.return_value = None
     app.ctx.storage = fake_storage
     return SanicTestClient(app)
 
@@ -17514,3 +17521,572 @@ def test_admin_hub_help_cards_renamed(client: SanicTestClient):
     assert 'Как работает система' in body
     assert 'Карта данных' not in body
     assert '/admin/data-map' in body
+
+
+# --- Course / Education, Phase A: уровни образования, учебные данные групп,
+# --- снимок года поступления записей, производный курс и backfill.
+# --- Все названия групп/институтов/ФИО синтетические (паттерны реальные,
+# --- значения выдуманные). Полные сценарии — на реальном SQLite-адаптере
+# --- (паттерн people_client); права — на Mock-фикстуре client. ---
+
+
+EDUCATION_ADMIN_ENDPOINTS = (
+    ('post', '/admin/education-levels'),
+    ('post', '/admin/education-levels/3/duration'),
+    ('post', '/admin/education-levels/3/hide'),
+    ('post', '/admin/education-levels/3/unhide'),
+    ('post', '/admin/education-levels/3/delete'),
+    ('get', '/admin/catalogs/group/3/academic'),
+    ('post', '/admin/catalogs/group/3/academic'),
+    ('get', '/admin/maintenance/admission-years'),
+    ('post', '/admin/maintenance/admission-years/apply'),
+)
+
+
+def test_education_admin_endpoints_forbidden_for_non_admin(client: SanicTestClient):
+    """Только admin: editor/viewer/athlete получают 403 на всех новых
+    эндпоинтах учебных данных (те же ожидания, что у /admin/catalogs)."""
+
+    def request_endpoint(headers: dict[str, str], method: str, path: str):
+        if method == 'post':
+            return client.post(path, headers=headers, data=csrf_for(headers))
+        return client.get(path, headers=headers)
+
+    for role in ('editor', 'viewer'):
+        headers = get_auth_headers(role=role)
+        for method, path in EDUCATION_ADMIN_ENDPOINTS:
+            _, response = request_endpoint(headers, method, path)
+            assert response.status == 403, (role, method, path)
+
+    athlete = athlete_headers()
+    for method, path in EDUCATION_ADMIN_ENDPOINTS:
+        _, response = request_endpoint(athlete, method, path)
+        assert response.status == 403, (method, path)
+
+
+def test_education_admin_endpoints_reject_anonymous(client: SanicTestClient):
+    """Аноним: GET — редирект на вход, POST — 401 (глобальная authorize_request)."""
+    for method, path in EDUCATION_ADMIN_ENDPOINTS:
+        _, response = getattr(client, method)(path, allow_redirects=False)
+        if method == 'get':
+            assert response.status == 302, path
+            assert response.headers['location'] == '/login'
+        else:
+            assert response.status == 401, path
+
+
+@pytest.fixture
+def education_client(client: SanicTestClient, tmp_path) -> SanicTestClient:
+    storage = SQLiteAdapter(str(tmp_path / 'education.sqlite3'))
+    storage.create_user(settings.auth_admin_username, 'hash', 'admin')
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+def seed_education_group(storage: SQLiteAdapter, institute: str = 'ИСИ', group: str = 'Тестб-23А1') -> dict:
+    """Пара институт→группа в справочнике реального адаптера; строка группы."""
+    storage.add_catalog_value('institute', institute)
+    institute_row = storage.find_catalog_row('institute', institute)
+    storage.add_catalog_value('group', group, parent_id=institute_row['id'])
+    return storage.find_catalog_row('group', group, parent_id=institute_row['id'])
+
+
+def education_level_id(storage: SQLiteAdapter, name: str) -> int:
+    return next(level['id'] for level in storage.list_education_levels(include_inactive=True) if level['name'] == name)
+
+
+def audit_actions(storage: SQLiteAdapter) -> list[str]:
+    return [row['action'] for row in storage.connection.execute('SELECT action FROM audit_log')]
+
+
+def test_education_level_admin_flow(education_client: SanicTestClient):
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+
+    _, response = education_client.get('/admin/catalogs', headers=headers)
+    assert response.status == 200
+    assert 'Уровни образования' in response.text
+    assert 'action="/admin/education-levels"' in response.text
+    # Посев Phase A: 4 базовых уровня, длительности NULL (не хардкодятся).
+    for name in ('Бакалавриат', 'Специалитет', 'Магистратура', 'Аспирантура'):
+        assert name in response.text
+    seeded = {level['name']: level for level in storage.list_education_levels(include_inactive=True)}
+    assert all(level['default_duration_years'] is None for level in seeded.values())
+
+    # Создание уровня с длительностью по умолчанию.
+    _, response = education_client.post(
+        '/admin/education-levels',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Тестовый бакалавриат', 'default_duration_years': '4'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_message' in response.headers['location']
+    created_id = education_level_id(storage, 'Тестовый бакалавриат')
+    assert storage.get_education_level(created_id)['default_duration_years'] == 4
+
+    # Дубликат имени без учёта регистра отклоняется (кириллица — в Python).
+    _, response = education_client.post(
+        '/admin/education-levels',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'ТЕСТОВЫЙ бакалавриат'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'admin_error' in location
+    assert 'уже есть' in location
+    assert len(storage.list_education_levels(include_inactive=True)) == 5
+
+    # Inline-правка длительности: значение и очистка в NULL.
+    _, response = education_client.post(
+        f'/admin/education-levels/{created_id}/duration',
+        headers=headers,
+        data={**csrf_for(headers), 'default_duration_years': '5'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_education_level(created_id)['default_duration_years'] == 5
+    _, response = education_client.post(
+        f'/admin/education-levels/{created_id}/duration',
+        headers=headers,
+        data={**csrf_for(headers), 'default_duration_years': ''},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_education_level(created_id)['default_duration_years'] is None
+
+    # Скрытие/показ: скрытый не выбирается в новых учебных данных групп,
+    # но остаётся в справочнике (и у групп, где уже задан).
+    _, response = education_client.post(
+        f'/admin/education-levels/{created_id}/hide', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert storage.get_education_level(created_id)['active'] == 0
+    assert created_id not in {level['id'] for level in storage.list_education_levels()}
+    _, response = education_client.post(
+        f'/admin/education-levels/{created_id}/unhide', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert storage.get_education_level(created_id)['active'] == 1
+
+    # Удаление: guard по группам — уровень со ссылкой не удаляется.
+    group = seed_education_group(storage)
+    storage.upsert_group_academic(group['id'], education_level_id=created_id)
+    _, response = education_client.post(
+        f'/admin/education-levels/{created_id}/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'невозможно' in unquote_plus(response.headers['location'])
+    assert storage.get_education_level(created_id) is not None
+    storage.delete_group_academic(group['id'])
+    _, response = education_client.post(
+        f'/admin/education-levels/{created_id}/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert storage.get_education_level(created_id) is None
+    assert 'education_level_deleted' in audit_actions(storage)
+
+
+def test_group_academic_page_prefill_and_save(education_client: SanicTestClient):
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    group = seed_education_group(storage)  # «Тестб-23А1» — парсер уверен (2023)
+
+    _, response = education_client.get(f'/admin/catalogs/group/{group["id"]}/academic', headers=headers)
+    assert response.status == 200
+    assert 'value="2023"' in response.text
+    assert 'Предложено автоматически' in response.text
+
+    # Неуверенный парсер («Без Года») — предзаполнения нет.
+    unclear = seed_education_group(storage, group='Без Года')
+    _, response = education_client.get(f'/admin/catalogs/group/{unclear["id"]}/academic', headers=headers)
+    assert response.status == 200
+    assert 'Предложено автоматически' not in response.text
+
+    # Сохранение: уровень + год + длительность-override; аудит.
+    level_id = storage.create_education_level('Тестовый бакалавриат', 4)
+    _, response = education_client.post(
+        f'/admin/catalogs/group/{group["id"]}/academic',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'education_level_id': str(level_id),
+            'admission_year': '2023',
+            'duration_years_override': '5',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_message' in response.headers['location']
+    stored = storage.get_group_academic(group['id'])
+    assert stored['education_level_id'] == level_id
+    assert stored['admission_year'] == 2023
+    assert stored['duration_years_override'] == 5
+    assert 'group_academic_updated' in audit_actions(storage)
+
+    # После сохранения подсказка парсера не показывается (значение уже задано).
+    _, response = education_client.get(f'/admin/catalogs/group/{group["id"]}/academic', headers=headers)
+    assert 'value="2023"' in response.text
+    assert 'Предложено автоматически' not in response.text
+
+    # Некорректный год — error flash, сохранённые данные не меняются.
+    _, response = education_client.post(
+        f'/admin/catalogs/group/{group["id"]}/academic',
+        headers=headers,
+        data={**csrf_for(headers), 'education_level_id': '', 'admission_year': '1800'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Год поступления' in unquote_plus(response.headers['location'])
+    assert storage.get_group_academic(group['id'])['admission_year'] == 2023
+
+    # Институт вместо группы / несуществующее значение — редирект с ошибкой.
+    institute_row = storage.find_catalog_row('institute', 'ИСИ')
+    _, response = education_client.get(
+        f'/admin/catalogs/group/{institute_row["id"]}/academic', headers=headers, allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Группа не найдена' in unquote_plus(response.headers['location'])
+    _, response = education_client.get('/admin/catalogs/group/999999/academic', headers=headers, allow_redirects=False)
+    assert response.status == 302
+    assert 'Группа не найдена' in unquote_plus(response.headers['location'])
+
+
+MANUAL_RECORD_DATA = {
+    'student_name': 'Снимков Снимок Снимкович',
+    'student_sex': 'М',
+    'institute': 'ИСИ',
+    'group': 'Тестб-23А1',
+    'course': '2',
+    'sport': 'Бег',
+    'date': '10.04.2026',
+    'level': 'внутривузовские',
+    'name': 'Кубок',
+    'position': '1',
+}
+
+
+def test_manual_record_create_writes_snapshot_edit_keeps_it(education_client: SanicTestClient):
+    """Снимок года поступления пишется при создании записи ручной формой;
+    правка записи НЕ меняет заданный и НЕ дополняет пустой снимок."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    group = seed_education_group(storage)
+
+    # Пара есть, учебных данных нет → запись создаётся со снимком NULL.
+    _, response = education_client.post(
+        '/competition', headers=headers, data={**csrf_for(headers), **MANUAL_RECORD_DATA}, allow_redirects=False
+    )
+    assert response.status == 302
+    first_id = storage.connection.execute('SELECT id FROM competitions').fetchone()['id']
+    assert (
+        storage.connection.execute('SELECT admission_year FROM competitions WHERE id = ?', (first_id,)).fetchone()[
+            'admission_year'
+        ]
+        is None
+    )
+
+    # Учебные данные появились ПОСЛЕ создания — правка записи не дополняет снимок.
+    storage.upsert_group_academic(group['id'], admission_year=2023)
+    _, response = education_client.post(
+        f'/competition/{first_id}',
+        headers=headers,
+        data={**csrf_for(headers), **MANUAL_RECORD_DATA, 'course': '5'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT admission_year, course FROM competitions WHERE id = ?', (first_id,)
+    ).fetchone()
+    assert row['admission_year'] is None
+    assert row['course'] == 5
+
+    # Новая запись той же пары — снимок заполняется из учебных данных группы.
+    _, response = education_client.post(
+        '/competition',
+        headers=headers,
+        data={**csrf_for(headers), **MANUAL_RECORD_DATA, 'student_name': 'Второв Снимок Снимкович'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    second_row = storage.connection.execute(
+        'SELECT id, admission_year FROM competitions WHERE student_name = ?', ('Второв Снимок Снимкович',)
+    ).fetchone()
+    assert second_row['admission_year'] == 2023
+
+    # Заданный снимок правка не перезаписывает.
+    _, response = education_client.post(
+        f"/competition/{second_row['id']}",
+        headers=headers,
+        data={**csrf_for(headers), **MANUAL_RECORD_DATA, 'student_name': 'Второв Снимок Снимкович', 'course': '3'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert (
+        storage.connection.execute(
+            'SELECT admission_year FROM competitions WHERE id = ?', (second_row['id'],)
+        ).fetchone()['admission_year']
+        == 2023
+    )
+
+
+def test_calendar_participant_add_writes_snapshot(education_client: SanicTestClient):
+    """Добавление участника события создаёт запись реестра тем же путём —
+    снимок года поступления заполняется из учебных данных группы."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    group = seed_education_group(storage)
+    storage.upsert_group_academic(group['id'], admission_year=2022)
+    event_id = make_calendar_event(storage)
+
+    _, response = education_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Участков Участ Участкович',
+            'institute': 'ИСИ',
+            'group': 'Тестб-23А1',
+            'course': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute('SELECT admission_year FROM competitions').fetchone()
+    assert row['admission_year'] == 2022
+
+
+def test_registry_course_cell_derived_and_legacy_fallback(education_client: SanicTestClient):
+    """Колонка «Курс» реестра: запись со снимком — производный курс НА ДАТУ
+    СОРЕВНОВАНИЯ (future — «—» с подсказкой); без снимка — легаси-значение
+    записи, включая текстовые («Выпускник 2025/26»)."""
+    storage = app.ctx.storage
+    with_metadata = seed_education_group(storage)  # «Тестб-23А1»
+    storage.upsert_group_academic(with_metadata['id'], admission_year=2023)
+    future_group = seed_education_group(storage, group='Футч-27Б1')
+    storage.upsert_group_academic(future_group['id'], admission_year=2027)
+
+    storage.save_competitions(
+        [
+            # Снимок 2023, дата 15.03.2026 → учебный год 2025/2026 → 3 курс
+            # (легаси-курс 1 игнорируется).
+            Competition(
+                student_id='id-derived',
+                student_name='Производнов Кур Курсович',
+                student_sex='М',
+                institute='ИСИ',
+                group='Тестб-23А1',
+                course=1,
+                sport='Бег',
+                date=datetime(2026, 3, 15),
+                level='внутривузовские',
+                name='Кубок',
+                position=1,
+            ),
+            # Снимок 2027 при дате 2026 → future: «—» с подсказкой.
+            Competition(
+                student_id='id-future',
+                student_name='Будущев Кур Курсович',
+                student_sex='М',
+                institute='ИСИ',
+                group='Футч-27Б1',
+                course=1,
+                sport='Бег',
+                date=datetime(2026, 5, 10),
+                level='внутривузовские',
+                name='Кубок',
+                position=1,
+            ),
+            # Без снимка (пары нет в справочнике) — легаси-текст как есть.
+            Competition(
+                student_id='id-legacy',
+                student_name='Легачев Кур Курсович',
+                student_sex='М',
+                institute='ИСИ',
+                group='Выпуск',
+                course='Выпускник 2025/26',
+                sport='Бег',
+                date=datetime(2026, 3, 15),
+                level='внутривузовские',
+                name='Кубок',
+                position=1,
+            ),
+        ]
+    )
+    snapshots = {
+        row['student_name']: row['admission_year']
+        for row in storage.connection.execute('SELECT student_name, admission_year FROM competitions')
+    }
+    assert snapshots['Производнов Кур Курсович'] == 2023
+    assert snapshots['Будущев Кур Курсович'] == 2027
+    assert snapshots['Легачев Кур Курсович'] is None
+
+    _, response = education_client.get('/', headers=get_auth_headers())
+    assert response.status == 200
+    assert '<td data-column-key="course">3</td>' in response.text
+    assert 'Год поступления позже даты соревнования' in response.text
+    assert '<td data-column-key="course">Выпускник 2025/26</td>' in response.text
+    # Легаси-курс записи со снимком не показывается (заменён производным).
+    assert '<td data-column-key="course">1</td>' not in response.text
+
+
+def test_person_card_education_block_with_and_without_metadata(education_client: SanicTestClient):
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    group = seed_education_group(storage, group='Тестб-22А1')
+    level_id = storage.create_education_level('Тестовый бакалавриат', 4)
+    # Год 2022 + длительность 4: с сентября 2026 курс 5 > 4 — бейдж
+    # «Предположительно обучение завершено» (стабильно для любых дат дальше).
+    storage.upsert_group_academic(
+        group['id'], education_level_id=level_id, admission_year=2022, duration_years_override=4
+    )
+    educated_id = storage.create_student('Образован Образ Образович', 'М', 'ИСИ', 'Тестб-22А1', '2')
+
+    _, response = education_client.get(f'/admin/people/{educated_id}', headers=headers)
+    assert response.status == 200
+    assert '<h5 class="card-title">Образование</h5>' in response.text
+    assert 'Тестовый бакалавриат' in response.text
+    assert '2022' in response.text
+    assert 'Предположительно обучение завершено' in response.text
+    assert 'не архивируется автоматически' in response.text
+
+    # Пара есть в справочнике, но учебных данных нет — блока «Образование» нет.
+    seed_education_group(storage, group='Безметад Группа')
+    plain_id = storage.create_student('Простов Прост Простович', 'М', 'ИСИ', 'Безметад Группа', '1')
+    _, response = education_client.get(f'/admin/people/{plain_id}', headers=headers)
+    assert response.status == 200
+    assert '<h5 class="card-title">Образование</h5>' not in response.text
+    assert 'Предположительно обучение завершено' not in response.text
+
+    # Пара не резолвится (группы нет в справочнике) — блока тоже нет.
+    unknown_id = storage.create_student('Неизвестов Неиз Неизвестович', 'М', 'ИСИ', 'Нет Такой', '1')
+    _, response = education_client.get(f'/admin/people/{unknown_id}', headers=headers)
+    assert response.status == 200
+    assert '<h5 class="card-title">Образование</h5>' not in response.text
+
+
+def test_maintenance_admission_years_preview_and_apply(education_client: SanicTestClient):
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    # Синтетика классификации: SAFE (год в названии, не позже даты),
+    # MANUAL-future, UNRESOLVED-мусор; пары в справочнике НЕТ → снимков нет.
+    storage.save_competitions(
+        [
+            Competition(
+                student_id='id-safe',
+                student_name='Однозначов Год Годович',
+                student_sex='М',
+                institute='ИСИ',
+                group='Тестб-23А1',
+                course=1,
+                sport='Бег',
+                date=datetime(2024, 5, 1),
+                level='внутривузовские',
+                name='Кубок',
+                position=1,
+            ),
+            Competition(
+                student_id='id-future',
+                student_name='Будущев Год Годович',
+                student_sex='М',
+                institute='ИСИ',
+                group='НГр-27Б1',
+                course=1,
+                sport='Бег',
+                date=datetime(2026, 3, 1),
+                level='внутривузовские',
+                name='Кубок',
+                position=1,
+            ),
+            Competition(
+                student_id='id-junk',
+                student_name='Мусоров Год Годович',
+                student_sex='М',
+                institute='ИСИ',
+                group='nan',
+                course=1,
+                sport='Бег',
+                date=datetime(2024, 5, 1),
+                level='внутривузовские',
+                name='Кубок',
+                position=1,
+            ),
+        ]
+    )
+
+    # Карточка хаба обслуживания + страница предпросмотра.
+    _, response = education_client.get('/admin/maintenance', headers=headers)
+    assert response.status == 200
+    assert 'Годы поступления (записи)' in response.text
+    assert '/admin/maintenance/admission-years' in response.text
+
+    _, response = education_client.get('/admin/maintenance/admission-years', headers=headers)
+    assert response.status == 200
+    assert 'Однозначов Год Годович' in response.text
+    assert 'Заполнить год у 1 записей' in response.text
+    assert 'Нужно проверить' in response.text
+    assert 'НГр-27Б1' in response.text
+    assert 'Не распознано' in response.text
+
+    # Применение: только SAFE; аудит; повтор — нечего заполнять.
+    _, response = education_client.post(
+        '/admin/maintenance/admission-years/apply', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'заполнены: 1 записей' in unquote_plus(response.headers['location'])
+    years = {
+        row['student_name']: row['admission_year']
+        for row in storage.connection.execute('SELECT student_name, admission_year FROM competitions')
+    }
+    assert years['Однозначов Год Годович'] == 2023
+    assert years['Будущев Год Годович'] is None
+    assert years['Мусоров Год Годович'] is None
+    assert 'group_admission_backfill_applied' in audit_actions(storage)
+
+    _, response = education_client.get('/admin/maintenance/admission-years', headers=headers)
+    assert response.status == 200
+    assert 'Записей без года поступления нет' not in response.text  # future/junk ещё есть
+    assert 'Заполнить год у' not in response.text  # но SAFE пуст
+
+
+def test_export_index_unchanged_with_admission_year(client: SanicTestClient):
+    """Выгрузка реестра не меняется: снимок года поступления — внутренняя
+    колонка, в xlsx её нет; «Курс» остаётся легаси-полем записи."""
+    app.ctx.storage.get_competitions.return_value = [
+        Competition(
+            student_id='1',
+            student_name='Экспортов Эксп Экспортиевич',
+            student_sex='М',
+            institute='ИСИ',
+            group='Тестб-23А1',
+            course=3,
+            sport='Бег',
+            date=datetime(2026, 3, 15),
+            level='внутривузовские',
+            name='Кубок',
+            position=1,
+            admission_year=2023,
+        )
+    ]
+    _, response = client.get('/export/index', headers=get_auth_headers())
+    assert response.status == 200
+    assert get_xlsx_headers(response.body) == [
+        'ФИО',
+        'Пол',
+        'Институт',
+        'Группа',
+        'Вид спорта',
+        'Дата',
+        'Уровень соревнований',
+        'Название соревнований',
+        'Место',
+        'Курс',
+        'Дисциплина',
+        'Результат',
+    ]
+    app.ctx.storage.get_competitions.return_value = []

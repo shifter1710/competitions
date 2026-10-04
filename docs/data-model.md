@@ -1,8 +1,9 @@
 # Модель данных: текущее состояние
 
-> Снимок актуален на **2026-09-20**, ветка **`feature/student-reconciliation`**
-> (Student Identity v1, Phase 1 — фундамент «Студентов»; Phase 2 — сопоставление
-> данных; см. раздел «Личность: легаси и новое»). Документ описывает
+> Снимок актуален на **2026-10-04**, ветка **`feature/course-education-phase-a`**
+> (Course/Education Phase A — уровни образования, учебные данные групп,
+> вычисляемый курс и снимок года поступления; см. разделы 14–15 и
+> «Личность: легаси и новое»). Документ описывает
 > **CURRENT STATE** — как база устроена и работает прямо сейчас, а не целевую
 > архитектуру. История того, почему так решили, — в
 > [data-model-decisions.md](data-model-decisions.md); этот документ —
@@ -18,8 +19,9 @@
 - SQLite, файл `./data/competitions.sqlite3` (путь настраивается
   `DATABASE_PATH`), режим `journal_mode=WAL`.
 - `PRAGMA foreign_keys` **везде выключен** — приложение его никогда
-  не включает. Единственный объявленный в DDL внешний ключ
-  (`catalog_values.parent_id`) — декларативный, без enforcement.
+  не включает. Объявленные в DDL внешние ключи (`catalog_values.parent_id`;
+  Phase A учебных данных — `group_academic.group_catalog_value_id` и
+  `group_academic.education_level_id`) — декларативные, без enforcement.
 - `user_version = 0`, таблицы версий нет. Миграции — «самомиграция» при
   каждом старте: `_create_schema()` в `src/storage/sqlite.py` выполняет
   `CREATE TABLE IF NOT EXISTS` + аддитивные `ALTER TABLE ADD COLUMN`
@@ -40,8 +42,8 @@
 
 Связи между таблицами — логические (в приложении), а не SQL-ограничения:
 `PRAGMA foreign_keys` выключен, каскадов и ограничений целостности на уровне
-БД нет. Исключение — самоссылка `catalog_values.parent_id`, объявленная
-в DDL, но тоже не enforced.
+БД нет. Исключения — самоссылка `catalog_values.parent_id` и два FK
+`group_academic`, объявленные в DDL, но тоже не enforced.
 
 ```mermaid
 erDiagram
@@ -53,6 +55,8 @@ erDiagram
     competitions ||--o{ import_queue : "matched_record_id (логическая)"
     catalog_values ||--o{ catalog_values : "parent_id (FK объявлен, не enforced)"
     students ||--o{ student_aliases : "student_id (логическая)"
+    catalog_values ||--o| group_academic : "group_catalog_value_id (FK объявлен, не enforced)"
+    education_levels ||--o{ group_academic : "education_level_id (FK объявлен, не enforced)"
 ```
 
 Отдельная прикладная связь, которой нет в SQL:
@@ -105,6 +109,7 @@ erDiagram
 | `discipline` | TEXT NULL | дисциплина участия (Event Model, Wave 1 P0/P1 → P5a): заполняется Excel-импортом реестра (опциональная колонка «Дисциплина»), решениями очереди конфликтов и импортом участников события (фиксированная колонка P4 — identity-часть участия вместе с карточкой/ФИО), входит в полный ключ дубля (нормализованная), отдаётся фиксированной колонкой выгрузки; обычная правка записи сохраняет значение (P2, контракт QA O1). Существующие строки — NULL |
 | `result` | TEXT NULL | результат участия (Event Model, Wave 1 P0/P1 → P5a): отдаётся фиксированной колонкой выгрузки «Результат»; импортом реестра не пишется (значение файла идёт только в кастом-поло с тем же label, если активно); импорт участников события пишет фиксированной колонкой «Результат» (P4, informational); restricted-обновление из предпросмотра импорта (P4) меняет только `position`/`result`; обычная правка записи сохраняет значение (P2) |
 | `calendar_event_id` | INTEGER NULL | логический FK `calendar_events.id` (Event Model, Wave 1 P0/P1 → P2). Проставляется стартовым backfill'ем по однозначному пресету (см. «Миграции») и всеми event-workflows (ручное добавление участника, импорт участников); общий `update_competition` её сохраняет. Явное связывание NULL-записи со страницы записи — P5b (см. «Явное связывание записи с событием»). P2: у связанных записей поля `name/date/date_to/sport/level` принадлежат событию (edit-sync, реестр их не правит). Не UNIQUE: одно событие — много участий |
+| `admission_year` | INTEGER NULL | **замороженный снимок года поступления** (Course/Education, Phase A). Заполняется ТОЛЬКО при создании записи — из учебных данных группы (строгое разрешение пары институт+группа по справочнику, `resolve_group_admission_year`) — и admin-backfill'ем годов; обычная правка записи (`update_competition`) его НЕ меняет и НЕ дополняет. Существующие строки — NULL: курс такой записи отображается по легаси-колонке `course` (включая текстовые значения); у записи со снимком реестр показывает производный курс на дату соревнования. В экспорт/архив колонка не попадает |
 
 Кто создаёт строки (везде через модель `Competition`):
 
@@ -305,6 +310,13 @@ erDiagram
   (содержимое файла в аудит не пишется); counters с P4: `added / updated /
   kept / skipped / already_exists / file_duplicates / errors / total`;
 - `field_settings_changed` — настройки базовых полей;
+- `group_academic_updated` — учебные данные группы `{group_id, group,
+  institute, education_level_id, admission_year, duration_years_override}`
+  (Course/Education Phase A);
+- `education_level_deleted` — удаление уровня образования
+  `{level_id, name}` (заблокированная попытка не аудируется);
+- `group_admission_backfill_applied` — заполнение снимков годов
+  поступления `{applied, skipped, matched}` (SAFE-only backfill);
 - `identity_mode_changed` — переключение режима идентификации кабинета
   атлета (P3) `{old, new, hash_only_visible}` — только admin, только
   успешный переход через guard (отказ guard'а не аудируется);
@@ -634,6 +646,56 @@ Identity): `'dual'` (значение seed'а и безопасный дефол
 admin через отчёт проверки идентификации с guard'ом
 (`/admin/people/reconcile/identity`, см. «Личность: легаси и новое»).
 
+### 14. `education_levels` — уровни образования (Course/Education, Phase A)
+
+Справочник уровней образования для учебных данных групп. Управление —
+только admin (раздел «Справочники», карточка «Уровни образования»).
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `name` | TEXT NOT NULL UNIQUE | название уровня; уникальность БЕЗ учёта регистра держит код (сравнение casefold в Python — `lower()` в SQLite не знает кириллицы) |
+| `default_duration_years` | INTEGER NULL | длительность по умолчанию, лет (1..10); NULL = не задана — курс группы считается без границы «обучение завершено». Хардкода длительностей нет (решение владельца) |
+| `active` | INTEGER NOT NULL DEFAULT 1 | скрытый уровень не выбирается в НОВЫХ учебных данных групп, но остаётся у групп, где уже задан (метаданные переживают деактивацию) |
+| `created_at` | TEXT NOT NULL | UTC |
+| `updated_at` | TEXT NOT NULL | UTC |
+
+Посев при каждом старте: 4 базовых уровня («Бакалавриат», «Специалитет»,
+«Магистратура», «Аспирантура») `INSERT OR IGNORE` с NULL-длительностями —
+повторные старты не дублируют и не сбрасывают изменения админа. Удаление
+уровня заблокировано, пока на него ссылается хоть одна строка
+`group_academic` (guard в коде, см. ниже). Аудит: `education_level_deleted`.
+
+### 15. `group_academic` — учебные данные группы (Course/Education, Phase A)
+
+Уровень образования, год поступления и длительность обучения КОНКРЕТНОЙ
+группы справочника: одна строка на группу (upsert). Источник года
+поступления для снимков новых записей (`competitions.admission_year`) и
+производного курса в карточке студента. Управление — только admin
+(«Справочники» → кнопка «Обучение…» у группы). Год из названия группы —
+только ПРЕДЗАПОЛНЕНИЕ формы (парсер «ровно 2 цифры после дефиса»), никогда
+не пишется без явного сохранения.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `group_catalog_value_id` | INTEGER PK, REFERENCES `catalog_values(id)` | строка справочника категории `group` (валидируется кодом); FK объявлен декларативно, не enforced |
+| `education_level_id` | INTEGER NULL, REFERENCES `education_levels(id)` | уровень образования группы; может быть скрытым |
+| `admission_year` | INTEGER NULL | год поступления (1990..2100) или NULL |
+| `duration_years_override` | INTEGER NULL | длительность группы (1..10); эффективная длительность = override ?? `education_levels.default_duration_years` ?? NULL |
+| `source` | TEXT NOT NULL DEFAULT `'manual'` | источник данных (зарезервирован; сейчас всегда `manual`) |
+| `updated_at` | TEXT NOT NULL | UTC |
+
+Производный курс (чистые функции `src/education.py`): учебный год
+начинается 1 сентября; course = начало учебного года − год поступления + 1;
+course ≤ 0 — год поступления позже даты («future», курса нет); course >
+эффективной длительности — «предположительно обучение завершено»
+(бейдж в карточке студента, БЕЗ авто-архирования). Классификация записей
+без снимка и заполнение однозначных — admin-инструмент «Обслуживание
+базы → Годы поступления (записи)» (SAFE-only, вручную; автозаполнения при
+старте нет). Удаление группы справочника удаляет и её учебные данные
+той же транзакцией. Аудит: `group_academic_updated`,
+`group_admission_backfill_applied`.
+
 ## Как устроена личность сегодня
 
 Отдельной сущности «студент»/«атлет» в базе **нет**. Человек в системе —
@@ -861,6 +923,8 @@ runtime кабинета атлета и прав атлета на чтение
 
 - `competitions`: `+extra_data`, `+review_status`, `+owner_id`,
   `+review_comment`, `+date_to`, `+student_ref_id` (Phase 1; с Phase 2 наполняется вручную через сопоставление);
+  `+admission_year` (Course/Education Phase A — снимок года поступления,
+  существующие строки NULL; обратно совместимо, легаси-`course` не трогается);
 - `custom_fields`: `+link_target`;
 - `catalog_values`: реструктуризация в `parent_id`-схему — единственная
   пересборка таблицы (данные копируются, легаси-таблица дропается);
@@ -885,9 +949,28 @@ runtime кабинета атлета и прав атлета на чтение
 - новые таблицы целиком через `CREATE TABLE IF NOT EXISTS`
   (`attachments`, `levels`, `catalog_values`, `users`, `audit_log`,
   `calendar_events`, `field_settings`, `import_queue`, `students`,
-  `student_aliases` — последние две с Phase 1; `app_settings` — Wave 1 P0);
+  `student_aliases` — последние две с Phase 1; `app_settings` — Wave 1 P0;
+  `education_levels`, `group_academic` — Course/Education Phase A);
 - populate-шаги: дефолты `field_settings`, наполнение справочников из
-  записей — `INSERT OR IGNORE`.
+  записей, посев базовых уровней образования — `INSERT OR IGNORE`.
+
+**Backfill годов поступления записей** (Course/Education Phase A; НЕ при
+старте — только вручную admin'ом, «Обслуживание базы → Годы поступления
+(записи)»):
+
+- рассматриваются ТОЛЬКО строки `competitions.admission_year IS NULL`;
+  классифицируются по СВОЕМУ тексту группы в самой записи: SAFE — парсер
+  названия однозначен («ровно 2 цифры после дефиса» → 20YY) И год не позже
+  даты соревнования; MANUAL — год определяется, но применять нельзя
+  (future), или парсер не уверен, а пара институт+группа известна
+  справочнику (сюда попадает и «Выпуск»); UNRESOLVED — парсер не уверен и
+  пары нет (мусор: nan, пусто, не-каталог);
+- применяются ТОЛЬКО SAFE, классификация пересчитывается в момент клика;
+  каждая строка — guarded UPDATE `WHERE id = ? AND admission_year IS NULL`
+  (заполненную между предпросмотром и apply запись — пропуск `skipped`,
+  не откат пакета); аудит `group_admission_backfill_applied`;
+  автозаполнения при старте НЕТ, «MANUAL»/«UNRESOLVED» никогда не
+  заполняются автоматически.
 
 **Backfill `calendar_event_id`** (Wave 1 P0,
 `_backfill_competition_calendar_links`, тот же предикат, что у подсчёта
@@ -916,10 +999,12 @@ runtime кабинета атлета и прав атлета на чтение
 перед очисткой базы (`get_competitions_before`), собирается теми же
 колонками, что выгрузка реестра: с P5a переносит `discipline`/`result`
 (фиксированные колонки «Дисциплина»/«Результат»), но НЕ переносит
-`calendar_event_id` (как и остальные служебные ссылки) — после
-восстановления из него связи со событиями придётся восстанавливать
-backfill'ем/явными связями. Полные бэкапы SQLite (файл БД целиком,
-`scripts/backup_sqlite.py`) переносят все колонки без потерь.
+`calendar_event_id` (как и остальные служебные ссылки) и снимок года
+поступления `admission_year` — после восстановления из него связи со
+событиями придётся восстанавливать backfill'ем/явными связями, а годы
+поступления — admin-инструментом «Годы поступления (записи)». Полные
+бэкапы SQLite (файл БД целиком, `scripts/backup_sqlite.py`) переносят
+все колонки без потерь.
 
 ## Открытые продуктовые вопросы
 

@@ -32,7 +32,7 @@
                 <label class="form-label" for="group-academic-year">Год поступления</label>
                 {# Сохранённое значение приоритетнее предзаполнения парсером. #}
                 {% set year_value = stored.admission_year if (stored and stored.admission_year is not none) else suggested_admission_year %}
-                <input class="form-control" id="group-academic-year" max="{{ current_year }}" min="1980"
+                <input class="form-control" id="group-academic-year" max="{{ max_admission_year }}" min="{{ min_admission_year }}"
                        name="admission_year" type="number"
                        {% if year_value is not none %}value="{{ year_value }}"{% endif %}>
                 {% if suggested_admission_year is not none %}
@@ -41,7 +41,7 @@
             </div>
             <div class="col-md-2">
                 <label class="form-label" for="group-academic-duration">Длительность обучения (лет)</label>
-                <input class="form-control" id="group-academic-duration" max="8" min="1"
+                <input class="form-control" id="group-academic-duration" max="{{ max_duration_years }}" min="{{ min_duration_years }}"
                        name="duration_years_override" type="number"
                        {% if stored and stored.duration_years_override is not none %}value="{{ stored.duration_years_override }}"{% endif %}>
                 <div class="form-text">{{ duration_hint }}</div>

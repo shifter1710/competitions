@@ -454,12 +454,15 @@ class SQLiteAdapter(
             self.connection.execute('ALTER TABLE competitions ADD COLUMN result TEXT')
         if 'calendar_event_id' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN calendar_event_id INTEGER')
-        # Course / Education, Phase A: замороженный снимок года поступления
-        # участия. Пишется при создании записи из учебных данных группы
-        # (строгое разрешение пары институт+группа) и backfill'ем; обычная
-        # правка записи НЕ меняет и НЕ дополняет его (историчность).
-        # Существующие строки остаются NULL — легаси-колонка course
-        # продолжает работать как фолбэк отображения.
+        self._migrate_competitions_course_columns(columns)
+
+    def _migrate_competitions_course_columns(self, columns: set[str]) -> None:
+        """Course / Education, Phase A: замороженный снимок года поступления
+        участия. Пишется при создании записи из учебных данных группы
+        (строгое разрешение пары институт+группа) и backfill'ем лет; обычная
+        правка записи НЕ меняет и НЕ дополняет его (историчность).
+        Существующие строки остаются NULL — легаси-колонка course
+        продолжает работать как фолбэк отображения."""
         if 'admission_year' not in columns:
             self.connection.execute('ALTER TABLE competitions ADD COLUMN admission_year INTEGER')
 

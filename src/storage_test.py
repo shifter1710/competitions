@@ -5360,6 +5360,7 @@ V21_PUBLIC_API = [
     'get_unlinked_athlete_user',
     'get_user',
     'get_user_by_id',
+    'group_admission_backfill_preview',
     'hard_delete_level',
     'hide_catalog_value',
     'identity_verification_data',
@@ -5375,6 +5376,8 @@ V21_PUBLIC_API = [
     'list_catalog',
     'list_catalog_all',
     'list_catalog_tree',
+    'list_education_levels',
+    'list_group_academic_with_context',
     'list_import_queue',
     'list_levels',
     'list_linked_records',
@@ -5389,12 +5392,14 @@ V21_PUBLIC_API = [
     'relink_user',
     'remove_student_alias',
     'rename_catalog_value',
+    'resolve_group_admission_year',
     'save_competitions',
     'search_athletes',
     'search_student_candidates',
     'search_student_suggestions',
     'set_calendar_regulation',
     'set_competition_review',
+    'set_education_level_active',
     'set_identity_mode',
     'set_identity_mode_guarded',
     'set_import_queue_status',
@@ -5410,9 +5415,11 @@ V21_PUBLIC_API = [
     'update_calendar_event',
     'update_competition',
     'update_custom_field',
+    'update_education_level',
     'update_event_participation_result',
     'update_field_settings',
     'update_student',
+    'upsert_group_academic',
     'vacuum',
 ]
 
@@ -5555,10 +5562,7 @@ def test_migration_adds_education_tables_to_existing_db(tmp_path):
     connection.close()
 
     adapter = SQLiteAdapter(str(db_path))
-    tables = {
-        row['name']
-        for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    tables = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {'education_levels', 'group_academic'} <= tables
     columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
     assert 'admission_year' in columns
@@ -5751,9 +5755,11 @@ def test_admission_year_snapshot_filled_on_save_and_import(adapter):
     # нельзя). Повторный импорт той же пары получает метаданные только
     # после ручного задания учебных данных группы.
     adapter.import_competitions(
-        [make_competition('Новов Пара', datetime(2026, 3, 3)).model_copy(
-            update={'group': 'НГр-24Б1', 'institute': 'ИСИ'}
-        )]
+        [
+            make_competition('Новов Пара', datetime(2026, 3, 3)).model_copy(
+                update={'group': 'НГр-24Б1', 'institute': 'ИСИ'}
+            )
+        ]
     )
     brand_new = [comp for comp in adapter.get_competitions() if comp.student_name == 'Новов Пара'][0]
     assert brand_new.admission_year is None
@@ -5768,18 +5774,22 @@ def test_admission_year_snapshot_event_participation_batch(adapter):
 
     adapter.apply_event_participation_batch(
         event_id,
-        [make_competition('Участков Участ', datetime(2026, 5, 10)).model_copy(
-            update={'group': 'Тестб-23А1', 'calendar_event_id': event_id}
-        )],
+        [
+            make_competition('Участков Участ', datetime(2026, 5, 10)).model_copy(
+                update={'group': 'Тестб-23А1', 'calendar_event_id': event_id}
+            )
+        ],
     )
     record = adapter.get_competitions()[0]
     assert record.admission_year == 2022
 
     adapter.apply_event_participation_batch(
         event_id,
-        [make_competition('Безпаров Без', datetime(2026, 5, 10)).model_copy(
-            update={'group': 'Чужая-99А1', 'calendar_event_id': event_id}
-        )],
+        [
+            make_competition('Безпаров Без', datetime(2026, 5, 10)).model_copy(
+                update={'group': 'Чужая-99А1', 'calendar_event_id': event_id}
+            )
+        ],
     )
     record = [comp for comp in adapter.get_competitions() if comp.student_name == 'Безпаров Без'][0]
     assert record.admission_year is None
@@ -5899,9 +5909,7 @@ def test_group_admission_backfill_apply_skips_raced_rows(adapter):
     # классификации только у NULL-строк, поэтому пропуска нет — имитируем
     # иначе: заполняем ПОСЛЕ выборки, подменяя соединение не будем, просто
     # проверяем, что уже заполненная SAFE-строка не считается вовсе.
-    adapter.connection.execute(
-        "UPDATE competitions SET admission_year = 2023 WHERE student_name = 'Однозначов Год'"
-    )
+    adapter.connection.execute("UPDATE competitions SET admission_year = 2023 WHERE student_name = 'Однозначов Год'")
     adapter.connection.commit()
     counters = adapter.apply_group_admission_backfill()
     assert counters['matched'] == 0

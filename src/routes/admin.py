@@ -40,6 +40,10 @@ from src.backup import run_backup
 from src.education import academic_year_label
 from src.education import derive_course
 from src.education import effective_duration_years
+from src.education import MAX_ADMISSION_YEAR
+from src.education import MAX_DURATION_YEARS
+from src.education import MIN_ADMISSION_YEAR
+from src.education import MIN_DURATION_YEARS
 from src.education import parse_group_admission_year
 from src.education import parse_group_admission_year_evidence
 from src.files import attachment_source_path
@@ -359,13 +363,14 @@ def group_academic_course_preview(stored: dict | None) -> str:
         stored.get('duration_years_override'), stored.get('level_default_duration_years')
     )
     derived = derive_course(stored['admission_year'], date.today(), duration)
+    if derived['status'] == 'future':
+        return 'Курс пока не рассчитывается: год поступления позже текущей даты.'
     if derived['status'] != 'ok' or derived['course'] is None:
         return 'Курс пока не рассчитывается: не указан год поступления.'
     return (
         f'По сохранённым данным сейчас: {derived["course"]} курс '
         f'(учебный год {academic_year_label(derived["academic_year_start"])}).'
     )
-
 
 
 def describe_presence(last_seen_raw, *, now: datetime | None = None) -> dict:
@@ -1400,7 +1405,10 @@ def register(app: Sanic) -> None:  # noqa: C901
                 else None,
                 'duration_hint': group_academic_duration_hint(stored),
                 'course_preview': group_academic_course_preview(stored),
-                'current_year': date.today().year,
+                'min_admission_year': MIN_ADMISSION_YEAR,
+                'max_admission_year': MAX_ADMISSION_YEAR,
+                'min_duration_years': MIN_DURATION_YEARS,
+                'max_duration_years': MAX_DURATION_YEARS,
                 **get_flash_args(request),
             },
         )

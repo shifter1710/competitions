@@ -202,9 +202,7 @@ class EducationMixin:
             if not isinstance(admission_year, int) or isinstance(admission_year, bool):
                 raise ValueError('Год поступления должен быть целым числом или пустым')
             if not MIN_ADMISSION_YEAR <= admission_year <= MAX_ADMISSION_YEAR:
-                raise ValueError(
-                    f'Год поступления должен быть от {MIN_ADMISSION_YEAR} до {MAX_ADMISSION_YEAR}'
-                )
+                raise ValueError(f'Год поступления должен быть от {MIN_ADMISSION_YEAR} до {MAX_ADMISSION_YEAR}')
         self._assert_valid_duration(duration_years_override, field='Длительность обучения')
         now = datetime.utcnow().isoformat()
         with self._lock:
