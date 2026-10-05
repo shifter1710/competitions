@@ -15,6 +15,11 @@ from src.storage.helpers import dedup_text
 from src.storage.helpers import event_identity_key
 
 
+# Режимы доступа к документу события (Event Documents): всем участникам
+# события (по факту участия Student-карточки) или явно выбранным карточкам.
+EVENT_DOCUMENT_ACCESS_MODES = ('all_participants', 'selected_students')
+
+
 class EventsMixin:
     # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
     #
@@ -176,6 +181,294 @@ class EventsMixin:
             self.connection.commit()
             return cursor.rowcount > 0
 
+    # ---- Документы события (Event Documents). ----
+    #
+    # Отдельная сущность, принадлежащая событию календаря: 0..N документов
+    # (файл + заголовок + режим доступа). 'all_participants' — документ
+    # видят все Student-карточки с участием в событии (маппинги не пишутся),
+    # 'selected_students' — только явно выбранным участникам (маппинги
+    # document↔student). Identity — только стабильные students.id, без
+    # ФИО-хешей. Строки живут и умирают вместе с событием (каскад в
+    # delete_calendar_event одним commit); файл на диске чистит роут.
+
+    def list_calendar_event_documents(self, event_id: int) -> list[dict]:
+        """Все документы события по (sort_order, id) — детерминированный
+        порядок добавления. Каждая строка — все колонки таблицы плюс
+        students_count: число маппингов (0 у all_participants — маппинги
+        для них не пишутся)."""
+        with self._lock:
+            rows = self.connection.execute(
+                '''
+                SELECT d.*,
+                       (SELECT COUNT(*) FROM calendar_event_document_students m
+                        WHERE m.calendar_event_document_id = d.id) AS students_count
+                FROM calendar_event_documents d
+                WHERE d.calendar_event_id = ?
+                ORDER BY d.sort_order ASC, d.id ASC
+                ''',
+                (int(event_id),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_calendar_event_document(self, event_id: int, document_id: int) -> dict | None:
+        """Документ события или None (ownership calendar_event_id — в WHERE,
+        прецедент update_calendar_event_team_result: чужой document_id или
+        другое событие → не найден). Список выбранных студентов — отдельным
+        методом calendar_event_document_students."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT * FROM calendar_event_documents WHERE id = ? AND calendar_event_id = ?',
+                (int(document_id), int(event_id)),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def calendar_event_document_students(self, document_id: int) -> list[int]:
+        """Student_id маппингов документа по возрастанию."""
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT student_id FROM calendar_event_document_students'
+                ' WHERE calendar_event_document_id = ? ORDER BY student_id ASC',
+                (int(document_id),),
+            ).fetchall()
+            return [int(row['student_id']) for row in rows]
+
+    def student_participates_in_event(self, event_id: int, student_id: int) -> bool:
+        """Участие Student-карточки в событии: EXISTS запись реестра со
+        ссылкой calendar_event_id и student_ref_id = карточке (id-first;
+        cardless-записи без student_ref_id участиями карточки не считаются)."""
+        with self._lock:
+            row = self.connection.execute(
+                'SELECT EXISTS(SELECT 1 FROM competitions'
+                ' WHERE calendar_event_id = ? AND student_ref_id = ?) AS participates',
+                (int(event_id), int(student_id)),
+            ).fetchone()
+            return bool(row['participates'])
+
+    def _check_event_document_students(self, event_id: int, student_ids: Sequence[int]) -> str | None:
+        """Валидация списка карточек для selected_students-документа (под
+        _lock): список непуст, каждая карточка существует, активна и
+        участвует в событии. Возвращает код ошибки или None. Дубликаты
+        схлопнуты, порядок проверок — link_competitions (student_not_found /
+        student_inactive), затем участие (student_not_participant)."""
+        ids = sorted({int(student_id) for student_id in student_ids})
+        if not ids:
+            return 'no_students'
+        for student_id in ids:
+            student = self.connection.execute(
+                'SELECT active FROM students WHERE id = ?',
+                (student_id,),
+            ).fetchone()
+            if student is None:
+                return 'student_not_found'
+            if not student['active']:
+                return 'student_inactive'
+            if not self.student_participates_in_event(event_id, student_id):
+                return 'student_not_participant'
+        return None
+
+    def _insert_document_students(self, document_id: int, student_ids: Sequence[int]) -> None:
+        """Вставить маппинги document↔student — INSERT OR IGNORE (дубликаты
+        списка уже схлопнуты валидацией, страховка — UNIQUE-констрейнт).
+        Без собственного commit: вызывается под _lock внутри транзакции
+        создателя (create/update), паттерн _insert_event_links."""
+        created_at = datetime.utcnow().isoformat()
+        for student_id in student_ids:
+            self.connection.execute(
+                'INSERT OR IGNORE INTO calendar_event_document_students'
+                ' (calendar_event_document_id, student_id, created_at) VALUES (?, ?, ?)',
+                (document_id, int(student_id), created_at),
+            )
+
+    def create_calendar_event_document(
+        self,
+        event_id: int,
+        *,
+        title: str,
+        filename: str,
+        stored_name: str,
+        content_type: str,
+        size: int,
+        access_mode: str,
+        student_ids: Sequence[int],
+        uploaded_by: int | None = None,
+    ) -> tuple[int | None, str | None]:
+        """Создать документ события: (document_id, None) или (None, код
+        ошибки).
+
+        Валидация ДО вставки (invalid_access_mode / no_students /
+        student_not_found / student_inactive / student_not_participant) —
+        отказ не оставляет строк. Одна транзакция: INSERT документа
+        (sort_order = COALESCE(MAX, 0)+1 — новый документ в конец,
+        timestamps — datetime.utcnow().isoformat()) + маппинги для
+        selected_students (all_participants маппингов не пишет). Существование
+        события и файла проверяет роут."""
+        if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
+            return None, 'invalid_access_mode'
+        with self._lock:
+            if access_mode == 'selected_students':
+                error = self._check_event_document_students(event_id, student_ids)
+                if error is not None:
+                    return None, error
+                ids = sorted({int(student_id) for student_id in student_ids})
+            else:
+                ids = []
+            now = datetime.utcnow().isoformat()
+            try:
+                cursor = self.connection.execute(
+                    'INSERT INTO calendar_event_documents'
+                    ' (calendar_event_id, title, filename, stored_name, content_type, size,'
+                    ' access_mode, uploaded_by, sort_order, created_at, updated_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?,'
+                    ' COALESCE((SELECT MAX(sort_order) FROM calendar_event_documents'
+                    '     WHERE calendar_event_id = ?), 0) + 1, ?, ?)',
+                    (
+                        int(event_id),
+                        title,
+                        filename,
+                        stored_name,
+                        content_type,
+                        int(size),
+                        access_mode,
+                        uploaded_by,
+                        int(event_id),
+                        now,
+                        now,
+                    ),
+                )
+                document_id = cursor.lastrowid
+                self._insert_document_students(document_id, ids)
+                self.connection.commit()
+                return document_id, None
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def update_calendar_event_document(
+        self,
+        event_id: int,
+        document_id: int,
+        *,
+        title: str,
+        access_mode: str,
+        student_ids: Sequence[int],
+        filename: str | None = None,
+        stored_name: str | None = None,
+        content_type: str | None = None,
+        size: int | None = None,
+    ) -> tuple[bool, str | None]:
+        """Правка метаданных документа: (True, None), (False, 'not_found')
+        или (False, код валидации).
+
+        Валидация та же, что у create; отказ ДО записи не меняет ничего
+        (включая title). Одна транзакция: UPDATE метаданных (updated_at)
+        + full-replace маппингов — DELETE всех + INSERT OR IGNORE новых
+        (паттерн _insert_event_links); при all_participants маппинги
+        просто стираются. Опциональные файловые поля (filename/stored_name/
+        content_type/size) передаёт только роут при замене файла: поданные
+        не-None значения обновляются в том же commit (None — поле не
+        трогаем); старый файл на диске чистит роут."""
+        if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
+            return False, 'invalid_access_mode'
+        with self._lock:
+            exists = self.connection.execute(
+                'SELECT 1 FROM calendar_event_documents WHERE id = ? AND calendar_event_id = ?',
+                (int(document_id), int(event_id)),
+            ).fetchone()
+            if exists is None:
+                return False, 'not_found'
+            if access_mode == 'selected_students':
+                error = self._check_event_document_students(event_id, student_ids)
+                if error is not None:
+                    return False, error
+                ids = sorted({int(student_id) for student_id in student_ids})
+            else:
+                ids = []
+            try:
+                set_clause = 'title = ?, access_mode = ?, updated_at = ?'
+                set_params: list = [title, access_mode, datetime.utcnow().isoformat()]
+                for column, value in (
+                    ('filename', filename),
+                    ('stored_name', stored_name),
+                    ('content_type', content_type),
+                    ('size', int(size) if size is not None else None),
+                ):
+                    if value is not None:
+                        set_clause += f', {column} = ?'
+                        set_params.append(value)
+                self.connection.execute(
+                    f'UPDATE calendar_event_documents SET {set_clause}' ' WHERE id = ? AND calendar_event_id = ?',
+                    (*set_params, int(document_id), int(event_id)),
+                )
+                self.connection.execute(
+                    'DELETE FROM calendar_event_document_students WHERE calendar_event_document_id = ?',
+                    (int(document_id),),
+                )
+                self._insert_document_students(int(document_id), ids)
+                self.connection.commit()
+                return True, None
+            except BaseException:
+                self.connection.rollback()
+                raise
+
+    def delete_calendar_event_document(self, event_id: int, document_id: int) -> bool:
+        """Удалить документ события (ownership — в WHERE): True — удалён,
+        False — не найден/чужой. Маппинги чистятся в той же транзакции и
+        только при найденном документе (чужой документ с тем же id своих
+        маппингов не теряет). Файл на диске чистит роут."""
+        with self._lock:
+            cursor = self.connection.execute(
+                'DELETE FROM calendar_event_documents WHERE id = ? AND calendar_event_id = ?',
+                (int(document_id), int(event_id)),
+            )
+            deleted = cursor.rowcount > 0
+            if deleted:
+                self.connection.execute(
+                    'DELETE FROM calendar_event_document_students WHERE calendar_event_document_id = ?',
+                    (int(document_id),),
+                )
+            self.connection.commit()
+            return deleted
+
+    def list_documents_for_student(self, student_id: int) -> list[dict]:
+        """Документы, доступные Student-карточке (личный кабинет атлета):
+        all_participants — при любом участии карточки в событии,
+        selected_students — при явном маппинге документ↔карточка.
+
+        JOIN с calendar_events несёт название и сырые даты события
+        (форматирование — за роутом). EXISTS-предикаты не дублируют документ
+        при нескольких участиях одной карточки в одном событии. Порядок —
+        дата события DESC (свежие сверху), затем (sort_order, id) документа."""
+        with self._lock:
+            rows = self.connection.execute(
+                '''
+                SELECT
+                    d.id,
+                    d.calendar_event_id,
+                    d.title,
+                    d.filename,
+                    d.content_type,
+                    d.size,
+                    d.access_mode,
+                    e.name AS event_name,
+                    e.date AS event_date,
+                    e.date_to AS event_date_to
+                FROM calendar_event_documents d
+                JOIN calendar_events e ON e.id = d.calendar_event_id
+                WHERE
+                    (d.access_mode = 'all_participants' AND EXISTS (
+                        SELECT 1 FROM competitions c
+                        WHERE c.calendar_event_id = d.calendar_event_id
+                          AND c.student_ref_id = ?))
+                    OR (d.access_mode = 'selected_students' AND EXISTS (
+                        SELECT 1 FROM calendar_event_document_students m
+                        WHERE m.calendar_event_document_id = d.id
+                          AND m.student_id = ?))
+                ORDER BY e.date DESC, d.sort_order ASC, d.id ASC
+                ''',
+                (int(student_id), int(student_id)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def create_calendar_event(
         self,
         name: str,
@@ -315,12 +608,19 @@ class EventsMixin:
             return row['total']
 
     def delete_calendar_event(self, event_id: int) -> None:
-        """Удалить событие вместе со строками его ссылок и командных
-        результатов (один commit). Guard участников живёт в роуте и не
-        меняется."""
+        """Удалить событие вместе со строками его ссылок, командных
+        результатов и документов (маппинги + строки, один commit). Guard
+        участников живёт в роуте и не меняется; файлы документов на диске
+        чистит роут."""
         with self._lock:
             self.connection.execute('DELETE FROM calendar_event_links WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute('DELETE FROM calendar_event_team_results WHERE calendar_event_id = ?', (event_id,))
+            self.connection.execute(
+                'DELETE FROM calendar_event_document_students WHERE calendar_event_document_id IN '
+                '(SELECT id FROM calendar_event_documents WHERE calendar_event_id = ?)',
+                (event_id,),
+            )
+            self.connection.execute('DELETE FROM calendar_event_documents WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute('DELETE FROM calendar_events WHERE id = ?', (event_id,))
             self.connection.commit()
 

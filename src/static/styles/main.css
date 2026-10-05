@@ -1640,6 +1640,16 @@ a.calendar-comp-row__name:hover {
     font-size: var(--fs-sm);
 }
 
+/* Документы соревнования (Event Documents): список чекбоксов участников
+   в форме доступа — ограничен по высоте, длинные составы скроллятся. */
+.documents-students-list {
+    max-height: 260px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+}
+
 /* Период календаря: единый всплывающий календарь RangePicker вместо двух
    нативных <input type="date">. Стилирование — на токенах прототипа:
    form-control-эстетика поля, радиусы/тени карточек главной таблицы. */

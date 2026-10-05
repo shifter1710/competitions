@@ -217,6 +217,162 @@
 </section>
 {% endif %}
 
+{# Документы соревнования (Event Documents): материалы для участников —
+   видны в личном кабинете по режиму доступа. Скачивание — все не-атлеты
+   (страница события атлету закрыта), управление — модераторы. Форма с
+   файловым полем — обычная multipart-форма без .import-form (этот класс
+   перехватывается script.js); вид блока выбранных студентов переключает
+   initEventDocumentsForm по радиокнопке доступа. #}
+{% if documents or can_manage %}
+<section class="card shadow-sm mb-4" id="documents">
+    <div class="card-body">
+        <h3 class="title mb-1">Документы соревнования</h3>
+        <div class="text-muted small mb-2">Материалы для участников: видны в личном кабинете в зависимости от
+            доступа.
+        </div>
+        <table class="table table-sm table-striped align-middle mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th scope="col">Название</th>
+                    <th scope="col">Файл</th>
+                    <th scope="col">Доступ</th>
+                    <th scope="col" style="width: 240px;">Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for doc in documents %}
+                <tr {% if edit_document_data and doc.id == edit_document_data.id %}class="table-active"{% endif %}>
+                    <td class="text-break">
+                        {{ doc.title }}
+                        {% if edit_document_data and doc.id == edit_document_data.id %}
+                        <span class="badge text-bg-primary">редактируется</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-break">
+                        {{ doc.filename }}
+                        <div class="small text-muted">{{ doc.type_label }} · {{ doc.size_label }}</div>
+                    </td>
+                    <td>
+                        {% if doc.access_mode == 'all_participants' %}
+                        <span class="badge text-bg-secondary">Все участники</span>
+                        {% else %}
+                        <span class="badge text-bg-primary"{% if can_manage %} title="{{ doc.students_names | join(', ') }}"{% endif %}>Выбранные студенты: {{ doc.students_count }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="d-flex gap-1">
+                            <a class="btn btn-sm btn-outline-primary"
+                                href="/calendar/{{ event.id }}/documents/{{ doc.id }}/download">Скачать</a>
+                            {% if can_manage %}
+                            <a class="btn btn-sm btn-outline-secondary"
+                                href="/calendar/{{ event.id }}?edit_document={{ doc.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}">Изменить</a>
+                            <form action="/calendar/{{ event.id }}/documents/{{ doc.id }}/delete" method="post"
+                                  onsubmit='return confirm({{ ('Удалить документ «' ~ doc.title ~ '»? Файл будет удалён безвозвратно.') | tojson }})'>
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input type="hidden" name="result" value="{{ result_filter }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                {# Пусто: секция без строк рендерится только can_manage
+                   (условие выше), поэтому подсказка адресована ему. #}
+                <tr>
+                    <td colspan="4" class="text-center text-muted py-4">Документов пока нет — добавьте первый ниже.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if can_manage %}
+        {% if edit_document_data %}
+        <div class="small fw-semibold mt-3 mb-2">Изменить документ</div>
+        {% endif %}
+        <form class="row g-3{% if not edit_document_data %} mt-3{% endif %}" enctype="multipart/form-data" method="post"
+              action="/calendar/{{ event.id }}/documents{% if edit_document_data %}/{{ edit_document_data.id }}/edit{% endif %}"
+              data-documents-form>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="result" value="{{ result_filter }}">
+            <div class="col-md-4">
+                <label class="label" for="document-title">Название<span class="req">*</span></label>
+                <input class="form-control" id="document-title" name="title" type="text" maxlength="200" required
+                    placeholder="Например: Стартовый протокол"
+                    {% if edit_document_data %}value="{{ edit_document_data.title }}"{% endif %}>
+            </div>
+            <div class="col-md-4">
+                <label class="label" for="document-file">Файл{% if not edit_document_data %}<span
+                    class="req">*</span>{% endif %}</label>
+                {% if edit_document_data %}
+                <div class="small mb-1">Текущий файл: {{ edit_document_data.filename }} · {{ edit_document_data.size_label }}</div>
+                {% endif %}
+                <input accept=".pdf,.png,.jpg,.jpeg" aria-label="Файл документа" class="form-control"
+                    id="document-file" name="file" type="file"
+                    {% if not edit_document_data %}required{% endif %}>
+                {% if edit_document_data %}
+                <div class="form-text ui-hint">Новый файл заменит текущий (PDF, JPEG или PNG, до 5 МБ). Оставьте пустым, чтобы не менять файл.</div>
+                {% else %}
+                <div class="form-text ui-hint">PDF, JPEG или PNG, до 5 МБ.</div>
+                {% endif %}
+            </div>
+            <div class="col-12">
+                <span class="label d-block">Доступ</span>
+                <div class="form-check">
+                    <input class="form-check-input" id="document-access-all" name="access_mode" type="radio"
+                        value="all_participants"
+                        {% if not edit_document_data or edit_document_data.access_mode == 'all_participants' %}checked{% endif %}>
+                    <label class="form-check-label" for="document-access-all">Все участники</label>
+                    <div class="small text-muted">виден каждому участнику соревнования в личном кабинете</div>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" id="document-access-selected" name="access_mode" type="radio"
+                        value="selected_students"
+                        {% if edit_document_data and edit_document_data.access_mode == 'selected_students' %}checked{% endif %}>
+                    <label class="form-check-label" for="document-access-selected">Выбранные студенты</label>
+                    <div class="small text-muted">виден только отмеченным участникам</div>
+                </div>
+            </div>
+            <div class="col-12{% if not (edit_document_data and edit_document_data.access_mode == 'selected_students') %} d-none{% endif %}"
+                data-documents-students>
+                <span class="label d-block">Кому доступен документ</span>
+                <div aria-label="Участники с доступом к документу" class="documents-students-list" role="group"
+                    tabindex="0">
+                    {% for p in document_participants %}
+                    <label class="form-check">
+                        <input class="form-check-input" name="student_id" type="checkbox"
+                            value="{{ p.student_ref_id }}"
+                            {% if edit_document_data and p.student_ref_id in edit_document_data.students_ids %}checked{% endif %}>
+                        <span>{{ p.fio }}</span>
+                        <small class="text-muted">· {{ p.institute }}{% if p.group_name %}, {{ p.group_name }}{% endif %}</small>
+                    </label>
+                    {% endfor %}
+                    {% for u in document_participants_unlinked %}
+                    {# Cardless-участия: доступ выдаётся только карточкам
+                       студентов — строка показывается, но недоступна. #}
+                    <label class="form-check text-muted"
+                        title="Свяжите запись со студентом в таблице участников, чтобы выдать ему документ">
+                        <input class="form-check-input" disabled type="checkbox">
+                        <span>{{ u.fio }}</span>
+                        <small>нет карточки студента</small>
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="col-12">
+                {% if edit_document_data %}
+                <button class="btn btn-sm btn-success" type="submit">Сохранить</button>
+                <a class="btn btn-sm btn-link"
+                    href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                {% else %}
+                <button class="btn btn-sm btn-success" type="submit">Добавить документ</button>
+                {% endif %}
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
 {# Командные результаты (Team Results): итоги командного зачёта события —
    категория + место команды, отдельно от личных мест участников ниже.
    Форма правки строки живёт вне таблицы: инпуты строки ссылаются на неё

@@ -3,6 +3,7 @@
 Каталоги data/files, сигнатурная валидация типов файлов и подсчёт/удаление
 файлов вложений. Перенесено из src/main.py без изменения поведения
 (Architecture v1)."""
+import re
 import shutil
 from pathlib import Path
 from typing import Sequence
@@ -45,6 +46,22 @@ def regulation_source_path(event_id: int, stored_name: str) -> Path:
     return calendar_regulation_dir(event_id) / stored_name
 
 
+# Служебное имя файла документа события: генерируется приложением как
+# uuid4().hex + '.' + расширение (как у положений). Строгий регекс-гард
+# отсекает path traversal (../, слэши, пустые части).
+EVENT_DOCUMENT_STORED_NAME_PATTERN = re.compile(r'^[0-9a-f]{32}\.[a-z0-9]+$')
+
+
+def event_document_source_path(event_id: int, stored_name: str) -> Path:
+    """Путь к файлу документа события на диске по служебному имени.
+
+    Тот же каталог события, что и у положения (data/files/calendar/
+    <event_id>); при неподходящем stored_name — ValueError."""
+    if not EVENT_DOCUMENT_STORED_NAME_PATTERN.match(stored_name or ''):
+        raise ValueError(f'invalid event document stored name: {stored_name!r}')
+    return calendar_regulation_dir(event_id) / stored_name
+
+
 def detect_attachment_type(body: bytes, filename: str) -> str | None:
     extension = Path(filename).suffix.lower().lstrip('.')
     expected_type = ATTACHMENT_EXTENSIONS.get(extension)
@@ -70,10 +87,19 @@ def file_size(path: Path) -> int:
 
 
 def remove_attachment_files() -> None:
-    """Remove uploaded attachment files only (data/files), nothing else inside data/."""
+    """Remove uploaded attachment files only (data/files), nothing else inside data/.
+
+    Удаляются ТОЛЬКО числовые каталоги (имена ^\\d+$) — каталоги вложений
+    записей реестра. Subtree 'calendar' (положения и документы событий) и
+    прочие не-числовые каталоги не трогаются: wipe scope 'attachments'
+    чистит лишь вложения записей, иначе метаданные файлов событий в БД
+    остались бы без файлов на диске (dangling)."""
     root = files_dir()
-    if root.is_dir():
-        shutil.rmtree(root, ignore_errors=True)
+    if not root.is_dir():
+        return
+    for item in root.iterdir():
+        if item.is_dir() and re.fullmatch(r'\d+', item.name):
+            shutil.rmtree(item, ignore_errors=True)
 
 
 def remove_attachment_record_dirs(record_ids: Sequence[int]) -> None:

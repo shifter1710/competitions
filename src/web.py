@@ -317,3 +317,20 @@ def parse_reconcile_int(raw: str, label: str):
         return int(raw), None
     except ValueError:
         return None, text(body=f'Invalid {label}', status=400)
+
+
+def format_size(num_bytes: int | float) -> str:
+    """Человекочитаемый размер: 12,4 ГБ / 5 МБ / 512 Б (запятая как
+    разделитель). Поднят из src/routes/admin.py (Event Documents): размеры
+    файлов нужны и странице события, и админ-панели — общий веб-хелпер."""
+    size = float(num_bytes)
+    for unit in ('Б', 'КБ', 'МБ', 'ГБ', 'ТБ'):
+        if size < 1024 or unit == 'ТБ':
+            if unit == 'Б':
+                return f'{int(size)} Б'
+            rounded = f'{size:.1f}'.replace('.', ',')
+            if rounded.endswith(',0'):
+                rounded = rounded[:-2]
+            return f'{rounded} {unit}'
+        size /= 1024
+    return f'{int(size)} Б'

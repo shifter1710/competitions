@@ -661,6 +661,37 @@ def competition_update_record(
     return record
 
 
+def build_my_document_groups(documents: Sequence[dict]) -> list[dict]:
+    """Документы атлета (личный кабинет, Event Documents), сгруппированные по
+    событию с сохранением порядка storage (дата события DESC, затем
+    sort_order/id документа): [{event_name, event_date_label, documents:
+    [{id, calendar_event_id, title}]}]. Дата события — тем же форматером
+    (format_date_range), что у календаря/страницы события."""
+    groups: list[dict] = []
+    group_by_event: dict[int, dict] = {}
+    for document in documents:
+        event_id = document['calendar_event_id']
+        group = group_by_event.get(event_id)
+        if group is None:
+            date_from = datetime.fromisoformat(document['event_date'])
+            date_to = datetime.fromisoformat(document['event_date_to']) if document.get('event_date_to') else None
+            group = {
+                'event_name': document.get('event_name') or '',
+                'event_date_label': format_date_range(date_from, date_to),
+                'documents': [],
+            }
+            group_by_event[event_id] = group
+            groups.append(group)
+        group['documents'].append(
+            {
+                'id': document['id'],
+                'calendar_event_id': event_id,
+                'title': document.get('title') or '',
+            }
+        )
+    return groups
+
+
 # C901 (осознанное подавление): mccabe суммирует сложность вложенных
 # verbatim-хендлеров, перенесённых из main.py без изменений; разбиение
 # register() — Architecture v2, не pre-merge gate.
@@ -677,6 +708,14 @@ def register(app: Sanic) -> None:  # noqa: C901
         owner_filter = identity['user_id'] if identity is not None else None
         profile_hashes = identity['hashes'] if identity is not None else ()
         student_ref_filter = identity['student_ref_id'] if identity is not None else None
+        # Event Documents (личный кабинет атлета): документы событий,
+        # доступные карточке студента (all_participants — участие,
+        # selected_students — маппинг). Не-атлеты и атлеты без стабильной
+        # связи с карточкой — None: карточка «Мои документы» не рендерится,
+        # лишних запросов нет.
+        my_documents = None
+        if student_ref_filter is not None:
+            my_documents = build_my_document_groups(storage.list_documents_for_student(student_ref_filter))
         args = dict(request.args)
 
         # Серверная фильтрация реестра (прототип 02): GET-параметры рендерит,
@@ -760,6 +799,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'is_moderator': user_is_moderator(request),
                 'is_athlete': user_is_athlete(request),
                 'is_admin': user_is_admin(request),
+                # Event Documents: карточка «Мои документы» (только атлет со
+                # стабильной связью с карточкой студента и непустым списком).
+                'my_documents': my_documents,
                 'users': storage.list_users() if user_is_admin(request) else [],
                 'user_roles': USER_ROLES,
                 'levels': levels,
