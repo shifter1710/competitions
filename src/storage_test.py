@@ -6050,18 +6050,22 @@ def test_delete_catalog_value_removes_group_academic(adapter):
 
 def seed_backfill_records(adapter: SQLiteAdapter) -> None:
     """Синтетика для классификации backfill: SAFE / MANUAL-future /
-    MANUAL-известная-группа (в т.ч. «Выпуск») / UNRESOLVED-мусор."""
+    MANUAL-известная-группа (в т.ч. «Выпуск») / UNRESOLVED-мусор; плюс уже
+    заполненная строка (REGRESS: непустой снимок никогда не выбирается)."""
     adapter.connection.executemany(
         'INSERT INTO competitions (student_id, student_name, student_sex, institute, "group", course, '
-        'sport, date, level, name, position, created_at, extra_data) '
-        "VALUES (?, ?, 'М', ?, ?, 1, 'Бег', ?, 'внутривузовские', 'Кубок', 1, ?, '{}')",
+        'sport, date, level, name, position, admission_year, created_at, extra_data) '
+        "VALUES (?, ?, 'М', ?, ?, 1, 'Бег', ?, 'внутривузовские', 'Кубок', 1, ?, ?, '{}')",
         [
-            ('id-safe', 'Однозначов Год', 'ИСИ', 'Тестб-23А1', '2024-05-01T00:00:00', '2024-05-01T00:00:00'),
-            ('id-future', 'Будущев Год', 'ИСИ', 'НГр-27Б1', '2026-03-01T00:00:00', '2026-03-01T00:00:00'),
-            ('id-vypusk', 'Выпускников Год', 'ИСИ', 'Выпуск', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
-            ('id-known', 'Известков Год', 'ИСИ', 'БезГода Группа', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
-            ('id-junk', 'Мусоров Год', 'ИСИ', 'nan', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
-            ('id-empty', 'Пустов Год', '', 'БезЦифр', '2023-06-01T00:00:00', '2023-06-01T00:00:00'),
+            ('id-safe', 'Однозначов Год', 'ИСИ', 'Тестб-23А1', '2024-05-01T00:00:00', None, '2024-05-01T00:00:00'),
+            ('id-future', 'Будущев Год', 'ИСИ', 'НГр-27Б1', '2026-03-01T00:00:00', None, '2026-03-01T00:00:00'),
+            ('id-vypusk', 'Выпускников Год', 'ИСИ', 'Выпуск', '2023-06-01T00:00:00', None, '2023-06-01T00:00:00'),
+            ('id-known', 'Известков Год', 'ИСИ', 'БезГода Группа', '2023-06-01T00:00:00', None, '2023-06-01T00:00:00'),
+            ('id-junk', 'Мусоров Год', 'ИСИ', 'nan', '2023-06-01T00:00:00', None, '2023-06-01T00:00:00'),
+            ('id-empty', 'Пустов Год', '', 'БезЦифр', '2023-06-01T00:00:00', None, '2023-06-01T00:00:00'),
+            # Группа парсится однозначно (2022), но снимок уже задан — строка
+            # вне рассмотрения backfill: не выбирается и не меняется.
+            ('id-filled', 'Заполнен Год', 'ИСИ', 'Тестб-22С1', '2024-04-10T00:00:00', 2022, '2024-04-10T00:00:00'),
         ],
     )
     adapter.connection.commit()
@@ -6070,7 +6074,8 @@ def seed_backfill_records(adapter: SQLiteAdapter) -> None:
 def test_group_admission_backfill_classification_and_apply(adapter):
     """Классификация по СВОЕМУ тексту группы записи: SAFE заполняется,
     MANUAL (future + известные справочнику группы без года, включая
-    «Выпуск») и UNRESOLVED (мусор) не трогаются; apply идемпотентен."""
+    «Выпуск») и UNRESOLVED (мусор) не трогаются; уже заполненная строка не
+    выбирается и не меняется (REGRESS RULE 1-13); apply идемпотентен."""
     seed_group_pair(adapter, 'ИСИ', 'Выпуск')
     seed_group_pair(adapter, 'ИСИ', 'БезГода Группа')
     seed_backfill_records(adapter)
@@ -6080,7 +6085,7 @@ def test_group_admission_backfill_classification_and_apply(adapter):
     assert preview['counters']['safe'] == 1
     assert preview['counters']['manual'] == 3
     assert preview['counters']['unresolved'] == 2
-    assert preview['counters']['already_filled'] == 0
+    assert preview['counters']['already_filled'] == 1
     assert [row['admission_year'] for row in preview['safe']] == [2023]
     manual_groups = {row['group'] for row in preview['manual']}
     assert manual_groups == {'НГр-27Б1', 'Выпуск', 'БезГода Группа'}
@@ -6100,13 +6105,18 @@ def test_group_admission_backfill_classification_and_apply(adapter):
     assert rows['Известков Год'] is None
     assert rows['Мусоров Год'] is None
     assert rows['Пустов Год'] is None
+    assert rows['Заполнен Год'] == 2022  # заданный снимок apply не трогает
 
     # Идемпотентность: повторный apply ничего не находит.
     second = adapter.apply_group_admission_backfill()
     assert second == {'matched': 0, 'applied': 0, 'skipped': 0}
     repeat_preview = adapter.group_admission_backfill_preview()
     assert repeat_preview['counters']['safe'] == 0
-    assert repeat_preview['counters']['already_filled'] == 1
+    assert repeat_preview['counters']['already_filled'] == 2
+    filled_after = adapter.connection.execute(
+        "SELECT admission_year FROM competitions WHERE student_name = 'Заполнен Год'"
+    ).fetchone()['admission_year']
+    assert filled_after == 2022
 
 
 def test_group_admission_backfill_apply_skips_raced_rows(adapter):

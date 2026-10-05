@@ -18245,7 +18245,8 @@ def test_manual_record_create_writes_snapshot_edit_keeps_it(education_client: Sa
 
 def test_calendar_participant_add_writes_snapshot(education_client: SanicTestClient):
     """Добавление участника события создаёт запись реестра тем же путём —
-    снимок года поступления заполняется из учебных данных группы."""
+    снимок года поступления заполняется из учебных данных группы; пары без
+    учебных данных — NULL (RULE 2-17/18: полярность создания)."""
     storage = app.ctx.storage
     headers = get_auth_headers()
     group = seed_education_group(storage)
@@ -18267,6 +18268,26 @@ def test_calendar_participant_add_writes_snapshot(education_client: SanicTestCli
     assert response.status == 302
     row = storage.connection.execute('SELECT admission_year FROM competitions').fetchone()
     assert row['admission_year'] == 2022
+
+    # Пара есть в справочнике, но учебных данных нет → снимок NULL.
+    seed_education_group(storage, group='Безметад Группа')
+    _, response = education_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'student_name': 'Безметов Без Метович',
+            'institute': 'ИСИ',
+            'group': 'Безметад Группа',
+            'course': '1',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = storage.connection.execute(
+        'SELECT admission_year FROM competitions WHERE student_name = ?', ('Безметов Без Метович',)
+    ).fetchone()
+    assert row['admission_year'] is None
 
 
 def test_registry_course_cell_derived_and_legacy_fallback(education_client: SanicTestClient):
@@ -18498,3 +18519,654 @@ def test_export_index_unchanged_with_admission_year(client: SanicTestClient):
         'Результат',
     ]
     app.ctx.storage.get_competitions.return_value = []
+
+
+# --- Регресс-гвард снимка года поступления (инцидент прод-2026-10: потерян
+# --- ровно один непустой admission_year при ручном удалении записи; код-аудит
+# --- бага не нашёл — инварианты фиксируются тестами). RULE 1: непустой снимок
+# --- 2022 переживает ЛЮБОЙ обычный путь правки/связывания/объединения.
+# --- RULE 2: пути создания пишут снимок из учебных данных пары (нет данных —
+# --- NULL). Строки с уже заданным снимком вставляются прямым SQL — как
+# --- исторические строки реальной БД, без справочника и учебных данных.
+# --- Все ФИО/группы/институты синтетические. ---
+
+
+def insert_admission_year_record(
+    storage,
+    *,
+    name: str,
+    admission_year: int | None = 2022,
+    institute: str = 'ИСИ',
+    group: str = 'Тестб-22С1',
+    date: str = '2024-04-10T00:00:00',
+    date_to: str | None = None,
+    sport: str = 'Бег',
+    level: str = 'внутривузовские',
+    event_name: str = 'Кубок',
+    position: int = 1,
+    course: int = 2,
+    discipline: str | None = None,
+    result: str | None = None,
+    student_ref=None,
+    calendar_event_id=None,
+) -> int:
+    """Историческая запись реестра с заданным снимком года поступления:
+    прямой INSERT мимо storage API (правки НЕ заполняют и НЕ меняют снимок,
+    поэтому конфигурировать пару институт+группа не нужно)."""
+    cursor = storage.connection.execute(
+        'INSERT INTO competitions (student_id, student_name, student_sex, institute, "group", course, '
+        'sport, date, date_to, level, name, position, discipline, result, student_ref_id, '
+        'calendar_event_id, admission_year, created_at, extra_data) '
+        "VALUES (?, ?, 'М', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')",
+        (
+            sha256(name.encode()).hexdigest(),
+            name,
+            institute,
+            group,
+            course,
+            sport,
+            date,
+            date_to,
+            level,
+            event_name,
+            position,
+            discipline,
+            result,
+            student_ref,
+            calendar_event_id,
+            admission_year,
+            '2024-01-01T00:00:00',
+        ),
+    )
+    storage.connection.commit()
+    return int(cursor.lastrowid)
+
+
+def set_record_admission_year(storage, record_id: int, year: int | None) -> None:
+    """Поставить записи снимок года напрямую (посев «уже заполненной» строки
+    там, где запись создана через storage API)."""
+    storage.connection.execute('UPDATE competitions SET admission_year = ? WHERE id = ?', (year, record_id))
+    storage.connection.commit()
+
+
+def regression_record_form(student_name: str, **overrides) -> dict:
+    """Форма правки/создания записи реестра (все базовые поля)."""
+    form = {
+        'student_name': student_name,
+        'student_sex': 'М',
+        'institute': 'ИСИ',
+        'group': 'Тестб-22С1',
+        'sport': 'Бег',
+        'date': '10.04.2024',
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': '1',
+        'course': '2',
+    }
+    form.update(overrides)
+    return form
+
+
+def test_regression_registry_edit_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-1а: правка записи реестра POST /competition/<id> — снимок 2022
+    не меняется и не затирается, остальные поля обновляются."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    record_id = insert_admission_year_record(storage, name='Правимов Прав Правимович')
+
+    _, response = education_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            **regression_record_form('Правимов Прав Правимович', group='Другая-99А1', course='5', date='12.05.2025'),
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert row['group'] == 'Другая-99А1'
+    assert row['course'] == 5
+    assert row['date'] == '2025-05-12T00:00:00'
+
+
+def test_regression_registry_edit_event_discipline_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-1б: инлайн-правка участия события (смена дисциплины, guard
+    принимает) — та же правка записи, снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    event_id = make_calendar_event(storage)  # «Забег 2026», 10–11.05.2026
+    student_id = storage.create_student('Дисциплинов Дисц Дисциплинович', 'М', 'ИСИ', 'Тестб-22С1', '2')
+    record_id = insert_admission_year_record(
+        storage,
+        name='Дисциплинов Дисц Дисциплинович',
+        date='2026-05-10T00:00:00',
+        date_to='2026-05-11T00:00:00',
+        event_name='Забег 2026',
+        discipline='100 м',
+        result='12,0 с',
+        student_ref=student_id,
+        calendar_event_id=event_id,
+    )
+
+    # Guard P7 реально выполняется: карточка связана, дисциплина меняется.
+    _, response = education_client.post(
+        f'/competition/{record_id}',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            **regression_record_form(
+                'Дисциплинов Дисц Дисциплинович', date='10.05.2026', name='Забег 2026', discipline='200 м'
+            ),
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert row['discipline'] == '200 м'
+    assert row['result'] == '12,0 с'  # presence-based: поле форма не слала
+    assert row['calendar_event_id'] == event_id
+
+
+def test_regression_import_queue_replace_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-2: замена существующей записи кандидатом очереди импорта —
+    in-place update: снимок 2022 остаётся, группа/институт/дата меняются."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    record_id = insert_admission_year_record(storage, name='Заменяемов Зам Замяемович')
+    payload = {
+        'student_id': sha256('Заменяемов Зам Замяемович'.encode()).hexdigest(),
+        'student_name': 'Заменяемов Зам Замяемович',
+        'student_sex': 'М',
+        'institute': 'ИМИ',
+        'group': 'Новая-24Б1',
+        'course': 3,
+        'sport': 'Лыжи',
+        'date': '2025-06-20T00:00:00',
+        'date_to': None,
+        'level': 'внутривузовские',
+        'name': 'Кубок',
+        'position': 4,
+        'extra_data': {},
+        'record_id': None,
+        'created_at': '2025-06-01T00:00:00',
+        'review_status': 'approved',
+        'review_comment': '',
+    }
+    entry_id = storage.add_import_queue_entry(payload, matched_record_id=record_id, created_by=None)
+
+    _, response = education_client.post(
+        f'/admin/import-queue/{entry_id}/replace', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert (row['institute'], row['group'], row['date'], row['sport'], row['position']) == (
+        'ИМИ',
+        'Новая-24Б1',
+        '2025-06-20T00:00:00',
+        'Лыжи',
+        4,
+    )
+    # Вставки не произошло: в реестре ровно одна строка этого ФИО.
+    count = storage.connection.execute(
+        'SELECT COUNT(*) AS total FROM competitions WHERE student_name = ?', ('Заменяемов Зам Замяемович',)
+    ).fetchone()['total']
+    assert count == 1
+    assert storage.get_import_queue_entry(entry_id)['status'] == 'replaced'
+
+
+def test_regression_event_import_update_existing_keeps_admission_year(event_import_client: SanicTestClient):
+    """RULE 1-3: «Обновить существующее» по строке предпросмотра импорта
+    участников — restricted-update места/результата, снимок 2022 не тронут."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    name = 'Обновляемов Обн Обновляемович'
+    student_id = storage.create_student(name, 'М', 'ИСИ', 'Тестб-22С1', '2')
+    record_id = make_event_participation(
+        storage, event_id, name, student_ref=student_id, discipline='100 м', position=1, result='12,0 с'
+    )
+    set_record_admission_year(storage, record_id, 2022)
+
+    response = upload_event_xlsx(
+        event_import_client,
+        event_id,
+        [{'ФИО': name, 'Курс': 2, 'Дисциплина': '100 м', 'Место': 3, 'Результат': '11,5 с'}],
+    )
+    token = import_session_token(response)
+    response = post_event_import_action(event_import_client, event_id, token, 'row/2/update-existing')
+    assert 'Строка 2: существующее участие обновлено.' in unquote_plus(response.headers['location'])
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert (row['position'], row['result']) == (3, '11,5 с')
+
+
+def test_regression_calendar_event_edit_sync_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-4: правка события календаря (имя/дата/вид/уровень) — синхронизация
+    5 event-owned полей связанной записи, снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    event_id = make_calendar_event(storage)
+    record_id = insert_admission_year_record(
+        storage,
+        name='Синхронов Синх Синхронович',
+        date='2026-05-10T00:00:00',
+        date_to='2026-05-11T00:00:00',
+        event_name='Забег 2026',
+        calendar_event_id=event_id,
+    )
+
+    _, response = education_client.post(
+        f'/calendar/{event_id}/edit',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Забег 2027',
+            'date': '20.06.2027',
+            'level': 'межвузовские',
+            'sport': 'Лыжи',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert (row['name'], row['date'], row['sport'], row['level']) == (
+        'Забег 2027',
+        '2027-06-20T00:00:00',
+        'Лыжи',
+        'межвузовские',
+    )
+
+
+def test_regression_link_event_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-5: связывание записи с существующим событием — пресет
+    синхронизируется, снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    event_id = make_calendar_event(storage)
+    record_id = insert_admission_year_record(storage, name='Привязов Прив Привязович')
+
+    _, response = education_client.post(
+        f'/competition/{record_id}/link-event',
+        headers=headers,
+        data={**csrf_for(headers), 'event_id': str(event_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'связана с соревнованием' in unquote_plus(response.headers['location'])
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert row['calendar_event_id'] == event_id
+    assert row['name'] == 'Забег 2026'  # пресет события скопирован в запись
+
+
+def test_regression_link_event_new_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-6: «Создать событие и связать» — новое событие + связывание,
+    снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    record_id = insert_admission_year_record(storage, name='Новопривяз Нов Новопривязович')
+
+    _, response = education_client.post(
+        f'/competition/{record_id}/link-event/new',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'name': 'Новое соревнование',
+            'date': '15.07.2027',
+            'level': 'межвузовские',
+            'sport': 'Плавание',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert row['calendar_event_id'] is not None
+    assert (row['name'], row['date'], row['sport'], row['level']) == (
+        'Новое соревнование',
+        '2027-07-15T00:00:00',
+        'Плавание',
+        'межвузовские',
+    )
+
+
+def test_regression_calendar_links_backfill_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-7: массовое связывание matched-записей с календарём — пресет
+    синхронизируется, снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    event_id = make_calendar_event(storage)  # «Забег 2026», 10–11.05.2026
+    # Несвязанная запись, пресет которой совпадает с событием ровно один раз.
+    record_id = insert_admission_year_record(
+        storage,
+        name='Батчев Батч Батчевич',
+        date='2026-05-10T00:00:00',
+        date_to='2026-05-11T00:00:00',
+        event_name='Забег 2026',
+    )
+
+    _, response = education_client.post(
+        '/admin/maintenance/calendar-links/apply', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'связано 1.' in unquote_plus(response.headers['location'])
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert row['calendar_event_id'] == event_id
+
+
+def test_regression_reconcile_link_unlink_relink_keep_admission_year(education_client: SanicTestClient):
+    """RULE 1-8а: привязка/отвязка/перепривязка записи к карточке студента
+    (роуты сопоставления) — меняется только student_ref_id, снимок 2022 жив."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    record_id = insert_admission_year_record(storage, name='Сопоставов Соп Сопоставович')
+    first_id = storage.create_student('Сопоставов Соп Сопоставович', 'М', 'ИСИ', 'Тестб-22С1', '2')
+    second_id = storage.create_student('Другой Студент Другович', 'М', 'ИСИ', 'Тестб-22С1', '2')
+
+    _, response = education_client.post(
+        '/admin/people/reconcile/link',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'record_ids[]': str(record_id),
+            'student_id': str(first_id),
+            'back': '/admin/people/reconcile',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['student_ref_id'] == first_id
+    assert row['admission_year'] == 2022
+
+    _, response = education_client.post(
+        '/admin/people/reconcile/unlink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': str(record_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['student_ref_id'] is None
+    assert row['admission_year'] == 2022
+
+    _, response = education_client.post(
+        '/admin/people/reconcile/relink',
+        headers=headers,
+        data={**csrf_for(headers), 'record_id': str(record_id), 'student_id': str(second_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['student_ref_id'] == second_id
+    assert row['admission_year'] == 2022
+
+
+def test_regression_calendar_participant_link_routes_keep_admission_year(event_import_client: SanicTestClient):
+    """RULE 1-8б: привязка cardless-участия события к карточке («привязать» и
+    «создать и связать») — снимок 2022 сохраняется у обеих записей."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    linkable = make_event_participation(storage, event_id, 'Карточкин Кар Карточкинич', discipline='100 м')
+    set_record_admission_year(storage, linkable, 2022)
+    student_id = storage.create_student('Карточкин Кар Карточкинич', 'М', 'ИСИ', 'Тестб-22С1', '2')
+    creatable = make_event_participation(storage, event_id, 'Создаваемов Соз Создаваемович', discipline='200 м')
+    set_record_admission_year(storage, creatable, 2022)
+
+    response = post_participant_link(event_import_client, event_id, linkable, {'student_id': str(student_id)})
+    assert response.status == 302
+    assert 'привязана к студенту' in unquote_plus(response.headers['location'])
+    row = competition_db_row(storage, linkable)
+    assert row['student_ref_id'] == student_id
+    assert row['admission_year'] == 2022
+
+    response = post_participant_link(
+        event_import_client,
+        event_id,
+        creatable,
+        {
+            '_route': 'create-and-link',
+            'full_name': 'Создаваемов Соз Создаваемович',
+            'sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'Тестб-22С1',
+            'course': '2',
+        },
+    )
+    assert response.status == 302
+    assert 'создан, запись привязана' in unquote_plus(response.headers['location'])
+    row = competition_db_row(storage, creatable)
+    assert row['student_ref_id'] is not None
+    assert row['admission_year'] == 2022
+
+
+def test_regression_student_merge_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-9: объединение студентов (с rewrite_names и без) — меняется
+    только ключ/имя, снимок 2022 у записей сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    from_name = 'Сливаемов Слив Сливаемович'
+    to_name = 'Целевов Цел Целевович'
+    rewrite_name = 'Перезаписов Перез Перезаписович'
+    plain = insert_admission_year_record(storage, name=from_name)
+    target = insert_admission_year_record(storage, name=to_name)
+    rewritten = insert_admission_year_record(storage, name=rewrite_name)
+
+    # Без rewrite_names: строки меняют ключ, ФИО в записях не трогаются.
+    _, response = education_client.post(
+        '/admin/students/merge',
+        headers=headers,
+        data={**csrf_for(headers), 'from_name': from_name, 'to_name': to_name, 'confirm': 'on'},
+    )
+    assert response.status == 200
+    assert response.json['merged'] == 1
+    row = competition_db_row(storage, plain)
+    assert row['student_id'] == sha256(to_name.encode()).hexdigest()
+    assert row['student_name'] == from_name
+    assert row['admission_year'] == 2022
+    assert competition_db_row(storage, target)['admission_year'] == 2022
+
+    # С rewrite_names: ключ и ФИО переписываются, снимок прежний.
+    _, response = education_client.post(
+        '/admin/students/merge',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'from_name': rewrite_name,
+            'to_name': to_name,
+            'confirm': 'on',
+            'rewrite_names': 'on',
+        },
+    )
+    assert response.status == 200
+    assert response.json['merged'] == 1
+    row = competition_db_row(storage, rewritten)
+    assert (row['student_id'], row['student_name']) == (
+        sha256(to_name.encode()).hexdigest(),
+        to_name,
+    )
+    assert row['admission_year'] == 2022
+
+
+def test_regression_catalog_group_rename_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-10: переименование группы справочника с обновлением записей —
+    текст группы в записи меняется, снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    group = seed_education_group(storage, group='Тестб-22С1')
+    record_id = insert_admission_year_record(storage, name='Группов Груп Группович')
+
+    _, response = education_client.post(
+        f"/admin/catalogs/group/{group['id']}/rename",
+        headers=headers,
+        data={**csrf_for(headers), 'new_name': 'Тестб-22С2', 'confirm': 'on', 'update_records': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['group'] == 'Тестб-22С2'
+    assert row['admission_year'] == 2022
+
+
+def test_regression_catalog_group_move_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-11: перенос группы в другой институт — институт записи меняется,
+    снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    group = seed_education_group(storage, group='Тестб-22С1')
+    storage.add_catalog_value('institute', 'ИМИ')
+    target = storage.find_catalog_row('institute', 'ИМИ')
+    record_id = insert_admission_year_record(storage, name='Переносов Перен Перенсович')
+
+    _, response = education_client.post(
+        f"/admin/catalogs/group/{group['id']}/move",
+        headers=headers,
+        data={**csrf_for(headers), 'target_institute_id': str(target['id']), 'confirm': 'on'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['institute'] == 'ИМИ'
+    assert row['group'] == 'Тестб-22С1'
+    assert row['admission_year'] == 2022
+
+
+def test_regression_review_decision_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-12: решение проверки (approve/reject) — только статус и
+    комментарий, снимок 2022 сохраняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    record_id = insert_admission_year_record(storage, name='Проверяемов Пров Проверяемович')
+
+    _, response = education_client.post(
+        f'/competition/{record_id}/review/reject',
+        headers=headers,
+        data={**csrf_for(headers), 'comment': 'Регресс-проверка'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['review_status'] == 'rejected'
+    assert row['review_comment'] == 'Регресс-проверка'
+    assert row['admission_year'] == 2022
+
+    _, response = education_client.post(
+        f'/competition/{record_id}/review/approve', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    row = competition_db_row(storage, record_id)
+    assert row['review_status'] == 'approved'
+    assert row['admission_year'] == 2022
+
+
+def test_regression_admission_years_apply_never_touches_filled_rows(education_client: SanicTestClient):
+    """RULE 1-13: применение backfill лет (роут) — заполненная строка 2022 не
+    выбирается и не меняется (хотя её группа парсится однозначно), NULL-строка
+    «Выпуск» остаётся NULL, SAFE-NULL заполняется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    seed_education_group(storage, group='Выпуск')  # пара в справочнике → MANUAL
+    filled = insert_admission_year_record(storage, name='Заполнен Год Заполненов')  # группа «Тестб-22С1»
+    vypusk = insert_admission_year_record(
+        storage, name='Выпускников Год Выпускников', group='Выпуск', admission_year=None
+    )
+    safe = insert_admission_year_record(
+        storage, name='Безопаснов Год Безопаснов', group='Тестб-23А1', admission_year=None
+    )
+
+    _, response = education_client.post(
+        '/admin/maintenance/admission-years/apply', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'заполнены: 1 записей' in unquote_plus(response.headers['location'])
+    years = {
+        row['student_name']: row['admission_year']
+        for row in storage.connection.execute('SELECT student_name, admission_year FROM competitions')
+    }
+    assert years['Заполнен Год Заполненов'] == 2022  # никогда не выбирается/не меняется
+    assert years['Выпускников Год Выпускников'] is None  # «Выпуск» не заполняется
+    assert years['Безопаснов Год Безопаснов'] == 2023  # SAFE заполняется
+
+
+def test_regression_exact_duplicate_import_keeps_admission_year(education_client: SanicTestClient):
+    """RULE 1-14: точный дубль Excel-импорта — существующая строка не
+    трогается (снимок 2022 и поля на месте), новой строки не появляется."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    name = 'Дублей Дубль Дублевич'
+    record_id = save_reconcile_record(storage, name, datetime(2024, 4, 10))
+    set_record_admission_year(storage, record_id, 2022)
+
+    file_obj = BytesIO()
+    pd.DataFrame(
+        [
+            {
+                'ФИО': name,
+                'Пол': 'М',
+                'Институт': 'ИСИ',
+                'Группа': 'ПГС-101',
+                'Вид спорта': 'Бег',
+                'Дата': '10.04.2024',
+                'Уровень соревнований': 'внутривузовские',
+                'Название соревнований': 'Кубок',
+                'Место': 1,
+                'Курс': 2,
+            }
+        ]
+    ).to_excel(file_obj, index=False)
+    file_obj.seek(0)
+    _, response = education_client.post(
+        '/',
+        headers=headers,
+        data=csrf_for(headers),
+        files={
+            'file': (
+                'duplicate.xlsx',
+                file_obj.getvalue(),
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            )
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 200
+    assert 'Импортировано записей: 0' in response.text
+    assert 'Пропущено дублей: 1' in response.text
+    total = storage.connection.execute(
+        'SELECT COUNT(*) AS total FROM competitions WHERE student_name = ?', (name,)
+    ).fetchone()['total']
+    assert total == 1
+    row = competition_db_row(storage, record_id)
+    assert row['admission_year'] == 2022
+    assert (row['group'], row['date'], row['sport'], row['name']) == (
+        'ПГС-101',
+        '2024-04-10T00:00:00',
+        'Бег',
+        'Кубок',
+    )
+
+
+def test_regression_student_card_delete_blocked_keeps_record(education_client: SanicTestClient):
+    """RULE 1-15: удаление карточки студента заблокировано, пока к ней
+    привязаны записи, — запись (и её снимок 2022) не может исчезнуть этим
+    путём."""
+    storage = app.ctx.storage
+    headers = get_auth_headers()
+    name = 'Охраняемов Охр Охраняемович'
+    student_id = storage.create_student(name, 'М', 'ИСИ', 'Тестб-22С1', '2')
+    record_id = insert_admission_year_record(storage, name=name, student_ref=student_id)
+
+    _, response = education_client.post(
+        f'/admin/people/{student_id}/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Удалить карточку нельзя' in location
+    assert storage.get_student_by_id(student_id) is not None
+    row = competition_db_row(storage, record_id)
+    assert row is not None
+    assert row['admission_year'] == 2022
