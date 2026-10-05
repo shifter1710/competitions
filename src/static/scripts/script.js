@@ -909,6 +909,7 @@ class Main {
         }
         this.initUsersPage();
         this.initIndexFilterCard();
+        this.initEventDocumentsForm();
         this.bindContentWrapperEvents();
     }
 
@@ -940,6 +941,26 @@ class Main {
             const matchesQuery = !query || (row.dataset.username || "").toLowerCase().includes(query);
             const matchesRole = !role || row.dataset.role === role;
             row.classList.toggle("d-none", !(matchesQuery && matchesRole));
+        });
+    }
+
+    // Документы соревнования (Event Documents, /calendar/<id>): форма
+    // добавления/правки документа. Начальное состояние блока выбранных
+    // студентов отрендерено сервером (d-none по режиму доступа правки);
+    // здесь только переключение видимости при смене радиокнопки доступа.
+    // Сабмит — обычный, без перехвата.
+    initEventDocumentsForm() {
+        const form = document.querySelector("[data-documents-form]");
+        if (!form) {
+            return;
+        }
+        const studentsBlock = form.querySelector("[data-documents-students]");
+        form.querySelectorAll('input[name="access_mode"]').forEach((radio) => {
+            radio.addEventListener("change", () => {
+                if (studentsBlock) {
+                    studentsBlock.classList.toggle("d-none", radio.value !== "selected_students");
+                }
+            });
         });
     }
 

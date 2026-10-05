@@ -35,6 +35,7 @@ from src.files import ATTACHMENT_EXTENSIONS
 from src.files import ATTACHMENT_MAX_SIZE
 from src.files import calendar_regulation_dir
 from src.files import detect_attachment_type
+from src.files import event_document_source_path
 from src.files import regulation_source_path
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
@@ -51,6 +52,7 @@ from src.records import get_base_field_settings
 from src.records import LINK_EVENT_FIELD_LABELS
 from src.records import participation_field_changes
 from src.settings import settings
+from src.storage.events import EVENT_DOCUMENT_ACCESS_MODES
 from src.storage.sqlite import CalendarEventDuplicateError
 from src.storage.sqlite import dedup_discipline
 from src.storage.sqlite import dedup_place
@@ -68,6 +70,8 @@ from src.web import build_redirect_with_message
 from src.web import clean_str
 from src.web import forbidden
 from src.web import format_date_range
+from src.web import format_size
+from src.web import get_auth_user
 from src.web import get_flash_args
 from src.web import get_form_value
 from src.web import get_param
@@ -395,6 +399,205 @@ def resolve_manual_participant_student_ref(
             url=back_url,
         )
     return student_ref_id, None
+
+
+# Event Documents (документы события): 0..N файлов (PDF/JPEG/PNG до 5 МБ —
+# та же валидация, что у положений) с режимом доступа all_participants /
+# selected_students. Управление — модераторы, скачивание — по режиму доступа
+# (атлет — только участие/маппинг), каталог файла общий с положением события.
+
+# Flash-тексты кодов storage.create/update_calendar_event_document.
+EVENT_DOCUMENT_STORAGE_ERRORS = {
+    'no_students': 'Выберите хотя бы одного студента для доступа',
+    'student_not_found': 'Карточка студента не найдена',
+    'student_inactive': 'Карточка студента неактивна',
+    'student_not_participant': 'Выбранный студент не участвует в соревновании',
+    'invalid_access_mode': 'Недопустимый режим доступа документа',
+}
+
+
+def document_participant_choosers(all_groups: Sequence[dict]) -> tuple[list[dict], list[dict]]:
+    """Chooser участников для формы доступа к документу: (связанные, cardless).
+
+    Строится по НЕотфильтрованным группам страницы события (документы не
+    зависят от фильтра результата). Связанные — по карточке студента
+    (student_ref_id не None: доступ выдаётся только стабильным id), cardless
+    участия без карточки в доступе участвовать не могут — показываются
+    отдельным недоступным к выбору списком. Оба списка — по fio.lower()."""
+    linked = [
+        {
+            'student_ref_id': group.get('student_ref_id'),
+            'fio': group.get('student_name') or '',
+            'institute': group.get('institute'),
+            'group_name': group.get('group_name'),
+        }
+        for group in all_groups
+        if group.get('student_ref_id') is not None
+    ]
+    unlinked = [
+        {
+            'fio': group.get('student_name') or '',
+            'institute': group.get('institute'),
+            'group_name': group.get('group_name'),
+        }
+        for group in all_groups
+        if group.get('student_ref_id') is None
+    ]
+    linked.sort(key=lambda item: (item['fio'] or '').lower())
+    unlinked.sort(key=lambda item: (item['fio'] or '').lower())
+    return linked, unlinked
+
+
+def event_document_type_label(content_type: str | None) -> str:
+    """Короткая метка типа файла документа (content_type → 'PDF'/'PNG'/'JPEG')
+    для таблицы документов; неизвестный тип — 'Файл'."""
+    return {
+        'application/pdf': 'PDF',
+        'image/png': 'PNG',
+        'image/jpeg': 'JPEG',
+    }.get(content_type or '', 'Файл')
+
+
+def parse_document_student_ids(request: Request) -> list[int]:
+    """Повторённое поле student_id формы документа → список int.
+
+    Мусорные значения пропускаются (no-guess); дубликаты и порядок схлопнет
+    storage-валидация. Sanic выкидывает пустые значения из request.form —
+    пустой чекбокс сюда и не попадает."""
+    student_ids: list[int] = []
+    for raw_value in request.form.getlist('student_id'):
+        value = clean_str(raw_value)
+        if not value:
+            continue
+        try:
+            student_ids.append(int(value))
+        except ValueError:
+            continue
+    return student_ids
+
+
+def parse_event_document_fields(request: Request) -> tuple[str, str, list[int], str | None]:
+    """Общие поля формы документа: (title, access_mode, student_ids, ошибка).
+
+    Валидация до любых записей (паттерн форм события): пустой/длинный title,
+    мусорный access_mode, пустой список при selected_students — flash-ошибка,
+    форма никуда не пишется."""
+    title = clean_str(get_form_value(request, 'title'))
+    if not title:
+        return title, '', [], 'Укажите название документа'
+    if len(title) > 200:
+        return title, '', [], 'Название документа слишком длинное'
+    access_mode = (get_form_value(request, 'access_mode') or '').strip()
+    if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
+        return title, access_mode, [], EVENT_DOCUMENT_STORAGE_ERRORS['invalid_access_mode']
+    student_ids = parse_document_student_ids(request)
+    if access_mode == 'selected_students' and not student_ids:
+        return title, access_mode, student_ids, EVENT_DOCUMENT_STORAGE_ERRORS['no_students']
+    return title, access_mode, student_ids, None
+
+
+def read_event_document_upload(request: Request, *, required: bool) -> tuple[object | None, str | None]:
+    """Файл формы документа: (upload, None) или (None, flash-ошибка).
+
+    Валидация — ровно как у положения события (присутствие/размер/сигнатура
+    типа). required=False (правка документа) — пустое поле не ошибка: файл
+    не меняется, файловые колонки БД не трогаем."""
+    upload_file = request.files.get('file')
+    if upload_file is None or not upload_file.body:
+        return None, 'Выберите файл' if required else None
+    if len(upload_file.body) > ATTACHMENT_MAX_SIZE:
+        return None, 'Файл больше 5 МБ'
+    filename = (upload_file.name or 'document').rsplit('/', 1)[-1]
+    if detect_attachment_type(upload_file.body, filename) is None:
+        return None, 'Допустимы только PDF, JPEG и PNG'
+    return upload_file, None
+
+
+def store_event_document_file(event_id: int, upload_file) -> tuple[str, str, str, int]:
+    """Записать файл документа на диск (паттерн положения): сначала файл,
+    затем БД, затем best-effort удаление прежнего. Возвращает
+    (filename, stored_name, content_type, size)."""
+    filename = (upload_file.name or 'document').rsplit('/', 1)[-1]
+    content_type = detect_attachment_type(upload_file.body, filename)
+    extension = Path(filename).suffix.lower().lstrip('.') or 'bin'
+    stored_name = f'{uuid.uuid4().hex}.{extension}'
+    event_dir = calendar_regulation_dir(event_id)
+    event_dir.mkdir(parents=True, exist_ok=True)
+    (event_dir / stored_name).write_bytes(upload_file.body)
+    return filename, stored_name, content_type, len(upload_file.body)
+
+
+def remove_event_document_file(event_id: int, stored_name: str) -> None:
+    """Best-effort удаление файла документа события: нет файла/невалидное
+    служебное имя — warning, не ошибка запроса (БД уже согласована)."""
+    if not stored_name:
+        return
+    try:
+        event_document_source_path(event_id, stored_name).unlink(missing_ok=True)
+    except (OSError, ValueError):
+        logger.warning(
+            'Failed to remove event document file of event %s (%s)',
+            event_id,
+            stored_name,
+            exc_info=True,
+        )
+
+
+def event_document_back_urls(
+    event: dict,
+    document_id: int | None,
+    result_filter: str,
+) -> tuple[str, str]:
+    """(back_url, edit_url) роутов документа с сохранением result-фильтра
+    (hidden-поле формы, паттерн edit_team_result): back — страница события,
+    edit — режим правки ?edit_document=<id>."""
+    base = f"/calendar/{event['id']}"
+    back_url = f'{base}?result={result_filter}' if result_filter else base
+    if document_id is None:
+        return back_url, back_url
+    suffix = f'edit_document={document_id}'
+    edit_url = f'{base}?result={result_filter}&{suffix}' if result_filter else f'{base}?{suffix}'
+    return back_url, edit_url
+
+
+def event_document_form_result_filter(request: Request) -> str:
+    """result-фильтр из hidden-поля формы документа (сохранение вида
+    страницы события после flash-редиректа); мусор → пусто."""
+    result_filter = (get_form_value(request, 'result') or '').strip()
+    if result_filter not in {key for key, _ in CALENDAR_RESULT_FILTERS if key}:
+        return ''
+    return result_filter
+
+
+def sanitize_download_filename(value: str | None) -> str:
+    """Имя файла для Content-Disposition: без кавычек и переводов строк
+    (инъекция заголовка); пусто после чистки — 'document'. Сырое имя из БД
+    не подставляем (в отличие от regulation — там имя генерит приложение)."""
+    cleaned = (value or '').replace('"', '').replace('\r', '').replace('\n', '').strip()
+    return cleaned or 'document'
+
+
+def athlete_can_download_event_document(
+    storage: SQLiteAdapter,
+    request: Request,
+    event_id: int,
+    document: dict,
+) -> bool:
+    """Право атлета на документ события: стабильная связь аккаунта с
+    карточкой студента (users.student_ref_id) + режим доступа документа —
+    all_participants требует участия карточки в событии, selected_students —
+    маппинга документ↔карточка. Без карточки/без права — False (403).
+    Не-атлеты проходят эту проверку всегда (дальше — их роли)."""
+    if not user_is_athlete(request):
+        return True
+    user = get_auth_user(request)
+    record = storage.get_user(user['username']) if user else None
+    student_ref_id = record.get('student_ref_id') if record else None
+    if student_ref_id is None:
+        return False
+    if document.get('access_mode') == 'all_participants':
+        return storage.student_participates_in_event(event_id, student_ref_id)
+    return student_ref_id in storage.calendar_event_document_students(document['id'])
 
 
 # Связывание cardless-участия события с карточкой студента со страницы
@@ -1956,6 +2159,50 @@ def register(app: Sanic) -> None:  # noqa: C901
                         None,
                     )
 
+        # Event Documents: список документов события; selected-документы
+        # несут students_ids (выбранные карточки — для формы правки), карточки
+        # chooser'а — по НЕотфильтрованным группам (доступ не зависит от
+        # фильтра результата). ?edit_document=<id> — паттерн edit_team_result:
+        # только can_manage и только id из документов ЭТОГО события.
+        documents = storage.list_calendar_event_documents(event['id'])
+        for document in documents:
+            document['students_ids'] = (
+                storage.calendar_event_document_students(document['id'])
+                if document.get('access_mode') == 'selected_students'
+                else []
+            )
+        document_participants, document_participants_unlinked = document_participant_choosers(all_groups)
+        # students_names (selected-документы) — ФИО выбранных для title-атрибута
+        # бейджа доступа; порядок — как в students_ids. size_label/тип файла —
+        # отображение таблицы (format_size — общий веб-хелпер, прецедент
+        # админ-панели).
+        participant_fio_by_ref = {item['student_ref_id']: item['fio'] for item in document_participants}
+        for document in documents:
+            document['size_label'] = format_size(document.get('size') or 0)
+            document['type_label'] = event_document_type_label(document.get('content_type'))
+            document['students_names'] = [
+                participant_fio_by_ref[student_ref_id]
+                for student_ref_id in document['students_ids']
+                if student_ref_id in participant_fio_by_ref
+            ]
+        edit_document = None
+        edit_document_data = None
+        if can_manage:
+            raw_edit_document = (get_param(args, 'edit_document') or '').strip()
+            if raw_edit_document:
+                try:
+                    edit_document_id = int(raw_edit_document)
+                except ValueError:
+                    edit_document_id = None
+                if edit_document_id is not None and any(
+                    document.get('id') == edit_document_id for document in documents
+                ):
+                    edit_document = edit_document_id
+                    edit_document_data = next(
+                        (document for document in documents if document.get('id') == edit_document),
+                        None,
+                    )
+
         return await render(
             template_name=jinja_env.get_template('calendar_event.html'),
             context={
@@ -1981,6 +2228,16 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'can_manage': can_manage,
                 # Team Results: строка в режиме правки (dict) или None.
                 'edit_team_result': edit_team_result,
+                # Event Documents: документы события (каждый со students_ids/
+                # students_names выбранного доступа и size_label), chooser
+                # участников доступа (cardless — отдельно), id документа в
+                # режиме правки (int) или None и сам редактируемый документ
+                # (edit_document_data — для префилла формы).
+                'documents': documents,
+                'document_participants': document_participants,
+                'document_participants_unlinked': document_participants_unlinked,
+                'edit_document': edit_document,
+                'edit_document_data': edit_document_data,
                 'result_filter': result_filter,
                 'result_filter_options': CALENDAR_RESULT_FILTERS,
                 'sport_options': storage.list_catalog('sport'),
@@ -2546,13 +2803,248 @@ def register(app: Sanic) -> None:  # noqa: C901
             return build_redirect_with_message(error='Положение не прикреплено.', url=back_url)
 
         get_storage(request.app).clear_calendar_regulation(event['id'])
-        shutil.rmtree(calendar_regulation_dir(event['id']), ignore_errors=True)
+        # Удаляем ТОЛЬКО файл положения: каталог события общий с файлами
+        # документов события (Event Documents), рекурсивное удаление каталога
+        # сносило бы и их. Сам каталог убираем rmdir без рекурсии — он уйдёт,
+        # лишь когда пуст (документов нет).
+        try:
+            regulation_source_path(event['id'], stored_name).unlink(missing_ok=True)
+        except OSError:
+            logger.warning('Failed to remove regulation file of event %s', event['id'], exc_info=True)
+        try:
+            calendar_regulation_dir(event['id']).rmdir()
+        except OSError:
+            # Каталог не пуст (остались файлы документов) или уже отсутствует —
+            # штатная ситуация, молча оставляем как есть.
+            pass
         log_audit_event(
             request,
             'calendar_regulation_deleted',
             {'event_id': event['id'], 'event_name': event['name'], 'filename': filename},
         )
         return build_redirect_with_message(message='Положение удалено', url=back_url)
+
+    # Документы события (Event Documents): загрузка/правка/удаление —
+    # модераторы (require_moderator, как у положений), скачивание — по режиму
+    # доступа. Ошибки полей — flash-редирект на страницу события (правка —
+    # назад в ?edit_document=<id>) с сохранением result-фильтра, паттерн
+    # team_results.
+
+    @app.post('/calendar/<event_id>/documents')
+    async def upload_calendar_event_document(request: Request, event_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        back_url, _ = event_document_back_urls(event, None, event_document_form_result_filter(request))
+        title, access_mode, student_ids, form_error = parse_event_document_fields(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=back_url)
+
+        upload_file, file_error = read_event_document_upload(request, required=True)
+        if file_error is not None:
+            return build_redirect_with_message(error=file_error, url=back_url)
+
+        # Порядок как у положений: сначала файл на диск, затем БД; отказ
+        # storage-валидации (карточки) — best-effort удаление нового файла.
+        filename, stored_name, content_type, size = store_event_document_file(event['id'], upload_file)
+        try:
+            document_id, create_error = get_storage(request.app).create_calendar_event_document(
+                event['id'],
+                title=title,
+                filename=filename,
+                stored_name=stored_name,
+                content_type=content_type,
+                size=size,
+                access_mode=access_mode,
+                student_ids=student_ids,
+                uploaded_by=get_current_user_id(request),
+            )
+        except Exception:
+            # Внезапный сбой storage (не контрактный (None, err)): строку в БД
+            # не создали — не оставляем осиротевший файл в каталоге события.
+            logger.exception('Unexpected storage failure creating event document of event %s', event['id'])
+            remove_event_document_file(event['id'], stored_name)
+            return build_redirect_with_message(error='Не удалось сохранить документ', url=back_url)
+        if document_id is None:
+            remove_event_document_file(event['id'], stored_name)
+            return build_redirect_with_message(
+                error=EVENT_DOCUMENT_STORAGE_ERRORS.get(create_error, 'Не удалось сохранить документ'),
+                url=back_url,
+            )
+        log_audit_event(
+            request,
+            'calendar_event_document_uploaded',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'document_id': document_id,
+                'title': title,
+                'filename': filename,
+                'access_mode': access_mode,
+                'students_count': len(set(student_ids)) if access_mode == 'selected_students' else 0,
+            },
+        )
+        return build_redirect_with_message(message='Документ добавлен', url=back_url)
+
+    @app.post('/calendar/<event_id>/documents/<document_id>/edit')
+    async def edit_calendar_event_document(request: Request, event_id: str, document_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_document_id = int(document_id)
+        except ValueError:
+            return text(body='Invalid document id', status=400)
+
+        # Ошибки валидации — назад в режим правки того же документа
+        # (edit_document), с сохранением result-фильтра (hidden-поле формы).
+        back_url, edit_url = event_document_back_urls(
+            event, numeric_document_id, event_document_form_result_filter(request)
+        )
+        storage = get_storage(request.app)
+        document = storage.get_calendar_event_document(event['id'], numeric_document_id)
+        if document is None:
+            return build_redirect_with_message(error='Документ не найден', url=back_url)
+
+        title, access_mode, student_ids, form_error = parse_event_document_fields(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=edit_url)
+
+        # Файл опционален: передан и валиден — новый файл на диск, файловые
+        # колонки обновляются в том же UPDATE, прежний файл удаляется после
+        # согласования БД; пусто — файловые поля не меняются.
+        upload_file, file_error = read_event_document_upload(request, required=False)
+        if file_error is not None:
+            return build_redirect_with_message(error=file_error, url=edit_url)
+        file_fields: dict = {}
+        old_stored_name = ''
+        if upload_file is not None:
+            filename, stored_name, content_type, size = store_event_document_file(event['id'], upload_file)
+            file_fields = {
+                'filename': filename,
+                'stored_name': stored_name,
+                'content_type': content_type,
+                'size': size,
+            }
+            old_stored_name = document.get('stored_name') or ''
+
+        updated, update_error = storage.update_calendar_event_document(
+            event['id'],
+            numeric_document_id,
+            title=title,
+            access_mode=access_mode,
+            student_ids=student_ids,
+            **file_fields,
+        )
+        if not updated:
+            if file_fields:
+                remove_event_document_file(event['id'], file_fields['stored_name'])
+            if update_error == 'not_found':
+                return build_redirect_with_message(error='Документ не найден', url=back_url)
+            return build_redirect_with_message(
+                error=EVENT_DOCUMENT_STORAGE_ERRORS.get(update_error, 'Не удалось обновить документ'),
+                url=edit_url,
+            )
+        if old_stored_name:
+            remove_event_document_file(event['id'], old_stored_name)
+        log_audit_event(
+            request,
+            'calendar_event_document_updated',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'document_id': numeric_document_id,
+                'title': title,
+                'access_mode': access_mode,
+                'students_count': len(set(student_ids)) if access_mode == 'selected_students' else 0,
+                'replaced_file': bool(file_fields),
+            },
+        )
+        return build_redirect_with_message(message='Документ обновлён', url=back_url)
+
+    @app.post('/calendar/<event_id>/documents/<document_id>/delete')
+    async def delete_calendar_event_document(request: Request, event_id: str, document_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_document_id = int(document_id)
+        except ValueError:
+            return text(body='Invalid document id', status=400)
+
+        back_url, _ = event_document_back_urls(event, None, event_document_form_result_filter(request))
+        storage = get_storage(request.app)
+        # Старые значения — в аудит (до удаления, из документа ЭТОГО события).
+        document = storage.get_calendar_event_document(event['id'], numeric_document_id)
+        if document is None:
+            return build_redirect_with_message(error='Документ не найден', url=back_url)
+        deleted = storage.delete_calendar_event_document(event['id'], numeric_document_id)
+        if not deleted:
+            return build_redirect_with_message(error='Документ не найден', url=back_url)
+        remove_event_document_file(event['id'], document.get('stored_name') or '')
+        log_audit_event(
+            request,
+            'calendar_event_document_deleted',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'document_id': numeric_document_id,
+                'title': document.get('title'),
+                'filename': document.get('filename'),
+            },
+        )
+        return build_redirect_with_message(message='Документ удалён', url=back_url)
+
+    @app.get('/calendar/<event_id>/documents/<document_id>/download')
+    async def download_calendar_event_document(request: Request, event_id: str, document_id: str):
+        # Права — как у скачивания положения (аноним перенаправляется на вход
+        # middleware), плюс режим доступа для атлетов: карточка студента из
+        # аккаунта + участие/маппинг. admin/editor/viewer проходят всегда.
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_document_id = int(document_id)
+        except ValueError:
+            return text(body='Invalid document id', status=400)
+
+        storage = get_storage(request.app)
+        document = storage.get_calendar_event_document(event['id'], numeric_document_id)
+        if document is None:
+            return text(body='Document not found', status=404)
+        if not athlete_can_download_event_document(storage, request, event['id'], document):
+            return forbidden(request)
+
+        try:
+            file_path = event_document_source_path(event['id'], document['stored_name'])
+        except ValueError:
+            return text(body='Not Found', status=404)
+        if not file_path.is_file():
+            return text(body='Not Found', status=404)
+
+        # Имя выдачи — sanitized title (фолбэк filename): пользовательское
+        # значение, сырую подстановку в заголовок не допускаем.
+        download_name = sanitize_download_filename(document.get('title') or document.get('filename'))
+        return raw(
+            await asyncio.to_thread(file_path.read_bytes),
+            headers={
+                'content-type': document.get('content_type') or 'application/octet-stream',
+                'content-disposition': f'attachment; filename="{download_name}"',
+            },
+        )
 
     @app.get('/calendar/<event_id>/participants/import')
     async def event_participants_import_page(request: Request, event_id: str):

@@ -34,7 +34,8 @@
    (or `docker compose down` in the project directory).
 2. Pick the archive to restore and decompress it:
    `gunzip -c data/backups/sqlite/competitions-YYYYMMDD-HHMMSS.sqlite3.gz > data/competitions.sqlite3`
-3. If attachments exist, restore them from the `-files.zip` archive:
+3. If uploaded files exist (record attachments, event regulations and
+   event documents), restore them from the `-files.zip` archive:
    `unzip data/backups/sqlite/competitions-YYYYMMDD-HHMMSS-files.zip -d data/files`
 4. Remove stale WAL/SHM files from the old database, if present:
    `rm -f data/competitions.sqlite3-wal data/competitions.sqlite3-shm`

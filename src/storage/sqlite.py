@@ -280,6 +280,58 @@ class SQLiteAdapter(
                 ON calendar_event_team_results (calendar_event_id, sort_order, id)
                 '''
             )
+            # Документы события (Event Documents): у события 0..N документов
+            # (PDF/PNG/JPEG, валидация файла — в роуте) с заголовком и режимом
+            # доступа. access_mode: 'all_participants' — всем Student-карточкам
+            # с участием в событии (маппинги не пишутся), 'selected_students' —
+            # только явно выбранным (таблица маппингов ниже). Файл лежит в
+            # каталоге события data/files/calendar/<event_id>/ (рядом с
+            # положением); строки живут и умирают вместе с событием (каскад
+            # в delete_calendar_event тем же commit). Логический FK и
+            # отсутствие CHECK — по конвенции соседних таблиц; уникальность
+            # пары документ+студент держит UNIQUE-констрейнт. Миграция чисто
+            # аддитивная и идемпотентная, без backfill.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS calendar_event_documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    calendar_event_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    stored_name TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    access_mode TEXT NOT NULL,
+                    uploaded_by INTEGER,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_calendar_event_documents_event
+                ON calendar_event_documents (calendar_event_id, sort_order, id)
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS calendar_event_document_students (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    calendar_event_document_id INTEGER NOT NULL,
+                    student_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (calendar_event_document_id, student_id)
+                )
+                '''
+            )
+            self.connection.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_calendar_event_document_students_student
+                ON calendar_event_document_students (student_id)
+                '''
+            )
             # Backfill-and-clear: каждый непустой legacy-url становится ссылкой
             # события (label «Ссылка», В КОНЦЕ существующих — sort_order =
             # max+1), затем колонка url очищается — очищенная колонка

@@ -1570,11 +1570,12 @@ def test_vacuum_shrinks_database_file_after_mass_delete(tmp_path):
         adapter.connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         return Path(db_path).stat().st_size
 
-    # 600 строк: объём данных должен доминировать над размером пустой схемы
-    # (таблицы растут — field_settings/import_queue и др., порог 0.5 иначе
-    # становится хрупким).
+    # 1200 строк: объём данных должен доминировать над размером пустой схемы
+    # (таблицы растут — field_settings/import_queue/documents и др., порог
+    # 0.5 иначе становится хрупким: с 600 строками пустая схема Event
+    # Documents уже съедала больше половины файла).
     adapter.save_competitions(
-        [make_competition(f'Спортсменов Номер {index}', datetime(2025, index % 12 + 1, 1)) for index in range(600)]
+        [make_competition(f'Спортсменов Номер {index}', datetime(2025, index % 12 + 1, 1)) for index in range(1200)]
     )
     size_before_delete = file_size()
 
@@ -3310,6 +3311,481 @@ def test_calendar_event_team_results_table_migrated(tmp_path):
     ]
     assert result_id == read_team_results_raw(adapter, 1)[0]['id']
     adapter.connection.close()
+
+
+# ---- Документы события (Event Documents, этап 1: схема + storage API) ----
+
+
+def read_event_documents_raw(adapter, event_id: int) -> list[dict]:
+    """Прямой SELECT документов события (БД-уровень, паттерн
+    read_team_results_raw)."""
+    rows = adapter.connection.execute(
+        'SELECT * FROM calendar_event_documents WHERE calendar_event_id = ? ORDER BY id ASC',
+        (event_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def read_document_students_raw(adapter, document_id: int) -> list[int]:
+    """Прямой SELECT student_id маппингов документа (БД-уровень)."""
+    rows = adapter.connection.execute(
+        'SELECT student_id FROM calendar_event_document_students'
+        ' WHERE calendar_event_document_id = ? ORDER BY student_id ASC',
+        (document_id,),
+    ).fetchall()
+    return [row['student_id'] for row in rows]
+
+
+def make_document_event(adapter, name: str, date: str) -> int:
+    """Событие для тестов документов (make_team_results_event-паттерн)."""
+    return adapter.create_calendar_event(name=name, date=date, date_to=None, level='', sport='Бег', links=[])
+
+
+def make_event_participation(adapter, event_id: int, student_id: int, name: str, discipline=None) -> None:
+    """Участие карточки в событии (запись реестра со ссылкой и student_ref)."""
+    adapter.save_competitions([make_participation(name, event_id, discipline, student_ref=student_id)])
+
+
+def test_event_documents_schema_created_on_fresh_db(adapter):
+    """Схема: обе таблицы и оба индекса существуют на свежей БД; состав
+    колонок — как в миграции."""
+    tables = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {'calendar_event_documents', 'calendar_event_document_students'} <= tables
+    indexes = {row['name'] for row in adapter.connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {
+        'idx_calendar_event_documents_event',
+        'idx_calendar_event_document_students_student',
+    } <= indexes
+
+    document_columns = [
+        row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_event_documents)')
+    ]
+    assert document_columns == [
+        'id',
+        'calendar_event_id',
+        'title',
+        'filename',
+        'stored_name',
+        'content_type',
+        'size',
+        'access_mode',
+        'uploaded_by',
+        'sort_order',
+        'created_at',
+        'updated_at',
+    ]
+    mapping_columns = [
+        row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_event_document_students)')
+    ]
+    assert mapping_columns == ['id', 'calendar_event_document_id', 'student_id', 'created_at']
+
+
+def test_event_documents_tables_migrated(tmp_path):
+    """Миграция: легаси-БД без таблиц документов получает их при старте;
+    повторный старт идемпотентен; данные соседних таблиц не тронуты
+    (паттерн test_calendar_event_team_results_table_migrated)."""
+    db_path = tmp_path / 'legacy-event-documents.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE calendar_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            date_to TEXT,
+            level TEXT NOT NULL DEFAULT '',
+            sport TEXT NOT NULL DEFAULT '',
+            url TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        '''
+    )
+    connection.execute(
+        'INSERT INTO calendar_events (name, date, level, sport, url, created_at) '
+        "VALUES ('Кросс', '2026-06-25', 'внутривузовские', 'Бег', '', '2026-01-01T00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    assert adapter.list_calendar_event_documents(1) == []
+    document_id, error = adapter.create_calendar_event_document(
+        1,
+        title='Порядок допуска',
+        filename='dopusk.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=120,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+    assert error is None
+    result_id, error = adapter.add_calendar_event_team_result(1, 'Общий зачёт', 2)
+    assert error is None
+
+    # Повторный старт на том же файле — идемпотентен: документ и соседние
+    # строки (командные результаты) на месте, дублей нет.
+    adapter.connection.close()
+    adapter = SQLiteAdapter(str(db_path))
+    documents = adapter.list_calendar_event_documents(1)
+    assert [row['id'] for row in documents] == [document_id]
+    assert [(row['title'], row['access_mode']) for row in documents] == [('Порядок допуска', 'all_participants')]
+    assert [(row['label'], row['place']) for row in adapter.get_calendar_event(1)['team_results']] == [
+        ('Общий зачёт', 2)
+    ]
+    assert result_id == read_team_results_raw(adapter, 1)[0]['id']
+    adapter.connection.close()
+
+
+def test_event_document_create_list_and_mapping_dedup(adapter):
+    """create/list: 0/1/N документов события, sort_order растёт с каждым
+    новым; all_participants — students_count 0 и маппингов нет;
+    selected_students — маппинги ровно указанные; дубликат student_id в
+    списке — одна строка (схлопывание + UNIQUE)."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    assert adapter.list_calendar_event_documents(event_id) == []
+
+    first, error = adapter.create_calendar_event_document(
+        event_id,
+        title='Итоговый протокол',
+        filename='protocol.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=10,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+    assert error is None and first is not None
+    assert read_document_students_raw(adapter, first) == []
+
+    student_one = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    student_two = adapter.create_student('Петров Пётр', 'М', '', '', '')
+    make_event_participation(adapter, event_id, student_one, 'Иванов Иван')
+    make_event_participation(adapter, event_id, student_two, 'Петров Пётр')
+
+    second, error = adapter.create_calendar_event_document(
+        event_id,
+        title='Справки участникам',
+        filename='spravki.pdf',
+        stored_name='b' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=20,
+        access_mode='selected_students',
+        student_ids=[student_two, student_one, student_two],
+    )
+    assert error is None and second is not None
+    assert read_document_students_raw(adapter, second) == sorted([student_one, student_two])
+
+    rows = adapter.list_calendar_event_documents(event_id)
+    assert [(row['id'], row['title'], row['sort_order'], row['students_count']) for row in rows] == [
+        (first, 'Итоговый протокол', 1, 0),
+        (second, 'Справки участникам', 2, 2),
+    ]
+    # Полные метаданные строки — все колонки таблицы (SELECT * + счётчик).
+    assert rows[0]['filename'] == 'protocol.pdf'
+    assert rows[0]['stored_name'] == 'a' * 32 + '.pdf'
+    assert rows[0]['content_type'] == 'application/pdf'
+    assert rows[0]['size'] == 10
+    assert rows[0]['access_mode'] == 'all_participants'
+    assert rows[0]['uploaded_by'] is None
+    assert rows[0]['created_at'] and rows[0]['updated_at']
+
+
+def test_event_document_create_validation_errors(adapter):
+    """create-отказы: мусорный access_mode; selected без студентов;
+    несуществующая/неактивная карточка; карточка-не-участник. Документ
+    и маппинги не создаются (0 строк в обеих таблицах)."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    participant = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    make_event_participation(adapter, event_id, participant, 'Иванов Иван')
+    outsider = adapter.create_student('Не участник', 'М', '', '', '')
+    inactive = adapter.create_student('Неактивный', 'М', '', '', '')
+    adapter.set_student_active(inactive, False)
+
+    def document_rows() -> int:
+        return adapter.connection.execute('SELECT COUNT(*) AS total FROM calendar_event_documents').fetchone()['total']
+
+    def mapping_rows() -> int:
+        return adapter.connection.execute('SELECT COUNT(*) AS total FROM calendar_event_document_students').fetchone()[
+            'total'
+        ]
+
+    payload = dict(
+        title='Документ',
+        filename='d.pdf',
+        stored_name='c' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=1,
+    )
+
+    assert adapter.create_calendar_event_document(event_id, access_mode='everyone', student_ids=[], **payload) == (
+        None,
+        'invalid_access_mode',
+    )
+    assert adapter.create_calendar_event_document(
+        event_id, access_mode='selected_students', student_ids=[], **payload
+    ) == (None, 'no_students')
+    assert adapter.create_calendar_event_document(
+        event_id, access_mode='selected_students', student_ids=[999999], **payload
+    ) == (None, 'student_not_found')
+    assert adapter.create_calendar_event_document(
+        event_id, access_mode='selected_students', student_ids=[inactive], **payload
+    ) == (None, 'student_inactive')
+    assert adapter.create_calendar_event_document(
+        event_id, access_mode='selected_students', student_ids=[outsider], **payload
+    ) == (None, 'student_not_participant')
+
+    assert document_rows() == 0
+    assert mapping_rows() == 0
+
+
+def test_event_document_update_metadata_and_full_replace(adapter):
+    """update: не найден/чужой → not_found; title/access_mode меняются;
+    маппинги — full-replace (старых нет, новые есть); all_participants
+    стирает маппинги; невалидные студенты → отказ БЕЗ изменений (title
+    тоже не поменялся — валидация до записи)."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    student_one = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    student_two = adapter.create_student('Петров Пётр', 'М', '', '', '')
+    make_event_participation(adapter, event_id, student_one, 'Иванов Иван')
+    make_event_participation(adapter, event_id, student_two, 'Петров Пётр')
+
+    document_id, error = adapter.create_calendar_event_document(
+        event_id,
+        title='Справки',
+        filename='spravki.pdf',
+        stored_name='d' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=30,
+        access_mode='selected_students',
+        student_ids=[student_one],
+    )
+    assert error is None
+
+    # Чужое событие / несуществующий документ — not_found без изменений.
+    other_event = make_document_event(adapter, 'Кубок', '2026-03-01T00:00:00')
+    assert adapter.update_calendar_event_document(
+        other_event, document_id, title='Взлом', access_mode='all_participants', student_ids=[]
+    ) == (False, 'not_found')
+    assert adapter.update_calendar_event_document(
+        event_id, 999999, title='Взлом', access_mode='all_participants', student_ids=[]
+    ) == (False, 'not_found')
+
+    # Правка title + full-replace маппингов.
+    updated, error = adapter.update_calendar_event_document(
+        event_id,
+        document_id,
+        title='Справки и дипломы',
+        access_mode='selected_students',
+        student_ids=[student_two, student_two],
+    )
+    assert (updated, error) == (True, None)
+    row = adapter.get_calendar_event_document(event_id, document_id)
+    assert row['title'] == 'Справки и дипломы'
+    assert read_document_students_raw(adapter, document_id) == [student_two]
+
+    # all_participants — маппинги просто стираются.
+    updated, error = adapter.update_calendar_event_document(
+        event_id, document_id, title='Справки и дипломы', access_mode='all_participants', student_ids=[]
+    )
+    assert (updated, error) == (True, None)
+    assert read_document_students_raw(adapter, document_id) == []
+    assert adapter.get_calendar_event_document(event_id, document_id)['access_mode'] == 'all_participants'
+
+    # Невалидные студенты → отказ, документ НЕ изменён (включая title).
+    assert adapter.update_calendar_event_document(
+        event_id,
+        document_id,
+        title='Не должно сохраниться',
+        access_mode='selected_students',
+        student_ids=[999999],
+    ) == (False, 'student_not_found')
+    assert adapter.update_calendar_event_document(
+        event_id, document_id, title='Не должно сохраниться', access_mode='selected_students', student_ids=[]
+    ) == (False, 'no_students')
+    row = adapter.get_calendar_event_document(event_id, document_id)
+    assert row['title'] == 'Справки и дипломы'
+    assert row['access_mode'] == 'all_participants'
+    assert read_document_students_raw(adapter, document_id) == []
+
+
+def test_event_document_delete_removes_rows_and_mappings(adapter):
+    """delete: документ + его маппинги удаляются одним commit; повторный
+    вызов и чужое событие — False, чужие строки не тронуты."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    student_one = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    make_event_participation(adapter, event_id, student_one, 'Иванов Иван')
+
+    document_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Справки',
+        filename='spravki.pdf',
+        stored_name='e' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=30,
+        access_mode='selected_students',
+        student_ids=[student_one],
+    )
+    keeper_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Протокол',
+        filename='protocol.pdf',
+        stored_name='f' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=40,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+    other_event = make_document_event(adapter, 'Кубок', '2026-03-01T00:00:00')
+    other_document, _ = adapter.create_calendar_event_document(
+        other_event,
+        title='Чужой',
+        filename='other.pdf',
+        stored_name='1' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=50,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+
+    assert adapter.delete_calendar_event_document(event_id, document_id) is True
+    assert [row['id'] for row in read_event_documents_raw(adapter, event_id)] == [keeper_id]
+    assert read_document_students_raw(adapter, document_id) == []
+    assert [row['id'] for row in adapter.list_calendar_event_documents(event_id)] == [keeper_id]
+
+    # Повторный вызов / чужое событие — False, чужой документ жив.
+    assert adapter.delete_calendar_event_document(event_id, document_id) is False
+    assert adapter.delete_calendar_event_document(other_event, keeper_id) is False
+    assert [row['id'] for row in adapter.list_calendar_event_documents(other_event)] == [other_document]
+
+
+def test_delete_calendar_event_removes_documents(adapter):
+    """Каскад: удаление события чистит документы и маппинги (прямым
+    SELECT), документы другого события остаются (паттерн links/team_results)."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-04-01T00:00:00')
+    student_one = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    make_event_participation(adapter, event_id, student_one, 'Иванов Иван')
+
+    document_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Справки',
+        filename='spravki.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=30,
+        access_mode='selected_students',
+        student_ids=[student_one],
+    )
+    keeper_event = make_document_event(adapter, 'Кубок', '2026-05-01T00:00:00')
+    keeper_document, _ = adapter.create_calendar_event_document(
+        keeper_event,
+        title='Остаётся',
+        filename='keep.pdf',
+        stored_name='b' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=60,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+    assert read_event_documents_raw(adapter, event_id) != []
+
+    adapter.delete_calendar_event(event_id)
+
+    assert read_event_documents_raw(adapter, event_id) == []
+    assert read_document_students_raw(adapter, document_id) == []
+    assert [row['id'] for row in adapter.list_calendar_event_documents(keeper_event)] == [keeper_document]
+
+
+def test_student_participates_in_event_variants(adapter):
+    """Участие карточки в событии: участник — True; не-участник — False;
+    cardless-запись (без student_ref_id, даже с тем же ФИО) — False
+    (id-first: совпадение ФИО не делает карточку участником)."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    outsider = adapter.create_student('Сидор Сидоров', 'М', '', '', '')
+
+    # Пока записей нет — не участник; cardless-запись того же ФИО не помогает.
+    assert adapter.student_participates_in_event(event_id, student_id) is False
+    adapter.save_competitions([make_participation('Иванов Иван', event_id)])
+    assert adapter.student_participates_in_event(event_id, student_id) is False
+
+    make_event_participation(adapter, event_id, student_id, 'Иванов Иван')
+    assert adapter.student_participates_in_event(event_id, student_id) is True
+    assert adapter.student_participates_in_event(event_id, outsider) is False
+    assert adapter.student_participates_in_event(999999, student_id) is False
+
+
+def test_list_documents_for_student_access_and_ordering(adapter):
+    """Кабинет атлета: ALL-документ события участия; SELECTED где выбран;
+    SELECTED где не выбран и чужие события — отсутствуют; не-участник —
+    пусто; несколько участий одной карточки в одном событии — без дубля;
+    порядок — дата события DESC, затем (sort_order, id) документа."""
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    other_student = adapter.create_student('Петров Пётр', 'М', '', '', '')
+    outsider = adapter.create_student('Сидор Сидоров', 'М', '', '', '')
+
+    old_event = make_document_event(adapter, 'Январский кросс', '2026-01-10T00:00:00')
+    mid_event = make_document_event(adapter, 'Февральский кубок', '2026-02-10T00:00:00')
+    new_event = make_document_event(adapter, 'Мартовское первенство', '2026-03-10T00:00:00')
+
+    # Участия карточки: старое событие (одно), среднее (два участия —
+    # документ не должен задублироваться); в новом НЕ участвует.
+    make_event_participation(adapter, old_event, student_id, 'Иванов Иван')
+    make_event_participation(adapter, mid_event, student_id, 'Иванов Иван', '100 м')
+    make_event_participation(adapter, mid_event, student_id, 'Иванов Иван', 'эстафета')
+    make_event_participation(adapter, old_event, other_student, 'Петров Пётр')
+    make_event_participation(adapter, new_event, other_student, 'Петров Пётр')
+
+    def add_document(event_id, title, access_mode, student_ids):
+        document_id, error = adapter.create_calendar_event_document(
+            event_id,
+            title=title,
+            filename=f'{title}.pdf',
+            stored_name=title.encode('utf-8').hex()[:32].ljust(32, '0') + '.pdf',
+            content_type='application/pdf',
+            size=100,
+            access_mode=access_mode,
+            student_ids=student_ids,
+        )
+        assert error is None, error
+        return document_id
+
+    old_all = add_document(old_event, 'Итоговый протокол', 'all_participants', [])
+    old_chosen = add_document(old_event, 'Справка Иванову', 'selected_students', [student_id])
+    add_document(old_event, 'Справка Петрову', 'selected_students', [other_student])
+    mid_all = add_document(mid_event, 'Положение об итогах', 'all_participants', [])
+    add_document(new_event, 'Чужой протокол', 'all_participants', [])
+
+    documents = adapter.list_documents_for_student(student_id)
+    assert [row['id'] for row in documents] == [mid_all, old_all, old_chosen]
+
+    first = documents[0]
+    assert (first['calendar_event_id'], first['title'], first['event_name'], first['event_date']) == (
+        mid_event,
+        'Положение об итогах',
+        'Февральский кубок',
+        '2026-02-10T00:00:00',
+    )
+    assert first['access_mode'] == 'all_participants'
+    assert first['filename'] == 'Положение об итогах.pdf'
+    assert first['content_type'] == 'application/pdf'
+    assert first['size'] == 100
+    assert documents[-1]['event_date_to'] is None
+
+    # Выбранный в SELECTED, но не участвующий нигде — пусто.
+    chosen_only, error = adapter.create_calendar_event_document(
+        old_event,
+        title='Только избранным',
+        filename='chosen.pdf',
+        stored_name='c' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=100,
+        access_mode='selected_students',
+        student_ids=[other_student],
+    )
+    assert error is None
+    assert adapter.list_documents_for_student(outsider) == []
+    assert chosen_only not in [row['id'] for row in adapter.list_documents_for_student(student_id)]
 
 
 def test_create_calendar_event_and_link_stores_links(adapter):
@@ -5478,6 +5954,7 @@ V21_PUBLIC_API = [
     'apply_event_participation_batch',
     'apply_group_admission_backfill',
     'athlete_name_hashes',
+    'calendar_event_document_students',
     'calendar_link_backfill_preview',
     'carry_name_aliases',
     'clean_db',
@@ -5503,6 +5980,7 @@ V21_PUBLIC_API = [
     'create_attachment',
     'create_calendar_event',
     'create_calendar_event_and_link',
+    'create_calendar_event_document',
     'create_custom_field',
     'create_education_level',
     'create_level',
@@ -5515,6 +5993,7 @@ V21_PUBLIC_API = [
     'delete_attachment',
     'delete_attachments_for_records',
     'delete_calendar_event',
+    'delete_calendar_event_document',
     'delete_calendar_event_team_result',
     'delete_catalog_value',
     'delete_competition',
@@ -5539,6 +6018,7 @@ V21_PUBLIC_API = [
     'get_attachments_for_records',
     'get_audit_events',
     'get_calendar_event',
+    'get_calendar_event_document',
     'get_catalog_value',
     'get_competition_by_id',
     'get_competition_review',
@@ -5577,11 +6057,13 @@ V21_PUBLIC_API = [
     'linked_athlete_users',
     'linked_records_count',
     'list_audit_actions',
+    'list_calendar_event_documents',
     'list_calendar_event_participants',
     'list_calendar_events',
     'list_catalog',
     'list_catalog_all',
     'list_catalog_tree',
+    'list_documents_for_student',
     'list_education_levels',
     'list_group_academic_with_context',
     'list_import_queue',
@@ -5614,11 +6096,13 @@ V21_PUBLIC_API = [
     'set_user_active',
     'set_user_last_login',
     'set_user_password',
+    'student_participates_in_event',
     'touch_user_seen',
     'unhide_catalog_value',
     'unlink_competition',
     'unlink_user',
     'update_calendar_event',
+    'update_calendar_event_document',
     'update_calendar_event_team_result',
     'update_competition',
     'update_custom_field',
@@ -5636,7 +6120,8 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     в документированном порядке; имена между примесями не перекрываются;
     публичная поверхность экземпляра — замороженный список методов
     (инвентаризация b0a7586 до разреза + Course/Education Phase A
-    + Team Results: calendar_event_team_results).
+    + Team Results: calendar_event_team_results
+    + Event Documents: calendar_event_documents).
     Регрессионный pin состава."""
     from src.storage.catalogs import CatalogsMixin
     from src.storage.education import EducationMixin

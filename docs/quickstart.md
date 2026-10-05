@@ -111,7 +111,8 @@ systemctl enable --now competitions-compose
 Бэкапы: [scripts/backup_sqlite.py](../scripts/backup_sqlite.py) делает
 gzip-архив базы через sqlite3 backup API (корректный снимок живой базы),
 проверяет его целостность (`PRAGMA quick_check`) и отдельным zip
-архивирует вложения (`--files-dir`). Ротация — хранить последние N копий.
+архивирует файлы из `data/files` — вложения записей, положения и
+документы событий (`--files-dir`). Ротация — хранить последние N копий.
 
 Юниты: `deploy/systemd/competitions-backup.service` и
 `competitions-backup.timer` (ежедневно в 03:15, `Persistent=true` —

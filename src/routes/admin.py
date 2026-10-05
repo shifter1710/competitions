@@ -73,6 +73,7 @@ from src.storage.sqlite import SQLiteAdapter
 from src.web import build_redirect_with_message
 from src.web import checkbox_to_bool
 from src.web import format_date_range
+from src.web import format_size
 from src.web import get_flash_args
 from src.web import get_form_value
 from src.web import get_param
@@ -406,21 +407,6 @@ def describe_presence(last_seen_raw, *, now: datetime | None = None) -> dict:
 
 def count_active_admins(storage: SQLiteAdapter) -> int:
     return sum(1 for user in storage.list_users() if user['role'] == ADMIN_ROLE and user['active'])
-
-
-def format_size(num_bytes: int | float) -> str:
-    """Человекочитаемый размер: 12,4 ГБ / 5 МБ / 512 Б (запятая как разделитель)."""
-    size = float(num_bytes)
-    for unit in ('Б', 'КБ', 'МБ', 'ГБ', 'ТБ'):
-        if size < 1024 or unit == 'ТБ':
-            if unit == 'Б':
-                return f'{int(size)} Б'
-            rounded = f'{size:.1f}'.replace('.', ',')
-            if rounded.endswith(',0'):
-                rounded = rounded[:-2]
-            return f'{rounded} {unit}'
-        size /= 1024
-    return f'{int(size)} Б'
 
 
 def dir_size(path: Path) -> int:

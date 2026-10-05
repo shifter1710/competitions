@@ -74,11 +74,15 @@ erDiagram
 
 Общее: первичный ключ — `INTEGER PRIMARY KEY AUTOINCREMENT` (кроме
 `field_settings` и `app_settings`, где ключ — текстовый). Явные индексы
-в схеме: два частичных уникальных индекса `catalog_values` (см. ниже)
-и два обычных индекса ссылок participation-identity у `competitions` —
+в схеме: два частичных уникальных индекса `catalog_values` (см. ниже),
+два обычных индекса ссылок participation-identity у `competitions` —
 `idx_competitions_calendar_event_id`, `idx_competitions_student_ref_id`
 (Event Model, Wave 1 P0; не UNIQUE — уникальность связи управляется
-приложением); остальных индексов нет.
+приложением) и индексы календарных таблиц
+(`idx_calendar_event_links_event`, `idx_calendar_event_team_results_event`,
+`idx_calendar_event_documents_event`,
+`idx_calendar_event_document_students_student` — разделы 9a–9c);
+остальных индексов нет.
 
 ### 1. `competitions` — записи участий
 
@@ -241,6 +245,15 @@ erDiagram
 записи). С ревизии 88ce6d7 удаление записи удаляет и строки вложений
 (одной транзакцией с записью), и файлы на диске (best-effort).
 
+Файлы событий календаря (положения и документы соревнования) лежат
+отдельно — в `data/files/calendar/<event_id>/` (разделы 9, 9c), и
+очисткой вложений не затрагиваются: с Event Documents wipe-объёмы
+«только вложения» и «записи + вложения» удаляют с диска только числовые
+каталоги `data/files/<record_id>/` — subtree `calendar` не трогается
+(иначе метаданные файлов событий в БД остались бы без файлов — dangling).
+Бэкапы (`scripts/backup_sqlite.py`) архивируют всё дерево `data/files`
+целиком — вложения, положения и документы событий вместе.
+
 ### 8. `audit_log` — журнал аудита
 
 | Колонка | Тип / ограничение | Смысл |
@@ -278,6 +291,15 @@ erDiagram
 - `calendar_regulation_uploaded` `{event_id, event_name, filename,
   replaced}` / `calendar_regulation_deleted` `{event_id, event_name,
   filename}` — файл положения события календаря (2026-09-22);
+- `calendar_event_document_uploaded` `{event_id, event_name, document_id,
+  title, filename, access_mode, students_count}` /
+  `calendar_event_document_updated` `{event_id, event_name, document_id,
+  title, access_mode, students_count, replaced_file}` /
+  `calendar_event_document_deleted` `{event_id, event_name, document_id,
+  title, filename}` — документы соревнования (Event Documents);
+  `students_count` — число выбранных карточек у
+  `selected_students`-документа (для `all_participants` — 0),
+  `replaced_file` — был ли при правке заменён файл;
 - `calendar_event_created` — создание события календаря (P5b, со страницы
   записи): `{event_id, name, date, date_to, sport, level, links,
   linked_record_id, source: 'registry'}` (создание из самого календаря
@@ -580,6 +602,68 @@ sort_order, id)`. Кап строк — 50 на событие (роут). Ау�
 `calendar_event_team_result_added` / `calendar_event_team_result_edited`
 (новые значения) / `calendar_event_team_result_deleted` (старые значения)
 `{event_id, event_name, result_id, label, place}`.
+
+### 9c. `calendar_event_documents` + `calendar_event_document_students` — документы соревнования
+
+Документы соревнования (Event Documents): у события 0..N файлов для
+участников — протоколы, дипломы, грамоты, фото (само положение —
+отдельная колонка события, раздел 9). Каждый документ — файл PDF/JPEG/PNG
+до 5 МБ (проверяются и расширение, и сигнатура — как у вложений записей и
+положений) плюс режим доступа: `all_participants` (документ доступен всем
+участникам события) или `selected_students` (только выбранным карточкам
+студентов). Владение — Event: строки живут и умирают вместе с событием
+(удаление события чистит их тем же commit). Управление — секция «Документы
+соревнования» на странице события (`POST /calendar/<id>/documents` +
+`/<document_id>/edit` + `/delete`, модераторы); в отчёты и
+импорт/экспорт документы не попадают.
+
+`calendar_event_documents`:
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `calendar_event_id` | INTEGER NOT NULL | логический FK `calendar_events.id` (по конвенции проекта, без `PRAGMA foreign_keys`) |
+| `title` | TEXT NOT NULL | название (таблица документов, кабинет атлета, имя файла при скачивании); непустое, до 200 символов — валидация роута |
+| `filename` | TEXT NOT NULL | исходное имя файла от пользователя |
+| `stored_name` | TEXT NOT NULL | имя на диске: `uuid4().hex` + расширение; файл лежит в `data/files/calendar/<event_id>/` рядом с положением (общий каталог события) |
+| `content_type` | TEXT NOT NULL | MIME `application/pdf` / `image/png` / `image/jpeg` — по сигнатуре файла |
+| `size` | INTEGER NOT NULL | размер в байтах (лимит 5 МБ на уровне приложения) |
+| `access_mode` | TEXT NOT NULL | `all_participants` / `selected_students`; допустимость значения проверяет storage (`invalid_access_mode`) |
+| `uploaded_by` | INTEGER NULL | логический FK `users.id` |
+| `sort_order` | INTEGER NOT NULL DEFAULT `0` | порядок добавления (`max+1`); чтение — `ORDER BY sort_order, id`; правка/удаление порядок не пересчитывают |
+| `created_at` | TEXT NOT NULL | |
+| `updated_at` | TEXT NOT NULL | меняется при правке |
+
+`calendar_event_document_students` — маппинги «документ ↔ карточка» для
+режима `selected_students` (при правке документа — full-replace):
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `calendar_event_document_id` | INTEGER NOT NULL | логический FK `calendar_event_documents.id` |
+| `student_id` | INTEGER NOT NULL | логический FK `students.id` |
+| `created_at` | TEXT NOT NULL | |
+
+UNIQUE `(calendar_event_document_id, student_id)` — дубль пары невозможен
+(вставка — `INSERT OR IGNORE`). Список карточек валидирует storage ДО
+записи (`no_students` / `student_not_found` / `student_inactive` /
+`student_not_participant`): каждая карточка существует, активна и
+участвует в этом событии; отказ не оставляет строк.
+
+Индексы: `idx_calendar_event_documents_event (calendar_event_id,
+sort_order, id)` и `idx_calendar_event_document_students_student
+(student_id)` — второй под запрос «документы, доступные карточке»
+(`list_documents_for_student`: `all_participants` требует участия
+карточки в событии, `selected_students` — маппинга; источник карточки
+«Мои документы» личного кабинета атлета).
+
+Скачивание — `GET /calendar/<event_id>/documents/<document_id>/download`:
+admin/editor/viewer проходят всегда; атлет — только при стабильной связи
+аккаунта с карточкой (`users.student_ref_id`) И праве по режиму доступа
+(участие карточки в событии для `all_participants`, маппинг для
+`selected_students`), иначе 403. Аудит —
+`calendar_event_document_uploaded` / `calendar_event_document_updated` /
+`calendar_event_document_deleted` (раздел 8).
 
 ### 10. `import_queue` — очередь конфликтов импорта
 
@@ -971,6 +1055,12 @@ runtime кабинета атлета и прав атлета на чтение
   + индекс `idx_calendar_event_team_results_event` — чисто аддитивная
   идемпотентная миграция (`CREATE TABLE/INDEX IF NOT EXISTS`), без
   backfill (легаси-концепта «командное место» в коде не было);
+- Event Documents: новые таблицы `calendar_event_documents` +
+  `calendar_event_document_students` (раздел 9c) + индексы
+  `idx_calendar_event_documents_event`,
+  `idx_calendar_event_document_students_student` — чисто аддитивная
+  идемпотентная миграция (`CREATE TABLE/INDEX IF NOT EXISTS`),
+  применяется при старте к существующим БД, без backfill;
 - Event Model, Wave 1 P0 (2026-09-24):
   - `competitions`: `+discipline`, `+result`, `+calendar_event_id` —
     аддитивно, существующие строки NULL;
@@ -982,7 +1072,9 @@ runtime кабинета атлета и прав атлета на чтение
   (`attachments`, `levels`, `catalog_values`, `users`, `audit_log`,
   `calendar_events`, `field_settings`, `import_queue`, `students`,
   `student_aliases` — последние две с Phase 1; `app_settings` — Wave 1 P0;
-  `education_levels`, `group_academic` — Course/Education Phase A);
+  `education_levels`, `group_academic` — Course/Education Phase A;
+  `calendar_event_documents`, `calendar_event_document_students` —
+  Event Documents);
 - populate-шаги: дефолты `field_settings`, наполнение справочников из
   записей, посев базовых уровней образования — `INSERT OR IGNORE`.
 
