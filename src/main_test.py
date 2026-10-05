@@ -19071,13 +19071,9 @@ def test_regression_admission_years_apply_never_touches_filled_rows(education_cl
     storage = app.ctx.storage
     headers = get_auth_headers()
     seed_education_group(storage, group='Выпуск')  # пара в справочнике → MANUAL
-    filled = insert_admission_year_record(storage, name='Заполнен Год Заполненов')  # группа «Тестб-22С1»
-    vypusk = insert_admission_year_record(
-        storage, name='Выпускников Год Выпускников', group='Выпуск', admission_year=None
-    )
-    safe = insert_admission_year_record(
-        storage, name='Безопаснов Год Безопаснов', group='Тестб-23А1', admission_year=None
-    )
+    insert_admission_year_record(storage, name='Заполнен Год Заполненов')  # группа «Тестб-22С1»
+    insert_admission_year_record(storage, name='Выпускников Год Выпускников', group='Выпуск', admission_year=None)
+    insert_admission_year_record(storage, name='Безопаснов Год Безопаснов', group='Тестб-23А1', admission_year=None)
 
     _, response = education_client.post(
         '/admin/maintenance/admission-years/apply', headers=headers, data=csrf_for(headers), allow_redirects=False
