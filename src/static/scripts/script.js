@@ -907,10 +907,40 @@ class Main {
             this.updateHintsToggleButton();
             this.hintsToggleButton.addEventListener("click", () => this.handleHintsToggle());
         }
+        this.initPasswordTools();
         this.initUsersPage();
         this.initIndexFilterCard();
         this.initEventDocumentsForm();
         this.bindContentWrapperEvents();
+    }
+
+    // Кнопки «Сгенерировать»/«Копировать» у полей пароля (.password-generate-
+    // button / .password-copy-button, цель — data-password-input): документ-
+    // левел обработчик на ЛЮБОЙ странице — эти кнопки есть не только в
+    // модалах /admin/users, но и в формах выдачи доступа атлета на карточке
+    // студента (где таблицы пользователей нет и initUsersPage выходит
+    // раньше привязки). Генерация — криптослучайная, только на клиенте.
+    initPasswordTools() {
+        document.addEventListener("click", (event) => this.handlePasswordToolsClick(event));
+    }
+
+    handlePasswordToolsClick(event) {
+        const generateButton = event.target.closest(".password-generate-button");
+        if (generateButton) {
+            const input = document.querySelector(generateButton.dataset.passwordInput);
+            if (input) {
+                input.value = this.generatePassword();
+                input.focus();
+            }
+            return;
+        }
+        const copyButton = event.target.closest(".password-copy-button");
+        if (copyButton) {
+            const input = document.querySelector(copyButton.dataset.passwordInput);
+            if (input && input.value) {
+                this.copyPasswordToClipboard(input.value, copyButton);
+            }
+        }
     }
 
     // Страница «Пользователи» (/admin/users): живой поиск по логину и фильтр
@@ -1202,22 +1232,6 @@ class Main {
             }
             this.validateUserDeleteConfirm();
             return;
-        }
-        const generateButton = event.target.closest(".password-generate-button");
-        if (generateButton) {
-            const input = document.querySelector(generateButton.dataset.passwordInput);
-            if (input) {
-                input.value = this.generatePassword();
-                input.focus();
-            }
-            return;
-        }
-        const copyButton = event.target.closest(".password-copy-button");
-        if (copyButton) {
-            const input = document.querySelector(copyButton.dataset.passwordInput);
-            if (input && input.value) {
-                this.copyPasswordToClipboard(input.value, copyButton);
-            }
         }
     }
 

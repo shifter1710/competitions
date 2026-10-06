@@ -17,6 +17,69 @@ from src.web import get_form_value
 # поля «Пол» — только М/Ж или пусто (не указан).
 STUDENT_SEX_OPTIONS: frozenset[str] = frozenset({'', 'М', 'Ж'})
 
+# Транслитерация кириллицы для предложения логина (выдача доступа атлету
+# с карточки студента): фамилия + инициалы → «иванов_ии». Однозначности
+# с паспортной схемой не требуется — это только предзаполнение поля,
+# итоговый логин вводит модератор, уникальность проверяет сервер.
+TRANSLIT_TABLE: dict[str, str] = {
+    'а': 'a',
+    'б': 'b',
+    'в': 'v',
+    'г': 'g',
+    'д': 'd',
+    'е': 'e',
+    'ё': 'e',
+    'ж': 'zh',
+    'з': 'z',
+    'и': 'i',
+    'й': 'y',
+    'к': 'k',
+    'л': 'l',
+    'м': 'm',
+    'н': 'n',
+    'о': 'o',
+    'п': 'p',
+    'р': 'r',
+    'с': 's',
+    'т': 't',
+    'у': 'u',
+    'ф': 'f',
+    'х': 'kh',
+    'ц': 'ts',
+    'ч': 'ch',
+    'ш': 'sh',
+    'щ': 'shch',
+    'ъ': '',
+    'ы': 'y',
+    'ь': '',
+    'э': 'e',
+    'ю': 'yu',
+    'я': 'ya',
+}
+
+
+def suggest_login(full_name: str) -> str:
+    """Предложение логина из ФИО: транслит фамилии (до 24 символов) + «_» +
+    инициалы имени и отчества. «Иванов Иван Иванович» → «ivanov_ii».
+
+    Чистая функция без I/O: только предзаполнение формы выдачи доступа,
+    занятость проверяет отдельно find_free_username. Из транслита и латиницы
+    остаются только [a-z0-9] (дефис и прочее отбрасывается); слова, из
+    которых не выжило ни одного символа, не участвуют; если не выжило
+    ничего — «student».
+    """
+    words = []
+    for part in (full_name or '').lower().split():
+        transliterated = ''.join(TRANSLIT_TABLE.get(char, char) for char in part)
+        word = ''.join(char for char in transliterated if 'a' <= char <= 'z' or char.isdigit())
+        if word:
+            words.append(word)
+    surname = words[0][:24] if words else ''
+    initials = ''.join(word[0] for word in words[1:])
+    if surname and initials:
+        return f'{surname}_{initials}'
+    return surname or 'student'
+
 
 def parse_student_form(request: Request) -> tuple[dict, str | None]:
     """Поля карточки студента из формы. None-ошибка — текст для редиректа.

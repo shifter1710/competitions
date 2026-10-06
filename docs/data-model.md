@@ -150,8 +150,12 @@ erDiagram
 | `student_ref_id` | INTEGER NULL | логический FK `students.id`; существующие строки — NULL, наполняется вручную через сопоставление (Phase 2). С Phase 3 runtime читает её: видимость и права кабинета атлета в режимах dual/ref (см. «Режим идентификации») |
 
 Кто создаёт строки: посев при старте из `AUTH_*`-переменных окружения
-(`seed_users`; viewer опционален — при пустых переменных не создаётся)
-и `POST /admin/users`. «Аккаунт без пароля» сегодня невозможен:
+(`seed_users`; viewer опционален — при пустых переменных не создаётся),
+`POST /admin/users` и выдача доступа атлета с карточки студента
+(`POST /admin/people/<id>/access/issue`, Account Issuance: создаёт
+`role='athlete'` сразу со `student_ref_id` — не больше одного аккаунта
+на студента через этот флоу, уникальность логина и активность студента
+проверяет storage). «Аккаунт без пароля» сегодня невозможен:
 `password_hash NOT NULL`, а `verify_password` строго парсит scrypt-формат —
 пустой/чужой хеш просто не пройдёт проверку.
 
@@ -315,6 +319,12 @@ erDiagram
 - `student_created` / `student_updated` (с diff old→new) /
   `student_deactivated` / `student_activated` / `student_alias_added` /
   `student_alias_removed` — карточки студентов (Phase 1);
+- `athlete_account_issued` `{student_id, user_id, username}` /
+  `athlete_account_password_changed` `{student_id, user_id, username}` /
+  `athlete_account_disabled` / `athlete_account_enabled`
+  `{student_id, user_id, username}` — выдача и управление доступом атлета
+  с карточки студента (Account Issuance, модераторы; пароль в аудит не
+  пишется никогда — только логин);
 - `student_gto_added` `{student_id, record_id, year, stage, status}` /
   `student_gto_updated` `{…, changed: {поле: {old, new}}}` /
   `student_gto_deleted` `{student_id, record_id, year, stage, status}` —

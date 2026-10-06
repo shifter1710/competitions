@@ -10,6 +10,7 @@ from src.conftest import make_report_fixture
 from src.conftest import make_report_unapproved_fixture
 from src.models.competition import Competition
 from src.storage.sqlite import SQLiteAdapter
+from src.students import suggest_login
 
 
 def make_competition(name: str, date: datetime, extra: dict | None = None) -> Competition:
@@ -4858,6 +4859,116 @@ def test_user_link_validates_role_and_null_state(adapter):
     assert adapter.relink_user(boris_id, other_student) == (None, 'student_inactive')
 
 
+# ---- Выдача доступа атлета с карточки студента (Account Issuance). ----
+
+
+def test_suggest_login_from_fio():
+    """Иванов Иван Иванович → ivanov_ii: транслит фамилии + инициалы имени
+    и отчества. Чистая функция — только предзаполнение, занятость логина
+    она не проверяет (это find_free_username)."""
+    assert suggest_login('Иванов Иван Иванович') == 'ivanov_ii'
+    assert suggest_login('Щукина Юлия Александровна') == 'shchukina_ya'
+    assert suggest_login('Хлопонина Анна') == 'khloponina_a'
+    # Без отчества — один инициал; латиница проходит как есть
+    assert suggest_login('Иванов Иван') == 'ivanov_i'
+    assert suggest_login('Smith John') == 'smith_j'
+    # МУСОР/пустота → нейтральный fallback
+    assert suggest_login('') == 'student'
+    assert suggest_login('   ') == 'student'
+    assert suggest_login('!!! ???') == 'student'
+    assert suggest_login('Иванов !!!') == 'ivanov'
+
+
+def test_suggest_login_truncates_surname():
+    """Длинная фамилия обрезается до 24 символов ДО добавления инициалов."""
+    login = suggest_login('Оченьдлиннаяфамилиясстудента Иван Иванович')
+    assert login == 'ochendlinnayafamiliyasst_ii'
+    assert login.startswith(suggest_login('Оченьдлиннаяфамилиясстудента')[:24])
+
+
+def test_find_free_username_suffixes(adapter):
+    """base свободен → base; занят → base2, base3 (коллизия подсказки
+    «ivanov_ii → ivanov_ii2» на карточке)."""
+    assert adapter.find_free_username('ivanov_ii') == 'ivanov_ii'
+    assert adapter.find_free_username('student') == 'student'
+
+    make_athlete_user(adapter, 'ivanov_ii')
+    assert adapter.find_free_username('ivanov_ii') == 'ivanov_ii2'
+    make_athlete_user(adapter, 'ivanov_ii2')
+    assert adapter.find_free_username('ivanov_ii') == 'ivanov_ii3'
+
+
+def test_create_athlete_user_success(adapter):
+    """Аккаунт создаётся сразу role=athlete + student_ref_id + active=1;
+    create_athlete_user — единственный источник строк этого флоу."""
+    student_id = adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+
+    user_id, error = adapter.create_athlete_user('ivanov_ii', 'scrypt$x', student_id)
+    assert error is None and isinstance(user_id, int)
+
+    user = adapter.get_user_by_id(user_id)
+    assert user['username'] == 'ivanov_ii'
+    assert user['password_hash'] == 'scrypt$x'
+    assert user['role'] == 'athlete'
+    assert user['active'] == 1
+    assert user['student_ref_id'] == student_id
+    # Аккаунт виден в списке привязанных карточки (как и link_user-аккаунты)
+    assert adapter.linked_athlete_users(student_id) == [{'id': user_id, 'username': 'ivanov_ii', 'active': 1}]
+
+
+def test_create_athlete_user_error_codes(adapter):
+    """Все четыре кода отказа; строка при них не создаётся."""
+    student_id = adapter.create_student('Иванов Иван Иванович', 'М', '', '', '')
+    assert adapter.create_athlete_user('ivanov_ii', 'scrypt$x', 999999) == (None, 'student_not_found')
+
+    inactive_id = adapter.create_student('Спящий Студент', 'Ж', '', '', '')
+    adapter.set_student_active(inactive_id, False)
+    assert adapter.create_athlete_user('sleepy', 'scrypt$x', inactive_id) == (None, 'student_inactive')
+
+    make_athlete_user(adapter, 'existing')  # логин занят — до выдачи
+    assert adapter.create_athlete_user('existing', 'scrypt$x', student_id) == (None, 'username_taken')
+
+    issued_id, error = adapter.create_athlete_user('ivanov_ii', 'scrypt$x', student_id)
+    assert error is None
+    # Второй аккаунт тому же студенту через флоу выдачи не создаётся
+    # (link_user по-прежнему разрешает дубли — контракт не менялся)
+    assert adapter.create_athlete_user('ivanov_second', 'scrypt$x', student_id) == (None, 'student_already_linked')
+
+    assert (
+        adapter.connection.execute("SELECT COUNT(*) AS total FROM users WHERE role = 'athlete'").fetchone()['total']
+        == 2
+    )
+
+
+def test_create_athlete_user_integrity_error_is_username_taken(adapter):
+    """Гонка по username (UNIQUE между предпроверкой и INSERT): исключение
+    маппится в username_taken, rollback — таблица пользователей не меняется."""
+    student_id = adapter.create_student('Иванов Иван Иванович', 'М', '', '', '')
+
+    class IntegrityConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith('INSERT INTO users'):
+                raise sqlite3.IntegrityError('UNIQUE constraint failed: users.username')
+            return self._connection.execute(sql, parameters)
+
+        def commit(self):
+            self._connection.commit()
+
+        def rollback(self):
+            self._connection.rollback()
+
+    real_connection = adapter.connection
+    adapter.connection = IntegrityConnection(real_connection)
+    try:
+        assert adapter.create_athlete_user('ivanov_ii', 'scrypt$x', student_id) == (None, 'username_taken')
+    finally:
+        adapter.connection = real_connection
+    assert adapter.connection.execute('SELECT COUNT(*) AS total FROM users').fetchone()['total'] == 0
+
+
 def test_reconciliation_ops_keep_snapshots_and_legacy_keys(adapter):
     """Привязки меняют ТОЛЬКО student_ref_id: строки записей и пользователей
     байт-в-байт совпадают до и после (кроме самой ссылки)."""
@@ -5988,6 +6099,7 @@ V21_PUBLIC_API = [
     'count_student_reconciliation',
     'count_students_using_group_pair',
     'count_unlinked_competitions',
+    'create_athlete_user',
     'create_attachment',
     'create_calendar_event',
     'create_calendar_event_and_link',
@@ -6022,6 +6134,7 @@ V21_PUBLIC_API = [
     'find_athlete_fields',
     'find_catalog_canonical',
     'find_catalog_row',
+    'find_free_username',
     'find_level_canonical',
     'find_similar_calendar_event',
     'find_student_candidates',
