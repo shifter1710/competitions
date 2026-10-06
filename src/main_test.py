@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import html
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from sanic_testing.testing import SanicTestClient
 
 from src.auth import create_auth_cookie_value
 from src.auth import hash_password
+from src.auth import verify_password
 from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
 from src.conftest import make_report_record
@@ -20466,3 +20468,357 @@ def test_event_document_cabinet_hidden_when_no_documents_or_no_card(calendar_cli
     # admin карточку не видит даже при наличии документов
     _, page = calendar_client.get('/', headers=admin)
     assert 'Мои документы' not in page.body.decode()
+
+
+# --- Выдача доступа атлета с карточки студента (Account Issuance). ---
+# HTTP-контракт на реальном SQLite (паттерн people_client): создание аккаунта
+# role=athlete сразу со связью student_ref_id, смена пароля (ревокация сессий
+# через pwd_ver), включение/отключение, гейтинг (модераторы / viewer /
+# атлет), анти-подмена user_id, тёзки и аудит. Пароль существует только в
+# запросе: в БД — scrypt-хеш, в аудит/flash — только логин.
+
+
+def issue_access(
+    client: SanicTestClient,
+    student_id: int,
+    *,
+    username: str = 'ivanov_ii',
+    password: str = 'parol-ivanova-1',
+    headers: dict[str, str] | None = None,
+):
+    """POST формы выдачи доступа с карточки (по умолчанию — admin)."""
+    headers = headers if headers is not None else get_auth_headers()
+    _, response = client.post(
+        f'/admin/people/{student_id}/access/issue',
+        headers=headers,
+        data={**csrf_for(headers), 'username': username, 'password': password},
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_person_access_issue_flow(people_client: SanicTestClient):
+    """Выдача: подсказка логина из ФИО предзаполнена, аккаунт создаётся
+    role=athlete + student_ref_id + active=1, пароль — только хеш, аудит
+    athlete_account_issued, карточка переключается на управление."""
+    storage = app.ctx.storage
+    create_person(people_client)  # «Иванов Иван Иванович» → карточка 1
+    headers = get_auth_headers()
+
+    _, response = people_client.get('/admin/people/1', headers=headers)
+    assert 'Доступ не выдан.' in response.text
+    assert 'value="ivanov_ii"' in response.text
+    assert 'Выдать доступ' in response.text
+
+    response = issue_access(people_client, 1)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Доступ выдан: логин «ivanov_ii».' in location
+
+    user = storage.get_user('ivanov_ii')
+    assert user['role'] == 'athlete'
+    assert user['student_ref_id'] == 1
+    assert user['active'] == 1
+    assert verify_password('parol-ivanova-1', user['password_hash'])
+    assert user['password_hash'] != 'parol-ivanova-1'
+
+    assert audit_details(storage, 'athlete_account_issued') == [
+        {'student_id': 1, 'user_id': user['id'], 'username': 'ivanov_ii'}
+    ]
+
+    _, response = people_client.get('/admin/people/1', headers=headers)
+    assert 'Доступ не выдан.' not in response.text
+    assert 'ivanov_ii' in response.text
+    assert 'Сменить пароль' in response.text
+    assert 'Отключить доступ' in response.text
+    # Форма отключения: onsubmit собирается через |tojson|forceescape (логин
+    # не сидит в сырой JS-строке) — проверяем форму, префикс confirm( и что
+    # текст диалога декодируется из JSON-аргумента верным, не сам механизм
+    # экранирования.
+    assert f'action="/admin/people/1/access/{user["id"]}/active"' in response.text
+    assert 'onsubmit="return confirm(' in response.text
+    attribute_start = response.text.index('onsubmit="', response.text.index('/active" method="post"'))
+    raw_attribute = response.text[attribute_start:].split('"', 1)[1].split('"', 1)[0]
+    dialog_message = json.loads(html.unescape(raw_attribute).removeprefix('return confirm(').removesuffix(')'))
+    assert dialog_message == 'Отключить доступ аккаунту ivanov_ii? Атлет не сможет войти; записи и данные сохранятся.'
+
+
+def test_person_access_gating(people_client: SanicTestClient):
+    """Модераторы выдают; viewer видит секцию только чтением и получает 403
+    на POST; атлету карточка закрыта вовсе; неаутентифицированному — вход;
+    POST без CSRF отклоняется глобальной middleware."""
+    create_person(people_client)
+    storage = app.ctx.storage
+    ensure_staff_users(storage)
+    storage.create_user('sportik', 'hash', 'athlete')
+
+    viewer_headers = get_auth_headers(role='viewer')
+    _, response = people_client.get('/admin/people/1', headers=viewer_headers)
+    assert response.status == 200
+    assert 'Доступ не выдан.' in response.text
+    assert 'Выдать доступ' not in response.text
+    assert 'Сменить пароль' not in response.text
+    assert issue_access(people_client, 1, headers=viewer_headers).status == 403
+
+    _, response = people_client.get('/admin/people/1', headers=athlete_headers(), allow_redirects=False)
+    assert response.status == 403
+    assert issue_access(people_client, 1, headers=athlete_headers()).status == 403
+
+    _, response = people_client.get('/admin/people/1', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+    _, response = people_client.post(
+        '/admin/people/1/access/issue', data={'username': 'x1', 'password': '123456'}, allow_redirects=False
+    )
+    assert response.status == 401
+
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/1/access/issue',
+        headers=headers,
+        data={'username': 'x1', 'password': '123456'},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    assert storage.get_user('x1') is None
+
+
+def test_person_access_editor_can_issue(people_client: SanicTestClient):
+    create_person(people_client)
+    ensure_staff_users(app.ctx.storage)
+    response = issue_access(people_client, 1, headers=get_auth_headers(role='editor'))
+    assert response.status == 302
+    user = app.ctx.storage.get_user('ivanov_ii')
+    assert user['role'] == 'athlete'
+    assert user['student_ref_id'] == 1
+
+
+def test_person_access_issue_validation(people_client: SanicTestClient):
+    """Короткий пароль, двоеточие в логине, пустой логин — ошибки во flash,
+    строка не создаётся, аудит молчит."""
+    create_person(people_client)
+
+    response = issue_access(people_client, 1, password='12345')
+    assert 'Пароль должен быть не короче 6 символов' in unquote_plus(response.headers['location'])
+    response = issue_access(people_client, 1, username='iva:nov')
+    assert 'Логин не может содержать двоеточие' in unquote_plus(response.headers['location'])
+    response = issue_access(people_client, 1, username='   ')
+    assert 'Укажите логин.' in unquote_plus(response.headers['location'])
+
+    assert app.ctx.storage.get_user('ivanov_ii') is None
+    assert audit_details(app.ctx.storage, 'athlete_account_issued') == []
+
+
+def test_person_access_namesakes_and_duplicates(people_client: SanicTestClient):
+    """Тёзки изолированы: подсказка второго учитывает занятость (ivanov_ii2),
+    занятый логин — ошибка со следующим свободным вариантом, вторая выдача
+    тому же студенту не проходит."""
+    storage = app.ctx.storage
+    first = storage.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+    second = storage.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-102', '2')
+
+    assert issue_access(people_client, first).status == 302
+
+    _, response = people_client.get(f'/admin/people/{second}', headers=get_auth_headers())
+    assert 'value="ivanov_ii2"' in response.text
+
+    response = issue_access(people_client, second)
+    location = unquote_plus(response.headers['location'])
+    assert 'Логин «ivanov_ii» уже занят' in location
+    assert 'ivanov_ii2' in location
+    assert storage.get_user('ivanov_ii')['student_ref_id'] == first
+
+    response = issue_access(people_client, first, username='ivanov_ii3')
+    assert 'уже выдан' in unquote_plus(response.headers['location'])
+    assert len(storage.linked_athlete_users(first)) == 1
+    assert storage.linked_athlete_users(second) == []
+
+
+def test_person_access_inactive_student(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Сонный Студент', 'Ж', '', '', '')
+    storage.set_student_active(student_id, False)
+    response = issue_access(people_client, student_id, username='sonny', password='parol-1a')
+    assert 'только активному студенту' in unquote_plus(response.headers['location'])
+    assert storage.get_user('sonny') is None
+
+
+def test_person_access_password_change(people_client: SanicTestClient):
+    """Смена пароля: старый перестаёт входить, новый работает, живой cookie
+    отзывается (pwd_ver+1), аудит athlete_account_password_changed."""
+    from src.routes.auth import login_failures
+
+    login_failures.clear()
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', '', '', '')
+    assert issue_access(people_client, student_id, password='staryi-parol-1').status == 302
+    user = storage.get_user('ivanov_ii')
+
+    live_headers = athlete_headers_for('ivanov_ii')
+    _, response = people_client.get('/', headers=live_headers, allow_redirects=False)
+    assert response.status == 200
+
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        f'/admin/people/{student_id}/access/{user["id"]}/password',
+        headers=headers,
+        data={**csrf_for(headers), 'password': 'novyi-parol-2'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Пароль аккаунта «ivanov_ii» изменён' in location
+    assert 'novyi-parol-2' not in location
+    assert audit_details(storage, 'athlete_account_password_changed') == [
+        {'student_id': student_id, 'user_id': user['id'], 'username': 'ivanov_ii'}
+    ]
+
+    _, response = people_client.get('/', headers=live_headers, allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    _, response = people_client.post(
+        '/login', data={'username': 'ivanov_ii', 'password': 'staryi-parol-1'}, allow_redirects=False
+    )
+    assert response.status == 401
+    _, response = people_client.post(
+        '/login', data={'username': 'ivanov_ii', 'password': 'novyi-parol-2'}, allow_redirects=False
+    )
+    assert response.status == 302
+    login_failures.clear()
+
+
+def test_person_access_disable_and_enable(people_client: SanicTestClient):
+    """Отключение: вход запрещён, живой cookie перестаёт авторизовать; кадры
+    и связи не трогаются; включение возвращает вход. Аудит — по событию на
+    каждое переключение."""
+    from src.routes.auth import login_failures
+
+    login_failures.clear()
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', '', '', '')
+    assert issue_access(people_client, student_id).status == 302
+    user = storage.get_user('ivanov_ii')
+    headers = get_auth_headers()
+    live_headers = athlete_headers_for('ivanov_ii')
+
+    _, response = people_client.post(
+        f'/admin/people/{student_id}/access/{user["id"]}/active',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Доступ аккаунта «ivanov_ii» отключён' in unquote_plus(response.headers['location'])
+    assert storage.get_user('ivanov_ii')['active'] == 0
+    assert storage.get_user('ivanov_ii')['student_ref_id'] == student_id
+    assert audit_details(storage, 'athlete_account_disabled') == [
+        {'student_id': student_id, 'user_id': user['id'], 'username': 'ivanov_ii'}
+    ]
+
+    _, response = people_client.get('/', headers=live_headers, allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+    _, response = people_client.post(
+        '/login', data={'username': 'ivanov_ii', 'password': 'parol-ivanova-1'}, allow_redirects=False
+    )
+    assert response.status == 401
+
+    _, response = people_client.post(
+        f'/admin/people/{student_id}/access/{user["id"]}/active',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Доступ аккаунта «ivanov_ii» включён' in unquote_plus(response.headers['location'])
+    assert storage.get_user('ivanov_ii')['active'] == 1
+    assert audit_details(storage, 'athlete_account_enabled') == [
+        {'student_id': student_id, 'user_id': user['id'], 'username': 'ivanov_ii'}
+    ]
+    _, response = people_client.post(
+        '/login', data={'username': 'ivanov_ii', 'password': 'parol-ivanova-1'}, allow_redirects=False
+    )
+    assert response.status == 302
+    login_failures.clear()
+
+
+def test_person_access_tampering_targets(people_client: SanicTestClient):
+    """Анти-подмена user_id: смена пароля/статуса через карточку возможна
+    только для athlete-аккаунта, привязанного к ЭТОЙ карточке — штатные и
+    чужие аккаунты не трогаются, аудит молчит. Несуществующий студент — 404
+    (в т.ч. нечисловой id — int-конвертер маршрута)."""
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван Иванович', 'М', '', '', '')
+    other_student = storage.create_student('Петров Пётр Петрович', 'М', '', '', '')
+    assert issue_access(people_client, student_id).status == 302
+    admin = storage.get_user(settings.auth_admin_username)
+    storage.create_user('petrov_pp', 'hash', 'athlete')
+    other = storage.get_user('petrov_pp')
+    storage.link_user(other['id'], other_student)
+
+    headers = get_auth_headers()
+    for target in (admin['id'], other['id'], 999999):
+        _, response = people_client.post(
+            f'/admin/people/{student_id}/access/{target}/password',
+            headers=headers,
+            data={**csrf_for(headers), 'password': 'zloui-parol-3'},
+            allow_redirects=False,
+        )
+        assert 'не найден' in unquote_plus(response.headers['location'])
+        _, response = people_client.post(
+            f'/admin/people/{student_id}/access/{target}/active',
+            headers=headers,
+            data=csrf_for(headers),
+            allow_redirects=False,
+        )
+        assert 'не найден' in unquote_plus(response.headers['location'])
+
+    assert storage.get_user_by_id(admin['id'])['password_hash'] == 'hash'
+    assert storage.get_user_by_id(admin['id'])['active'] == 1
+    assert storage.get_user_by_id(other['id'])['active'] == 1
+    assert storage.get_user_by_id(other['id'])['student_ref_id'] == other_student
+    assert audit_details(storage, 'athlete_account_password_changed') == []
+    assert audit_details(storage, 'athlete_account_disabled') == []
+    assert audit_details(storage, 'athlete_account_enabled') == []
+
+    _, response = people_client.post(
+        '/admin/people/999999/access/issue',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'prizrak', 'password': '123456'},
+        allow_redirects=False,
+    )
+    assert response.status == 404
+    # Нечисловой id не совпадает ни с одним маршрутом (int-конвертер):
+    # обработчик не выполняется, пользователь не создаётся.
+    _, response = people_client.post(
+        '/admin/people/abc/access/issue',
+        headers=headers,
+        data={**csrf_for(headers), 'username': 'prizrak', 'password': '123456'},
+        allow_redirects=False,
+    )
+    assert response.status in (403, 404)
+    assert storage.get_user('prizrak') is None
+
+
+def test_person_card_access_ambiguous_multiple_accounts(people_client: SanicTestClient):
+    """Несколько аккаунтов на карточке (link_user разрешает дубли — контракт
+    сопоставления): секция доступа показывает предупреждение вместо форм,
+    разбор дубликатов — в списке «Аккаунты атлетов»."""
+    storage = app.ctx.storage
+    student_id = storage.create_student('Иванов Иван', 'М', '', '', '')
+    storage.create_user('acc1', 'hash', 'athlete')
+    storage.create_user('acc2', 'hash', 'athlete')
+    storage.link_user(storage.get_user('acc1')['id'], student_id)
+    storage.link_user(storage.get_user('acc2')['id'], student_id)
+
+    _, response = people_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
+    assert 'несколько аккаунтов атлета' in response.text
+    assert 'Сменить пароль' not in response.text
+    assert 'Отключить доступ' not in response.text
+    assert 'Выдать доступ' not in response.text
+    # Выдача такому студенту через флоу тоже не проходит (storage guard)
+    response = issue_access(people_client, student_id, username='acc3')
+    assert 'уже выдан' in unquote_plus(response.headers['location'])
+    assert storage.get_user('acc3') is None

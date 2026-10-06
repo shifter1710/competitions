@@ -55,6 +55,65 @@ class UsersMixin:
             )
             self.connection.commit()
 
+    def find_free_username(self, base: str) -> str:
+        """Ближайший свободный логин: base, иначе base2, base3, ...
+
+        Для предзаполнения формы выдачи доступа и подсказки при коллизии
+        (ivanov_ii → ivanov_ii2). Только чтение, без вставки.
+        """
+        if self.get_user(base) is None:
+            return base
+        for suffix in range(2, 1000):
+            candidate = f'{base}{suffix}'
+            if self.get_user(candidate) is None:
+                return candidate
+        # Практически недостижимо (998 занятых вариантов); страховка от
+        # вечного цикла — суффикс из метки времени.
+        return f'{base}{int(datetime.utcnow().timestamp())}'
+
+    def create_athlete_user(self, username: str, password_hash: str, student_id: int) -> tuple[int | None, str | None]:
+        """Создать аккаунт атлета, СРАЗУ связанный с карточкой студента
+        (выдача доступа с карточки, Account Issuance).
+
+        Единственный INSERT атомарен по построению; предпроверки — под той
+        же блокировкой, что и вставка. В отличие от link_user (который
+        сознательно разрешает несколько аккаунтов на карточку), этот флоу
+        выдаёт не больше ОДНОГО аккаунта на студента. Коды ошибок:
+        student_not_found / student_inactive / student_already_linked /
+        username_taken. Успех — (id новой строки, None).
+        """
+        with self._lock:
+            student = self.connection.execute(
+                'SELECT active FROM students WHERE id = ?',
+                (int(student_id),),
+            ).fetchone()
+            if student is None:
+                return None, 'student_not_found'
+            if not student['active']:
+                return None, 'student_inactive'
+            linked = self.connection.execute(
+                "SELECT id FROM users WHERE role = 'athlete' AND student_ref_id = ?",
+                (int(student_id),),
+            ).fetchone()
+            if linked is not None:
+                return None, 'student_already_linked'
+            # get_user здесь нельзя — он берёт ту же блокировку (не реентерантна).
+            if self.connection.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone():
+                return None, 'username_taken'
+            try:
+                cursor = self.connection.execute(
+                    'INSERT INTO users (username, password_hash, role, active, student_ref_id) '
+                    "VALUES (?, ?, 'athlete', 1, ?)",
+                    (username, password_hash, int(student_id)),
+                )
+                self.connection.commit()
+                return cursor.lastrowid, None
+            except sqlite3.IntegrityError:
+                # Гонка по username между предпроверкой и INSERT — UNIQUE
+                # держит край; строка не создана (откат), отсекаемся кодом.
+                self.connection.rollback()
+                return None, 'username_taken'
+
     def set_user_password(self, user_id: int, password_hash: str) -> None:
         with self._lock:
             self.connection.execute(

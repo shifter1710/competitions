@@ -293,7 +293,7 @@
 <div class="card shadow-sm mt-4">
     <div class="card-body">
         <h5 class="card-title">Связанные данные</h5>
-        <div class="text-muted mb-3">Записи о соревнованиях и аккаунты атлета, привязанные к этому студенту.</div>
+        <div class="text-muted mb-3">Доступ атлета, записи о соревнованиях и аккаунты, привязанные к этому студенту.</div>
 
         <h6 class="mb-2">Записи о соревнованиях
             <span class="badge text-bg-secondary">{{ linked_records_count }}</span>
@@ -362,6 +362,103 @@
         {% endif %}
         {% else %}
         <div class="text-muted mb-3">Привязанных записей пока нет.</div>
+        {% endif %}
+
+        {# Выдача доступа атлета (Account Issuance): аккаунт role=athlete
+           создаётся сразу со связью с этой карточкой — не больше одного на
+           студента. Пароль существует только до отправки формы (генерация и
+           копирование — клиентские кнопки), в базе — один scrypt-хеш;
+           смена пароля отзывает сессии (pwd_ver). Управление — модераторам,
+           viewer видит секцию только чтением. #}
+        <h6 class="mt-4 mb-2">Доступ атлета</h6>
+
+        {% if access_ambiguous %}
+        <div class="alert alert-warning" role="alert">
+            К этому студенту привязано несколько аккаунтов атлета — сначала разрешите
+            дубликаты в списке «Аккаунты атлетов» ниже.
+        </div>
+        {% elif access_user %}
+        <dl class="row mb-2">
+            <dt class="col-sm-4 fw-normal text-muted">Логин</dt>
+            <dd class="col-sm-8"><span class="font-monospace">{{ access_user.username }}</span></dd>
+            <dt class="col-sm-4 fw-normal text-muted">Статус</dt>
+            <dd class="col-sm-8">
+                {% if access_user.active %}<span class="badge text-bg-success">активен</span>
+                {% else %}<span class="badge text-bg-secondary">отключён</span>{% endif %}
+            </dd>
+        </dl>
+        {% if is_moderator %}
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <details class="d-inline-block">
+                <summary class="btn btn-sm btn-outline-secondary">Сменить пароль</summary>
+                <form action="/admin/people/{{ student.id }}/access/{{ access_user.id }}/password"
+                      class="d-flex flex-wrap gap-2 mt-2" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                    <div class="input-group">
+                        <input aria-label="Новый пароль" autocomplete="new-password"
+                               class="form-control form-control-sm font-monospace"
+                               id="person-access-new-password" minlength="6" name="password"
+                               required type="text">
+                        <button class="btn btn-outline-secondary password-generate-button"
+                                data-password-input="#person-access-new-password" type="button">Сгенерировать</button>
+                        <button class="btn btn-outline-secondary password-copy-button"
+                                data-password-input="#person-access-new-password" type="button">Копировать</button>
+                    </div>
+                    <button class="btn btn-sm btn-primary" type="submit">Сменить пароль</button>
+                </form>
+            </details>
+            <form action="/admin/people/{{ student.id }}/access/{{ access_user.id }}/active" method="post"
+                  {% if access_user.active %}
+                  onsubmit="return confirm({{ ('Отключить доступ аккаунту ' ~ access_user.username ~ '? Атлет не сможет войти; записи и данные сохранятся.')|tojson|forceescape }})"
+                  {% endif %}>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                {% if access_user.active %}
+                <button class="btn btn-sm btn-outline-warning" type="submit">Отключить доступ</button>
+                {% else %}
+                <button class="btn btn-sm btn-outline-success" type="submit">Включить доступ</button>
+                {% endif %}
+            </form>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="text-muted mb-2">Доступ не выдан.</div>
+        {% if is_moderator %}
+        <details class="d-inline-block">
+            <summary class="btn btn-sm btn-outline-primary">Выдать доступ</summary>
+            <form action="/admin/people/{{ student.id }}/access/issue"
+                  class="row g-2 align-items-end mt-2" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <div class="col-12 col-md-4">
+                    <label class="form-label" for="person-access-username">Логин</label>
+                    <input autocomplete="off" class="form-control form-control-sm"
+                           id="person-access-username" name="username" required type="text"
+                           value="{{ access_suggested_login }}">
+                </div>
+                <div class="col-12 col-md-6">
+                    <label class="form-label" for="person-access-password">Пароль</label>
+                    <div class="input-group">
+                        <input aria-label="Пароль" autocomplete="new-password"
+                               class="form-control form-control-sm font-monospace"
+                               id="person-access-password" minlength="6" name="password"
+                               required type="text">
+                        <button class="btn btn-outline-secondary password-generate-button"
+                                data-password-input="#person-access-password" type="button">Сгенерировать</button>
+                        <button class="btn btn-outline-secondary password-copy-button"
+                                data-password-input="#person-access-password" type="button">Копировать</button>
+                    </div>
+                </div>
+                <div class="col-12 col-md-2">
+                    <button class="btn btn-sm btn-primary" type="submit">Создать доступ</button>
+                </div>
+                <div class="col-12">
+                    <div class="form-text ui-hint">
+                        Минимум 6 символов. Скопируйте пароль до отправки — после создания он
+                        больше не показывается; в базе только хеш.
+                    </div>
+                </div>
+            </form>
+        </details>
+        {% endif %}
         {% endif %}
 
         <h6 class="mt-4 mb-2">Аккаунты атлетов

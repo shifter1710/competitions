@@ -21,12 +21,15 @@ from sanic.response import raw
 from sanic_ext import render
 
 from src.auth import get_current_user_id
+from src.auth import hash_password
 from src.auth import log_audit_event
+from src.auth import MIN_PASSWORD_LENGTH
 from src.auth import require_admin
 from src.auth import require_moderator
 from src.auth import require_staff
 from src.auth import user_is_admin
 from src.auth import user_is_moderator
+from src.auth import username_error
 from src.education import academic_year_label
 from src.education import derive_course
 from src.gto import build_gto_rows
@@ -46,6 +49,7 @@ from src.students import reconcile_student_error
 from src.students import student_catalog_hints
 from src.students import student_file_group_institutes
 from src.students import STUDENT_SEX_OPTIONS
+from src.students import suggest_login
 from src.web import build_redirect_with_message
 from src.web import checkbox_to_bool
 from src.web import clean_str
@@ -70,6 +74,25 @@ STUDENT_IMPORT_SESSION_TTL_SECONDS = 2 * 60 * 60
 
 
 RECONCILE_PAGE_SIZE = 50
+
+
+# Выдача доступа атлета с карточки студента (Account Issuance): лимиты длин
+# логина/пароля ТОЛЬКО этого флоу (админский /admin/users исторически без
+# лимита длины — не трогаем). Имена событий аудита — контракт продукта.
+ACCESS_USERNAME_MAX_LENGTH = 64
+
+
+ACCESS_PASSWORD_MAX_LENGTH = 128
+
+
+def load_card_athlete(storage: SQLiteAdapter, student_id: int, user_id: int) -> dict | None:
+    """Аккаунт атлета, привязанный именно к ЭТОЙ карточке (анти-подмена
+    user_id в URL: через флоу доступа нельзя тронуть штатные аккаунты и
+    аккаунты, привязанные к другому студенту)."""
+    user = storage.get_user_by_id(user_id)
+    if user is None or user['role'] != 'athlete' or user['student_ref_id'] != student_id:
+        return None
+    return user
 
 
 def student_field_changes(student: dict, form: dict) -> dict:
@@ -1526,6 +1549,133 @@ def register(app: Sanic) -> None:  # noqa: C901
             )
         return build_redirect_with_message(message='Импорт отменён.', url='/admin/people')
 
+    # --- Выдача доступа атлета с карточки (Account Issuance): создание
+    # аккаунта role=athlete сразу со связью student_ref_id, смена пароля и
+    # включение/отключение — модераторам; viewer — только чтение секции,
+    # атлету карточка и вовсе закрыта (require_staff выше). Пароль живёт
+    # один запрос: в БД — только scrypt-хеш, в аудит/flash — только логин.
+    # Регистрируются до динамического /admin/people/<student_id> (паттерн
+    # статических сегментов выше в модуле).
+    @app.post('/admin/people/<student_id:int>/access/issue')
+    async def admin_person_access_issue(request: Request, student_id: int):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+
+        storage = get_storage(request.app)
+        student = storage.get_student_by_id(student_id)
+        if student is None:
+            return text(body='Student not found', status=404)
+        back_url = f'/admin/people/{student_id}'
+
+        username = get_form_value(request, 'username').strip()
+        password = get_form_value(request, 'password')
+        if not username:
+            return build_redirect_with_message(error='Укажите логин.', url=back_url)
+        invalid_username_message = username_error(username)
+        if invalid_username_message:
+            return build_redirect_with_message(error=invalid_username_message, url=back_url)
+        if len(username) > ACCESS_USERNAME_MAX_LENGTH:
+            return build_redirect_with_message(
+                error=f'Логин должен быть не длиннее {ACCESS_USERNAME_MAX_LENGTH} символов', url=back_url
+            )
+        if len(password) < MIN_PASSWORD_LENGTH:
+            return build_redirect_with_message(
+                error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов', url=back_url
+            )
+        if len(password) > ACCESS_PASSWORD_MAX_LENGTH:
+            return build_redirect_with_message(
+                error=f'Пароль должен быть не длиннее {ACCESS_PASSWORD_MAX_LENGTH} символов', url=back_url
+            )
+
+        user_id, error = storage.create_athlete_user(username, hash_password(password), student_id)
+        if error is not None:
+            if error == 'username_taken':
+                suggestion = storage.find_free_username(suggest_login(student['full_name']))
+                return build_redirect_with_message(
+                    error=f'Логин «{username}» уже занят. Свободный вариант: «{suggestion}»', url=back_url
+                )
+            messages = {
+                'student_not_found': 'Студент не найден.',
+                'student_inactive': 'Студент неактивен: доступ можно выдать только активному студенту.',
+                'student_already_linked': 'У этого студента уже выдан доступ — аккаунт атлета уже привязан.',
+            }
+            return build_redirect_with_message(error=messages.get(error, 'Не удалось выдать доступ.'), url=back_url)
+        log_audit_event(
+            request,
+            'athlete_account_issued',
+            {'student_id': student_id, 'user_id': user_id, 'username': username},
+        )
+        return build_redirect_with_message(message=f'Доступ выдан: логин «{username}».', url=back_url)
+
+    @app.post('/admin/people/<student_id:int>/access/<user_id:int>/password')
+    async def admin_person_access_password(request: Request, student_id: int, user_id: int):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+
+        storage = get_storage(request.app)
+        if storage.get_student_by_id(student_id) is None:
+            return text(body='Student not found', status=404)
+        back_url = f'/admin/people/{student_id}'
+        user = load_card_athlete(storage, student_id, user_id)
+        if user is None:
+            return build_redirect_with_message(
+                error='Аккаунт атлета с доступом на этой карточке не найден.', url=back_url
+            )
+
+        password = get_form_value(request, 'password')
+        if len(password) < MIN_PASSWORD_LENGTH:
+            return build_redirect_with_message(
+                error=f'Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов', url=back_url
+            )
+        if len(password) > ACCESS_PASSWORD_MAX_LENGTH:
+            return build_redirect_with_message(
+                error=f'Пароль должен быть не длиннее {ACCESS_PASSWORD_MAX_LENGTH} символов', url=back_url
+            )
+        storage.set_user_password(user_id, hash_password(password))
+        log_audit_event(
+            request,
+            'athlete_account_password_changed',
+            {'student_id': student_id, 'user_id': user_id, 'username': user['username']},
+        )
+        return build_redirect_with_message(
+            message=(
+                f'Пароль аккаунта «{user["username"]}» изменён. Скопируйте его атлету — ' 'повторно он не показывается.'
+            ),
+            url=back_url,
+        )
+
+    @app.post('/admin/people/<student_id:int>/access/<user_id:int>/active')
+    async def admin_person_access_active(request: Request, student_id: int, user_id: int):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+
+        storage = get_storage(request.app)
+        if storage.get_student_by_id(student_id) is None:
+            return text(body='Student not found', status=404)
+        back_url = f'/admin/people/{student_id}'
+        user = load_card_athlete(storage, student_id, user_id)
+        if user is None:
+            return build_redirect_with_message(
+                error='Аккаунт атлета с доступом на этой карточке не найден.', url=back_url
+            )
+
+        activate = not user['active']
+        storage.set_user_active(user_id, activate)
+        log_audit_event(
+            request,
+            'athlete_account_enabled' if activate else 'athlete_account_disabled',
+            {'student_id': student_id, 'user_id': user_id, 'username': user['username']},
+        )
+        message = (
+            f'Доступ аккаунта «{user["username"]}» включён.'
+            if activate
+            else f'Доступ аккаунта «{user["username"]}» отключён. Записи и данные сохранены.'
+        )
+        return build_redirect_with_message(message=message, url=back_url)
+
     @app.get('/admin/people/<student_id>')
     async def admin_person_card(request: Request, student_id: str):
         # Карточка открыта всему штату (гто-волна): admin — все операции,
@@ -1602,6 +1752,16 @@ def register(app: Sanic) -> None:  # noqa: C901
                     f'Отвязать аккаунт {user["username"]} от студента? '
                     f'Атлет будет видеть {user["visible_after_unlink"]} из {user["visible_now"]} записей.'
                 )
+        # Выдача доступа (Account Issuance): секция управляет единственным
+        # выданным аккаунтом; несколько аккаунтов — неоднозначно (дубликаты
+        # разбираются в списке ниже), ноль — форма выдачи с предзаполненным
+        # логином из ФИО (свободный вариант).
+        is_moderator = user_is_moderator(request)
+        access_user = linked_users[0] if len(linked_users) == 1 else None
+        access_ambiguous = len(linked_users) > 1
+        access_suggested_login = ''
+        if is_moderator and not linked_users:
+            access_suggested_login = storage.find_free_username(suggest_login(student['full_name']))
         return await render(
             template_name=jinja_env.get_template('admin_person.html'),
             context={
@@ -1624,7 +1784,10 @@ def register(app: Sanic) -> None:  # noqa: C901
                 # Гейтинг карточки: admin-формы только админу, ГТО-формы —
                 # модераторам, остальное — чтение всему штату.
                 'is_admin': user_is_admin(request),
-                'is_moderator': user_is_moderator(request),
+                'is_moderator': is_moderator,
+                'access_user': access_user,
+                'access_ambiguous': access_ambiguous,
+                'access_suggested_login': access_suggested_login,
                 **get_flash_args(request),
             },
         )
