@@ -41,6 +41,7 @@ from src.files import attachments_dir
 from src.files import detect_attachment_type
 from src.files import files_dir
 from src.files import remove_attachment_record_dirs
+from src.gto import build_gto_rows
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.records import BASE_FIELD_LABELS
@@ -716,6 +717,13 @@ def register(app: Sanic) -> None:  # noqa: C901
         my_documents = None
         if student_ref_filter is not None:
             my_documents = build_my_document_groups(storage.list_documents_for_student(student_ref_filter))
+        # ГТО (личный кабинет атлета): ступени и результаты карточки студента,
+        # read-only, без форм. Только атлет со стабильной связью (student_ref_id)
+        # и только при непустом списке — паттерн my_documents: пустой список
+        # скрывает карточку, не-атлеты и атлеты без связи my_gto не получают.
+        my_gto = None
+        if student_ref_filter is not None:
+            my_gto = build_gto_rows(storage.list_student_gto_records(student_ref_filter)) or None
         args = dict(request.args)
 
         # Серверная фильтрация реестра (прототип 02): GET-параметры рендерит,
@@ -802,6 +810,8 @@ def register(app: Sanic) -> None:  # noqa: C901
                 # Event Documents: карточка «Мои документы» (только атлет со
                 # стабильной связью с карточкой студента и непустым списком).
                 'my_documents': my_documents,
+                # ГТО: read-only карточка кабинета (тот же паттерн).
+                'my_gto': my_gto,
                 'users': storage.list_users() if user_is_admin(request) else [],
                 'user_roles': USER_ROLES,
                 'levels': levels,

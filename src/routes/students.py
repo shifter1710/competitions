@@ -24,8 +24,18 @@ from src.auth import get_current_user_id
 from src.auth import log_audit_event
 from src.auth import require_admin
 from src.auth import require_moderator
+from src.auth import require_staff
+from src.auth import user_is_admin
+from src.auth import user_is_moderator
 from src.education import academic_year_label
 from src.education import derive_course
+from src.gto import build_gto_rows
+from src.gto import build_gto_stage_options
+from src.gto import gto_stage_label
+from src.storage.sqlite import GTO_STATUS_LABELS
+from src.storage.sqlite import GTO_STATUSES
+from src.storage.sqlite import gto_year_max
+from src.storage.sqlite import GTO_YEAR_MIN
 from src.storage.sqlite import SQLiteAdapter
 from src.storage.sqlite import STUDENT_SORT_COLUMNS
 from src.students import normalize_import_course
@@ -69,6 +79,50 @@ def student_field_changes(student: dict, form: dict) -> dict:
         for field in ('full_name', 'sex', 'institute', 'group_name', 'course')
         if student[field] != form[field]
     }
+
+
+# --- ГТО (Готов к труду и обороне): формы записи на карточке студента. ---
+#
+# Запись = (год, ступень, статус), принадлежит карточке (stable id), НЕ
+# событию календаря и не участию. Создание/правка/удаление — модераторы,
+# просмотр — весь штат и сам атлет в кабинете.
+
+
+def parse_gto_form(request: Request) -> tuple[int | None, int | None, str, str | None]:
+    """Тройка (год, ступень, статус) из формы ГТО; None-ошибка — flash-текст.
+
+    Нечисловые год/ступень — те же тексты, что у вне-диапазонных значений
+    (внутри диапазона validates хранилище); статус — строкой, допустимость
+    кода проверяет хранилище (invalid_status).
+    """
+    year_raw = get_form_value(request, 'year').strip()
+    stage_raw = get_form_value(request, 'stage').strip()
+    status = get_form_value(request, 'status').strip()
+    if not year_raw or not stage_raw or not status:
+        return None, None, status, 'Укажите год, ступень и статус.'
+    try:
+        year = int(year_raw)
+    except ValueError:
+        return None, None, status, f'Год должен быть числом от {GTO_YEAR_MIN} до {gto_year_max()}.'
+    try:
+        stage = int(stage_raw)
+    except ValueError:
+        return None, None, status, 'Ступень должна быть числом от 1 до 18.'
+    return year, stage, status, None
+
+
+def gto_storage_error(code: str, *, year: int, stage: int) -> str | None:
+    """Flash-текст ошибки хранилища ГТО по коду; None — неизвестный код
+    (обрабатывает вызывающий маршрут)."""
+    if code == 'duplicate':
+        return f'Запись ГТО {gto_stage_label(stage)} за {year} год уже существует.'
+    if code == 'invalid_year':
+        return f'Год должен быть числом от {GTO_YEAR_MIN} до {gto_year_max()}.'
+    if code == 'invalid_stage':
+        return 'Ступень должна быть числом от 1 до 18.'
+    if code == 'invalid_status':
+        return 'Указан недопустимый статус ГТО.'
+    return None
 
 
 def resolve_student_id(request: Request, student_id: str):
@@ -405,7 +459,9 @@ def register(app: Sanic) -> None:  # noqa: C901
 
     @app.get('/admin/people')
     async def admin_people_page(request: Request):
-        auth_error = require_admin(request)
+        # Список карточек открыт всему штату (admin/editor/viewer — гто-волна):
+        # карточка и её данные ГТО нужны и немодераторам; атлету — прежний 403.
+        auth_error = require_staff(request)
         if auth_error is not None:
             return auth_error
         storage = get_storage(request.app)
@@ -437,6 +493,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'order': order,
                 'sort_urls': {column: sort_url(column) for column in STUDENT_SORT_COLUMNS},
                 'reconcile_unlinked': storage.count_student_reconciliation()['records_unlinked'],
+                # admin-only инструменты (сопоставление/импорт/создание)
+                # скрываются в шаблоне от editor/viewer.
+                'is_admin': user_is_admin(request),
                 **get_flash_args(request),
             },
         )
@@ -1469,7 +1528,10 @@ def register(app: Sanic) -> None:  # noqa: C901
 
     @app.get('/admin/people/<student_id>')
     async def admin_person_card(request: Request, student_id: str):
-        auth_error = require_admin(request)
+        # Карточка открыта всему штату (гто-волна): admin — все операции,
+        # editor — просмотр + CRUD записей ГТО, viewer — только чтение.
+        # Атлету — прежний 403 (его данные ГТО — в кабинете на главной).
+        auth_error = require_staff(request)
         if auth_error is not None:
             return auth_error
         numeric_id, id_error = resolve_student_id(request, student_id)
@@ -1551,6 +1613,18 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'linked_records': linked_records,
                 'linked_users': linked_users,
                 'active_students': [item for item in storage.list_students() if item['active']],
+                # ГТО: предвычисленные строки и опции селектов + границы года
+                # для number-инпута (шаблон без логики).
+                'gto_rows': build_gto_rows(storage.list_student_gto_records(numeric_id)),
+                'gto_count': storage.count_student_gto_records(numeric_id),
+                'gto_stage_options': build_gto_stage_options(),
+                'gto_status_options': [{'value': code, 'label': GTO_STATUS_LABELS[code]} for code in GTO_STATUSES],
+                'gto_year_min': GTO_YEAR_MIN,
+                'gto_year_max': gto_year_max(),
+                # Гейтинг карточки: admin-формы только админу, ГТО-формы —
+                # модераторам, остальное — чтение всему штату.
+                'is_admin': user_is_admin(request),
+                'is_moderator': user_is_moderator(request),
                 **get_flash_args(request),
             },
         )
@@ -1680,13 +1754,139 @@ def register(app: Sanic) -> None:  # noqa: C901
             url=f'/admin/people/{numeric_id}',
         )
 
+    @app.post('/admin/people/<student_id>/gto')
+    async def admin_person_add_gto(request: Request, student_id: str):
+        """Добавить запись ГТО (год, ступень, статус) — модераторы."""
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        numeric_id, id_error = resolve_student_id(request, student_id)
+        if id_error is not None:
+            return id_error
+
+        year, stage, status, form_error = parse_gto_form(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=f'/admin/people/{numeric_id}')
+
+        storage = get_storage(request.app)
+        record_id, error = storage.create_student_gto_record(numeric_id, year=year, stage=stage, status=status)
+        if error == 'student_not_found':
+            return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+        if error is not None:
+            # Отказ не пишется в аудит (конвенция остальных проверок).
+            return build_redirect_with_message(
+                error=gto_storage_error(error, year=year, stage=stage) or 'Запись ГТО не найдена.',
+                url=f'/admin/people/{numeric_id}',
+            )
+
+        log_audit_event(
+            request,
+            'student_gto_added',
+            {'student_id': numeric_id, 'record_id': record_id, 'year': year, 'stage': stage, 'status': status},
+        )
+        return build_redirect_with_message(message='Запись ГТО добавлена.', url=f'/admin/people/{numeric_id}')
+
+    @app.post('/admin/people/<student_id>/gto/<record_id>/edit')
+    async def admin_person_edit_gto(request: Request, student_id: str, record_id: str):
+        """Изменить запись ГТО (полная тройка год/ступень/статус) — модераторы."""
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        numeric_id, id_error = resolve_student_id(request, student_id)
+        if id_error is not None:
+            return id_error
+        numeric_record_id, record_id_error = parse_reconcile_int(record_id, 'record id')
+        if record_id_error is not None:
+            return record_id_error
+
+        year, stage, status, form_error = parse_gto_form(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=f'/admin/people/{numeric_id}')
+
+        storage = get_storage(request.app)
+        if storage.get_student_by_id(numeric_id) is None:
+            return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+        # Снимок до правки: старые значения — для аудита changed (паттерн
+        # student_field_changes); отсутствие записи — «не найдена».
+        existing = storage.get_student_gto_record(numeric_id, numeric_record_id)
+        if existing is None:
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}')
+
+        updated, error = storage.update_student_gto_record(
+            numeric_id, numeric_record_id, year=year, stage=stage, status=status
+        )
+        if error is not None:
+            return build_redirect_with_message(
+                error=gto_storage_error(error, year=year, stage=stage) or 'Запись ГТО не найдена.',
+                url=f'/admin/people/{numeric_id}',
+            )
+        if not updated:
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}')
+
+        changes = {
+            field: {'old': existing[field], 'new': new_value}
+            for field, new_value in (('year', year), ('stage', stage), ('status', status))
+            if existing[field] != new_value
+        }
+        log_audit_event(
+            request,
+            'student_gto_updated',
+            {
+                'student_id': numeric_id,
+                'record_id': numeric_record_id,
+                'year': year,
+                'stage': stage,
+                'status': status,
+                'changed': changes,
+            },
+        )
+        return build_redirect_with_message(message='Запись ГТО обновлена.', url=f'/admin/people/{numeric_id}')
+
+    @app.post('/admin/people/<student_id>/gto/<record_id>/delete')
+    async def admin_person_delete_gto(request: Request, student_id: str, record_id: str):
+        """Удалить запись ГТО — модераторы."""
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        numeric_id, id_error = resolve_student_id(request, student_id)
+        if id_error is not None:
+            return id_error
+        numeric_record_id, record_id_error = parse_reconcile_int(record_id, 'record id')
+        if record_id_error is not None:
+            return record_id_error
+
+        storage = get_storage(request.app)
+        if storage.get_student_by_id(numeric_id) is None:
+            return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
+        # Снимок до удаления: тройка нужна для аудита после исчезновения
+        # строки (паттерн admin_person_remove_alias).
+        existing = storage.get_student_gto_record(numeric_id, numeric_record_id)
+        if existing is None:
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}')
+
+        if not storage.delete_student_gto_record(numeric_id, numeric_record_id):
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}')
+        log_audit_event(
+            request,
+            'student_gto_deleted',
+            {
+                'student_id': numeric_id,
+                'record_id': numeric_record_id,
+                'year': existing['year'],
+                'stage': existing['stage'],
+                'status': existing['status'],
+            },
+        )
+        return build_redirect_with_message(message='Запись ГТО удалена.', url=f'/admin/people/{numeric_id}')
+
     @app.post('/admin/people/<student_id>/delete')
     async def admin_person_delete(request: Request, student_id: str):
         """Полное удаление ОШИБОЧНО созданной карточки (hard delete, admin).
 
         Возможно только для карточки без связей: storage блокирует удаление
-        при привязанных записях/аккаунтах и слитых карточках, не меняя ни
-        одной строки. Записи соревнований вместе с карточкой не удаляются.
+        при привязанных записях/аккаунтах, слитых карточках и записях ГТО,
+        не меняя ни одной строки. Записи соревнований и ГТО вместе с
+        карточкой не удаляются.
         """
         auth_error = require_admin(request)
         if auth_error is not None:
@@ -1714,6 +1914,8 @@ def register(app: Sanic) -> None:  # noqa: C901
                 facts.append(f'аккаунтов атлета — {blockers["athlete_users"]}')
             if blockers.get('merged_children'):
                 facts.append(f'объединённых карточек — {blockers["merged_children"]}')
+            if blockers.get('gto_records'):
+                facts.append(f'записей ГТО — {blockers["gto_records"]}')
             return build_redirect_with_message(
                 error=(
                     f'Удалить карточку нельзя: к ней привязано {", ".join(facts)}. '

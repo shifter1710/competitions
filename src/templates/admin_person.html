@@ -12,7 +12,9 @@
 {% block admin_content %}
 
 {# Актуальные данные. Сохранение меняет ТОЛЬКО карточку: ФИО и данные
-   существующих записей, отчётов и выгрузок не переписываются. #}
+   существующих записей, отчётов и выгрузок не переписываются. Формы —
+   только admin; editor/viewer видят те же данные read-only (паттерн
+   карточки «Образование»). #}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
@@ -24,6 +26,7 @@
                 <span class="badge text-bg-secondary">неактивен</span>
                 {% endif %}
             </h5>
+            {% if is_admin %}
             <form action="/admin/people/{{ student.id }}/active" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 {% if student.active %}
@@ -32,7 +35,9 @@
                 <button class="btn btn-sm btn-outline-success" type="submit">Активировать</button>
                 {% endif %}
             </form>
+            {% endif %}
         </div>
+        {% if is_admin %}
         <form action="/admin/people/{{ student.id }}/edit" class="row g-3" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <div class="col-md-4">
@@ -67,6 +72,20 @@
                 </div>
             </div>
         </form>
+        {% else %}
+        <dl class="row mb-0">
+            <dt class="col-sm-4 fw-normal text-muted">ФИО</dt>
+            <dd class="col-sm-8">{{ student.full_name }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Пол</dt>
+            <dd class="col-sm-8">{% if student.sex %}{{ student.sex }}{% else %}<span class="text-muted">не указан</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Институт</dt>
+            <dd class="col-sm-8">{{ student.institute or '—' }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
+            <dd class="col-sm-8">{{ student.group_name or '—' }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Курс</dt>
+            <dd class="col-sm-8">{{ student.course or '—' }}</dd>
+        </dl>
+        {% endif %}
     </div>
 </div>
 
@@ -110,7 +129,109 @@
 </div>
 {% endif %}
 
-{# Псевдонимы: другие написания ФИО, встречающиеся в записях и импорте. #}
+{# ГТО (Готов к труду и обороне): история ступеней и результатов студента
+   по годам. Принадлежит карточке (не событию и не участию), записи —
+   исторический факт, из возраста не пересчитываются. Таблица — всему
+   штату; формы — модераторам (admin/editor), viewer — только чтение. #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">ГТО <span class="badge text-bg-secondary">{{ gto_count }}</span></h5>
+        <div class="text-muted mb-3">Записи комплекса ГТО по годам: ступень и результат.</div>
+
+        {% if gto_rows %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead>
+                    <tr>
+                        <th scope="col">Год</th>
+                        <th scope="col">Ступень</th>
+                        <th scope="col">Статус</th>
+                        {% if is_moderator %}
+                        <th scope="col">Действия</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in gto_rows %}
+                    <tr>
+                        <td>{{ row.year }}</td>
+                        <td>{{ row.stage_label }}</td>
+                        <td class="text-nowrap">{{ row.status_label }}</td>
+                        {% if is_moderator %}
+                        <td>
+                            <div class="d-flex flex-wrap gap-2 align-items-center">
+                                <details class="d-inline-block">
+                                    <summary class="btn btn-sm btn-outline-secondary">Изменить</summary>
+                                    <form action="/admin/people/{{ student.id }}/gto/{{ row.id }}/edit"
+                                          class="d-flex flex-wrap gap-2 mt-2" method="post">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                        <input aria-label="Год" class="form-control form-control-sm" max="{{ gto_year_max }}"
+                                               min="{{ gto_year_min }}" name="year" required type="number" value="{{ row.year }}">
+                                        <select aria-label="Ступень" class="form-select form-select-sm" name="stage"
+                                                required style="min-width: 14rem;">
+                                            {% for option in gto_stage_options %}
+                                            <option value="{{ option.value }}" {% if option.value == row.stage %}selected{% endif %}>{{ option.label }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <select aria-label="Статус" class="form-select form-select-sm" name="status" required>
+                                            {% for option in gto_status_options %}
+                                            <option value="{{ option.value }}" {% if option.value == row.status %}selected{% endif %}>{{ option.label }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <button class="btn btn-sm btn-primary" type="submit">Сохранить</button>
+                                    </form>
+                                </details>
+                                <form action="/admin/people/{{ student.id }}/gto/{{ row.id }}/delete" method="post"
+                                      onsubmit="return confirm('Удалить запись ГТО за {{ row.year }} год ({{ row.stage_label }}, {{ row.status_label }})?')">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                                </form>
+                            </div>
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-muted mb-3">Записей ГТО пока нет.</div>
+        {% endif %}
+
+        {% if is_moderator %}
+        <form action="/admin/people/{{ student.id }}/gto" class="row g-2 align-items-end" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="gto-add-year">Год</label>
+                <input class="form-control form-control-sm" id="gto-add-year" max="{{ gto_year_max }}"
+                       min="{{ gto_year_min }}" name="year" required type="number" value="{{ gto_year_max }}">
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label" for="gto-add-stage">Ступень</label>
+                <select class="form-select form-select-sm" id="gto-add-stage" name="stage" required>
+                    {% for option in gto_stage_options %}
+                    <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-3">
+                <label class="form-label" for="gto-add-status">Статус</label>
+                <select class="form-select form-select-sm" id="gto-add-status" name="status" required>
+                    {% for option in gto_status_options %}
+                    <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-3">
+                <button class="btn btn-sm btn-outline-primary" type="submit">Добавить запись ГТО</button>
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+{# Псевдонимы: другие написания ФИО, встречающиеся в записях и импорте.
+   Таблица — всему штату (read-only), удаление/добавление — только admin. #}
 <div class="card shadow-sm">
     <div class="card-body">
         <h5 class="card-title">Псевдонимы</h5>
@@ -122,13 +243,16 @@
                 <thead>
                     <tr>
                         <th>Псевдоним</th>
+                        {% if is_admin %}
                         <th>Действия</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody>
                     {% for alias in aliases %}
                     <tr>
                         <td>{{ alias.name }}</td>
+                        {% if is_admin %}
                         <td>
                             <form action="/admin/people/{{ student.id }}/alias/{{ alias.id }}/delete" method="post"
                                   onsubmit="return confirm('Удалить псевдоним «{{ alias.name }}»?')">
@@ -136,6 +260,7 @@
                                 <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
                             </form>
                         </td>
+                        {% endif %}
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -145,6 +270,7 @@
         <div class="text-muted mb-3">Псевдонимов пока нет.</div>
         {% endif %}
 
+        {% if is_admin %}
         <form action="/admin/people/{{ student.id }}/alias" class="row g-2 align-items-center" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <div class="col-md-4">
@@ -155,13 +281,15 @@
                 <button class="btn btn-sm btn-outline-primary" type="submit">Добавить</button>
             </div>
         </form>
+        {% endif %}
     </div>
 </div>
 
 {# Связанные данные (Phase 2 + P3): записи и аккаунты, привязанные вручную
    через сопоставление. Привязка меняет только student_ref_id — кабинет
    атлета с P3 читает эту связь (dual: связь + легаси-хеш ФИО), отчёты и
-   выгрузки работают по легаси-ключу sha256(ФИО) как раньше. #}
+   выгрузки работают по легаси-ключу sha256(ФИО) как раньше. Таблицы —
+   всему штату (read-only), отвязка/перепривязка — только admin. #}
 <div class="card shadow-sm mt-4">
     <div class="card-body">
         <h5 class="card-title">Связанные данные</h5>
@@ -179,7 +307,9 @@
                         <th scope="col">ФИО в записи</th>
                         <th scope="col">Спорт · Дата</th>
                         <th scope="col">Название</th>
+                        {% if is_admin %}
                         <th scope="col">Действия</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody>
@@ -191,6 +321,7 @@
                            спорта может переноситься). #}
                         <td>{{ record.sport }} · <span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td>
                         <td>{{ record.name }}</td>
+                        {% if is_admin %}
                         <td>
                             <div class="d-flex flex-wrap gap-2 align-items-center">
                                 <form action="/admin/people/reconcile/unlink" method="post"
@@ -220,6 +351,7 @@
                                 </details>
                             </div>
                         </td>
+                        {% endif %}
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -248,7 +380,9 @@
                     <tr>
                         <th scope="col">Логин</th>
                         <th scope="col">Видимо атлету</th>
+                        {% if is_admin %}
                         <th scope="col">Действия</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody>
@@ -260,6 +394,7 @@
                                (текущий режим dual/ref): сейчас и после отвязки аккаунта. #}
                             сейчас {{ user.visible_now }} · после отвязки {{ user.visible_after_unlink }}
                         </td>
+                        {% if is_admin %}
                         <td>
                             <div class="d-flex flex-wrap gap-2 align-items-center">
                                 <form action="/admin/people/reconcile/users/unlink" method="post"
@@ -291,6 +426,7 @@
                                 </details>
                             </div>
                         </td>
+                        {% endif %}
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -302,20 +438,22 @@
     </div>
 </div>
 
-{# Полное удаление ошибочно созданной карточки — только без связей
-   (records/accounts считаются на сервере, форма скрывается при блокерах). #}
+{# Полное удаление ошибочно созданной карточки — только admin и только без
+   связей (records/accounts/ГТО считаются на сервере, форма скрывается при
+   блокерах). #}
+{% if is_admin %}
 <div class="card shadow-sm mt-4 border-danger">
     <div class="card-body">
         <h5 class="card-title">Удаление карточки</h5>
         <div class="text-muted mb-3">
             Полное удаление ошибочно созданной карточки. Возможно только для карточки без записей
-            о соревнованиях и без привязанных аккаунтов атлета — данные соревнований не удаляются
-            вместе с карточкой.
+            о соревнованиях, без привязанных аккаунтов атлета и без записей ГТО — данные
+            соревнований и ГТО не удаляются вместе с карточкой.
         </div>
 
-        {% if linked_records_count == 0 and not linked_users %}
+        {% if linked_records_count == 0 and not linked_users and gto_count == 0 %}
         <form action="/admin/people/{{ student.id }}/delete" method="post"
-              onsubmit="return confirm('Удалить карточку «{{ student.full_name }}» (#{{ student.id }}) безвозвратно? Удаление возможно только для карточки без записей о соревнованиях и без привязанных аккаунтов атлета. Восстановить карточку будет нельзя.')">
+              onsubmit="return confirm('Удалить карточку «{{ student.full_name }}» (#{{ student.id }}) безвозвратно? Удаление возможно только для карточки без записей о соревнованиях, без привязанных аккаунтов атлета и без записей ГТО. Восстановить карточку будет нельзя.')">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button class="btn btn-danger" type="submit">Удалить карточку</button>
             <div class="form-text ui-hint">
@@ -341,6 +479,12 @@
                 («Отвязать» в блоке «Аккаунты атлетов»);
             </li>
             {% endif %}
+            {% if gto_count > 0 %}
+            <li>
+                записей ГТО — <strong>{{ gto_count }}</strong>: удалите каждую
+                («Удалить» в блоке «ГТО»);
+            </li>
+            {% endif %}
         </ul>
         {% if student.active %}
         <div class="text-muted">
@@ -355,6 +499,7 @@
         {% endif %}
     </div>
 </div>
+{% endif %}
 
 {# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
    (script.js): на странице достаточно пустого datalist с этим id. #}

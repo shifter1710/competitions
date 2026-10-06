@@ -70,6 +70,38 @@
 </div>
 {% endif %}
 
+{# ГТО (личный кабинет атлета): ступени и результаты комплекса по годам —
+   read-only, только просмотр (управление — у модераторов на карточке
+   студента). Только атлет со стабильной связью и непустым списком. #}
+{% if my_gto %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title">ГТО</h3>
+        <div class="text-muted">Ваши ступени и результаты комплекса ГТО по годам.</div>
+        <div class="table-responsive mt-3">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th scope="col">Год</th>
+                        <th scope="col">Ступень</th>
+                        <th scope="col">Статус</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in my_gto %}
+                    <tr>
+                        <td>{{ row.year }}</td>
+                        <td>{{ row.stage_label }}</td>
+                        <td class="text-nowrap">{{ row.status_label }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {# Мульти-фильтр главной (dropdown с чекбоксами): повторённые
    GET-параметры, OR внутри фильтра. Меню открывает собственный JS
    (script.js, initIndexMultiSelects) — БЕЗ Bootstrap Dropdown: бандл
