@@ -41,6 +41,7 @@ from src.routes.calendar import normalize_position
 from src.routes.registry import split_import_competitions
 from src.routes.students import student_import_sessions
 from src.settings import settings
+from src.storage.helpers import gto_year_max
 from src.storage.sqlite import SQLiteAdapter
 from src.web import format_date_range
 from src.web import parse_date_value
@@ -8931,19 +8932,25 @@ def create_person(client: SanicTestClient, **overrides) -> object:
     return response
 
 
-def test_admin_people_requires_admin(client: SanicTestClient):
+def test_admin_people_open_to_staff_only(people_client: SanicTestClient):
+    """Список карточек открыт всему штату (admin/editor/viewer — ГТО-волна);
+    атлету — 403, неаутентифицированному — прежний контракт (GET — /login,
+    POST — 401). Создание карточки остаётся admin-only."""
+    create_person(people_client)
+    app.ctx.storage.create_user('sportik', 'hash', 'athlete')
+    ensure_staff_users(app.ctx.storage)
     for role in ('editor', 'viewer'):
-        _, response = client.get('/admin/people', headers=get_auth_headers(role=role))
-        assert response.status == 403
+        _, response = people_client.get('/admin/people', headers=get_auth_headers(role=role))
+        assert response.status == 200
 
-    _, response = client.get('/admin/people', headers=athlete_headers(), allow_redirects=False)
+    _, response = people_client.get('/admin/people', headers=athlete_headers(), allow_redirects=False)
     assert response.status == 403
 
-    _, response = client.get('/admin/people', allow_redirects=False)
+    _, response = people_client.get('/admin/people', allow_redirects=False)
     assert response.status == 302
     assert response.headers['location'].startswith('/login')
 
-    _, response = client.post('/admin/people', data={'full_name': 'Кто-то'})
+    _, response = people_client.post('/admin/people', data={'full_name': 'Кто-то'})
     assert response.status == 401
 
 
@@ -9510,6 +9517,452 @@ def test_admin_person_delete_rolls_back_on_mid_delete_failure(people_client: San
 
     _, response = people_client.post('/admin/people/1/alias/abc/delete', headers=headers, data=csrf_for(headers))
     assert response.status == 400
+
+
+# --- Записи ГТО (Готов к труду и обороне): HTTP-контракт на реальном
+# SQLite-адаптере (people_client). CRUD — модераторы (admin/editor),
+# чтение — весь штат + сам атлет в кабинете; валидация/дубли/аудит. ---
+
+
+def ensure_staff_users(storage) -> None:
+    """editor/viewer в реальном storage тестов: editor сеётся из
+    AUTH_EDITOR_* при старте сервера, viewer — только из AUTH_VIEWER_*
+    (в окружении без переменных — вручную; паттерн blank_index_client)."""
+    editor_username = settings.auth_editor_username or 'editor'
+    if storage.get_user(editor_username) is None:
+        storage.create_user(editor_username, 'hash', 'editor')
+    viewer_username = settings.auth_viewer_username or 'viewer'
+    if storage.get_user(viewer_username) is None:
+        storage.create_user(viewer_username, 'hash', 'viewer')
+
+
+def add_gto_record(
+    client: SanicTestClient,
+    headers: dict[str, str],
+    student_id: int = 1,
+    *,
+    year: str = '2025',
+    stage: str = '8',
+    status: str = 'gold',
+):
+    """POST формы добавления записи ГТО (строки — как из формы)."""
+    _, response = client.post(
+        f'/admin/people/{student_id}/gto',
+        headers=headers,
+        data={**csrf_for(headers), 'year': year, 'stage': stage, 'status': status},
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_admin_person_gto_crud_flow(people_client: SanicTestClient):
+    """Admin: добавление/правка/удаление записи ГТО — flash, строка на
+    карточке и аудит всех трёх действий с корректными payload."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+
+    # Карточка без записей: пустое состояние + форма добавления
+    _, response = people_client.get('/admin/people/1', headers=headers)
+    assert 'Записей ГТО пока нет.' in response.text
+    assert 'Добавить запись ГТО' in response.text
+
+    response = add_gto_record(people_client, headers)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people/1?')
+    assert 'Запись ГТО добавлена.' in location
+
+    _, response = people_client.get('/admin/people/1', headers=headers)
+    assert 'VIII ступень (20–24)' in response.text
+    assert 'Золото' in response.text
+    assert audit_details(storage, 'student_gto_added') == [
+        {'student_id': 1, 'record_id': 1, 'year': 2025, 'stage': 8, 'status': 'gold'}
+    ]
+
+    record_id = storage.list_student_gto_records(1)[0]['id']
+    _, response = people_client.post(
+        f'/admin/people/1/gto/{record_id}/edit',
+        headers=headers,
+        data={**csrf_for(headers), 'year': '2025', 'stage': '8', 'status': 'silver'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Запись ГТО обновлена.' in unquote_plus(response.headers['location'])
+    assert storage.get_student_gto_record(1, record_id)['status'] == 'silver'
+    assert audit_details(storage, 'student_gto_updated') == [
+        {
+            'student_id': 1,
+            'record_id': record_id,
+            'year': 2025,
+            'stage': 8,
+            'status': 'silver',
+            'changed': {'status': {'old': 'gold', 'new': 'silver'}},
+        }
+    ]
+
+    _, response = people_client.post(
+        f'/admin/people/1/gto/{record_id}/delete',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'Запись ГТО удалена.' in unquote_plus(response.headers['location'])
+    assert storage.count_student_gto_records(1) == 0
+    assert audit_details(storage, 'student_gto_deleted') == [
+        {'student_id': 1, 'record_id': record_id, 'year': 2025, 'stage': 8, 'status': 'silver'}
+    ]
+
+
+def test_admin_person_gto_editor_can_crud(people_client: SanicTestClient):
+    """Editor: те же операции ГТО, что у admin (require_moderator)."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    ensure_staff_users(storage)
+    editor = get_auth_headers(role='editor')
+
+    response = add_gto_record(people_client, editor, year='2024', stage='5', status='bronze')
+    assert response.status == 302
+    assert 'Запись ГТО добавлена.' in unquote_plus(response.headers['location'])
+    record_id = storage.list_student_gto_records(1)[0]['id']
+
+    _, response = people_client.post(
+        f'/admin/people/1/gto/{record_id}/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'year': '2024', 'stage': '5', 'status': 'participated'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.get_student_gto_record(1, record_id)['status'] == 'participated'
+
+    _, response = people_client.post(
+        f'/admin/people/1/gto/{record_id}/delete',
+        headers=editor,
+        data=csrf_for(editor),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert storage.count_student_gto_records(1) == 0
+
+
+def test_admin_person_gto_viewer_read_only(people_client: SanicTestClient):
+    """Viewer: карточка 200 с таблицей ГТО, но без форм; POST — 403."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    ensure_staff_users(storage)
+    assert add_gto_record(people_client, get_auth_headers()).status == 302
+
+    viewer = get_auth_headers(role='viewer')
+    _, response = people_client.get('/admin/people/1', headers=viewer)
+    assert response.status == 200
+    assert 'VIII ступень (20–24)' in response.text
+    assert 'Золото' in response.text
+    # Ни ГТО-форм, ни admin-only форм на карточке
+    assert '/admin/people/1/gto' not in response.text
+    assert 'Добавить запись ГТО' not in response.text
+    assert '/admin/people/1/edit' not in response.text
+    assert '/admin/people/1/active' not in response.text
+    assert '/admin/people/1/alias' not in response.text
+    assert '/admin/people/reconcile/unlink' not in response.text
+    assert 'Удаление карточки' not in response.text
+
+    assert add_gto_record(people_client, viewer, year='2026').status == 403
+    record_id = storage.list_student_gto_records(1)[0]['id']
+    for path in (
+        f'/admin/people/1/gto/{record_id}/edit',
+        f'/admin/people/1/gto/{record_id}/delete',
+    ):
+        _, response = people_client.post(
+            path, headers=viewer, data={**csrf_for(viewer), 'year': '2026', 'stage': '9', 'status': 'gold'}
+        )
+        assert response.status == 403
+    assert storage.count_student_gto_records(1) == 1
+
+
+def test_admin_person_gto_athlete_forbidden(people_client: SanicTestClient):
+    """Атлету закрыты и карточка, и ГТО-маршруты (его данные ГТО — в
+    кабинете на главной)."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    storage.create_user('sportik', 'hash', 'athlete')
+
+    _, response = people_client.get('/admin/people/1', headers=athlete_headers(), allow_redirects=False)
+    assert response.status == 403
+
+    assert add_gto_record(people_client, athlete_headers()).status == 403
+    assert storage.count_student_gto_records(1) == 0
+
+
+def test_admin_person_gto_unauthenticated_contract(people_client: SanicTestClient):
+    """Неаутентифицированный: GET карточки — редирект /login, POST ГТО — 401
+    (глобальный контракт authorize_request)."""
+    create_person(people_client)
+
+    _, response = people_client.get('/admin/people/1', allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+    _, response = people_client.post(
+        '/admin/people/1/gto', data={'year': '2025', 'stage': '8', 'status': 'gold'}, allow_redirects=False
+    )
+    assert response.status == 401
+
+
+def test_admin_person_gto_rejects_missing_csrf(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+    for path in ('/admin/people/1/gto', '/admin/people/1/gto/1/edit', '/admin/people/1/gto/1/delete'):
+        _, response = people_client.post(path, headers=headers, data={'year': '2025'}, allow_redirects=False)
+        assert response.status == 403
+        assert 'CSRF' in response.text
+    assert app.ctx.storage.count_student_gto_records(1) == 0
+
+
+def test_admin_person_gto_non_numeric_ids_return_400(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+    _, response = people_client.post(
+        '/admin/people/abc/gto', headers=headers, data={**csrf_for(headers), 'year': '2025'}, allow_redirects=False
+    )
+    assert response.status == 400
+
+    for path in ('/admin/people/1/gto/abc/edit', '/admin/people/1/gto/abc/delete'):
+        _, response = people_client.post(
+            path,
+            headers=headers,
+            data={**csrf_for(headers), 'year': '2025', 'stage': '8', 'status': 'gold'},
+            allow_redirects=False,
+        )
+        assert response.status == 400
+
+
+def test_admin_person_gto_duplicate_rejected(people_client: SanicTestClient):
+    """Повтор той же пары (год, ступень) — error flash, второй строки нет,
+    аудит не пишется (блок — не успех)."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    assert add_gto_record(people_client, headers).status == 302
+
+    response = add_gto_record(people_client, headers, status='bronze')
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Запись ГТО VIII ступень (20–24) за 2025 год уже существует.' in location
+
+    assert storage.count_student_gto_records(1) == 1
+    assert storage.list_student_gto_records(1)[0]['status'] == 'gold'
+    assert len(audit_details(storage, 'student_gto_added')) == 1
+
+
+def test_admin_person_gto_validation_errors(people_client: SanicTestClient):
+    """Валидация формы/хранилища: пустые поля, год (не число/вне диапазона),
+    ступень, статус — error flash, строк не появляется, аудита нет."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+
+    cases = [
+        ({'year': '', 'stage': '', 'status': ''}, 'Укажите год, ступень и статус.'),
+        ({'year': '2025', 'stage': '', 'status': 'gold'}, 'Укажите год, ступень и статус.'),
+        ({'year': '1999', 'stage': '8', 'status': 'gold'}, 'Год должен быть числом от 2000 до'),
+        ({'year': str(gto_year_max() + 1), 'stage': '8', 'status': 'gold'}, 'Год должен быть числом от 2000 до'),
+        ({'year': 'abc', 'stage': '8', 'status': 'gold'}, 'Год должен быть числом от 2000 до'),
+        ({'year': '2025', 'stage': '0', 'status': 'gold'}, 'Ступень должна быть числом от 1 до 18.'),
+        ({'year': '2025', 'stage': '19', 'status': 'gold'}, 'Ступень должна быть числом от 1 до 18.'),
+        ({'year': '2025', 'stage': 'abc', 'status': 'gold'}, 'Ступень должна быть числом от 1 до 18.'),
+        ({'year': '2025', 'stage': '8', 'status': 'platinum'}, 'Указан недопустимый статус ГТО.'),
+    ]
+    for payload, expected_error in cases:
+        response = add_gto_record(people_client, headers, **payload)
+        assert response.status == 302
+        location = unquote_plus(response.headers['location'])
+        assert expected_error in location, f'{payload}: {location}'
+
+    assert storage.count_student_gto_records(1) == 0
+    assert audit_details(storage, 'student_gto_added') == []
+
+
+def test_admin_person_gto_edit_onto_occupied_pair(people_client: SanicTestClient):
+    """Правка на занятую пару (год, ступень) — дубль; обе строки целы."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    assert add_gto_record(people_client, headers, year='2025', stage='8', status='gold').status == 302
+    assert add_gto_record(people_client, headers, year='2026', stage='9', status='silver').status == 302
+
+    second_id = [row['id'] for row in storage.list_student_gto_records(1) if row['year'] == 2026][0]
+    _, response = people_client.post(
+        f'/admin/people/1/gto/{second_id}/edit',
+        headers=headers,
+        data={**csrf_for(headers), 'year': '2025', 'stage': '8', 'status': 'bronze'},
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'уже существует' in unquote_plus(response.headers['location'])
+
+    statuses = {(row['year'], row['stage']): row['status'] for row in storage.list_student_gto_records(1)}
+    assert statuses == {(2025, 8): 'gold', (2026, 9): 'silver'}
+    assert audit_details(storage, 'student_gto_updated') == []
+
+
+def test_admin_person_gto_unknown_record_and_student(people_client: SanicTestClient):
+    create_person(people_client)
+    headers = get_auth_headers()
+
+    for path in ('/admin/people/1/gto/999/edit', '/admin/people/1/gto/999/delete'):
+        _, response = people_client.post(
+            path,
+            headers=headers,
+            data={**csrf_for(headers), 'year': '2025', 'stage': '8', 'status': 'gold'},
+            allow_redirects=False,
+        )
+        assert response.status == 302
+        assert 'Запись ГТО не найдена.' in unquote_plus(response.headers['location'])
+
+    response = add_gto_record(people_client, headers, student_id=999999)
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert location.startswith('/admin/people?')
+    assert 'Студент не найден.' in location
+
+
+def test_admin_people_staff_list_without_admin_tools(people_client: SanicTestClient):
+    """Список: editor/viewer видят таблицу и «Карточку», но без
+    admin-only инструментов (сопоставление/импорт/merge/создание)."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    ensure_staff_users(storage)
+
+    for role in ('editor', 'viewer'):
+        _, response = people_client.get('/admin/people', headers=get_auth_headers(role=role))
+        assert response.status == 200
+        assert 'Иванов Иван Иванович' in response.text
+        assert 'href="/admin/people/1">Карточка</a>' in response.text
+        assert 'Сопоставление данных' not in response.text
+        assert 'Импорт из Excel' not in response.text
+        assert 'Объединение студентов' not in response.text
+        assert '+ Добавить студента' not in response.text
+        assert 'student-create-modal' not in response.text
+
+    _, response = people_client.get('/admin/people', headers=get_auth_headers())
+    assert 'Сопоставление данных' in response.text
+    assert 'Импорт из Excel' in response.text
+    assert 'Объединение студентов' in response.text
+    assert '+ Добавить студента' in response.text
+
+
+def test_admin_person_card_role_gating(people_client: SanicTestClient):
+    """Карточка: editor — просмотр + ГТО-формы (без admin-форм), viewer —
+    только чтение; таблицы/псевдонимы/связанные данные видны всем."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    ensure_staff_users(storage)
+    headers = get_auth_headers()
+    people_client.post(
+        '/admin/people/1/alias',
+        headers=headers,
+        data={**csrf_for(headers), 'name': 'Иванов И.И.'},
+        allow_redirects=False,
+    )
+    assert add_gto_record(people_client, headers).status == 302
+
+    editor = get_auth_headers(role='editor')
+    _, response = people_client.get('/admin/people/1', headers=editor)
+    assert response.status == 200
+    # ГТО-формы модератора на месте
+    assert 'Добавить запись ГТО' in response.text
+    assert '/admin/people/1/gto/1/edit' in response.text
+    assert '/admin/people/1/gto/1/delete' in response.text
+    # admin-only формы скрыты
+    assert '/admin/people/1/edit' not in response.text
+    assert '/admin/people/1/active' not in response.text
+    assert '/admin/people/1/alias' not in response.text
+    assert '/admin/people/reconcile/unlink' not in response.text
+    assert 'Удаление карточки' not in response.text
+
+    viewer = get_auth_headers(role='viewer')
+    _, response = people_client.get('/admin/people/1', headers=viewer)
+    assert response.status == 200
+    # Read-only данные видны: карточка, псевдоним, ГТО
+    assert 'Иванов Иван Иванович' in response.text
+    assert 'Иванов И.И.' in response.text
+    assert 'VIII ступень (20–24)' in response.text
+    # Никаких форм вовсе
+    assert '<form' not in response.text.replace('<form action="/logout"', '')
+
+
+def test_admin_person_delete_blocked_by_gto_http(people_client: SanicTestClient):
+    """Удаление карточки блокируется записями ГТО: счётчик на карточке и в
+    flash; после удаления записи ГТО карточка удаляется."""
+    storage = app.ctx.storage
+    create_person(people_client)
+    headers = get_auth_headers()
+    assert add_gto_record(people_client, headers).status == 302
+
+    _, response = people_client.get('/admin/people/1', headers=headers)
+    assert 'Удаление недоступно' in response.text
+    assert 'записей ГТО — <strong>1</strong>' in response.text
+    assert '/admin/people/1/delete' not in response.text
+
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Удалить карточку нельзя' in location
+    assert 'записей ГТО — 1' in location
+    assert storage.get_student_by_id(1) is not None
+
+    record_id = storage.list_student_gto_records(1)[0]['id']
+    people_client.post(
+        f'/admin/people/1/gto/{record_id}/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    _, response = people_client.post(
+        '/admin/people/1/delete', headers=headers, data=csrf_for(headers), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Карточка «Иванов Иван Иванович» (#1) удалена.' in unquote_plus(response.headers['location'])
+    assert storage.get_student_by_id(1) is None
+
+
+def test_cabinet_gto_card_for_linked_athlete(people_client: SanicTestClient):
+    """Кабинет атлета: read-only карточка «ГТО» — только записи СВОЕЙ
+    карточки студента; атлет без связи и не-атлеты карточку не видят."""
+    storage = app.ctx.storage
+    create_person(people_client, full_name='Первов Перв Первович')
+    create_person(people_client, full_name='Второв Втор Вторович')
+    storage.create_user('sportik', 'hash', 'athlete')
+    storage.create_user('anna', 'hash', 'athlete')
+    storage.link_user(storage.get_user('sportik')['id'], 1)
+    storage.link_user(storage.get_user('anna')['id'], 2)
+    headers = get_auth_headers()
+    assert add_gto_record(people_client, headers, student_id=1, year='2025', stage='8', status='gold').status == 302
+    assert add_gto_record(people_client, headers, student_id=2, year='2024', stage='3', status='bronze').status == 302
+
+    _, page = people_client.get('/', headers=athlete_headers())
+    body = page.body.decode()
+    assert 'Ваши ступени и результаты комплекса ГТО по годам.' in body
+    assert 'VIII ступень (20–24)' in body
+    assert 'Золото' in body
+    # Чужая (anna → студент 2) запись не видна: ни ступень, ни статус
+    assert 'III ступень (10–11)' not in body
+    assert 'Бронза' not in body
+
+    _, page = people_client.get('/', headers=athlete_headers_for('anna'))
+    body = page.body.decode()
+    assert 'III ступень (10–11)' in body
+    assert 'Бронза' in body
+    assert 'VIII ступень (20–24)' not in body
+
+    # Атлет без связи с карточкой — карточки ГТО нет
+    storage.create_user('nocard', 'hash', 'athlete')
+    _, page = people_client.get('/', headers=athlete_headers_for('nocard'))
+    assert 'комплекса ГТО по годам' not in page.body.decode()
+
+    # Не-атлет (admin) карточку «ГТО» на главной не видит
+    _, page = people_client.get('/', headers=get_auth_headers())
+    assert 'комплекса ГТО по годам' not in page.body.decode()
 
 
 # --- Сопоставление данных (Student Identity v1, Phase 2). ---
@@ -16494,7 +16947,8 @@ def test_p7_single_participation_renders_flat_row(client: SanicTestClient):
         # Viewer: нейтральный бейдж без номера карточки и без ссылки на карточку
         assert 'participant-student-link' in body
         assert 'Student #' not in body
-        assert 'href="/admin/people' not in body
+        # Ссылки на КАРТОЧКУ нет (навбар «Студенты» без id — не в счёт)
+        assert 'href="/admin/people/' not in body
         assert 'Бег 100 м' in body
         assert '11,2' in body
         assert 'add_participation' not in body
@@ -16518,7 +16972,8 @@ def test_p7_two_participations_render_parent_and_children(client: SanicTestClien
         # Viewer: нейтральный бейдж без номера, без ссылки на карточку
         assert 'participant-student-link' in body
         assert 'Student #' not in body
-        assert 'href="/admin/people' not in body
+        # Ссылки на КАРТОЧКУ нет (навбар «Студенты» без id — не в счёт)
+        assert 'href="/admin/people/' not in body
         # Children отсортированы по дисциплине: 100 м раньше 200 м
         assert body.index('Бег 100 м') < body.index('Бег 200 м')
         # Счётчики: участников 2 (группа + cardless), участий 3, без результата 2
@@ -16647,7 +17102,8 @@ def test_p7_same_name_different_refs_not_merged(client: SanicTestClient):
         # Бейдж «карточка студента» — у обеих linked-строк (без номера ref)
         assert body.count('participant-student-link') == 2
         assert 'Student #' not in body
-        assert 'href="/admin/people' not in body
+        # Ссылки на КАРТОЧКУ нет (навбар «Студенты» без id — не в счёт)
+        assert 'href="/admin/people/' not in body
         assert 'Участников: <strong>2</strong>' in body
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
@@ -17372,7 +17828,8 @@ def test_event_page_editor_viewer_linked_text_and_badge(client: SanicTestClient)
     try:
         for role in ('editor', 'viewer'):
             body = get_event_page(client, 7, role=role).text
-            assert 'href="/admin/people' not in body, role
+            # Ссылки на КАРТОЧКУ нет; навбар «Студенты» (без id) — не в счёт
+            assert 'href="/admin/people/' not in body, role
             assert 'Student #' not in body, role
             # Один бейдж: linked-строка есть, cardless-строка — без него
             assert body.count('participant-student-link') == 1, role

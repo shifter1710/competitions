@@ -48,10 +48,11 @@
 <body {% if request.ctx.auth_user %}data-role="{{ request.ctx.auth_user.role }}"{% endif %}>
 
     {% set auth_role = request.ctx.auth_user.role if request.ctx.auth_user else None %}
-    {# IA редизайна 2026-09: единый порядок Реестр → Календарь → Студенты(admin)
+    {# IA редизайна 2026-09: единый порядок Реестр → Календарь → Студенты(штат)
        → Отчёты → Админ(admin); атлету — Реестр → Профиль. «Студенты» —
-       /admin/people и /admin/students (объединение), «Админ» — остальной
-       /admin; условия проверяются в этом порядке. #}
+       /admin/people (весь штат с гто-волны; объединение и сопоставление —
+       admin), «Админ» — остальной /admin; условия проверяются в этом
+       порядке. #}
     {% set is_students_area = request.path.startswith('/admin/people') or request.path.startswith('/admin/students') %}
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
         <div class="container-fluid" style="margin: 0 20px">
@@ -71,11 +72,9 @@
                         <a class="nav-link{% if request.path.startswith('/calendar') %} active{% endif %}"
                             href="/calendar">Календарь</a>
                     </li>
-                    {% if auth_role == 'admin' %}
                     <li class="nav-item">
                         <a class="nav-link{% if is_students_area %} active{% endif %}" href="/admin/people">Студенты</a>
                     </li>
-                    {% endif %}
                     <li class="nav-item">
                         <a class="nav-link{% if request.path.startswith('/reports') %} active{% endif %}"
                             href="/reports">Отчёты</a>

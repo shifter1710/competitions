@@ -1,9 +1,10 @@
 # Модель данных: текущее состояние
 
-> Снимок актуален на **2026-10-04**, ветка **`feature/course-education-phase-a`**
-> (Course/Education Phase A — уровни образования, учебные данные групп,
-> вычисляемый курс и снимок года поступления; см. разделы 14–15 и
-> «Личность: легаси и новое»). Документ описывает
+> Снимок актуален на **2026-10-06**, ветка **`feature/gto`** (записи ГТО
+> студентов — раздел 16; ранее Course/Education Phase A — уровни
+> образования, учебные данные групп, вычисляемый курс и снимок года
+> поступления — разделы 14–15, и «Личность: легаси и новое»). Документ
+> описывает
 > **CURRENT STATE** — как база устроена и работает прямо сейчас, а не целевую
 > архитектуру. История того, почему так решили, — в
 > [data-model-decisions.md](data-model-decisions.md); этот документ —
@@ -55,6 +56,7 @@ erDiagram
     competitions ||--o{ import_queue : "matched_record_id (логическая)"
     catalog_values ||--o{ catalog_values : "parent_id (FK объявлен, не enforced)"
     students ||--o{ student_aliases : "student_id (логическая)"
+    students ||--o{ student_gto_records : "student_id (логическая)"
     catalog_values ||--o| group_academic : "group_catalog_value_id (FK объявлен, не enforced)"
     education_levels ||--o{ group_academic : "education_level_id (FK объявлен, не enforced)"
 ```
@@ -313,6 +315,10 @@ erDiagram
 - `student_created` / `student_updated` (с diff old→new) /
   `student_deactivated` / `student_activated` / `student_alias_added` /
   `student_alias_removed` — карточки студентов (Phase 1);
+- `student_gto_added` `{student_id, record_id, year, stage, status}` /
+  `student_gto_updated` `{…, changed: {поле: {old, new}}}` /
+  `student_gto_deleted` `{student_id, record_id, year, stage, status}` —
+  записи ГТО студентов (отказ/блок в аудит не пишется);
 - `competition_linked_to_student` / `student_records_bulk_linked` /
   `competition_unlinked_from_student` / `competition_relinked` /
   `user_linked_to_student` / `user_unlinked_from_student` /
@@ -713,11 +719,12 @@ sha256(ФИО).
 страницы карточки — `POST /admin/people/<id>/delete`. Предназначено для
 ОШИБОЧНО созданных карточек. Возможно только при отсутствии связей:
 записей с `competitions.student_ref_id = id`, аккаунтов с
-`users.student_ref_id = id` и карточек с `merged_into_id = id` — при любом
-блокере не меняется ни одна строка. Удаление убирает саму карточку и её
-псевдонимы ФИО (`student_aliases`) одной транзакцией «либо всё, либо
-ничего»; записи о соревнованиях и аккаунты вместе с карточкой НЕ
-удаляются — их отвязывают отдельно. Успех пишется в аудит
+`users.student_ref_id = id`, карточек с `merged_into_id = id` и записей
+ГТО (`student_gto_records`) — при любом блокере не меняется ни одна
+строка. Удаление убирает саму карточку и её псевдонимы ФИО
+(`student_aliases`) одной транзакцией «либо всё, либо ничего»; записи о
+соревнованиях, аккаунты и записи ГТО вместе с карточкой НЕ удаляются — их
+отвязывают/удаляют отдельно. Успех пишется в аудит
 (`student_deleted` `{student_id, full_name}`); заблокированная попытка в
 аудит не попадает. Для используемых карточек остаётся деактивация.
 
@@ -807,6 +814,38 @@ course ≤ 0 — год поступления позже даты («future», 
 старте нет). Удаление группы справочника удаляет и её учебные данные
 той же транзакцией. Аудит: `group_academic_updated`,
 `group_admission_backfill_applied`.
+
+### 16. `student_gto_records` — записи ГТО студента
+
+История комплекса ГТО (Готов к труду и обороне): одна строка = «в году
+`year` студент выполнял ступень `stage` с результатом `status`».
+Принадлежит Student (НЕ событию календаря и не участию): identity — только
+стабильный `students.id`, тёзки изолированы id, легаси-ключ sha256(ФИО) и
+режим идентификации кабинета (dual/ref) к ГТО отношения не имеют. Записи —
+исторический факт: ничего не пересчитывает ступень из возраста (DOB в
+модели нет), «последний статус побеждает» без event sourcing.
+
+| Колонка | Тип / ограничение | Смысл |
+|---|---|---|
+| `id` | PK AUTOINCREMENT | |
+| `student_id` | INTEGER NOT NULL | логический FK `students.id`; владение строкой — карточка |
+| `year` | INTEGER NOT NULL | год выполнения, 2000..текущий+1 (верхняя граница считается в момент вызова) |
+| `stage` | INTEGER NOT NULL | ступень 1..18 (римские цифры и возрастные группы — константы `GTO_STAGES`, хранится числом) |
+| `status` | TEXT NOT NULL | фиксированный enum `GTO_STATUSES`: `registered` / `participated` / `bronze` / `silver` / `gold` (своего справочника нет) |
+| `created_at` | TEXT NOT NULL | UTC |
+| `updated_at` | TEXT NOT NULL | UTC; меняется при правке записи |
+| `UNIQUE (student_id, year, stage)` | | одна запись на пару год+ступень у карточки; дубль create и правка «на занятую пару» — ошибка `duplicate` (авторитетно IntegrityError с rollback) |
+
+Кто пишет строки: модераторы (admin/editor) с карточки студента —
+`POST /admin/people/<id>/gto` (создание), `POST /admin/people/<id>/gto/<record_id>/edit`
+(полная замена тройки год/ступень/статус), `POST /admin/people/<id>/gto/<record_id>/delete`.
+Валидация — в storage (`GtoMixin`), не в CHECK-ограничениях (конвенция
+проекта): отказ ничего не пишет. Порядок чтения — `year DESC, stage ASC,
+id ASC`. Каскада при удалении карточки НЕТ: записи ГТО — блокер
+hard delete (см. раздел 11). Атлет видит свои записи (read-only) в
+кабинете на главной — по связи `users.student_ref_id`. Аудит:
+`student_gto_added` / `student_gto_updated` (с diff old→new) /
+`student_gto_deleted`.
 
 ## Как устроена личность сегодня
 
@@ -1074,7 +1113,7 @@ runtime кабинета атлета и прав атлета на чтение
   `student_aliases` — последние две с Phase 1; `app_settings` — Wave 1 P0;
   `education_levels`, `group_academic` — Course/Education Phase A;
   `calendar_event_documents`, `calendar_event_document_students` —
-  Event Documents);
+  Event Documents; `student_gto_records` — записи ГТО студентов);
 - populate-шаги: дефолты `field_settings`, наполнение справочников из
   записей, посев базовых уровней образования — `INSERT OR IGNORE`.
 

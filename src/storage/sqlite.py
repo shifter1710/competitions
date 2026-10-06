@@ -10,6 +10,7 @@ from src.models.custom_field import CustomField
 from src.storage.catalogs import CatalogsMixin
 from src.storage.education import EducationMixin
 from src.storage.events import EventsMixin
+from src.storage.gto import GtoMixin
 from src.storage.helpers import BASE_FIELD_SETTING_DEFAULTS  # noqa: F401
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP  # noqa: F401
 from src.storage.helpers import CalendarEventDuplicateError  # noqa: F401
@@ -23,6 +24,13 @@ from src.storage.helpers import dedup_text  # noqa: F401
 from src.storage.helpers import DEFAULT_REPORT_GROUPING  # noqa: F401
 from src.storage.helpers import event_identity_key  # noqa: F401
 from src.storage.helpers import EventParticipationConflictError  # noqa: F401
+from src.storage.helpers import GTO_STAGE_MAX  # noqa: F401
+from src.storage.helpers import GTO_STAGE_MIN  # noqa: F401
+from src.storage.helpers import GTO_STAGES  # noqa: F401
+from src.storage.helpers import GTO_STATUS_LABELS  # noqa: F401
+from src.storage.helpers import GTO_STATUSES  # noqa: F401
+from src.storage.helpers import gto_year_max  # noqa: F401
+from src.storage.helpers import GTO_YEAR_MIN  # noqa: F401
 from src.storage.helpers import IDENTITY_MODE_DEFAULT  # noqa: F401
 from src.storage.helpers import IDENTITY_MODES  # noqa: F401
 from src.storage.helpers import participation_content_key  # noqa: F401
@@ -51,15 +59,23 @@ logger = logging.getLogger(__name__)
 # EventsMixin (календарь соревнований),
 # EducationMixin (уровни образования, учебные данные групп, снимок года
 # поступления записей и его backfill — Course/Education Phase A),
+# GtoMixin (записи ГТО студентов),
 # ParticipationsMixin (записи соревнований: выборки, отчёты, импорт).
 # Порядок баз — только читаемость, перекрытий имён между примесями нет.
 # Контракт примеси: не создаёт соединение и блокировку (self.connection /
 # self._lock принадлежат SQLiteAdapter), не импортирует соседние доменные
-# модули src/storage.* (кроме src/storage.helpers), междоменные вызовы —
+# модули src/storage.* (кроме src.storage.helpers), междоменные вызовы —
 # только через self. Тесты патчат методы на самом SQLiteAdapter — патч
 # ложится раньше примесей в MRO и перехватывает вызовы через self.
 class SQLiteAdapter(
-    MiscMixin, CatalogsMixin, UsersMixin, StudentsMixin, EventsMixin, EducationMixin, ParticipationsMixin
+    MiscMixin,
+    CatalogsMixin,
+    UsersMixin,
+    StudentsMixin,
+    EventsMixin,
+    EducationMixin,
+    GtoMixin,
+    ParticipationsMixin,
 ):
     def __init__(self, database_path: str):
         db_path = Path(database_path)
@@ -423,6 +439,32 @@ class SQLiteAdapter(
                     name TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE (student_id, name)
+                )
+                '''
+            )
+            # Записи ГТО (Готов к труду и обороне): история ступеней и
+            # результатов студента по годам. Принадлежит Student (НЕ Event
+            # и не участие): identity — только стабильный students.id,
+            # легаси-режим dual/ref и ФИО-хеши значения не имеют. Одна
+            # запись на (student_id, year, stage) — UNIQUE держит дубль,
+            # правка меняет статус той же строки. Ступень/статус/год —
+            # исторический факт, из возраста не пересчитывается (DOB в
+            # модели нет и не планируется). Логический FK и отсутствие
+            # CHECK — по конвенции соседних таблиц (валидация в GtoMixin),
+            # cascade НЕТ: удаление карточки блокируется записями ГТО.
+            # Миграция чисто аддитивная и идемпотентная (паттерн
+            # calendar_event_documents), без backfill.
+            self.connection.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS student_gto_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    student_id INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    stage INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (student_id, year, stage)
                 )
                 '''
             )

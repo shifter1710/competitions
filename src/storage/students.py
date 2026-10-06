@@ -165,9 +165,9 @@ class StudentsMixin:
 
         Удаляет карточку и её псевдонимы ФИО ОДНОЙ транзакцией — «либо всё,
         либо ничего». Блокируется при ЛЮБЫХ связях карточки (записи
-        соревнований, аккаунты, слитые в неё карточки): в этом случае не
-        меняется ни одна строка. Записи соревнований вместе с карточкой
-        не удаляются — их отвязывают отдельно.
+        соревнований, аккаунты, слитые в неё карточки, записи ГТО): в этом
+        случае не меняется ни одна строка. Записи соревнований и ГТО вместе
+        с карточкой не удаляются — их отвязывают/удаляют отдельно.
 
         Аккаунты считаются по student_ref_id без фильтра роли: link_user /
         relink_user пишут связь только athlete-аккаунтам, но счётчик без
@@ -176,7 +176,8 @@ class StudentsMixin:
         Возвращает (код, счётчики блокеров):
         'ok' — удалено (счётчики пустые);
         'not_found' — карточки с таким id нет;
-        'blocked' — {'records': N, 'athlete_users': M, 'merged_children': K}.
+        'blocked' — {'records': N, 'athlete_users': M, 'merged_children': K,
+        'gto_records': L}.
         """
         with self._lock:
             try:
@@ -197,6 +198,10 @@ class StudentsMixin:
                     ).fetchone()['total'],
                     'merged_children': self.connection.execute(
                         'SELECT COUNT(*) AS total FROM students WHERE merged_into_id = ?',
+                        (int(student_id),),
+                    ).fetchone()['total'],
+                    'gto_records': self.connection.execute(
+                        'SELECT COUNT(*) AS total FROM student_gto_records WHERE student_id = ?',
                         (int(student_id),),
                     ).fetchone()['total'],
                 }

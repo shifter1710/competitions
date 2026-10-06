@@ -4179,7 +4179,8 @@ def test_delete_student_not_found(adapter):
 
 def test_delete_student_blocked_by_any_link(adapter):
     """Блок при ЛЮБЫХ связях: записи, аккаунты (включая легаси-строку без
-    роли athlete), слитые карточки — при блоке не меняется ни одна строка."""
+    роли athlete), слитые карточки, записи ГТО — при блоке не меняется ни
+    одна строка."""
     student_id = adapter.create_student('Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')
     adapter.add_student_alias(student_id, 'Иванов И.И.')
 
@@ -4193,7 +4194,7 @@ def test_delete_student_blocked_by_any_link(adapter):
     adapter.link_competitions([1, 2], student_id)
     assert adapter.delete_student(student_id) == (
         'blocked',
-        {'records': 2, 'athlete_users': 0, 'merged_children': 0},
+        {'records': 2, 'athlete_users': 0, 'merged_children': 0, 'gto_records': 0},
     )
     assert adapter.get_student_by_id(student_id) is not None
     assert [alias['name'] for alias in adapter.list_student_aliases(student_id)] == ['Иванов И.И.']
@@ -4205,7 +4206,7 @@ def test_delete_student_blocked_by_any_link(adapter):
     adapter.link_user(anna_id, student_id)
     assert adapter.delete_student(student_id) == (
         'blocked',
-        {'records': 0, 'athlete_users': 1, 'merged_children': 0},
+        {'records': 0, 'athlete_users': 1, 'merged_children': 0, 'gto_records': 0},
     )
 
     # 2а) легаси-строка без роли athlete с тем же ref — тоже блокер
@@ -4221,7 +4222,7 @@ def test_delete_student_blocked_by_any_link(adapter):
     adapter.connection.commit()
     assert adapter.delete_student(student_id) == (
         'blocked',
-        {'records': 0, 'athlete_users': 1, 'merged_children': 0},
+        {'records': 0, 'athlete_users': 1, 'merged_children': 0, 'gto_records': 0},
     )
     adapter.connection.execute('UPDATE users SET student_ref_id = NULL WHERE id = ?', (chief_id,))
     adapter.connection.commit()
@@ -4235,9 +4236,18 @@ def test_delete_student_blocked_by_any_link(adapter):
     adapter.connection.commit()
     assert adapter.delete_student(student_id) == (
         'blocked',
-        {'records': 0, 'athlete_users': 0, 'merged_children': 1},
+        {'records': 0, 'athlete_users': 0, 'merged_children': 1, 'gto_records': 0},
     )
     assert adapter.get_student_by_id(child) is not None
+
+    # 4) записи ГТО (guard, не каскад: удаляются отдельно до карточки)
+    record_id, gto_error = adapter.create_student_gto_record(student_id, year=2025, stage=8, status='gold')
+    assert gto_error is None
+    assert adapter.delete_student(student_id) == (
+        'blocked',
+        {'records': 0, 'athlete_users': 0, 'merged_children': 1, 'gto_records': 1},
+    )
+    assert adapter.delete_student_gto_record(student_id, record_id)
 
     # Снятие блокера открывает удаление; карточка-дубль не тронута
     adapter.connection.execute('UPDATE students SET merged_into_id = NULL WHERE id = ?', (child,))
@@ -5974,6 +5984,7 @@ V21_PUBLIC_API = [
     'count_records_by_owner',
     'count_records_by_student_hash',
     'count_records_using',
+    'count_student_gto_records',
     'count_student_reconciliation',
     'count_students_using_group_pair',
     'count_unlinked_competitions',
@@ -5986,6 +5997,7 @@ V21_PUBLIC_API = [
     'create_level',
     'create_student',
     'create_student_and_link_participation',
+    'create_student_gto_record',
     'create_students',
     'create_user',
     'delete_all_attachments',
@@ -6002,6 +6014,7 @@ V21_PUBLIC_API = [
     'delete_education_level',
     'delete_group_academic',
     'delete_student',
+    'delete_student_gto_record',
     'delete_user',
     'disable_custom_field',
     'disable_level',
@@ -6042,6 +6055,7 @@ V21_PUBLIC_API = [
     'get_sport_names',
     'get_student_by_id',
     'get_student_education_context',
+    'get_student_gto_record',
     'get_student_names',
     'get_unlinked_athlete_user',
     'get_user',
@@ -6070,6 +6084,7 @@ V21_PUBLIC_API = [
     'list_levels',
     'list_linked_records',
     'list_student_aliases',
+    'list_student_gto_records',
     'list_students',
     'list_unlinked_athlete_users',
     'list_unlinked_competitions',
@@ -6110,6 +6125,7 @@ V21_PUBLIC_API = [
     'update_event_participation_result',
     'update_field_settings',
     'update_student',
+    'update_student_gto_record',
     'upsert_group_academic',
     'vacuum',
 ]
@@ -6121,12 +6137,14 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     публичная поверхность экземпляра — замороженный список методов
     (инвентаризация b0a7586 до разреза + Course/Education Phase A
     + Team Results: calendar_event_team_results
-    + Event Documents: calendar_event_documents).
+    + Event Documents: calendar_event_documents
+    + ГТО: student_gto_records).
     Регрессионный pin состава."""
     from src.storage.catalogs import CatalogsMixin
     from src.storage.education import EducationMixin
     from src.storage.events import EventsMixin
     from src.storage.misc import MiscMixin
+    from src.storage.gto import GtoMixin
     from src.storage.participations import ParticipationsMixin
     from src.storage.students import StudentsMixin
     from src.storage.users import UsersMixin
@@ -6138,6 +6156,7 @@ def test_v21_adapter_composition_and_api_surface(adapter):
         StudentsMixin,
         EventsMixin,
         EducationMixin,
+        GtoMixin,
         ParticipationsMixin,
     ]
     mro = SQLiteAdapter.__mro__

@@ -30,6 +30,10 @@
                 <a class="btn btn-outline-secondary" href="/admin/people">Сброс</a>
             </form>
             <div class="d-flex flex-wrap gap-2 align-items-sm-center">
+                {# admin-only инструменты списка (сопоставление/импорт/merge/
+                   создание) скрыты от editor/viewer — их маршруты остаются
+                   require_admin. #}
+                {% if is_admin %}
                 {# Бейдж с числом непривязанных записей — только когда они есть. #}
                 <a class="btn btn-outline-secondary align-self-sm-start" href="/admin/people/reconcile">
                     Сопоставление данных
@@ -42,6 +46,7 @@
                 {# Merge-инструмент — внутри раздела «Студенты» (IA 2026-09). #}
                 <a class="btn btn-outline-secondary align-self-sm-start" href="/admin/students">Объединение студентов</a>
                 <button class="btn btn-primary align-self-sm-start" data-bs-target="#student-create-modal" data-bs-toggle="modal" type="button">+ Добавить студента</button>
+                {% endif %}
             </div>
         </div>
 
@@ -111,7 +116,8 @@
 
 {# Модал создания студента (паттерн модала пользователя): обычный POST
    /admin/people. Кроме ФИО поля можно оставить пустыми и заполнить позже
-   в карточке. #}
+   в карточке. Только admin (роут POST /admin/people — require_admin). #}
+{% if is_admin %}
 <div aria-hidden="true" aria-labelledby="student-create-modal-title" class="modal fade" id="student-create-modal" tabindex="-1">
     <div class="modal-dialog">
         <form action="/admin/people" class="modal-content" method="post">
@@ -154,6 +160,7 @@
         </form>
     </div>
 </div>
+{% endif %}
 
 {# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
    (script.js): на странице достаточно пустого datalist с этим id. #}

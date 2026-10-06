@@ -316,6 +316,20 @@ def require_admin(request: Request):
     return None
 
 
+def require_staff(request: Request):
+    """Любой штатный пользователь: admin / editor / viewer, НЕ атлет.
+
+    Точечное расширение доступа (карточка/список студентов с ГТО): атлету
+    — прежний запрет (forbidden), неаутентифицированному — прежний 401
+    (глобальный контракт). Новые роли не вводятся."""
+    user = get_auth_user(request)
+    if not user:
+        return unauthorized(request)
+    if user['role'] == ATHLETE_ROLE:
+        return forbidden(request)
+    return None
+
+
 def require_moderator(request: Request):
     user = get_auth_user(request)
     if not user:
