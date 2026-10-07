@@ -58,7 +58,7 @@
             <ul class="list-unstyled mb-0 mt-1 d-flex flex-column gap-1">
                 {% for document in group.documents %}
                 <li class="d-flex justify-content-between align-items-center gap-2">
-                    <span class="text-break">{{ document.title }}</span>
+                    <span class="text-break">{{ document.title }}{% if document.is_protocol %} <span class="badge text-bg-secondary">Протокол</span>{% endif %}</span>
                     <a class="btn btn-sm btn-outline-primary text-nowrap"
                        href="/calendar/{{ document.calendar_event_id }}/documents/{{ document.id }}/download">Скачать</a>
                 </li>

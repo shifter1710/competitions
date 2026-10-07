@@ -413,6 +413,7 @@ EVENT_DOCUMENT_STORAGE_ERRORS = {
     'student_inactive': 'Карточка студента неактивна',
     'student_not_participant': 'Выбранный студент не участвует в соревновании',
     'invalid_access_mode': 'Недопустимый режим доступа документа',
+    'invalid_document_type': 'Недопустимый тип документа',
 }
 
 
@@ -496,6 +497,20 @@ def parse_event_document_fields(request: Request) -> tuple[str, str, list[int], 
     return title, access_mode, student_ids, None
 
 
+def parse_event_protocol_fields(request: Request) -> tuple[str, str | None]:
+    """Название формы протокола соревнования: (title, ошибка).
+
+    Правила — те же, что у title документа события (strip, непусто, ≤200).
+    Поля доступа у протокола нет: access_mode/student_id роут НЕ парсит
+    вовсе (доступ протокола всегда all_participants — литерал роута)."""
+    title = clean_str(get_form_value(request, 'title'))
+    if not title:
+        return title, 'Укажите название протокола'
+    if len(title) > 200:
+        return title, 'Название протокола слишком длинное'
+    return title, None
+
+
 def read_event_document_upload(request: Request, *, required: bool) -> tuple[object | None, str | None]:
     """Файл формы документа: (upload, None) или (None, flash-ошибка).
 
@@ -556,6 +571,22 @@ def event_document_back_urls(
     if document_id is None:
         return back_url, back_url
     suffix = f'edit_document={document_id}'
+    edit_url = f'{base}?result={result_filter}&{suffix}' if result_filter else f'{base}?{suffix}'
+    return back_url, edit_url
+
+
+def event_protocol_back_urls(
+    event: dict,
+    protocol_id: int | None,
+    result_filter: str,
+) -> tuple[str, str]:
+    """(back_url, edit_url) роутов протокола — как event_document_back_urls,
+    но режим правки ?edit_protocol=<id> (протоколы — отдельная секция)."""
+    base = f"/calendar/{event['id']}"
+    back_url = f'{base}?result={result_filter}' if result_filter else base
+    if protocol_id is None:
+        return back_url, back_url
+    suffix = f'edit_protocol={protocol_id}'
     edit_url = f'{base}?result={result_filter}&{suffix}' if result_filter else f'{base}?{suffix}'
     return back_url, edit_url
 
@@ -2221,12 +2252,17 @@ def register(app: Sanic) -> None:  # noqa: C901
                         None,
                     )
 
-        # Event Documents: список документов события; selected-документы
-        # несут students_ids (выбранные карточки — для формы правки), карточки
-        # chooser'а — по НЕотфильтрованным группам (доступ не зависит от
-        # фильтра результата). ?edit_document=<id> — паттерн edit_team_result:
-        # только can_manage и только id из документов ЭТОГО события.
-        documents = storage.list_calendar_event_documents(event['id'])
+        # Event Documents: список документов события (generic-материалы —
+        # здесь, протоколы соревнования document_type='protocol' — отдельной
+        # секцией ниже: доступ всегда all_participants, без маппингов и
+        # chooser'а). Selected-документы несут students_ids (выбранные
+        # карточки — для формы правки), карточки chooser'а — по
+        # НЕотфильтрованным группам (доступ не зависит от фильтра
+        # результата). ?edit_document=<id> — паттерн edit_team_result:
+        # только can_manage и только id из generic-документов ЭТОГО события.
+        event_documents = storage.list_calendar_event_documents(event['id'])
+        documents = [document for document in event_documents if document.get('document_type') != 'protocol']
+        protocols = [document for document in event_documents if document.get('document_type') == 'protocol']
         for document in documents:
             document['students_ids'] = (
                 storage.calendar_event_document_students(document['id'])
@@ -2247,6 +2283,10 @@ def register(app: Sanic) -> None:  # noqa: C901
                 for student_ref_id in document['students_ids']
                 if student_ref_id in participant_fio_by_ref
             ]
+        # Протоколы: те же подписи таблицы, без маппингов доступа.
+        for protocol in protocols:
+            protocol['size_label'] = format_size(protocol.get('size') or 0)
+            protocol['type_label'] = event_document_type_label(protocol.get('content_type'))
         edit_document = None
         edit_document_data = None
         if can_manage:
@@ -2262,6 +2302,26 @@ def register(app: Sanic) -> None:  # noqa: C901
                     edit_document = edit_document_id
                     edit_document_data = next(
                         (document for document in documents if document.get('id') == edit_document),
+                        None,
+                    )
+        # ?edit_protocol=<id> — зеркально edit_document: только can_manage и
+        # только id из протоколов ЭТОГО события (id generic-документа или
+        # мусор молча игнорируются).
+        edit_protocol = None
+        edit_protocol_data = None
+        if can_manage:
+            raw_edit_protocol = (get_param(args, 'edit_protocol') or '').strip()
+            if raw_edit_protocol:
+                try:
+                    edit_protocol_id = int(raw_edit_protocol)
+                except ValueError:
+                    edit_protocol_id = None
+                if edit_protocol_id is not None and any(
+                    protocol.get('id') == edit_protocol_id for protocol in protocols
+                ):
+                    edit_protocol = edit_protocol_id
+                    edit_protocol_data = next(
+                        (protocol for protocol in protocols if protocol.get('id') == edit_protocol),
                         None,
                     )
 
@@ -2300,6 +2360,12 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'document_participants_unlinked': document_participants_unlinked,
                 'edit_document': edit_document,
                 'edit_document_data': edit_document_data,
+                # Протоколы соревнования (Event Protocols): отдельная секция
+                # страницы; доступ всегда all_participants (без chooser'а),
+                # edit_protocol_data — префилл формы правки.
+                'protocols': protocols,
+                'edit_protocol': edit_protocol,
+                'edit_protocol_data': edit_protocol_data,
                 'result_filter': result_filter,
                 'result_filter_options': CALENDAR_RESULT_FILTERS,
                 'sport_options': storage.list_catalog('sport'),
@@ -3107,6 +3173,190 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'content-disposition': f'attachment; filename="{download_name}"',
             },
         )
+
+    # Протоколы соревнования (Event Protocols): официальные протоколы —
+    # те же строки calendar_event_documents с document_type='protocol'.
+    # Загрузка/правка/удаление — модераторы, скачивание — СУЩЕСТВУЮЩИЙ роут
+    # /documents/<id>/download (режим доступа always all_participants уже
+    # обслуживается им). Формы протоколов НЕ содержат access_mode/student_id,
+    # роуты их не парсят: доступ — литерал 'all_participants' + пустые
+    # маппинги, storage продублирует принуждение по document_type строки.
+    # Ошибки полей — flash-редирект на страницу события (правка — назад в
+    # ?edit_protocol=<id>) с сохранением result-фильтра, паттерн documents.
+
+    @app.post('/calendar/<event_id>/protocols')
+    async def upload_calendar_event_protocol(request: Request, event_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        back_url, _ = event_protocol_back_urls(event, None, event_document_form_result_filter(request))
+        title, form_error = parse_event_protocol_fields(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=back_url)
+
+        upload_file, file_error = read_event_document_upload(request, required=True)
+        if file_error is not None:
+            return build_redirect_with_message(error=file_error, url=back_url)
+
+        # Порядок как у документов: сначала файл на диск, затем БД; отказ
+        # storage — best-effort удаление нового файла.
+        filename, stored_name, content_type, size = store_event_document_file(event['id'], upload_file)
+        try:
+            document_id, create_error = get_storage(request.app).create_calendar_event_document(
+                event['id'],
+                title=title,
+                filename=filename,
+                stored_name=stored_name,
+                content_type=content_type,
+                size=size,
+                access_mode='all_participants',
+                student_ids=[],
+                uploaded_by=get_current_user_id(request),
+                document_type='protocol',
+            )
+        except Exception:
+            logger.exception('Unexpected storage failure creating event protocol of event %s', event['id'])
+            remove_event_document_file(event['id'], stored_name)
+            return build_redirect_with_message(error='Не удалось сохранить протокол', url=back_url)
+        if document_id is None:
+            remove_event_document_file(event['id'], stored_name)
+            return build_redirect_with_message(
+                error=EVENT_DOCUMENT_STORAGE_ERRORS.get(create_error, 'Не удалось сохранить протокол'),
+                url=back_url,
+            )
+        log_audit_event(
+            request,
+            'calendar_event_protocol_uploaded',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'document_id': document_id,
+                'title': title,
+                'filename': filename,
+            },
+        )
+        return build_redirect_with_message(message='Протокол добавлен', url=back_url)
+
+    @app.post('/calendar/<event_id>/protocols/<document_id>/edit')
+    async def edit_calendar_event_protocol(request: Request, event_id: str, document_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_document_id = int(document_id)
+        except ValueError:
+            return text(body='Invalid document id', status=400)
+
+        # Ошибки валидации — назад в режим правки того же протокола
+        # (edit_protocol), с сохранением result-фильтра (hidden-поле формы).
+        back_url, edit_url = event_protocol_back_urls(
+            event, numeric_document_id, event_document_form_result_filter(request)
+        )
+        storage = get_storage(request.app)
+        document = storage.get_calendar_event_document(event['id'], numeric_document_id)
+        if document is None or document.get('document_type') != 'protocol':
+            return build_redirect_with_message(error='Протокол не найден', url=back_url)
+
+        title, form_error = parse_event_protocol_fields(request)
+        if form_error is not None:
+            return build_redirect_with_message(error=form_error, url=edit_url)
+
+        # Файл опционален: передан и валиден — новый файл на диск, файловые
+        # колонки обновляются в том же UPDATE, прежний файл удаляется после
+        # согласования БД; пусто — файловые поля не меняются.
+        upload_file, file_error = read_event_document_upload(request, required=False)
+        if file_error is not None:
+            return build_redirect_with_message(error=file_error, url=edit_url)
+        file_fields: dict = {}
+        old_stored_name = ''
+        if upload_file is not None:
+            filename, stored_name, content_type, size = store_event_document_file(event['id'], upload_file)
+            file_fields = {
+                'filename': filename,
+                'stored_name': stored_name,
+                'content_type': content_type,
+                'size': size,
+            }
+            old_stored_name = document.get('stored_name') or ''
+
+        # Доступ протокола неизменяем: литералы (не клиентский ввод),
+        # storage продублирует принуждение по document_type строки.
+        updated, update_error = storage.update_calendar_event_document(
+            event['id'],
+            numeric_document_id,
+            title=title,
+            access_mode='all_participants',
+            student_ids=[],
+            **file_fields,
+        )
+        if not updated:
+            if file_fields:
+                remove_event_document_file(event['id'], file_fields['stored_name'])
+            if update_error == 'not_found':
+                return build_redirect_with_message(error='Протокол не найден', url=back_url)
+            return build_redirect_with_message(
+                error=EVENT_DOCUMENT_STORAGE_ERRORS.get(update_error, 'Не удалось обновить протокол'),
+                url=edit_url,
+            )
+        if old_stored_name:
+            remove_event_document_file(event['id'], old_stored_name)
+        log_audit_event(
+            request,
+            'calendar_event_protocol_updated',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'document_id': numeric_document_id,
+                'title': title,
+                'replaced_file': bool(file_fields),
+            },
+        )
+        return build_redirect_with_message(message='Протокол обновлён', url=back_url)
+
+    @app.post('/calendar/<event_id>/protocols/<document_id>/delete')
+    async def delete_calendar_event_protocol(request: Request, event_id: str, document_id: str):
+        auth_error = require_moderator(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+
+        try:
+            numeric_document_id = int(document_id)
+        except ValueError:
+            return text(body='Invalid document id', status=400)
+
+        back_url, _ = event_protocol_back_urls(event, None, event_document_form_result_filter(request))
+        storage = get_storage(request.app)
+        # Старые значения — в аудит (до удаления, из протокола ЭТОГО события).
+        document = storage.get_calendar_event_document(event['id'], numeric_document_id)
+        if document is None or document.get('document_type') != 'protocol':
+            return build_redirect_with_message(error='Протокол не найден', url=back_url)
+        deleted = storage.delete_calendar_event_document(event['id'], numeric_document_id)
+        if not deleted:
+            return build_redirect_with_message(error='Протокол не найден', url=back_url)
+        remove_event_document_file(event['id'], document.get('stored_name') or '')
+        log_audit_event(
+            request,
+            'calendar_event_protocol_deleted',
+            {
+                'event_id': event['id'],
+                'event_name': event['name'],
+                'document_id': numeric_document_id,
+                'title': document.get('title'),
+                'filename': document.get('filename'),
+            },
+        )
+        return build_redirect_with_message(message='Протокол удалён', url=back_url)
 
     @app.get('/calendar/<event_id>/participants/import')
     async def event_participants_import_page(request: Request, event_id: str):

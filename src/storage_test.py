@@ -3443,6 +3443,7 @@ def test_event_documents_schema_created_on_fresh_db(adapter):
         'sort_order',
         'created_at',
         'updated_at',
+        'document_type',
     ]
     mapping_columns = [
         row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_event_document_students)')
@@ -3505,6 +3506,246 @@ def test_event_documents_tables_migrated(tmp_path):
     ]
     assert result_id == read_team_results_raw(adapter, 1)[0]['id']
     adapter.connection.close()
+
+
+def test_event_documents_document_type_column_migrated(tmp_path):
+    """Миграция document_type: легаси-БД с таблицей документов БЕЗ колонки
+    получает её при старте (ALTER, ПОСЛЕДНЕЙ — как в DDL свежей БД);
+    существующие строки читаются 'generic' (DEFAULT), повторный старт
+    идемпотентен (паттерн regulation_filename)."""
+    db_path = tmp_path / 'legacy-document-type.sqlite3'
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        '''
+        CREATE TABLE calendar_event_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            calendar_event_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_name TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            access_mode TEXT NOT NULL,
+            uploaded_by INTEGER,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        '''
+    )
+    connection.execute(
+        'INSERT INTO calendar_event_documents'
+        ' (calendar_event_id, title, filename, stored_name, content_type, size, access_mode,'
+        '  sort_order, created_at, updated_at)'
+        " VALUES (1, 'Легаси документ', 'old.pdf', 'a' * 32 || '.pdf', 'application/pdf', 10,"
+        " 'all_participants', 1, '2026-01-01T00:00:00', '2026-01-01T00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    adapter = SQLiteAdapter(str(db_path))
+    columns = [row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_event_documents)')]
+    assert columns == [
+        'id',
+        'calendar_event_id',
+        'title',
+        'filename',
+        'stored_name',
+        'content_type',
+        'size',
+        'access_mode',
+        'uploaded_by',
+        'sort_order',
+        'created_at',
+        'updated_at',
+        'document_type',
+    ]
+    rows = adapter.list_calendar_event_documents(1)
+    assert [(row['title'], row['document_type']) for row in rows] == [('Легаси документ', 'generic')]
+
+    # Повторный старт на том же файле — идемпотентен: колонка одна, строка жива.
+    adapter.connection.close()
+    adapter = SQLiteAdapter(str(db_path))
+    columns = [row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_event_documents)')]
+    assert columns.count('document_type') == 1
+    assert [(row['title'], row['document_type']) for row in adapter.list_calendar_event_documents(1)] == [
+        ('Легаси документ', 'generic')
+    ]
+    adapter.connection.close()
+
+
+def test_event_protocol_create_forces_all_participants_access(adapter):
+    """Протокол: document_type='protocol' принудительно all_participants и
+    без маппингов — даже если поданы selected_students и валидные участники;
+    мусорный document_type — invalid_document_type без строки."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    participant = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    make_event_participation(adapter, event_id, participant, 'Иванов Иван')
+
+    protocol_id, error = adapter.create_calendar_event_document(
+        event_id,
+        title='Итоговый протокол',
+        filename='protocol.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=10,
+        access_mode='selected_students',
+        student_ids=[participant],
+        document_type='protocol',
+    )
+    assert error is None and protocol_id is not None
+    row = adapter.get_calendar_event_document(event_id, protocol_id)
+    assert row['document_type'] == 'protocol'
+    assert row['access_mode'] == 'all_participants'
+    assert read_document_students_raw(adapter, protocol_id) == []
+    assert adapter.list_calendar_event_documents(event_id)[0]['students_count'] == 0
+
+    # Мусорный тип — отказ без строки (generic по умолчанию валиден).
+    payload = dict(
+        title='Документ',
+        filename='d.pdf',
+        stored_name='b' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=1,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+    assert adapter.create_calendar_event_document(event_id, document_type='order', **payload) == (
+        None,
+        'invalid_document_type',
+    )
+    generic_id, error = adapter.create_calendar_event_document(event_id, **payload)
+    assert error is None
+    assert adapter.get_calendar_event_document(event_id, generic_id)['document_type'] == 'generic'
+
+
+def test_event_protocol_update_ignores_access_and_students(adapter):
+    """Правка протокола: поданные access_mode/student_ids игнорируются
+    (всегда all_participants и без маппингов); document_type строки
+    неизменяем — тип остаётся 'protocol' у протокола и 'generic' у
+    обычного документа."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    participant = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    make_event_participation(adapter, event_id, participant, 'Иванов Иван')
+
+    protocol_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Итоговый протокол',
+        filename='protocol.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=10,
+        access_mode='all_participants',
+        student_ids=[],
+        document_type='protocol',
+    )
+    updated, error = adapter.update_calendar_event_document(
+        event_id,
+        protocol_id,
+        title='Протокол (исправлен)',
+        access_mode='selected_students',
+        student_ids=[participant, 999999],
+    )
+    assert (updated, error) == (True, None)
+    row = adapter.get_calendar_event_document(event_id, protocol_id)
+    assert row['title'] == 'Протокол (исправлен)'
+    assert row['access_mode'] == 'all_participants'
+    assert row['document_type'] == 'protocol'
+    assert read_document_students_raw(adapter, protocol_id) == []
+
+    # Обычный документ при правке тип не меняет (generic остаётся generic).
+    generic_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Справки',
+        filename='spravki.pdf',
+        stored_name='b' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=20,
+        access_mode='selected_students',
+        student_ids=[participant],
+    )
+    updated, error = adapter.update_calendar_event_document(
+        event_id, generic_id, title='Справки и дипломы', access_mode='all_participants', student_ids=[]
+    )
+    assert (updated, error) == (True, None)
+    row = adapter.get_calendar_event_document(event_id, generic_id)
+    assert row['document_type'] == 'generic'
+    assert row['access_mode'] == 'all_participants'
+
+
+def test_event_protocol_list_documents_for_student(adapter):
+    """Кабинет атлета: протокол виден каждому участнику события (маппингов
+    нет), строки несут document_type — бейдж «Протокол» в кабинете."""
+    student_id = adapter.create_student('Иванов Иван', 'М', '', '', '')
+    outsider = adapter.create_student('Сидор Сидоров', 'М', '', '', '')
+    event_id = make_document_event(adapter, 'Кросс', '2026-02-01T00:00:00')
+    make_event_participation(adapter, event_id, student_id, 'Иванов Иван')
+
+    protocol_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Итоговый протокол',
+        filename='protocol.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=10,
+        access_mode='all_participants',
+        student_ids=[],
+        document_type='protocol',
+    )
+    generic_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Справки',
+        filename='spravki.pdf',
+        stored_name='b' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=20,
+        access_mode='all_participants',
+        student_ids=[],
+    )
+
+    rows = adapter.list_documents_for_student(student_id)
+    assert [(row['id'], row['document_type']) for row in rows] == [
+        (protocol_id, 'protocol'),
+        (generic_id, 'generic'),
+    ]
+    # Не-участник протокола не видит (маппингов у протокола нет).
+    assert adapter.list_documents_for_student(outsider) == []
+
+
+def test_delete_calendar_event_removes_protocols(adapter):
+    """Каскад: удаление события чистит и строки протоколов (document_type=
+    'protocol' — те же calendar_event_documents); протоколы другого
+    события остаются."""
+    event_id = make_document_event(adapter, 'Кросс', '2026-04-01T00:00:00')
+    protocol_id, _ = adapter.create_calendar_event_document(
+        event_id,
+        title='Итоговый протокол',
+        filename='protocol.pdf',
+        stored_name='a' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=10,
+        access_mode='all_participants',
+        student_ids=[],
+        document_type='protocol',
+    )
+    keeper_event = make_document_event(adapter, 'Кубок', '2026-05-01T00:00:00')
+    keeper_protocol, _ = adapter.create_calendar_event_document(
+        keeper_event,
+        title='Чужой протокол',
+        filename='keep.pdf',
+        stored_name='b' * 32 + '.pdf',
+        content_type='application/pdf',
+        size=60,
+        access_mode='all_participants',
+        student_ids=[],
+        document_type='protocol',
+    )
+    assert read_event_documents_raw(adapter, event_id) != []
+
+    adapter.delete_calendar_event(event_id)
+
+    assert adapter.get_calendar_event_document(event_id, protocol_id) is None
+    assert [row['id'] for row in adapter.list_calendar_event_documents(keeper_event)] == [keeper_protocol]
 
 
 def test_event_document_create_list_and_mapping_dedup(adapter):

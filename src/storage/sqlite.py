@@ -300,7 +300,10 @@ class SQLiteAdapter(
             # (PDF/PNG/JPEG, валидация файла — в роуте) с заголовком и режимом
             # доступа. access_mode: 'all_participants' — всем Student-карточкам
             # с участием в событии (маппинги не пишутся), 'selected_students' —
-            # только явно выбранным (таблица маппингов ниже). Файл лежит в
+            # только явно выбранным (таблица маппингов ниже). document_type:
+            # 'generic' — материалы с настраиваемым доступом, 'protocol' —
+            # официальные протоколы соревнования (доступ всегда all_participants,
+            # без маппингов; принуждение — в storage-методах). Файл лежит в
             # каталоге события data/files/calendar/<event_id>/ (рядом с
             # положением); строки живут и умирают вместе с событием (каскад
             # в delete_calendar_event тем же commit). Логический FK и
@@ -321,7 +324,8 @@ class SQLiteAdapter(
                     uploaded_by INTEGER,
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    document_type TEXT NOT NULL DEFAULT 'generic'
                 )
                 '''
             )
@@ -331,6 +335,7 @@ class SQLiteAdapter(
                 ON calendar_event_documents (calendar_event_id, sort_order, id)
                 '''
             )
+            self._migrate_event_documents_document_type()
             self.connection.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS calendar_event_document_students (
@@ -542,6 +547,21 @@ class SQLiteAdapter(
             )
             self._backfill_competition_calendar_links()
             self.connection.commit()
+
+    def _migrate_event_documents_document_type(self) -> None:
+        """Колонка document_type таблицы документов события (Event
+        Protocols): аддитивная миграция легаси-БД — паттерн
+        regulation_filename. Колонка ПОСЛЕДНЯЯ и в DDL, и в ALTER'е
+        (совпадение порядка колонок свежей и мигрированной схемы);
+        существующие строки читаются 'generic' (DEFAULT), backfill не
+        нужен."""
+        columns = {
+            row['name'] for row in self.connection.execute('PRAGMA table_info(calendar_event_documents)').fetchall()
+        }
+        if 'document_type' not in columns:
+            self.connection.execute(
+                "ALTER TABLE calendar_event_documents ADD COLUMN document_type TEXT NOT NULL DEFAULT 'generic'"
+            )
 
     def _migrate_competitions_columns(self, columns: set[str]) -> None:
         """Порционная миграция легаси-таблицы записей: недостающие колонки

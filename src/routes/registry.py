@@ -666,8 +666,9 @@ def build_my_document_groups(documents: Sequence[dict]) -> list[dict]:
     """Документы атлета (личный кабинет, Event Documents), сгруппированные по
     событию с сохранением порядка storage (дата события DESC, затем
     sort_order/id документа): [{event_name, event_date_label, documents:
-    [{id, calendar_event_id, title}]}]. Дата события — тем же форматером
-    (format_date_range), что у календаря/страницы события."""
+    [{id, calendar_event_id, title, is_protocol}]}]. Дата события — тем же
+    форматером (format_date_range), что у календаря/страницы события;
+    is_protocol — бейдж «Протокол» для document_type='protocol'."""
     groups: list[dict] = []
     group_by_event: dict[int, dict] = {}
     for document in documents:
@@ -688,6 +689,7 @@ def build_my_document_groups(documents: Sequence[dict]) -> list[dict]:
                 'id': document['id'],
                 'calendar_event_id': event_id,
                 'title': document.get('title') or '',
+                'is_protocol': document.get('document_type') == 'protocol',
             }
         )
     return groups

@@ -17476,10 +17476,11 @@ def test_p7_colliding_custom_no_duplicate_columns(event_import_client: SanicTest
     make_event_participation(storage, event_id, 'Иванов Иван Иванович', position=1, extra={'discipline': 'кросс 3 км'})
     body = get_event_page(event_import_client, event_id).text
     # 10 колонок таблицы участников + 3 заголовка секции «Командные результаты»
-    # (Категория, Место команды, Действия) + 4 заголовка секции «Документы
+    # (Категория, Место команды, Действия) + 3 заголовка секции «Протоколы
+    # соревнования» (Название, Файл, Действия) + 4 заголовка секции «Документы
     # соревнования» (Название, Файл, Доступ, Действия) — клиент с правами
     # модератора
-    assert body.count('<th scope="col"') == 17
+    assert body.count('<th scope="col"') == 20
     assert body.count('>Дисциплина</th>') == 1
     # Эффективная дисциплина (base NULL → фолбэк в extra_data) отображается
     assert 'кросс 3 км' in body
@@ -20082,6 +20083,80 @@ def delete_event_document(
     return response
 
 
+def upload_event_protocol(
+    client: SanicTestClient,
+    headers: dict[str, str],
+    event_id: int,
+    *,
+    title: str = 'Итоговый протокол',
+    filename: str | None = 'protokol.pdf',
+    payload: bytes | None = None,
+    extra_form: dict | None = None,
+):
+    """POST формы загрузки протокола соревнования; filename=None — отправка
+    без файла; extra_form — crafted-поля (access_mode/student_id), которых
+    в легитимной форме протокола нет."""
+    form = {**csrf_for(headers), 'title': title}
+    if extra_form:
+        form.update(extra_form)
+    files = None
+    if filename is not None:
+        files = {'file': (filename, payload or b'%PDF-1.4\n' + os.urandom(64), 'application/octet-stream')}
+    _, response = client.post(
+        f'/calendar/{event_id}/protocols',
+        headers=headers,
+        data=form,
+        files=files,
+        allow_redirects=False,
+    )
+    return response
+
+
+def edit_event_protocol(
+    client: SanicTestClient,
+    headers: dict[str, str],
+    event_id: int,
+    document_id,
+    *,
+    title: str = 'Итоговый протокол',
+    filename: str | None = None,
+    payload: bytes | None = None,
+    extra_form: dict | None = None,
+):
+    """POST формы правки протокола соревнования; document_id может быть
+    не-int (контракт 400); filename=None — файл не меняется, иначе замена."""
+    form = {**csrf_for(headers), 'title': title}
+    if extra_form:
+        form.update(extra_form)
+    files = None
+    if filename is not None:
+        files = {'file': (filename, payload or b'%PDF-1.4\n' + os.urandom(64), 'application/octet-stream')}
+    _, response = client.post(
+        f'/calendar/{event_id}/protocols/{document_id}/edit',
+        headers=headers,
+        data=form,
+        files=files,
+        allow_redirects=False,
+    )
+    return response
+
+
+def delete_event_protocol(
+    client: SanicTestClient,
+    headers: dict[str, str],
+    event_id: int,
+    document_id,
+):
+    """POST удаления протокола соревнования; document_id — в URL как есть."""
+    _, response = client.post(
+        f'/calendar/{event_id}/protocols/{document_id}/delete',
+        headers=headers,
+        data=csrf_for(headers),
+        allow_redirects=False,
+    )
+    return response
+
+
 def test_event_document_upload_and_appearance_for_admin(calendar_client: SanicTestClient, tmp_path):
     """Загрузка админом: строка БД, файл в каталоге события, строка таблицы на
     странице события и аудит с режимом доступа."""
@@ -20783,6 +20858,486 @@ def test_event_document_cabinet_hidden_when_no_documents_or_no_card(calendar_cli
     # admin карточку не видит даже при наличии документов
     _, page = calendar_client.get('/', headers=admin)
     assert 'Мои документы' not in page.body.decode()
+
+
+# ---- Протоколы соревнования (Event Protocols): HTTP-контракт загрузки,
+# правки, удаления и скачивания. Протоколы — те же calendar_event_documents
+# с document_type='protocol': доступ принудительно all_participants (без
+# маппингов), секция на странице события отдельная от generic-документов.
+
+
+def test_event_protocol_upload_and_appearance_for_admin(calendar_client: SanicTestClient, tmp_path):
+    """Загрузка админом: строка БД (protocol/all_participants, без маппингов),
+    файл в каталоге события, секция «Протоколы соревнования» на странице и
+    аудит calendar_event_protocol_uploaded."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    payload = b'%PDF-1.4\n' + os.urandom(64)
+    response = upload_event_protocol(calendar_client, admin, event_id, title='Итоговый протокол', payload=payload)
+    assert response.status == 302
+    assert 'Протокол добавлен' in unquote_plus(response.headers['location'])
+
+    documents = storage.list_calendar_event_documents(event_id)
+    assert len(documents) == 1
+    document = documents[0]
+    assert document['document_type'] == 'protocol'
+    assert document['access_mode'] == 'all_participants'
+    assert document['title'] == 'Итоговый протокол'
+    assert document['filename'] == 'protokol.pdf'
+    assert document['uploaded_by'] == storage.get_user(settings.auth_admin_username)['id']
+    assert storage.calendar_event_document_students(document['id']) == []
+    stored_file = tmp_path / 'files' / 'calendar' / str(event_id) / document['stored_name']
+    assert stored_file.is_file()
+    assert stored_file.read_bytes() == payload
+
+    _, page = calendar_client.get(f'/calendar/{event_id}', headers=admin)
+    body = page.body.decode()
+    assert 'Протоколы соревнования' in body
+    assert 'Итоговый протокол' in body
+    assert 'protokol.pdf' in body
+    assert audit_details(storage, 'calendar_event_protocol_uploaded') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кубок',
+            'document_id': document['id'],
+            'title': 'Итоговый протокол',
+            'filename': 'protokol.pdf',
+        }
+    ]
+
+
+def test_event_protocol_upload_by_editor(calendar_client: SanicTestClient):
+    """editor — тот же контракт загрузки протокола: 302 и строка в БД."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    editor = get_auth_headers('editor')
+    response = upload_event_protocol(calendar_client, editor, event_id, title='Протокол финала')
+    assert response.status == 302
+    assert 'Протокол добавлен' in unquote_plus(response.headers['location'])
+    documents = storage.list_calendar_event_documents(event_id)
+    assert len(documents) == 1
+    assert documents[0]['document_type'] == 'protocol'
+    assert documents[0]['uploaded_by'] == storage.get_user(settings.auth_editor_username)['id']
+
+
+def test_event_protocol_upload_forbidden_roles_and_csrf(calendar_client: SanicTestClient):
+    """Загрузка — только модераторы: viewer и атлет получают 403; POST без
+    CSRF-токена — 403. БД пуста."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    for headers in (get_auth_headers('viewer'), athlete_headers()):
+        response = upload_event_protocol(calendar_client, headers, event_id)
+        assert response.status == 403
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/protocols',
+        headers=get_auth_headers(),
+        data={'title': 'Итоговый протокол'},
+        files={'file': ('p.pdf', b'%PDF-1.4', 'application/pdf')},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    assert storage.list_calendar_event_documents(event_id) == []
+
+
+def test_event_protocol_upload_validation_errors(calendar_client: SanicTestClient, tmp_path):
+    """Ошибки полей — flash-редирект: ни строки в БД, ни файла на диске
+    (паттерн test_event_document_upload_validation_errors)."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    cases = [
+        ({'title': ''}, 'Укажите название протокола'),
+        ({'title': 'Д' * 201}, 'Название протокола слишком длинное'),
+        ({'filename': None}, 'Выберите файл'),
+        ({'filename': 'notes.txt', 'payload': b'hello'}, 'Допустимы только PDF, JPEG и PNG'),
+        (
+            {'filename': 'big.pdf', 'payload': b'%PDF-1.4\n' + os.urandom(5 * 1024 * 1024 + 10)},
+            'Файл больше 5 МБ',
+        ),
+    ]
+    for form_kwargs, flash_text in cases:
+        response = upload_event_protocol(calendar_client, admin, event_id, **form_kwargs)
+        assert response.status == 302, form_kwargs
+        assert flash_text in unquote_plus(response.headers['location']), form_kwargs
+        assert storage.list_calendar_event_documents(event_id) == [], form_kwargs
+    assert not (tmp_path / 'files' / 'calendar' / str(event_id)).exists()
+
+
+def test_event_protocol_upload_crafted_access_fields_inert(calendar_client: SanicTestClient):
+    """Crafted-POST: access_mode=selected_students + student_id в форме
+    протокола инертны — строка all_participants, маппингов нет."""
+    storage = app.ctx.storage
+    event_id, student_a, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    response = upload_event_protocol(
+        calendar_client,
+        admin,
+        event_id,
+        title='Итоговый протокол',
+        extra_form={'access_mode': 'selected_students', 'student_id': [str(student_a)]},
+    )
+    assert response.status == 302
+    assert 'Протокол добавлен' in unquote_plus(response.headers['location'])
+    document = storage.list_calendar_event_documents(event_id)[0]
+    assert document['document_type'] == 'protocol'
+    assert document['access_mode'] == 'all_participants'
+    assert storage.calendar_event_document_students(document['id']) == []
+
+
+def test_event_protocol_page_sections_partition(calendar_client: SanicTestClient):
+    """Секции страницы: протоколы — в «Протоколы соревнования» (между
+    положением и документами), generic-документы — в «Документы
+    соревнования»; взаимных утечек нет. Viewer без протоколов секцию не
+    видит, admin — с пустым состоянием."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Протокол-А').status == 302
+    assert (
+        upload_event_document(
+            calendar_client, admin, event_id, title='Документ-Б', access_mode='all_participants'
+        ).status
+        == 302
+    )
+
+    _, page = calendar_client.get(f'/calendar/{event_id}', headers=admin)
+    body = page.body.decode()
+    regulation_end = body.index('Положение о соревновании')
+    protocols_start = body.index('id="protocols"')
+    documents_start = body.index('id="documents"')
+    assert regulation_end < protocols_start < documents_start
+    assert protocols_start < body.index('Протокол-А') < documents_start
+    assert body.index('Документ-Б') > documents_start
+    assert 'Протоколов пока нет' not in body
+
+    # Viewer без протоколов: секции нет вовсе (паттерн documents)
+    other_event = storage.create_calendar_event('Пустой кубок', '2026-07-01', None, '', '', links=[])
+    _, page = calendar_client.get(f'/calendar/{other_event}', headers=get_auth_headers('viewer'))
+    assert 'id="protocols"' not in page.body.decode()
+    _, page = calendar_client.get(f'/calendar/{other_event}', headers=admin)
+    assert 'Протоколов пока нет' in page.body.decode()
+
+
+def test_event_protocol_edit_mode_resolution(calendar_client: SanicTestClient):
+    """?edit_protocol=<id>: валиден только can_manage и только id протокола
+    ЭТОГО события; id generic-документа/мусор молча игнорируются; viewer
+    параметр игнорируется; ?edit_document=<protocol_id> тоже игнорируется."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Итоговый протокол').status == 302
+    assert upload_event_document(calendar_client, admin, event_id, title='Справки').status == 302
+    documents = storage.list_calendar_event_documents(event_id)
+    protocol = next(document for document in documents if document['document_type'] == 'protocol')
+    generic = next(document for document in documents if document['document_type'] == 'generic')
+
+    _, page = calendar_client.get(f'/calendar/{event_id}?edit_protocol={protocol["id"]}', headers=admin)
+    body = page.body.decode()
+    assert 'Изменить протокол' in body
+    assert 'редактируется' in body
+    assert f'value="{protocol["title"]}"' in body
+
+    # id generic-документа и мусор — правка протокола не открывается
+    for raw in (str(generic['id']), '999999', 'abc'):
+        _, page = calendar_client.get(f'/calendar/{event_id}?edit_protocol={raw}', headers=admin)
+        body = page.body.decode()
+        assert 'Изменить протокол' not in body, raw
+
+    # viewer параметр молча игнорирует: формы управления нет вовсе
+    _, page = calendar_client.get(
+        f'/calendar/{event_id}?edit_protocol={protocol["id"]}', headers=get_auth_headers('viewer')
+    )
+    assert 'Изменить протокол' not in page.body.decode()
+
+    # ?edit_document=<protocol_id> — протокол в generic-форме не редактируется
+    _, page = calendar_client.get(f'/calendar/{event_id}?edit_document={protocol["id"]}', headers=admin)
+    body = page.body.decode()
+    assert 'Изменить документ' not in body
+    assert 'Изменить протокол' not in body
+
+
+def test_event_protocol_edit_replaces_file_and_renames(calendar_client: SanicTestClient, tmp_path):
+    """Правка протокола: переименование + замена файла (колонки БД от нового
+    файла, прежний файл удалён, выдача отдаёт новые байты) + аудит
+    calendar_event_protocol_updated; crafted access-поля на правке инертны."""
+    storage = app.ctx.storage
+    event_id, student_a, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    first_payload = b'%PDF-1.4\n' + os.urandom(64)
+    second_payload = b'\x89PNG\r\n\x1a\n' + os.urandom(64)
+    assert (
+        upload_event_protocol(calendar_client, admin, event_id, title='Протокол', payload=first_payload).status == 302
+    )
+    document = storage.list_calendar_event_documents(event_id)[0]
+    old_stored_name = document['stored_name']
+    event_dir = tmp_path / 'files' / 'calendar' / str(event_id)
+
+    response = edit_event_protocol(
+        calendar_client,
+        admin,
+        event_id,
+        document['id'],
+        title='Итоговый протокол',
+        filename='protokol.png',
+        payload=second_payload,
+        extra_form={'access_mode': 'selected_students', 'student_id': [str(student_a)]},
+    )
+    assert response.status == 302
+    assert 'Протокол обновлён' in unquote_plus(response.headers['location'])
+
+    document = storage.get_calendar_event_document(event_id, document['id'])
+    assert document['title'] == 'Итоговый протокол'
+    assert document['filename'] == 'protokol.png'
+    assert document['content_type'] == 'image/png'
+    assert document['size'] == len(second_payload)
+    assert document['document_type'] == 'protocol'
+    assert document['access_mode'] == 'all_participants'
+    assert storage.calendar_event_document_students(document['id']) == []
+    assert not (event_dir / old_stored_name).exists()
+    assert (event_dir / document['stored_name']).read_bytes() == second_payload
+    _, response = calendar_client.get(f"/calendar/{event_id}/documents/{document['id']}/download", headers=admin)
+    assert response.status == 200
+    assert response.body == second_payload
+    assert audit_details(storage, 'calendar_event_protocol_updated') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кубок',
+            'document_id': document['id'],
+            'title': 'Итоговый протокол',
+            'replaced_file': True,
+        }
+    ]
+
+
+def test_event_protocol_edit_validation_keeps_protocol_unchanged(calendar_client: SanicTestClient):
+    """Ошибки полей правки — flash-редирект назад в ?edit_protocol=<id>,
+    протокол не изменён (паттерн test_event_document_edit_validation...)."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Протокол').status == 302
+    document = storage.list_calendar_event_documents(event_id)[0]
+
+    response = edit_event_protocol(calendar_client, admin, event_id, document['id'], title='')
+    assert response.status == 302
+    location = unquote_plus(response.headers['location'])
+    assert 'Укажите название протокола' in location
+    assert f"edit_protocol={document['id']}" in location
+
+    response = edit_event_protocol(calendar_client, admin, event_id, document['id'], title='Д' * 201)
+    assert response.status == 302
+    assert 'Название протокола слишком длинное' in unquote_plus(response.headers['location'])
+
+    response = edit_event_protocol(
+        calendar_client, admin, event_id, document['id'], title='Протокол', filename='notes.txt', payload=b'hello'
+    )
+    assert response.status == 302
+    assert 'Допустимы только PDF, JPEG и PNG' in unquote_plus(response.headers['location'])
+
+    document = storage.get_calendar_event_document(event_id, document['id'])
+    assert document['title'] == 'Протокол'
+    assert document['filename'] == 'protokol.pdf'
+
+
+def test_event_protocol_edit_forbidden_roles(calendar_client: SanicTestClient):
+    """Правка протокола — только модераторы: viewer и атлет получают 403."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Протокол').status == 302
+    document = storage.list_calendar_event_documents(event_id)[0]
+    for headers in (get_auth_headers('viewer'), athlete_headers()):
+        response = edit_event_protocol(calendar_client, headers, event_id, document['id'], title='X')
+        assert response.status == 403
+    assert storage.get_calendar_event_document(event_id, document['id'])['title'] == 'Протокол'
+
+
+def test_event_protocol_delete_removes_row_and_file(calendar_client: SanicTestClient, tmp_path):
+    """Удаление протокола: строка чистится, файл удалён, каталог события
+    пуст, download — 404; повторное удаление — flash «Протокол не найден»;
+    аудит calendar_event_protocol_deleted."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Итоговый протокол').status == 302
+    document = storage.list_calendar_event_documents(event_id)[0]
+    event_dir = tmp_path / 'files' / 'calendar' / str(event_id)
+
+    response = delete_event_protocol(calendar_client, admin, event_id, document['id'])
+    assert response.status == 302
+    assert 'Протокол удалён' in unquote_plus(response.headers['location'])
+    assert storage.list_calendar_event_documents(event_id) == []
+    assert list(event_dir.iterdir()) == []
+    _, response = calendar_client.get(f"/calendar/{event_id}/documents/{document['id']}/download", headers=admin)
+    assert response.status == 404
+    assert audit_details(storage, 'calendar_event_protocol_deleted') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кубок',
+            'document_id': document['id'],
+            'title': 'Итоговый протокол',
+            'filename': 'protokol.pdf',
+        }
+    ]
+
+    response = delete_event_protocol(calendar_client, admin, event_id, document['id'])
+    assert response.status == 302
+    assert 'Протокол не найден' in unquote_plus(response.headers['location'])
+
+
+def test_event_protocol_delete_forbidden_roles(calendar_client: SanicTestClient):
+    """Удаление протокола — только модераторы: viewer и атлет получают 403."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Протокол').status == 302
+    document = storage.list_calendar_event_documents(event_id)[0]
+    for headers in (get_auth_headers('viewer'), athlete_headers()):
+        response = delete_event_protocol(calendar_client, headers, event_id, document['id'])
+        assert response.status == 403
+    assert len(storage.list_calendar_event_documents(event_id)) == 1
+
+
+def test_event_protocol_endpoints_reject_generic_documents(calendar_client: SanicTestClient):
+    """Правка/удаление generic-документа через протокольные эндпоинты —
+    flash «Протокол не найден», generic-документ не тронут; мусорный id —
+    400; чужое событие — «Протокол не найден»."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_document(calendar_client, admin, event_id, title='Справки').status == 302
+    document = storage.list_calendar_event_documents(event_id)[0]
+
+    response = edit_event_protocol(calendar_client, admin, event_id, document['id'], title='Взлом')
+    assert response.status == 302
+    assert 'Протокол не найден' in unquote_plus(response.headers['location'])
+    assert storage.get_calendar_event_document(event_id, document['id'])['title'] == 'Справки'
+
+    response = delete_event_protocol(calendar_client, admin, event_id, document['id'])
+    assert response.status == 302
+    assert 'Протокол не найден' in unquote_plus(response.headers['location'])
+    assert len(storage.list_calendar_event_documents(event_id)) == 1
+
+    assert edit_event_protocol(calendar_client, admin, event_id, 'abc', title='X').status == 400
+    assert delete_event_protocol(calendar_client, admin, event_id, 'abc').status == 400
+
+    other_event = storage.create_calendar_event('Другой кубок', '2026-07-01', None, '', '', links=[])
+    response = edit_event_protocol(calendar_client, admin, other_event, document['id'], title='Взлом')
+    assert response.status == 302
+    assert 'Протокол не найден' in unquote_plus(response.headers['location'])
+    assert storage.get_calendar_event_document(event_id, document['id'])['title'] == 'Справки'
+
+
+def test_event_document_edit_endpoint_cannot_alter_protocol_access(calendar_client: SanicTestClient):
+    """Generic-эндпоинт правки документов на строке протокола: crafted
+    access_mode=selected_students + student_id инертны — доступ остаётся
+    all_participants, маппингов нет, document_type не меняется (title —
+    общие метаданные — меняется)."""
+    storage = app.ctx.storage
+    event_id, student_a, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Итоговый протокол').status == 302
+    document = storage.list_calendar_event_documents(event_id)[0]
+
+    response = edit_event_document(
+        calendar_client,
+        admin,
+        event_id,
+        document['id'],
+        title='Протокол финала',
+        access_mode='selected_students',
+        student_ids=[student_a],
+    )
+    assert response.status == 302
+    assert 'Документ обновлён' in unquote_plus(response.headers['location'])
+
+    document = storage.get_calendar_event_document(event_id, document['id'])
+    assert document['title'] == 'Протокол финала'
+    assert document['access_mode'] == 'all_participants'
+    assert document['document_type'] == 'protocol'
+    assert storage.calendar_event_document_students(document['id']) == []
+    # Оба атлета-участника по-прежнему скачивают (доступ не сузился)
+    _, response = calendar_client.get(
+        f"/calendar/{event_id}/documents/{document['id']}/download", headers=athlete_headers()
+    )
+    assert response.status == 200
+
+
+def test_event_protocol_download_access_matrix(calendar_client: SanicTestClient):
+    """Скачивание протокола (существующий роут документов): атлет-участник —
+    200 с байтами; атлет-неучастник и атлет без карточки — 403; viewer —
+    200; аноним — редирект на вход."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    payload = b'%PDF-1.4\n' + os.urandom(64)
+    assert (
+        upload_event_protocol(calendar_client, admin, event_id, title='Итоговый протокол', payload=payload).status
+        == 302
+    )
+    document = storage.list_calendar_event_documents(event_id)[0]
+    url = f"/calendar/{event_id}/documents/{document['id']}/download"
+
+    _, response = calendar_client.get(url, headers=athlete_headers())
+    assert response.status == 200
+    assert response.body == payload
+
+    _, response = calendar_client.get(url, headers=get_auth_headers('viewer'))
+    assert response.status == 200
+
+    storage.create_user('fourth', 'hash', 'athlete')
+    student_c = storage.create_student('Сидоров Сидор', 'М', 'ФГФ', 'Г-301', '1')
+    storage.link_user(storage.get_user('fourth')['id'], student_c)
+    _, response = calendar_client.get(url, headers=athlete_headers_for('fourth'))
+    assert response.status == 403
+
+    storage.create_user('nocard', 'hash', 'athlete')
+    _, response = calendar_client.get(url, headers=athlete_headers_for('nocard'))
+    assert response.status == 403
+
+    _, response = calendar_client.get(url, allow_redirects=False)
+    assert response.status == 302
+    assert response.headers['location'].startswith('/login')
+
+
+def test_event_protocol_cabinet_badge(calendar_client: SanicTestClient):
+    """Личный кабинет: протокол и generic-документ в одной карточке «Мои
+    документы»; бейдж «Протокол» — ровно у protocol-строки."""
+    storage = app.ctx.storage
+    event_id, _, _ = make_document_world(storage)
+    admin = get_auth_headers()
+    assert upload_event_protocol(calendar_client, admin, event_id, title='Итоговый протокол').status == 302
+    assert upload_event_document(calendar_client, admin, event_id, title='Справки').status == 302
+
+    _, page = calendar_client.get('/', headers=athlete_headers())
+    body = page.body.decode()
+    assert 'Мои документы' in body
+    assert 'Итоговый протокол' in body
+    assert 'Справки' in body
+    assert body.count('<span class="badge text-bg-secondary">Протокол</span>') == 1
+
+
+def test_event_delete_cascades_event_protocols(calendar_client: SanicTestClient, tmp_path):
+    """Удаление события без участников — каскад чистит и строки протоколов,
+    и каталог files/calendar/<id>/ на диске."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    event_id = storage.create_calendar_event('Кубок без участников', '2026-06-25', None, '', '', links=[])
+    assert upload_event_protocol(calendar_client, editor, event_id, title='Итоговый протокол').status == 302
+    event_dir = tmp_path / 'files' / 'calendar' / str(event_id)
+    assert event_dir.is_dir()
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/delete', headers=editor, data=csrf_for(editor), allow_redirects=False
+    )
+    assert response.status == 302
+    assert 'Соревнование удалено' in unquote_plus(response.headers['location'])
+    protocols_left = storage.connection.execute(
+        'SELECT COUNT(*) AS total FROM calendar_event_documents WHERE calendar_event_id = ?', (event_id,)
+    ).fetchone()['total']
+    assert protocols_left == 0
+    assert not event_dir.exists()
 
 
 # --- Выдача доступа атлета с карточки студента (Account Issuance). ---
