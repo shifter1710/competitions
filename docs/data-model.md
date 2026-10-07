@@ -649,6 +649,7 @@ sort_order, id)`. Кап строк — 50 на событие (роут). Ау�
 | `sort_order` | INTEGER NOT NULL DEFAULT `0` | порядок добавления (`max+1`); чтение — `ORDER BY sort_order, id`; правка/удаление порядок не пересчитывают |
 | `created_at` | TEXT NOT NULL | |
 | `updated_at` | TEXT NOT NULL | меняется при правке |
+| `document_type` | TEXT NOT NULL DEFAULT `'generic'` | `generic` — материалы с настраиваемым доступом; `protocol` — официальные протоколы соревнования (см. ниже). Аддитивная миграция (последняя колонка), существующие строки читаются `'generic'` |
 
 `calendar_event_document_students` — маппинги «документ ↔ карточка» для
 режима `selected_students` (при правке документа — full-replace):
@@ -680,6 +681,30 @@ admin/editor/viewer проходят всегда; атлет — только �
 `selected_students`), иначе 403. Аудит —
 `calendar_event_document_uploaded` / `calendar_event_document_updated` /
 `calendar_event_document_deleted` (раздел 8).
+
+**Протоколы соревнования (Event Protocols)** — строки той же таблицы с
+`document_type = 'protocol'`: официальные протоколы соревнования, 0..N на
+событие. Отличия от generic-документов:
+
+- доступ всегда `all_participants` и БЕЗ маппингов: storage принудительно
+  записывает `access_mode='all_participants'` и пустые `student_ids` при
+  создании и игнорирует поданные значения при правке — сузить доступ
+  протокола или выдать его избранным нельзя (в формах протоколов полей
+  доступа нет вовсе);
+- `document_type` неизменяем: UPDATE его не трогает, «превратить»
+  generic-документ в протокол (и наоборот) через формы нельзя;
+- управление — отдельная секция «Протоколы соревнования» на странице
+  события (между положением и документами): `POST
+  /calendar/<id>/protocols` + `/<document_id>/edit` + `/delete`
+  (модераторы); эндпоинты протоколов не трогают generic-документы и
+  наоборот («Протокол не найден»); скачивание — тот же роут `/documents/
+  <id>/download` (атлету-участнику протокол доступен всегда);
+- в «Мои документы» личного кабинета протоколы попадают как документы
+  события с бейджем «Протокол».
+
+Аудит протоколов — `calendar_event_protocol_uploaded` /
+`calendar_event_protocol_updated` (включая `replaced_file`) /
+`calendar_event_protocol_deleted` (раздел 8).
 
 ### 10. `import_queue` — очередь конфликтов импорта
 
@@ -1110,6 +1135,10 @@ runtime кабинета атлета и прав атлета на чтение
   `idx_calendar_event_document_students_student` — чисто аддитивная
   идемпотентная миграция (`CREATE TABLE/INDEX IF NOT EXISTS`),
   применяется при старте к существующим БД, без backfill;
+- Event Protocols: `calendar_event_documents.document_type` (раздел 9c) —
+  аддитивная колонка `TEXT NOT NULL DEFAULT 'generic'` (последняя; в DDL
+  и в `ALTER TABLE ... ADD COLUMN` легаси-таблиц — порядок колонок
+  совпадает), существующие строки читаются `'generic'`, без backfill;
 - Event Model, Wave 1 P0 (2026-09-24):
   - `competitions`: `+discipline`, `+result`, `+calendar_event_id` —
     аддитивно, существующие строки NULL;

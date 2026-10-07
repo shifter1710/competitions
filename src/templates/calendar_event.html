@@ -217,6 +217,108 @@
 </section>
 {% endif %}
 
+{# Протоколы соревнования (Event Protocols): официальные протоколы —
+   те же документы события с document_type='protocol', но доступ всегда
+   «все участники» (без маппингов и chooser'а). Видны всем участникам
+   в личном кабинете; скачивание — существующий роут документов.
+   Обычная multipart-форма без .import-form и data-documents-form
+   (JS не подключается). #}
+{% if protocols or can_manage %}
+<section class="card shadow-sm mb-4" id="protocols">
+    <div class="card-body">
+        <h3 class="title mb-1">Протоколы соревнования</h3>
+        <div class="text-muted small mb-2">Официальные протоколы — видны всем участникам соревнования в личном кабинете.</div>
+        <table class="table table-sm table-striped align-middle mb-0">
+            <thead class="table-dark">
+                <tr>
+                    <th scope="col">Название</th>
+                    <th scope="col">Файл</th>
+                    <th scope="col" style="width: 240px;">Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in protocols %}
+                <tr {% if edit_protocol_data and p.id == edit_protocol_data.id %}class="table-active"{% endif %}>
+                    <td class="text-break">
+                        {{ p.title }}
+                        {% if edit_protocol_data and p.id == edit_protocol_data.id %}
+                        <span class="badge text-bg-primary">редактируется</span>
+                        {% endif %}
+                    </td>
+                    <td class="text-break">
+                        {{ p.filename }}
+                        <div class="small text-muted">{{ p.type_label }} · {{ p.size_label }}</div>
+                    </td>
+                    <td>
+                        <div class="d-flex gap-1">
+                            <a class="btn btn-sm btn-outline-primary"
+                                href="/calendar/{{ event.id }}/documents/{{ p.id }}/download">Скачать</a>
+                            {% if can_manage %}
+                            <a class="btn btn-sm btn-outline-secondary"
+                                href="/calendar/{{ event.id }}?edit_protocol={{ p.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}">Изменить</a>
+                            <form action="/calendar/{{ event.id }}/protocols/{{ p.id }}/delete" method="post"
+                                  onsubmit='return confirm({{ ('Удалить протокол «' ~ p.title ~ '»? Файл будет удалён безвозвратно.') | tojson }})'>
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                <input type="hidden" name="result" value="{{ result_filter }}">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                {# Пусто: секция без строк рендерится только can_manage
+                   (условие выше), поэтому подсказка адресована ему. #}
+                <tr>
+                    <td colspan="3" class="text-center text-muted py-4">Протоколов пока нет — добавьте первый ниже.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if can_manage %}
+        {% if edit_protocol_data %}
+        <div class="small fw-semibold mt-3 mb-2">Изменить протокол</div>
+        {% endif %}
+        <form class="row g-3{% if not edit_protocol_data %} mt-3{% endif %}" enctype="multipart/form-data" method="post"
+              action="/calendar/{{ event.id }}/protocols{% if edit_protocol_data %}/{{ edit_protocol_data.id }}/edit{% endif %}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <input type="hidden" name="result" value="{{ result_filter }}">
+            <div class="col-md-4">
+                <label class="label" for="protocol-title">Название<span class="req">*</span></label>
+                <input class="form-control" id="protocol-title" name="title" type="text" maxlength="200" required
+                    placeholder="Например: Итоговый протокол"
+                    {% if edit_protocol_data %}value="{{ edit_protocol_data.title }}"{% endif %}>
+            </div>
+            <div class="col-md-4">
+                <label class="label" for="protocol-file">Файл{% if not edit_protocol_data %}<span
+                    class="req">*</span>{% endif %}</label>
+                {% if edit_protocol_data %}
+                <div class="small mb-1">Текущий файл: {{ edit_protocol_data.filename }} · {{ edit_protocol_data.size_label }}</div>
+                {% endif %}
+                <input accept=".pdf,.png,.jpg,.jpeg" aria-label="Файл протокола" class="form-control"
+                    id="protocol-file" name="file" type="file"
+                    {% if not edit_protocol_data %}required{% endif %}>
+                {% if edit_protocol_data %}
+                <div class="form-text ui-hint">Новый файл заменит текущий (PDF, JPEG или PNG, до 5 МБ). Оставьте пустым, чтобы не менять файл.</div>
+                {% else %}
+                <div class="form-text ui-hint">PDF, JPEG или PNG, до 5 МБ.</div>
+                {% endif %}
+            </div>
+            <div class="col-12">
+                {% if edit_protocol_data %}
+                <button class="btn btn-sm btn-success" type="submit">Сохранить</button>
+                <a class="btn btn-sm btn-link"
+                    href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                {% else %}
+                <button class="btn btn-sm btn-success" type="submit">Добавить протокол</button>
+                {% endif %}
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
 {# Документы соревнования (Event Documents): материалы для участников —
    видны в личном кабинете по режиму доступа. Скачивание — все не-атлеты
    (страница события атлету закрыта), управление — модераторы. Форма с

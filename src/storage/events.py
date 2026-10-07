@@ -19,6 +19,11 @@ from src.storage.helpers import event_identity_key
 # события (по факту участия Student-карточки) или явно выбранным карточкам.
 EVENT_DOCUMENT_ACCESS_MODES = ('all_participants', 'selected_students')
 
+# Типы документов события: 'generic' — материалы с настраиваемым доступом,
+# 'protocol' — официальные протоколы соревнования, доступ всегда
+# 'all_participants' (принудительно, без маппингов).
+EVENT_DOCUMENT_TYPES = ('generic', 'protocol')
+
 
 class EventsMixin:
     # ---- Календарь соревнований (волна A, docs/feedback-live.md №23) ----
@@ -187,7 +192,9 @@ class EventsMixin:
     # (файл + заголовок + режим доступа). 'all_participants' — документ
     # видят все Student-карточки с участием в событии (маппинги не пишутся),
     # 'selected_students' — только явно выбранным участникам (маппинги
-    # document↔student). Identity — только стабильные students.id, без
+    # document↔student). document_type='protocol' — официальные протоколы
+    # соревнования: доступ принудительно all_participants, без маппингов;
+    # тип строки неизменяем. Identity — только стабильные students.id, без
     # ФИО-хешей. Строки живут и умирают вместе с событием (каскад в
     # delete_calendar_event одним commit); файл на диске чистит роут.
 
@@ -291,17 +298,25 @@ class EventsMixin:
         access_mode: str,
         student_ids: Sequence[int],
         uploaded_by: int | None = None,
+        document_type: str = 'generic',
     ) -> tuple[int | None, str | None]:
         """Создать документ события: (document_id, None) или (None, код
         ошибки).
 
-        Валидация ДО вставки (invalid_access_mode / no_students /
-        student_not_found / student_inactive / student_not_participant) —
-        отказ не оставляет строк. Одна транзакция: INSERT документа
-        (sort_order = COALESCE(MAX, 0)+1 — новый документ в конец,
-        timestamps — datetime.utcnow().isoformat()) + маппинги для
-        selected_students (all_participants маппингов не пишет). Существование
-        события и файла проверяет роут."""
+        Валидация ДО вставки (invalid_document_type / invalid_access_mode /
+        no_students / student_not_found / student_inactive /
+        student_not_participant) — отказ не оставляет строк. Протокол
+        (document_type='protocol') — доступ всегда all_participants и без
+        маппингов, независимо от поданных access_mode/student_ids. Одна
+        транзакция: INSERT документа (sort_order = COALESCE(MAX, 0)+1 — новый
+        документ в конец, timestamps — datetime.utcnow().isoformat()) +
+        маппинги для selected_students (all_participants маппингов не пишет).
+        Существование события и файла проверяет роут."""
+        if document_type not in EVENT_DOCUMENT_TYPES:
+            return None, 'invalid_document_type'
+        if document_type == 'protocol':
+            access_mode = 'all_participants'
+            student_ids = []
         if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
             return None, 'invalid_access_mode'
         with self._lock:
@@ -317,10 +332,10 @@ class EventsMixin:
                 cursor = self.connection.execute(
                     'INSERT INTO calendar_event_documents'
                     ' (calendar_event_id, title, filename, stored_name, content_type, size,'
-                    ' access_mode, uploaded_by, sort_order, created_at, updated_at)'
+                    ' access_mode, uploaded_by, sort_order, created_at, updated_at, document_type)'
                     ' VALUES (?, ?, ?, ?, ?, ?, ?, ?,'
                     ' COALESCE((SELECT MAX(sort_order) FROM calendar_event_documents'
-                    '     WHERE calendar_event_id = ?), 0) + 1, ?, ?)',
+                    '     WHERE calendar_event_id = ?), 0) + 1, ?, ?, ?)',
                     (
                         int(event_id),
                         title,
@@ -333,6 +348,7 @@ class EventsMixin:
                         int(event_id),
                         now,
                         now,
+                        document_type,
                     ),
                 )
                 document_id = cursor.lastrowid
@@ -360,7 +376,10 @@ class EventsMixin:
         или (False, код валидации).
 
         Валидация та же, что у create; отказ ДО записи не меняет ничего
-        (включая title). Одна транзакция: UPDATE метаданных (updated_at)
+        (включая title). Протокол (document_type='protocol' в строке БД):
+        доступ всегда all_participants и без маппингов — поданные
+        access_mode/student_ids игнорируются; сам document_type неизменяем
+        (в UPDATE не входит). Одна транзакция: UPDATE метаданных (updated_at)
         + full-replace маппингов — DELETE всех + INSERT OR IGNORE новых
         (паттерн _insert_event_links); при all_participants маппинги
         просто стираются. Опциональные файловые поля (filename/stored_name/
@@ -370,12 +389,15 @@ class EventsMixin:
         if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
             return False, 'invalid_access_mode'
         with self._lock:
-            exists = self.connection.execute(
-                'SELECT 1 FROM calendar_event_documents WHERE id = ? AND calendar_event_id = ?',
+            stored = self.connection.execute(
+                'SELECT document_type FROM calendar_event_documents' ' WHERE id = ? AND calendar_event_id = ?',
                 (int(document_id), int(event_id)),
             ).fetchone()
-            if exists is None:
+            if stored is None:
                 return False, 'not_found'
+            if stored['document_type'] == 'protocol':
+                access_mode = 'all_participants'
+                student_ids = []
             if access_mode == 'selected_students':
                 error = self._check_event_document_students(event_id, student_ids)
                 if error is not None:
@@ -449,6 +471,7 @@ class EventsMixin:
                     d.content_type,
                     d.size,
                     d.access_mode,
+                    d.document_type,
                     e.name AS event_name,
                     e.date AS event_date,
                     e.date_to AS event_date_to
