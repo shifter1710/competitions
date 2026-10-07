@@ -3580,6 +3580,26 @@ class ParticipantsPage {
             return;
         }
         const row = button.closest("tr");
+        // Backup ДО любых манипуляций с ячейками: отмена (cancelEdit)
+        // должна вернуть исходную разметку строки — включая «сжатую»
+        // ведущую ячейку child-строки (colspan="6" с «└─»).
+        this.editingBackup = row.innerHTML;
+        this.editingRow = row;
+        // Child-строка группы начинается с ячейки colspan="6" (поля
+        // участника — в parent). Перед правкой раскрываем её в 1 + N-1
+        // пустых <td>: фиксированные индексы ячеек ниже и row.children[1]
+        // (ФИО) работают как у плоской строки.
+        const firstCell = row.querySelector("td");
+        if (firstCell && firstCell.colSpan > 1) {
+            const span = firstCell.colSpan;
+            firstCell.colSpan = 1;
+            let anchor = firstCell;
+            for (let index = 1; index < span; index += 1) {
+                const filler = document.createElement("td");
+                anchor.after(filler);
+                anchor = filler;
+            }
+        }
         const cells = row.querySelectorAll("td");
         const dataset = button.dataset;
         // Ячейки: №, ФИО, Пол, Институт, Группа, Курс, Дисциплина, Место,
@@ -3592,9 +3612,6 @@ class ParticipantsPage {
         const positionCell = cells[7];
         const resultCell = cells[8];
         const actionsCell = cells[cells.length - 1];
-
-        this.editingBackup = row.innerHTML;
-        this.editingRow = row;
 
         const fioInput = this.buildTextInput("student_name", dataset.studentName);
         const sexInput = document.createElement("select");

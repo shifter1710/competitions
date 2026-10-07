@@ -706,12 +706,12 @@
                для инлайн-правки (script.js). #}
             <tr class="row-group-item" data-record-id="{{ participation.record_id }}"
                 data-participation-custom='{{ (participation.extra_data or {}) | tojson }}'>
-                <td class="text-center text-muted" aria-hidden="true">└─</td>
-                <td><span class="text-muted">—</span></td>
-                <td><span class="text-muted">—</span></td>
-                <td><span class="text-muted">—</span></td>
-                <td><span class="text-muted">—</span></td>
-                <td><span class="text-muted">—</span></td>
+                {# Поля участника (№/ФИО/Пол/Институт/Группа/Курс) — в parent:
+                   одна ячейка на все шесть колонок, «└─» с отступом.
+                   colspan постоянный (6) — кастомных колонок в этой таблице
+                   нет; нормализация до плоской разметки при инлайн-правке —
+                   startEdit (script.js). #}
+                <td colspan="6" class="text-muted ps-4" aria-hidden="true">└─</td>
                 <td>
                     {% if participation.effective_discipline %}{{ participation.effective_discipline }}{% else %}<span
                         class="text-muted"

@@ -2309,6 +2309,7 @@ def make_calendar_record(
     date_to: datetime | None,
     position: int = 1,
     calendar_event_id: int | None = None,
+    student_ref: int | None = None,
 ) -> Competition:
     competition = make_competition(name, date)
     competition.name = name
@@ -2316,6 +2317,7 @@ def make_calendar_record(
     competition.date_to = date_to
     competition.position = position
     competition.calendar_event_id = calendar_event_id
+    competition.student_ref_id = student_ref
     return competition
 
 
@@ -2356,7 +2358,9 @@ def test_calendar_list_counts_participants_by_preset(adapter):
     """Счётчики (P2, id-first): N — записи со ссылкой calendar_event_id,
     M — из них с position=0 («без результата»). NULL-legacy-строки, совпавшие
     с пресетом по случайности, не считаются; блокировщик удаления при этом
-    консервативен (OR — см. test_calendar_delete_blocker_counts_link_or_preset)."""
+    консервативен (OR — см. test_calendar_delete_blocker_counts_link_or_preset).
+    Все связанные строки cardless — уникальных участников столько же,
+    сколько записей (каждая cardless-строка — отдельный участник)."""
     # Даты хранятся в том же ISO-формате, что и в записях реестра
     # (datetime.isoformat(), 'YYYY-MM-DDTHH:MM:SS') — совпадение по строке.
     event_id = adapter.create_calendar_event(
@@ -2394,10 +2398,58 @@ def test_calendar_list_counts_participants_by_preset(adapter):
     assert len(events) == 1
     assert events[0]['id'] == event_id
     assert events[0]['participant_count'] == 3
+    assert events[0]['participation_count'] == 3
     assert events[0]['no_result_count'] == 2
 
     participants = adapter.list_calendar_event_participants(event_id)
     assert len(participants) == 3
+
+
+def test_calendar_list_counts_unique_participants_and_participations(adapter):
+    """Счётчики карточек /calendar — семантика страницы события (P7):
+    участников — УНИКАЛЬНЫЕ student_ref_id + каждая cardless-строка,
+    участий — все связанные записи. Одна карточка с 3 участиями + 2
+    cardless-строки → 3 участника / 5 участий; без результата — по
+    position = 0 среди всех участий."""
+    event_id = adapter.create_calendar_event(
+        name='Кросс', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
+    )
+    adapter.save_competitions(
+        [
+            # Одна карточка студента (#7) — три участия (два «ждут результата»)
+            make_calendar_record(
+                'Иванов Иван', datetime(2026, 9, 12), None, position=0, calendar_event_id=event_id, student_ref=7
+            ),
+            make_calendar_record(
+                'Иванов Иван', datetime(2026, 9, 12), None, position=0, calendar_event_id=event_id, student_ref=7
+            ),
+            make_calendar_record(
+                'Иванов Иван', datetime(2026, 9, 12), None, position=2, calendar_event_id=event_id, student_ref=7
+            ),
+            # Две cardless-строки (одноимённые — но карточки нет, каждая
+            # считается отдельным участником)
+            make_calendar_record('Петров Пётр', datetime(2026, 9, 12), None, position=1, calendar_event_id=event_id),
+            make_calendar_record('Петров Пётр', datetime(2026, 9, 12), None, position=0, calendar_event_id=event_id),
+        ],
+        review_status='approved',
+        owner_id=None,
+    )
+    events = adapter.list_calendar_events()
+    assert len(events) == 1
+    assert events[0]['participant_count'] == 3
+    assert events[0]['participation_count'] == 5
+    assert events[0]['no_result_count'] == 3
+
+
+def test_calendar_list_counts_zero_participations(adapter):
+    """Событие без связанных записей: 0 участников / 0 участий / 0 без
+    результата (LEFT JOIN без строк — NULL-агрегаты дают 0)."""
+    adapter.create_calendar_event(name='Пустой', date='2026-09-12T00:00:00', date_to=None, level='', sport='', links=[])
+    events = adapter.list_calendar_events()
+    assert len(events) == 1
+    assert events[0]['participant_count'] == 0
+    assert events[0]['participation_count'] == 0
+    assert events[0]['no_result_count'] == 0
 
 
 def test_calendar_list_matches_oneday_preset_exactly(adapter):
@@ -2417,20 +2469,36 @@ def test_calendar_list_matches_oneday_preset_exactly(adapter):
     )
     events = adapter.list_calendar_events()
     assert events[0]['participant_count'] == 1
+    assert events[0]['participation_count'] == 1
     assert events[0]['no_result_count'] == 1
     assert len(adapter.list_calendar_event_participants(event_id)) == 1
 
 
-def test_calendar_list_orders_chronologically_and_filters_by_sport(adapter):
+def test_calendar_list_orders_newest_first_and_filters_by_sport(adapter):
+    """Сортировка списка (Calendar UX Feedback): новые события первыми
+    (date DESC); фильтр по виду спорта порядок сохраняет."""
     adapter.create_calendar_event(
         name='Поздний', date='2026-10-17T00:00:00', date_to=None, level='', sport='Волейбол', links=[]
     )
     adapter.create_calendar_event(
         name='Ранний', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
-    assert [event['name'] for event in adapter.list_calendar_events()] == ['Ранний', 'Поздний']
+    assert [event['name'] for event in adapter.list_calendar_events()] == ['Поздний', 'Ранний']
     assert [event['name'] for event in adapter.list_calendar_events(sport='Бег')] == ['Ранний']
     assert adapter.list_calendar_events(sport='Шахматы') == []
+
+
+def test_calendar_list_same_date_tie_break_larger_id_first(adapter):
+    """Одна и та же дата: первым событие с бóльшим id (создано позже) —
+    детерминированный порядок без имени в сортировке."""
+    first_id = adapter.create_calendar_event(
+        name='Альфа', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
+    )
+    second_id = adapter.create_calendar_event(
+        name='Ята', date='2026-09-12T00:00:00', date_to=None, level='', sport='Бег', links=[]
+    )
+    assert second_id > first_id
+    assert [event['id'] for event in adapter.list_calendar_events()] == [second_id, first_id]
 
 
 # ---- Event Model, Wave 1 P2: стабильная связь «запись → событие» ----
@@ -2467,6 +2535,7 @@ def test_calendar_participants_list_reads_by_link_only(adapter):
     # Счётчики /calendar — те же участники
     events = {event['id']: event for event in adapter.list_calendar_events()}
     assert events[event_id]['participant_count'] == 2
+    assert events[event_id]['participation_count'] == 2
     assert events[event_id]['no_result_count'] == 1
 
 

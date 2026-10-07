@@ -625,9 +625,14 @@ class EventsMixin:
             self.connection.commit()
 
     def list_calendar_events(self, sport: str = '') -> list[dict]:
-        """Все события по хронологии; рядом — счётчики участников по ссылке
+        """Все события, начиная с новых (date DESC, при равенстве — больший
+        id первым; группировка месяцев и карточки на /calendar наследуют
+        этот порядок); рядом — счётчики участников по ссылке
         calendar_event_id (P2, id-first; NULL-legacy-строки пресета не
-        считаются): participant_count — все связанные записи реестра,
+        считаются), семантика — как у страницы события (calendar_event_page):
+        participant_count — УНИКАЛЬНЫЕ участники (различные student_ref_id,
+        каждая cardless-строка без карточки — отдельный участник),
+        participation_count — все связанные записи реестра (участия),
         no_result_count — из них с position = 0 («без результата»). Каждая
         строка несёт links — ссылки события по (sort_order, id)."""
         with self._lock:
@@ -647,13 +652,16 @@ class EventsMixin:
                     e.sport,
                     e.url,
                     e.created_at,
-                    COUNT(c.id) AS participant_count,
+                    COUNT(DISTINCT c.student_ref_id) + COALESCE(
+                        SUM(CASE WHEN c.id IS NOT NULL AND c.student_ref_id IS NULL THEN 1 ELSE 0 END), 0
+                    ) AS participant_count,
+                    COUNT(c.id) AS participation_count,
                     SUM(CASE WHEN c.position = 0 THEN 1 ELSE 0 END) AS no_result_count
                 FROM calendar_events e
                 LEFT JOIN competitions c ON c.calendar_event_id = e.id
                 {where}
                 GROUP BY e.id
-                ORDER BY e.date ASC, e.name ASC
+                ORDER BY e.date DESC, e.id DESC
                 ''',
                 params,
             ).fetchall()
@@ -668,6 +676,7 @@ class EventsMixin:
                     'url': row['url'],
                     'created_at': row['created_at'],
                     'participant_count': row['participant_count'] or 0,
+                    'participation_count': row['participation_count'] or 0,
                     'no_result_count': row['no_result_count'] or 0,
                 }
                 for row in rows

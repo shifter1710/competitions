@@ -110,7 +110,7 @@
     <div class="card-body">
         <h3 class="title mb-1">Запланировать соревнование</h3>
         <div class="text-muted mb-3">План на год — не запись реестра. Период: два клика по календарю — начало и конец; повторный клик по той же дате — однодневное соревнование.</div>
-        <form class="row g-3" method="post" action="/calendar/new" data-period-form>
+        <form class="row g-3" method="post" action="/calendar/new" enctype="multipart/form-data" data-period-form>
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="date" data-period-field>
             <div class="col-md-6">
@@ -147,6 +147,12 @@
                 </datalist>
             </div>
             {{ event_links_field([{'label': '', 'url': ''}]) }}
+            <div class="col-md-6">
+                <label class="label" for="calendar-new-regulation">Положение о соревновании</label>
+                <input class="form-control" id="calendar-new-regulation" name="regulation" type="file"
+                    accept=".pdf,.png,.jpg,.jpeg">
+                <span class="form-text ui-hint">Необязательно. PDF, JPEG или PNG, до 5 МБ.</span>
+            </div>
             <div class="col-12 d-flex gap-2">
                 <button class="btn btn-primary" type="submit">Запланировать</button>
                 <button class="btn btn-outline-secondary" type="reset">Отмена</button>
@@ -159,7 +165,7 @@
 <div class="table-meta">
     <span>Соревнований: <strong>{{ events_count }}</strong> · запланировано <strong>{{ planned_count }}</strong> ·
         прошло <strong>{{ past_count }}</strong></span>
-    <span>Сортировка: по датам, по хронологии</span>
+    <span>Сортировка: по датам, сначала новые</span>
 </div>
 
 {% if month_groups %}
@@ -218,6 +224,7 @@
             <span class="badge text-bg-secondary"><span class="badge__dot"></span>прошло</span>
             {% endif %}
             <span class="calendar-comp-row__count">участников: <strong>{{ event.participant_count }}</strong></span>
+            <span class="calendar-comp-row__count">участий: <strong>{{ event.get('participation_count', 0) }}</strong></span>
             <span class="calendar-comp-row__count">без результата: <strong>{{ event.no_result_count }}</strong></span>
             {# Иконка-ссылка — по первой ссылке события (порядок строк формы);
                небезопасные схемы не рисуем href (эшелонированная защита). #}
