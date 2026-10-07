@@ -7292,6 +7292,12 @@ def test_calendar_events_grouped_by_month():
     assert [group['count'] for group in groups] == [2, 1]
     assert groups[0]['events'][0]['date_label'] == '12.09.2026'
     assert groups[0]['events'][1]['date_label'] == '26-27.09.2026'
+    # Порядок входа сохраняется (list_calendar_events отдаёт новые первыми):
+    # месяцы и карточки внутри наследуют порядок storage без пересортировки.
+    newest_first = list(reversed(events))
+    newest_groups = group_calendar_events_by_month(newest_first)
+    assert [group['label'] for group in newest_groups] == ['Октябрь 2026', 'Сентябрь 2026']
+    assert [event['name'] for event in newest_groups[1]['events']] == ['B', 'A']
 
 
 def test_calendar_page_available_for_viewer(client: SanicTestClient):
@@ -7695,6 +7701,7 @@ def test_calendar_pages_render_unsafe_stored_link_url_as_text(client: SanicTestC
         'url': '',
         'created_at': '2026-01-01T00:00:00',
         'participant_count': 0,
+        'participation_count': 0,
         'no_result_count': 0,
         'links': [{'id': 1, 'label': 'Опасная', 'url': 'javascript:alert(1)', 'sort_order': 0}],
     }
@@ -7730,6 +7737,7 @@ def make_calendar_list_event(event_id: int, links: list[dict]) -> dict:
         'url': '',
         'created_at': '2026-01-01T00:00:00',
         'participant_count': 0,
+        'participation_count': 0,
         'no_result_count': 0,
         'links': links,
     }
@@ -7943,6 +7951,41 @@ def test_calendar_filters_pass_sport_to_storage(client: SanicTestClient):
     _, response = client.get('/calendar?status=past&sport=Бег', headers=headers)
     assert response.status == 200
     app.ctx.storage.list_calendar_events.assert_called_with(sport='Бег')
+
+
+def test_calendar_page_renders_months_and_cards_newest_first(client: SanicTestClient):
+    """Порядок /calendar (Calendar UX Feedback): список приходит из storage
+    новыми первыми — месяцы и карточки внутри месяца наследуют этот
+    порядок (группировка порядок сохраняет, спорт-фильтр тоже)."""
+    headers = get_auth_headers('viewer')
+    events = [
+        {**make_calendar_list_event(3, []), 'date': '2026-10-17'},
+        {**make_calendar_list_event(1, []), 'date': '2026-09-26'},
+        {**make_calendar_list_event(2, []), 'date': '2026-09-12'},
+    ]
+    app.ctx.storage.list_calendar_events.return_value = events
+    try:
+        _, response = client.get('/calendar', headers=headers)
+        assert response.status == 200
+        body = response.body.decode()
+        assert 'Сортировка: по датам, сначала новые' in body
+        # Месяц новее — выше в списке
+        assert body.index('Октябрь 2026') < body.index('Сентябрь 2026')
+        # Внутри месяца карточки по убыванию даты начала
+        assert body.index('Кросс 1') < body.index('Кросс 2')
+    finally:
+        app.ctx.storage.list_calendar_events.return_value = []
+
+    # Спорт-фильтр: тот же порядок, карточки отфильтрованного вида
+    app.ctx.storage.list_calendar_events.return_value = [events[0], events[2]]
+    try:
+        _, response = client.get('/calendar?sport=Бег', headers=headers)
+        assert response.status == 200
+        body = response.body.decode()
+        assert 'Кросс 3' in body and 'Кросс 2' in body and 'Кросс 1' not in body
+        assert body.index('Кросс 3') < body.index('Кросс 2')
+    finally:
+        app.ctx.storage.list_calendar_events.return_value = []
 
 
 # ---- Страница соревнования: участники (волна B, прототип 16) ----
@@ -8330,6 +8373,211 @@ def test_calendar_event_deletion_removes_regulation_file(calendar_client: SanicT
     assert response.status == 200
     assert storage.get_calendar_event(event_id) is None
     assert not regulation_dir.exists()
+
+
+# --- Необязательное положение при планировании события (Calendar UX
+# Feedback): поле файла в форме /calendar/new, тот же жизненный цикл файла,
+# что у upload_calendar_regulation, валидация ДО создания события. ---
+
+
+def post_calendar_new_with_file(client, headers, fields: dict, filename=None, payload=None):
+    """POST /calendar/new c multipart-телом (поля события + необязательный
+    файл положения)."""
+    files = {'regulation': (filename, payload, 'application/octet-stream')} if filename else None
+    _, response = client.post(
+        '/calendar/new',
+        headers=headers,
+        data={**csrf_for(headers), **fields},
+        files=files,
+        allow_redirects=False,
+    )
+    return response
+
+
+def test_calendar_create_without_file_keeps_plain_redirect(calendar_client: SanicTestClient, tmp_path):
+    """Без файла — прежнее поведение: событие создано, редирект в /calendar с
+    тем же сообщением, файлов не появилось."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    response = post_calendar_new_with_file(calendar_client, editor, {'name': 'Кросс', 'date': '25.06.2026'})
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_message=')
+    assert 'Соревнование «Кросс» запланировано' in unquote_plus(response.headers['location'])
+    assert len(storage.list_calendar_events()) == 1
+    event = storage.get_calendar_event(storage.list_calendar_events()[0]['id'])
+    assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
+    assert not (tmp_path / 'files' / 'calendar').exists()
+
+
+def test_calendar_create_with_regulation_file(calendar_client: SanicTestClient, tmp_path):
+    """Валидный PDF при создании: событие + файл на диске + колонки + аудит
+    calendar_regulation_uploaded (replaced: False) + редирект на страницу
+    события; скачивание отдаёт исходные байты под исходным именем."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    pdf_bytes = b'%PDF-1.4 ' + b'0' * 32
+    response = post_calendar_new_with_file(
+        calendar_client, editor, {'name': 'Кросс', 'date': '25.06.2026'}, 'polozhenie.pdf', pdf_bytes
+    )
+    assert response.status == 302
+    events = storage.list_calendar_events()
+    assert len(events) == 1
+    event_id = events[0]['id']
+    assert response.headers['location'].startswith(f'/calendar/{event_id}?admin_message=')
+    message = unquote_plus(response.headers['location'])
+    assert 'Соревнование «Кросс» запланировано, положение прикреплено' in message
+
+    event = storage.get_calendar_event(event_id)
+    assert event['regulation_filename'] == 'polozhenie.pdf'
+    stored_files = list((tmp_path / 'files' / 'calendar' / str(event_id)).iterdir())
+    assert len(stored_files) == 1 and stored_files[0].name == event['regulation_stored_name']
+    assert audit_details(storage, 'calendar_regulation_uploaded') == [
+        {
+            'event_id': event_id,
+            'event_name': 'Кросс',
+            'filename': 'polozhenie.pdf',
+            'replaced': False,
+        }
+    ]
+
+    _, download = calendar_client.get(
+        f'/calendar/{event_id}/regulation', headers=get_auth_headers('viewer'), allow_redirects=False
+    )
+    assert download.status == 200
+    assert download.body == pdf_bytes
+    assert download.headers['content-disposition'] == 'attachment; filename="polozhenie.pdf"'
+
+
+def test_calendar_create_with_invalid_regulation_rejects_without_event(calendar_client: SanicTestClient, tmp_path):
+    """Невалидный файл (сигнатура/расширение/размер) — 400 текстом, СОВСЕМ
+    без создания события и без файла на диске (валидация ДО create)."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    cases = (
+        ('fake.pdf', b'not a pdf at all', 'Допустимы только PDF, JPEG и PNG'),
+        ('notes.txt', b'hello', 'Допустимы только PDF, JPEG и PNG'),
+        ('big.pdf', b'%PDF- ' + b'0' * (5 * 1024 * 1024), 'Файл больше 5 МБ'),
+    )
+    for filename, payload, expected_error in cases:
+        response = post_calendar_new_with_file(
+            calendar_client, editor, {'name': 'Кросс', 'date': '25.06.2026'}, filename, payload
+        )
+        assert response.status == 400, filename
+        assert expected_error in response.text
+    assert storage.list_calendar_events() == []
+    assert not (tmp_path / 'files' / 'calendar').exists()
+
+
+def test_calendar_create_regulation_write_failure_keeps_event(calendar_client: SanicTestClient, tmp_path, monkeypatch):
+    """Сбой записи файла ПОСЛЕ создания события: событие остаётся (без
+    положения — нормальное состояние), partial-файла нет, метаданных нет,
+    редирект на страницу события с объясняющим flash."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    original_write = Path.write_bytes
+
+    def failing_write(self, data):
+        if 'files/calendar' in str(self):
+            raise OSError('disk full')
+        return original_write(self, data)
+
+    monkeypatch.setattr(Path, 'write_bytes', failing_write)
+    try:
+        response = post_calendar_new_with_file(
+            calendar_client,
+            editor,
+            {'name': 'Кросс', 'date': '25.06.2026'},
+            'polozhenie.pdf',
+            b'%PDF-1.4 ok',
+        )
+    finally:
+        monkeypatch.undo()
+    assert response.status == 302
+
+    events = storage.list_calendar_events()
+    assert len(events) == 1
+    event_id = events[0]['id']
+    assert response.headers['location'].startswith(f'/calendar/{event_id}?admin_message=')
+    message = unquote_plus(response.headers['location'])
+    assert 'Соревнование «Кросс» создано, но положение прикрепить не удалось' in message
+    assert 'загрузите файл в разделе «Положение о соревновании»' in message
+
+    event = storage.get_calendar_event(event_id)
+    assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
+    regulation_dir = tmp_path / 'files' / 'calendar' / str(event_id)
+    assert not regulation_dir.exists() or list(regulation_dir.iterdir()) == []
+    assert audit_details(storage, 'calendar_regulation_uploaded') == []
+
+
+def test_calendar_create_duplicate_guard_skips_file_write(calendar_client: SanicTestClient, tmp_path):
+    """Guard точных дублей срабатывает раньше записи файла: дубль с файлом —
+    admin_error в /calendar, в БД одна строка, файлов нет."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    storage.create_calendar_event('Кросс', '2026-06-25T00:00:00', None, '', '', links=[])
+    response = post_calendar_new_with_file(
+        calendar_client,
+        editor,
+        {'name': 'Кросс', 'date': '25.06.2026'},
+        'polozhenie.pdf',
+        b'%PDF-1.4 ok',
+    )
+    assert response.status == 302
+    assert response.headers['location'].startswith('/calendar?admin_error=')
+    assert 'уже существует — новое не создано' in unquote_plus(response.headers['location'])
+    events = storage.list_calendar_events()
+    assert len(events) == 1
+    event = storage.get_calendar_event(events[0]['id'])
+    assert event['regulation_filename'] is None and event['regulation_stored_name'] is None
+    assert not (tmp_path / 'files' / 'calendar').exists()
+
+
+def test_calendar_create_multipart_keeps_link_rows(calendar_client: SanicTestClient):
+    """Multipart-форма (поле файла) не ломает разбор строк ссылок: пара
+    link_label/link_url доезжает до create_calendar_event."""
+    storage = app.ctx.storage
+    editor = get_auth_headers('editor')
+    response = post_calendar_new_with_file(
+        calendar_client,
+        editor,
+        {
+            'name': 'Кросс',
+            'date': '25.06.2026',
+            'link_label': ['Положение', ''],
+            'link_url': ['https://example.com/reglement', ''],
+        },
+        'polozhenie.pdf',
+        b'%PDF-1.4 ok',
+    )
+    assert response.status == 302
+    events = storage.list_calendar_events()
+    assert len(events) == 1
+    event = storage.get_calendar_event(events[0]['id'])
+    assert [(link['label'], link['url']) for link in event['links']] == [('Положение', 'https://example.com/reglement')]
+
+
+def test_calendar_create_with_file_blocked_for_viewer_and_athlete(calendar_client: SanicTestClient):
+    """Права не меняются: viewer и атлет не могут создать событие даже с
+    файлом — 403 до любой валидации."""
+    fields = {'name': 'Кросс', 'date': '25.06.2026'}
+    viewer = get_auth_headers('viewer')
+    _, response = calendar_client.post(
+        '/calendar/new',
+        headers=viewer,
+        data={**csrf_for(viewer), **fields},
+        files={'regulation': ('p.pdf', b'%PDF-1.4 ok', 'application/pdf')},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    _, response = calendar_client.post(
+        '/calendar/new',
+        headers=athlete_headers(),
+        data=fields,
+        files={'regulation': ('p.pdf', b'%PDF-1.4 ok', 'application/pdf')},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+    assert app.ctx.storage.list_calendar_events() == []
 
 
 # ---- Командные результаты события (Team Results): секция страницы события,
@@ -13335,7 +13583,9 @@ def test_link_event_page_caps_candidates_at_twenty(event_import_client: SanicTes
     уточнить поиск."""
     storage = app.ctx.storage
     record_id = make_null_participation(storage, comp_name='Серия', date=datetime(2026, 9, 1))
-    # a..y: хронология+алфавит -> первые 20 = a..t, хвост (u..y) скрыт капом.
+    # a..y одной датой; порядок кандидатов наследует list_calendar_events
+    # (новые первыми: date DESC, id DESC) -> кап показывает y..f, старейший
+    # хвост (a..e) скрыт.
     for index in range(25):
         storage.create_calendar_event(
             name=f'Серия {chr(97 + index)}', date='2026-09-01T00:00:00', date_to=None, level='', sport='', links=[]
@@ -13344,9 +13594,9 @@ def test_link_event_page_caps_candidates_at_twenty(event_import_client: SanicTes
     _, response = event_import_client.get(f'/competition/{record_id}/link-event', headers=get_auth_headers())
     assert response.status == 200
     assert 'Показаны первые 20 — уточните поиск.' in response.text
-    assert 'Серия t' in response.text
-    assert 'Серия u' not in response.text
-    assert 'Серия y' not in response.text
+    assert 'Серия f' in response.text
+    assert 'Серия e' not in response.text
+    assert 'Серия a' not in response.text
 
 
 def test_link_event_page_prefilled_and_create_open_without_candidates(event_import_client: SanicTestClient):
@@ -16982,6 +17232,8 @@ def test_p7_two_participations_render_parent_and_children(client: SanicTestClien
         assert 'Участников: <strong>2</strong>' in body
         assert 'Участий: <strong>3</strong>' in body
         assert 'Без результата: <strong>2</strong>' in body
+        # Child-строки: ведущие 6 колонок сжаты в одну ячейку colspan="6"
+        assert body.count('<td colspan="6" class="text-muted ps-4" aria-hidden="true">└─</td>') == 2
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
@@ -17035,6 +17287,33 @@ def test_p7_first_participation_is_child_too(client: SanicTestClient):
         parent_html = body.split('class="row-group"', 1)[1].split('</tr>', 1)[0]
         assert 'data-record-id' not in parent_html
         assert 'participant-edit-button' not in parent_html
+    finally:
+        app.ctx.storage.get_calendar_event.return_value = None
+        app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_p7_child_row_leading_cells_collapsed(client: SanicTestClient):
+    """Child-строка (P7 cleanup): шесть ведущих колонок (№/ФИО/Пол/Институт/
+    Группа/Курс) — ОДНА ячейка colspan="6" с «└─»; пустых dash-ячеек перед
+    дисциплиной нет, поля участия и действия с записью на месте."""
+    app.ctx.storage.get_calendar_event.return_value = _event_for_page()
+    app.ctx.storage.list_calendar_event_participants.return_value = _grouped_participants_sample()
+    try:
+        response = get_event_page(client, 7, role='admin')
+        assert response.status == 200
+        body = response.body.decode()
+        child_html = body.split('class="row-group-item"', 1)[1].split('</tr>', 1)[0]
+        # Ведущие ячейки сжаты: одна colspan-ячейка с маркером…
+        assert '<td colspan="6" class="text-muted ps-4" aria-hidden="true">└─</td>' in child_html
+        # …и НИ одной пустой dash-ячейки участника (как было до cleanup)
+        assert '<td><span class="text-muted">—</span></td>' not in child_html
+        # Поля участия и действия с записью не тронуты
+        assert 'Бег 100 м' in child_html
+        assert 'participant-edit-button' in child_html
+        assert 'participant-delete-button' in child_html
+        assert 'data-record-id="11"' in body and 'data-record-id="12"' in body
+        # Обе child-строки группы присутствуют целиком
+        assert body.count('class="row-group-item"') == 2
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
@@ -17130,6 +17409,42 @@ def test_p7_cardless_same_name_not_merged(client: SanicTestClient):
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
+
+
+def test_calendar_card_counters_match_event_page(event_import_client: SanicTestClient):
+    """Счётчики карточки /calendar — та же семантика, что у страницы события
+    (Calendar UX Feedback): участников — уникальные карточки + каждая
+    cardless-строка, участий — все записи, без результата — position = 0.
+    Смешанная фикстура: мультиучастие одной карточки + полный тёзка с другой
+    карточкой (не сливается) + cardless-строка."""
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    first_student = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
+    namesake_student = storage.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=first_student, discipline='100 м', position=1
+    )
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=first_student, discipline='200 м', position=0
+    )
+    make_event_participation(
+        storage, event_id, 'Иванов Иван Иванович', student_ref=namesake_student, discipline='Эстафета', position=0
+    )
+    make_event_participation(storage, event_id, 'Сидоров Сидор Сидорович', position=3)
+
+    # Карточка в /calendar (строчные подписи) и страница события (заглавные)
+    # показывают одни и те же числа
+    _, calendar_response = event_import_client.get('/calendar', headers=get_auth_headers('viewer'))
+    assert calendar_response.status == 200
+    card_body = calendar_response.body.decode()
+    assert 'участников: <strong>3</strong>' in card_body
+    assert 'участий: <strong>4</strong>' in card_body
+    assert 'без результата: <strong>2</strong>' in card_body
+
+    event_body = get_event_page(event_import_client, event_id, role='viewer').text
+    assert 'Участников: <strong>3</strong>' in event_body
+    assert 'Участий: <strong>4</strong>' in event_body
+    assert 'Без результата: <strong>2</strong>' in event_body
 
 
 def test_p7_discipline_and_result_displayed(client: SanicTestClient):

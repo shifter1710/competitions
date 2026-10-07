@@ -1899,7 +1899,8 @@ def decorate_link_event_candidates(
     events: Sequence[dict],
 ) -> tuple[list[dict], int]:
     """Кандидаты связывания для страницы записи: пресеты первыми (без очистки
-    полей выше пресетов с очисткой), затем остальные по хронологии; каждому —
+    полей выше пресетов с очисткой), затем остальные в порядке списка событий
+    (list_calendar_events — новые первыми); каждому —
     дифф 5 полей и готовый текст confirm. Возвращает (строки, всего до капа)."""
     decorated = []
     for event in events:
@@ -1986,11 +1987,27 @@ def register(app: Sanic) -> None:  # noqa: C901
         if links_error is not None:
             return text(body=links_error, status=400)
 
+        # Необязательное положение при планировании (Calendar UX Feedback):
+        # валидация ДО создания события — невалидный файл не создаёт событие
+        # и не пишет файл. Правила и сообщения — те же, что у
+        # upload_calendar_regulation; отказ — 400 текстом (стиль ошибок
+        # этой формы), файл при этом не сохраняется.
+        upload_file = request.files.get('regulation')
+        regulation_body = upload_file.body if upload_file is not None else b''
+        regulation_filename = ''
+        if regulation_body:
+            regulation_filename = (upload_file.name or 'regulation').rsplit('/', 1)[-1]
+            if len(regulation_body) > ATTACHMENT_MAX_SIZE:
+                return text(body='Файл больше 5 МБ', status=400)
+            if detect_attachment_type(regulation_body, regulation_filename) is None:
+                return text(body='Допустимы только PDF, JPEG и PNG', status=400)
+
         storage = get_storage(request.app)
         new_date = values['date'].isoformat()
         new_date_to = values['date_to'].isoformat() if values['date_to'] else None
         # Guard точных дублей (2026-09-27): событие с тем же identity-ключом
         # уже есть — новое не создаётся, аудита успеха нет (блок — не успех).
+        # Файла на диске ещё нет — откатываться нечего.
         try:
             event_id = storage.create_calendar_event(
                 name=values['name'],
@@ -2008,7 +2025,6 @@ def register(app: Sanic) -> None:  # noqa: C901
                 ),
                 url='/calendar',
             )
-        message = f'Соревнование «{values["name"]}» запланировано'
         # Неблокирующее предупреждение о похожем (то же название+дата, но
         # другой ключ — отличились date_to/sport/level): создание прошло,
         # решение «дубль или нет» остаётся за человеком.
@@ -2020,12 +2036,58 @@ def register(app: Sanic) -> None:  # noqa: C901
             sport=values['sport'],
             exclude_id=event_id,
         )
+        similar_suffix = ''
         if similar is not None:
-            message += (
+            similar_suffix = (
                 f'. Похоже, уже есть похожее: «{similar["name"]}»'
                 f' ({calendar_event_date_label(similar["date"])}) — проверьте, не дубль ли это.'
             )
-        return build_redirect_with_message(message=message, url='/calendar')
+
+        if not regulation_body:
+            message = f'Соревнование «{values["name"]}» запланировано' + similar_suffix
+            return build_redirect_with_message(message=message, url='/calendar')
+
+        # Валидный файл — жизненный цикл как у upload_calendar_regulation:
+        # сначала файл на диск, затем колонки БД, затем аудит. Событие уже
+        # создано: сбой записи НЕ удаляет его (событие без положения —
+        # нормальное состояние), partial-файл убираем best-effort.
+        extension = Path(regulation_filename).suffix.lower().lstrip('.') or 'bin'
+        stored_name = f'{uuid.uuid4().hex}.{extension}'
+        event_dir = calendar_regulation_dir(event_id)
+        file_path = event_dir / stored_name
+        try:
+            event_dir.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(regulation_body)
+            storage.set_calendar_regulation(event_id, regulation_filename, stored_name)
+        except OSError:
+            logger.warning('Failed to attach regulation file to new calendar event %s', event_id, exc_info=True)
+            try:
+                file_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning('Failed to remove partial regulation file of event %s', event_id, exc_info=True)
+            return build_redirect_with_message(
+                message=(
+                    f'Соревнование «{values["name"]}» создано, но положение прикрепить не удалось — '
+                    'загрузите файл в разделе «Положение о соревновании»'
+                )
+                + similar_suffix,
+                url=f'/calendar/{event_id}',
+            )
+
+        log_audit_event(
+            request,
+            'calendar_regulation_uploaded',
+            {
+                'event_id': event_id,
+                'event_name': values['name'],
+                'filename': regulation_filename,
+                'replaced': False,
+            },
+        )
+        return build_redirect_with_message(
+            message=f'Соревнование «{values["name"]}» запланировано, положение прикреплено' + similar_suffix,
+            url=f'/calendar/{event_id}',
+        )
 
     @app.post('/calendar/<event_id>/edit')
     async def edit_calendar_event(request: Request, event_id: str):
