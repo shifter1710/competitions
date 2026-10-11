@@ -25,4 +25,10 @@ jobs:
         run: pre-commit run --all-files
 
       - name: Run tests
+        env:
+          AUTH_SECRET_KEY: ci-synthetic-secret-key
+          AUTH_ADMIN_PASSWORD: ci-synthetic-admin-pass-123456
+          AUTH_EDITOR_PASSWORD: ci-synthetic-editor-pass-123456
+          AUTH_VIEWER_USERNAME: viewer
+          AUTH_VIEWER_PASSWORD: ci-synthetic-viewer-pass-123456
         run: pytest src/
