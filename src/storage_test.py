@@ -7,6 +7,8 @@ import pytest
 
 from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
+from src.conftest import make_report_identity_fixture
+from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
 from src.models.competition import Competition
 from src.storage.sqlite import SQLiteAdapter
@@ -231,7 +233,10 @@ def save_report_fixture(adapter):
 def test_report_student_slice_counts_metrics_in_sql(adapter):
     # Метрики для среза «студент»: участия/победы/призовые считаются одним
     # агрегирующим запросом; неподтверждённые записи не считаются.
-    # Порядок — существующий: участий по возрастанию, затем ФИО/институт.
+    # Reports v2, identity-ключ: фикстура без student_ref_id — каждая запись
+    # своя строка (раньше склеивались по хешу ФИО: Иванов был одной строкой с
+    # 3 участвиями). Порядок: участий по возрастанию, затем ФИО/институт и
+    # identity-тай-брейк для одинаковых ФИО+снимка.
     save_report_fixture(adapter)
     infos = adapter.get_filtered('', '', '', '', '')
 
@@ -247,11 +252,14 @@ def test_report_student_slice_counts_metrics_in_sql(adapter):
         )
         for info in infos
     ] == [
-        ('Козлов Кирилл', 'ИМИ', 'ТД-303', 2, 1, 0, 1),
-        ('Козлов Кирилл', 'ИСИ', 'ПГС-101', 1, 1, 1, 1),
-        ('Сидоров Сидор', 'ИСИ', 'ПГС-102', 3, 1, 0, 0),
-        ('Петров Пётр', 'ИМИ', 'СБ-202', 2, 2, 1, 2),
-        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 3, 1, 2),
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 1, 1, 1),  # запись id 1: 1 место
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 1, 0, 1),  # запись id 2: 3 место
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 1, 0, 0),  # запись id 3: 5 место
+        ('Козлов Кирилл', 'ИМИ', 'ТД-303', 2, 1, 0, 1),  # запись id 8: 2 место
+        ('Козлов Кирилл', 'ИСИ', 'ПГС-101', 1, 1, 1, 1),  # запись id 7: 1 место
+        ('Петров Пётр', 'ИМИ', 'СБ-202', 2, 1, 0, 1),  # запись id 4: 2 место
+        ('Петров Пётр', 'ИМИ', 'СБ-202', 2, 1, 1, 1),  # запись id 5: 1 место
+        ('Сидоров Сидор', 'ИСИ', 'ПГС-102', 3, 1, 0, 0),  # запись id 6: 4 место
     ]
 
 
@@ -301,12 +309,15 @@ def test_report_slices_share_filters_with_student_slice(adapter):
     # применяются к любому срезу тем же WHERE.
     save_report_fixture(adapter)
 
-    # институт+группа по иерархии: пара сузила срез «студент» до Иванова и
-    # записи Козлова из ИСИ/ПГС-101 (Козлов из ИМИ не попадает).
+    # институт+группа по иерархии: пара сузила срез «студент» до записей
+    # Иванова и Козлова из ИСИ/ПГС-101 (Козлов из ИМИ не попадает);
+    # Reports v2: без student_ref_id каждая запись — своя строка.
     infos = adapter.get_filtered('', '', '', '', '', institute='ИСИ', group='ПГС-101')
     assert [(info.student_name, info.count_participation) for info in infos] == [
+        ('Иванов Иван', 1),
+        ('Иванов Иван', 1),
+        ('Иванов Иван', 1),
         ('Козлов Кирилл', 1),
-        ('Иванов Иван', 3),
     ]
 
     # вид спорта на срезе «институт»: ИСИ по Бегу — записи 1, 2, 7; ИМИ — 4, 8.
@@ -336,6 +347,295 @@ def test_get_grouped_report_rejects_unknown_and_student_slices(adapter):
         adapter.get_grouped_report('bogus')
     with pytest.raises(ValueError, match='студент'):
         adapter.get_grouped_report('student')
+
+
+# --- Reports v2 (P1): identity-правило, уникальные метрики, сводка. ---
+# Фикстура make_report_identity_fixture — src/conftest.py.
+
+
+def save_report_identity_fixture(adapter):
+    adapter.save_competitions(make_report_identity_fixture())
+    return adapter
+
+
+def test_report_identity_same_ref_merges_within_snapshot(adapter):
+    # Один ref в одной группе — одна строка с 2 участвиями; смена группы
+    # даёт вторую строку по снимку (историчность), но человек один.
+    save_report_identity_fixture(adapter)
+    infos = adapter.get_filtered('', '', '', '', '')
+
+    odintsova = [info for info in infos if info.student_name == 'Одинцова Ольга']
+    # Порядок канонический: участий по возрастанию (Гр-222 с 1 участием —
+    # раньше, Гр-111 с 2 — позже).
+    assert [(info.group, info.count_participation, info.count_wins, info.count_prizes) for info in odintsova] == [
+        ('Гр-222', 1, 0, 1),
+        ('Гр-111', 2, 1, 2),
+    ]
+
+
+def test_report_identity_namesakes_with_different_refs_not_merged(adapter):
+    # Полные тёзки с одинаковым снимком, но разными ref — две строки
+    # (исправление склейки однофамильцев/тёзок легаси-ключом sha256(ФИО)).
+    save_report_identity_fixture(adapter)
+    infos = adapter.get_filtered('', '', '', '', '')
+
+    dvoynikova = [info for info in infos if info.student_name == 'Двойникова Дарья']
+    assert [(info.count_participation, info.count_wins, info.count_prizes) for info in dvoynikova] == [
+        (1, 0, 0),  # ref 22: 5 место
+        (1, 1, 1),  # ref 23: 1 место
+    ]
+
+
+def test_report_identity_legacy_row_without_ref_is_own_identity(adapter):
+    # Легаси-запись без student_ref_id — свой identity ('x' || id): строка
+    # не склеивается ни с кем, в уникальных метриках считается отдельно.
+    save_report_identity_fixture(adapter)
+    summary = adapter.get_report_summary()
+
+    legacy = [info for info in adapter.get_filtered('', '', '', '', '') if info.student_name == 'Легасиев Ларион']
+    assert [(info.count_participation, info.count_wins, info.count_prizes) for info in legacy] == [(1, 0, 0)]
+    # identities: r11, r22, r23, x(легаси) = 4 уникальных участника.
+    assert summary.count_unique_participants == 4
+
+
+def test_report_summary_five_metrics_via_separate_aggregate(adapter):
+    # Сводка — отдельный агрегатный запрос по всей выборке: участия 6,
+    # победы 2, призовые 4, уникальные участники 4, уникальные призёры 2
+    # (пересчитано руками по фикстуре).
+    save_report_identity_fixture(adapter)
+    summary = adapter.get_report_summary()
+
+    assert summary.model_dump() == {
+        'count_participation': 6,
+        'count_wins': 2,
+        'count_prizes': 4,
+        'count_unique_participants': 4,
+        'count_unique_prizers': 2,
+    }
+
+
+def test_report_summary_distinct_not_summed_over_groups(adapter):
+    # Инвариант итогов: уникальные метрики выборки НЕ сумма по группам
+    # среза. Одинцова (ref 11) в двух группах: срез «группа» даёт 3+2=5
+    # уникальных участников, в выборке их 4; уникальных призёров 2+1=3
+    # против 2 в выборке.
+    save_report_identity_fixture(adapter)
+
+    grouped = adapter.get_grouped_report('group')
+    # Порядок канонический: участий по возрастанию.
+    assert [
+        (
+            row.slice_value,
+            row.count_participation,
+            row.count_unique_participants,
+            row.count_unique_prizers,
+        )
+        for row in grouped
+    ] == [
+        ('Гр-222', 2, 2, 1),
+        ('Гр-111', 4, 3, 2),
+    ]
+    assert sum(row.count_unique_participants for row in grouped) == 5
+    assert sum(row.count_unique_prizers for row in grouped) == 3
+
+    summary = adapter.get_report_summary()
+    assert summary.count_participation == 6
+    assert summary.count_unique_participants == 4
+    assert summary.count_unique_prizers == 2
+
+
+def test_report_summary_shares_filters_with_slices(adapter):
+    # Тот же WHERE: фильтр вида спорта сужает и срез, и сводку.
+    # «Бег»: 2 записи Одинцовой (Гр-111) + Двойникова ref22 + ref23 = 4
+    # участия, 3 identity (r11, r22, r23).
+    save_report_identity_fixture(adapter)
+
+    summary = adapter.get_report_summary(sport='Бег')
+    assert summary.count_participation == 4
+    assert summary.count_unique_participants == 3
+
+
+def test_report_position_zero_participates_but_not_prize(adapter):
+    # Класс «Без результата» (место 0): входит в участия/уникальных
+    # участников, не входит в призовые/уникальных призёров.
+    save_report_identity_fixture(adapter)
+
+    summary = adapter.get_report_summary(position='0')
+    assert summary.model_dump() == {
+        'count_participation': 1,
+        'count_wins': 0,
+        'count_prizes': 0,
+        'count_unique_participants': 1,
+        'count_unique_prizers': 0,
+    }
+    assert [info.student_name for info in adapter.get_filtered(position='0')] == ['Легасиев Ларион']
+
+
+# --- Reports v2 (P2): фильтры курс/год поступления, casefold-ФИО. ---
+
+
+def test_report_name_filter_is_casefold_substring(adapter):
+    # ФИО-поиск без регистра, включая кириллицу (прецедент главной): SQL
+    # LIKE регистронезависив только для ASCII и «ИВАНОВ» по «иванов» не
+    # находил. Побочно % и _ — теперь литералы, не wildcard.
+    adapter.save_competitions(
+        [
+            make_competition('Иванов Иван', datetime(2026, 1, 1)),
+            make_competition('Петров Пётр', datetime(2026, 1, 2)),
+        ]
+    )
+
+    for needle in ('иванов', 'ИВАНОВ', 'иваНОВ', 'нов Ив'):
+        assert [info.student_name for info in adapter.get_filtered(name=needle)] == ['Иванов Иван']
+    assert adapter.get_filtered(name='%') == []
+    assert adapter.get_filtered(name='_') == []
+
+
+def test_report_course_filter_is_exact_value(adapter):
+    # Курс 1 фикстуры: Иванов ×3 + Козлов ИСИ = 4 участия; курсы 2 (Петров,
+    # Козлов ИМИ) и 3 (Сидоров) не мешают.
+    save_report_fixture(adapter)
+
+    summary = adapter.get_report_summary(course='1')
+    assert summary.count_participation == 4
+    assert summary.count_wins == 2
+    assert [info.course for info in adapter.get_filtered(course='1')] == [1, 1, 1, 1]
+
+
+def save_report_admission_fixture(adapter):
+    """Снимки года поступления: 2023 ×2, 2024 ×1, NULL ×1 (все approved)."""
+    adapter.save_competitions(
+        [
+            make_report_record(
+                'Абрамов Артём',
+                'М',
+                'ИПТ',
+                'Гр-1',
+                2,
+                'Бег',
+                datetime(2025, 3, 1),
+                'внутривузовские',
+                1,
+                admission_year=2023,
+            ),
+            make_report_record(
+                'Борисов Борис',
+                'М',
+                'ИПТ',
+                'Гр-1',
+                1,
+                'Бег',
+                datetime(2025, 4, 1),
+                'внутривузовские',
+                2,
+                admission_year=2023,
+            ),
+            make_report_record(
+                'Викторов Виктор',
+                'М',
+                'ИПТ',
+                'Гр-2',
+                1,
+                'Лыжи',
+                datetime(2025, 5, 1),
+                'внутривузовские',
+                3,
+                admission_year=2024,
+            ),
+            make_report_record(
+                'Григорьев Григорий', 'М', 'ИПТ', 'Гр-2', 2, 'Лыжи', datetime(2025, 6, 1), 'внутривузовские', 4
+            ),
+        ]
+    )
+    return adapter
+
+
+def test_report_admission_year_filter(adapter):
+    save_report_admission_fixture(adapter)
+
+    summary = adapter.get_report_summary(admission_year='2023')
+    assert summary.count_participation == 2
+    assert summary.count_wins == 1
+
+    # 'none' — только записи без снимка (IS NULL).
+    none_summary = adapter.get_report_summary(admission_year='none')
+    assert none_summary.count_participation == 1
+    assert [info.student_name for info in adapter.get_filtered(admission_year='none')] == ['Григорьев Григорий']
+
+
+def test_report_admission_year_slice_groups_null_as_separate(adapter):
+    # Срез «год поступления»: NULL-снимок — своя группа (slice_value None,
+    # отображение «Не указан»), данные в БД не переписываются.
+    save_report_admission_fixture(adapter)
+
+    rows = adapter.get_grouped_report('admission_year')
+    # Порядок канонический: участий по возрастанию, NULL-группа в ASC —
+    # первой (нативный порядок SQLite).
+    assert [
+        (
+            row.slice_value,
+            row.count_participation,
+            row.count_wins,
+            row.count_prizes,
+        )
+        for row in rows
+    ] == [
+        (None, 1, 0, 0),  # Григорьев без снимка: 4 место
+        (2024, 1, 0, 1),  # Викторов: 3 место
+        (2023, 2, 1, 2),  # Абрамов (1) + Борисов (2)
+    ]
+
+
+def test_report_period_date_boundaries(adapter):
+    # Границы периода: 31.08 конец / 01.09 начало учебного года, оба
+    # включительно; запись-диапазон через границу видна с обеих сторон
+    # (правило пересечения интервалов); односторонние фильтры. Прямые даты
+    # без period работают как раньше (легаси-ссылки).
+    range_record = make_competition('Диапазон Через Границу', datetime(2025, 8, 30))
+    range_record.date_to = datetime(2025, 9, 1)
+    adapter.save_competitions(
+        [
+            make_competition('Поздний Август', datetime(2025, 8, 31)),
+            make_competition('Ранний Сентябрь', datetime(2025, 9, 1)),
+            range_record,
+        ]
+    )
+
+    # Учебный 2024/2025 = 01.09.2024–31.08.2025: 31.08 включён, 01.09 нет,
+    # диапазон 30.08–01.09 пересекается — включён.
+    names = [info.student_name for info in adapter.get_filtered(date_from='01.09.2024', date_to='31.08.2025')]
+    assert names == ['Диапазон Через Границу', 'Поздний Август']
+
+    # Учебный 2025/2026 = 01.09.2025–31.08.2026: диапазон пересекается тоже.
+    names = [info.student_name for info in adapter.get_filtered(date_from='01.09.2025', date_to='31.08.2026')]
+    assert names == ['Диапазон Через Границу', 'Ранний Сентябрь']
+
+    # Односторонние фильтры.
+    names = [info.student_name for info in adapter.get_filtered(date_from='01.09.2025')]
+    assert names == ['Диапазон Через Границу', 'Ранний Сентябрь']
+    names = [info.student_name for info in adapter.get_filtered(date_to='31.08.2025')]
+    assert names == ['Диапазон Через Границу', 'Поздний Август']
+
+
+def test_report_period_year_options_academic_year_boundary(adapter):
+    # Учебный год записи определяется по дате начала с сентябрьской
+    # границей (academic_year_start): 31.08.2025 → 2024/2025, 01.09.2025 →
+    # 2025/2026 (соседние дни — разные учебные годы); весна 2025 тоже
+    # 2024/2025 (DISTINCT). Только approved, по убыванию.
+    adapter.save_competitions(
+        [
+            make_competition('Августовский Артём', datetime(2025, 8, 31)),
+            make_competition('Сентябрьский Семён', datetime(2025, 9, 1)),
+            make_competition('Майский Михаил', datetime(2025, 5, 20)),
+        ]
+    )
+    adapter.save_competitions(
+        [make_competition('Отклонённый Олег', datetime(2024, 10, 1))],
+        review_status='rejected',
+        owner_id=9,
+    )
+
+    assert adapter.get_report_period_year_options() == [2025, 2024]
 
 
 def test_athlete_sees_admin_created_records_matching_profile(adapter):
@@ -418,7 +718,7 @@ def test_audit_log_limit(adapter):
     assert events[0]['id'] == 5
 
 
-def test_merge_students_unifies_report_grouping(adapter):
+def test_merge_students_renames_report_rows(adapter):
     old_name = 'Иванова Анна Петровна'
     new_name = 'Петрова Анна Ивановна'
     adapter.save_competitions(
@@ -438,9 +738,15 @@ def test_merge_students_unifies_report_grouping(adapter):
     assert adapter.count_records_by_student_hash(old_hash) == 0
 
     infos = adapter.get_filtered('', '', '', '', '')
-    assert len(infos) == 1
-    assert infos[0].count_participation == 3
-    assert infos[0].student_name == new_name
+    # Reports v2, identity-ключ среза «студент»: записи без student_ref_id
+    # не склеиваются (раньше merge по хешу ФИО давал одну строку с 3
+    # участвиями). Сам merge (переименование записей) не меняется: все три
+    # строки теперь под новым ФИО.
+    assert [(info.student_name, info.count_participation) for info in infos] == [
+        (new_name, 1),
+        (new_name, 1),
+        (new_name, 1),
+    ]
 
 
 def merge_for(adapter, old_name, new_name):
@@ -6475,6 +6781,11 @@ V21_PUBLIC_API = [
     'get_level_names',
     'get_name_aliases',
     'get_profile',
+    # Reports v2: опции фильтров и сводный агрегат по выборке.
+    'get_report_admission_year_options',
+    'get_report_course_options',
+    'get_report_period_year_options',
+    'get_report_summary',
     'get_sport_names',
     'get_student_by_id',
     'get_student_education_context',
@@ -6617,6 +6928,7 @@ def test_v21_sqlite_module_reexports_helpers():
         'STUDENT_SEX_VALUES',
         'STUDENT_SORT_COLUMNS',
         'REPORT_GROUPINGS',
+        'REPORT_IDENTITY_SQL',
         'DEFAULT_REPORT_GROUPING',
         'REPORT_METRIC_SELECTS',
         'COMPETITION_SELECT_SQL',

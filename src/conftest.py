@@ -53,6 +53,8 @@ def make_report_record(
     level: str,
     position: int,
     extra: dict | None = None,
+    student_ref_id: int | None = None,
+    admission_year: int | None = None,
 ) -> Competition:
     return Competition(
         student_id=f'id-{student_name}',
@@ -67,6 +69,12 @@ def make_report_record(
         name='Кубок',
         position=position,
         extra_data=extra or {},
+        # Reports v2: стабильная связь с карточкой студента — источник
+        # identity-выражения уникальных метрик и ключа среза «студент».
+        student_ref_id=student_ref_id,
+        # Reports v2: явный снимок года поступления (для фильтра/среза);
+        # по умолчанию None — как у существующих записей без снимка.
+        admission_year=admission_year,
     )
 
 
@@ -122,5 +130,86 @@ def make_report_unapproved_fixture() -> list[tuple[str, Competition]]:
             make_report_record(
                 'Наумов Наум', 'М', 'ИСИ', 'ПГС-101', 1, 'Бег', datetime(2024, 7, 1), 'внутривузовские', 1
             ),
+        ),
+    ]
+
+
+def make_report_identity_fixture() -> list[Competition]:
+    """Записи с identity-разнообразием для тестов Reports v2 (P1/P2).
+
+    Руками (срез «студент», ключ = identity + ФИО + пол + институт + группа
+    + курс):
+      Одинцова Ольга (ref 11): Гр-111 ×2 (1 место, 3 место) и Гр-222 ×1
+        (2 место) — один человек в двух исторических группах: 3 участия,
+        2 строки среза, но 1 уникальный участник выборки;
+      Двойникова Дарья (ref 22): Гр-111, 5 место;
+      Двойникова Дарья (ref 23): Гр-111, 1 место — полное тёзка с тем же
+        снимком (ФИО/пол/институт/группа/курс), другой ref — 2 строки;
+      Легасиев Ларион (без ref): Гр-222, место 0 «Без результата» —
+        легаси-запись без связи, своя строка и свой identity.
+    """
+    return [
+        make_report_record(
+            'Одинцова Ольга',
+            'Ж',
+            'ИПТ',
+            'Гр-111',
+            1,
+            'Бег',
+            datetime(2024, 3, 1),
+            'внутривузовские',
+            1,
+            student_ref_id=11,
+        ),
+        make_report_record(
+            'Одинцова Ольга',
+            'Ж',
+            'ИПТ',
+            'Гр-111',
+            1,
+            'Бег',
+            datetime(2024, 4, 1),
+            'внутривузовские',
+            3,
+            student_ref_id=11,
+        ),
+        make_report_record(
+            'Одинцова Ольга',
+            'Ж',
+            'ИПТ',
+            'Гр-222',
+            2,
+            'Лыжи',
+            datetime(2025, 5, 1),
+            'межвузовские',
+            2,
+            student_ref_id=11,
+        ),
+        make_report_record(
+            'Двойникова Дарья',
+            'Ж',
+            'ИПТ',
+            'Гр-111',
+            1,
+            'Бег',
+            datetime(2024, 6, 1),
+            'внутривузовские',
+            5,
+            student_ref_id=22,
+        ),
+        make_report_record(
+            'Двойникова Дарья',
+            'Ж',
+            'ИПТ',
+            'Гр-111',
+            1,
+            'Бег',
+            datetime(2024, 7, 1),
+            'внутривузовские',
+            1,
+            student_ref_id=23,
+        ),
+        make_report_record(
+            'Легасиев Ларион', 'М', 'ИПТ', 'Гр-222', 2, 'Шахматы', datetime(2025, 8, 1), 'внутривузовские', 0
         ),
     ]

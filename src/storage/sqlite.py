@@ -36,6 +36,7 @@ from src.storage.helpers import IDENTITY_MODES  # noqa: F401
 from src.storage.helpers import participation_content_key  # noqa: F401
 from src.storage.helpers import RENAME_CATEGORIES  # noqa: F401
 from src.storage.helpers import REPORT_GROUPINGS  # noqa: F401
+from src.storage.helpers import REPORT_IDENTITY_SQL  # noqa: F401
 from src.storage.helpers import REPORT_METRIC_SELECTS  # noqa: F401
 from src.storage.helpers import STUDENT_SEX_VALUES  # noqa: F401
 from src.storage.helpers import STUDENT_SORT_COLUMNS  # noqa: F401

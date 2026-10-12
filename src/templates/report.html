@@ -2,254 +2,166 @@
 
 {% block content %}
 
-{# Композиция страницы отчётов — по прототипу 05: заголовок с описанием,
-   панель фильтров и панель выгрузки карточками; результат применения
-   фильтра подставляется в content-wrapper ниже. #}
+{# Страница отчётов Reports v2: применённое состояние живёт в URL
+   (GET-навигация). Сверху — условия (форма восстанавливается из URL),
+   ниже — зона результата по применённым параметрам либо заглушка. #}
 <div class="page-head">
     <div>
         <h1 class="page-title">Отчёты</h1>
-        <p class="page-sub">Готовые выборки по реестру. Задайте условия фильтра и сформируйте отчёт — результат откроется под формой, с выгрузкой в Excel.</p>
+        <p class="page-sub">Готовые выборки по реестру: участия, победы и призовые места с фильтрами по периоду, студентам и соревнованиям. Сформированный отчёт живёт в адресе страницы — ссылкой можно поделиться, результат выгружается в Excel.</p>
     </div>
 </div>
 
-<div class="card shadow-sm mb-4">
-    <div class="card-body">
-        <h3 class="title mb-1">Количество участий</h3>
-        <div class="text-muted mb-3">Сколько раз кто участвовал, побеждал и занимал призовые места. Группировка — по данным записи: ФИО, группа и курс на момент выступления.</div>
-        <form class="filter-form filter">
-    <div class="row align-items-md-bottom">
-        <div class="col align-self-md-center filter__group-by-wrapper">
-            <span class="label">Группировать по</span>
-            <select class="form-select filter__group-by" name="group_by">
-                {% for option in report_slice_options %}
-                <option value="{{ option.key }}"{% if option.key == 'student' %} selected{% endif %}>{{ option.label }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div class="col align-self-md-center filter__institute-wrapper">
-            <span class="label">Институт</span>
-            <select class="form-select filter__institute" name="institute">
-                <option value="">Все</option>
-                {% for value in institute_options %}
-                <option value="{{ value }}">{{ value }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div class="col align-self-md-center filter__group-wrapper">
-            <span class="label">Группа</span>
-            <select class="form-select filter__group" name="group"
-                    data-all-groups='{{ group_options | tojson }}'
-                    data-groups-by-institute='{{ groups_by_institute | tojson }}'>
-                <option value="">Все</option>
-                {% for value in group_options %}
-                <option value="{{ value }}">{{ value }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div class="col align-self-md-center filter__sport-wrapper">
-            <span class="label">Вид спорта</span>
-            <select class="form-select filter__sport" name="sport">
-                <option value="">Все</option>
-                {% for value in sport_options %}
-                <option value="{{ value }}">{{ value }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div class="col">
-            <span class="label">ФИО</span>
-            <div class="input-group">
-                <input class="form-control filter__name" name="name" type="text" autocomplete="off">
-            </div>
-        </div>
-        <div class="col align-self-md-center">
-            <div class="datetime">
-                <div>
-                    <span class="label">Дата (От)</span>
-                    <input class="filter__date-from" name="date_from" type="text" autocomplete="off">
-                </div>
-                <div>
-                    <span class="label">Дата (До)</span>
-                    <input class="filter__date-to" name="date_to" type="text" autocomplete="off">
-                </div>
-            </div>
-        </div>
-        <div class="col align-self-md-center filter__position-wrapper">
-            <span class="label">Место</span>
-            <select class="filter__position select" name="position">
-                <option data-display="Все" value="">Все</option>
-                <option value="<2">Победа</option>
-                <option value="<4">Призовое место</option>
-                <option value=">3">Не призовое место</option>
-            </select>
-        </div>
-        <div class="col align-self-md-center filter__level-wrapper">
-            <span class="label">Уровень соревнований</span>
-            <select class="filter__level select" name="level">
-                <option data-display="Все" value="">Все</option>
-                {% for level in levels %}
-                <option value="{{ level }}">{{ level }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        {% for field in custom_fields %}
-        <div class="col align-self-md-center">
-            <span class="label">{{ field.label }}</span>
-            <input
-                class="form-control filter__custom"
-                name="custom__{{ field.key }}"
-                type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'url' %}url{% else %}text{% endif %}"
-                autocomplete="off"
-                {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
-            >
-        </div>
-        {% endfor %}
-        <div class="col-clean-button align-self-md-end">
-            <button class="filter-form__clean-button btn btn-danger" type="button">
-                <img src="/static/icons/filter-clean.svg" alt="Сбросить фильтр" />
-            </button>
-        </div>
-        <div class="col-button align-self-md-end">
-            <button class="filter-form__button btn btn-primary" type="submit">Сформировать отчет</button>
-        </div>
-    </div>
-</form>
-    </div>
+{% if report_error %}
+{# Ошибка валидации условий: точный текст сервера, форма сохраняет
+   значения, зоны результата нет (шаблон как у admin_error в base.html). #}
+<div class="alert alert-danger alert-dismissible" role="alert">
+    {{ report_error }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Закрыть"></button>
 </div>
+{% endif %}
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h3 class="title mb-1">Выгрузить в Excel</h3>
-        <div class="text-muted mb-3">Отметьте колонки, которые попадут в файл выгрузки. Файл формируется по применённым условиям отчёта.</div>
-        <form class="report-export-form" method="get" action="/export/report">
-            <div class="row align-items-center">
-                {# Колонки зависят от среза (замечание №19): инлайн-скрипт ниже
-                   перестраивает чекбоксы при смене «Группировать по». #}
-                <div class="col">
-                    <div class="row align-items-center report-export-columns" id="report-export-columns"
-                         data-columns-by-slice='{{ report_export_columns_by_slice | tojson }}'>
-                        {% for column in report_export_columns %}
-                        <div class="col-auto">
-                            <label class="form-check report-export-form__column">
-                                <input
-                                    class="form-check-input report-export-column"
-                                    type="checkbox"
-                                    name="columns"
-                                    value="{{ column }}"
-                                    checked
-                                >
-                                <span class="form-check-label">{{ column }}</span>
-                            </label>
-                        </div>
-                        {% endfor %}
+        <h3 class="title mb-1">Условия отчёта</h3>
+        <div class="text-muted mb-3">Фильтры — какие записи попадают в расчёт; разрез — как они сведены в таблице.</div>
+        {# data-applied-query — применённый запрос для клиентского
+           dirty-детекта (предупреждение о неприменённых изменениях). #}
+        <form class="report-form row g-3 align-items-end" method="get" action="/reports"{% if report_applied %} data-applied-query="{{ applied_query }}"{% endif %}>
+            <div class="col-6 col-md-3">
+                <label class="form-label" for="report-filter-period">Период</label>
+                <select class="form-select report__period" id="report-filter-period" name="period">
+                    {% for option in period_options %}
+                    <option value="{{ option.value }}"{% if option.value == report_form.period %} selected{% endif %}>{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-5 report__dates{% if report_form.period != 'custom' %} d-none{% endif %}">
+                <div class="datetime">
+                    <div>
+                        <label class="form-label" for="report-filter-date-from">Дата (от)</label>
+                        <input class="form-control" id="report-filter-date-from" name="date_from" type="text"
+                               autocomplete="off"{% if report_form.period != 'custom' %} disabled{% endif %}
+                               value="{{ report_form.date_from }}">
+                    </div>
+                    <div>
+                        <label class="form-label" for="report-filter-date-to">Дата (до)</label>
+                        <input class="form-control" id="report-filter-date-to" name="date_to" type="text"
+                               autocomplete="off"{% if report_form.period != 'custom' %} disabled{% endif %}
+                               value="{{ report_form.date_to }}">
                     </div>
                 </div>
-                <div class="col-auto">
-                    <button class="report-export-form__button btn btn-success" type="submit">Экспорт</button>
-                </div>
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label" for="report-filter-institute">Институт</label>
+                <select class="form-select report__institute" id="report-filter-institute" name="institute">
+                    <option value="">Все</option>
+                    {% for value in institute_options %}
+                    <option value="{{ value }}"{% if value == report_form.institute %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label" for="report-filter-group">Группа</label>
+                <select class="form-select report__group" id="report-filter-group" name="group"
+                        data-all-groups='{{ group_options | tojson }}'
+                        data-groups-by-institute='{{ groups_by_institute | tojson }}'>
+                    <option value="">Все</option>
+                    {% for value in group_options %}
+                    <option value="{{ value }}"{% if value == report_form.group %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="report-filter-course">Курс</label>
+                <select class="form-select" id="report-filter-course" name="course">
+                    <option value="">Все</option>
+                    {% for value in course_options %}
+                    <option value="{{ value }}"{% if value == report_form.course %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-2">
+                <label class="form-label" for="report-filter-admission-year">Год поступления</label>
+                <select class="form-select" id="report-filter-admission-year" name="admission_year">
+                    <option value="">Все</option>
+                    {% if admission_has_none %}
+                    <option value="none"{% if report_form.admission_year == 'none' %} selected{% endif %}>Не указан</option>
+                    {% endif %}
+                    {% for value in admission_year_options %}
+                    <option value="{{ value }}"{% if value == report_form.admission_year %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label" for="report-filter-sport">Вид спорта</label>
+                <select class="form-select" id="report-filter-sport" name="sport">
+                    <option value="">Все</option>
+                    {% for value in sport_options %}
+                    <option value="{{ value }}"{% if value == report_form.sport %} selected{% endif %}>{{ value }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label" for="report-filter-level">Уровень соревнований</label>
+                <select class="form-select filter__level" id="report-filter-level" name="level">
+                    <option data-display="Все" value="">Все</option>
+                    {% for level in levels %}
+                    <option value="{{ level }}"{% if level == report_form.level %} selected{% endif %}>{{ level }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label" for="report-filter-name">ФИО</label>
+                <input class="form-control filter__name" id="report-filter-name" name="name" type="text"
+                       autocomplete="off" value="{{ report_form.name }}">
+            </div>
+            <div class="col-6 col-md-3">
+                <label class="form-label" for="report-filter-position">Место</label>
+                <select class="filter__position select" id="report-filter-position" name="position">
+                    <option data-display="Все" value="">Все</option>
+                    <option value="<2"{% if report_form.position == '<2' %} selected{% endif %}>Победа</option>
+                    <option value="<4"{% if report_form.position == '<4' %} selected{% endif %}>Призовое место</option>
+                    <option value=">3"{% if report_form.position == '>3' %} selected{% endif %}>Не призовое место</option>
+                    <option value="0"{% if report_form.position == '0' %} selected{% endif %}>Без результата</option>
+                </select>
+            </div>
+            {% for field in custom_fields %}
+            <div class="col-6 col-md-3">
+                <label class="form-label" for="report-filter-custom-{{ field.key }}">{{ field.label }}</label>
+                <input
+                    class="form-control filter__custom"
+                    id="report-filter-custom-{{ field.key }}"
+                    name="custom__{{ field.key }}"
+                    type="{% if field.field_type == 'number' %}number{% elif field.field_type == 'url' %}url{% else %}text{% endif %}"
+                    autocomplete="off"
+                    {% if field.field_type == 'date' %}placeholder="дд.мм.гггг"{% endif %}
+                    value="{{ report_form.custom.get(field.key, '') }}"
+                >
+            </div>
+            {% endfor %}
+            <div class="col-12 col-md-3">
+                <label class="form-label" for="report-filter-group-by">Разрез</label>
+                <select class="form-select report__group-by" id="report-filter-group-by" name="group_by">
+                    {% for option in report_slice_options %}
+                    <option value="{{ option.key }}"{% if option.key == report_form.group_by %} selected{% endif %}>{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4 d-flex gap-2">
+                <button class="btn btn-primary report-form__submit" type="submit">Сформировать отчёт</button>
+                <a class="btn btn-outline-secondary" href="/reports">Сбросить</a>
             </div>
         </form>
     </div>
 </div>
 
 <div class="content-wrapper">
-    <div class="empty-content">Задайте условия фильтра и нажмите «Сформировать отчет»</div>
-</div>
-
-<script>
-    // Логика новых контролов отчёта (замечание №19) живёт инлайн: script.js
-    // общий для всех страниц и не расширяется. Срез и фильтры уходят на
-    // сервер GET-параметрами той же формы — шаримость ссылок не меняется.
-    (function () {
-        var sliceSelect = document.querySelector(".filter__group-by");
-        var instituteSelect = document.querySelector(".filter__institute");
-        var groupSelect = document.querySelector(".filter__group");
-        var sportSelect = document.querySelector(".filter__sport");
-        var columnsBox = document.getElementById("report-export-columns");
-        var cleanButton = document.querySelector(".filter-form__clean-button");
-        if (!sliceSelect || !instituteSelect || !groupSelect || !columnsBox) {
-            return;
-        }
-
-        var columnsBySlice = {};
-        try {
-            columnsBySlice = JSON.parse(columnsBox.dataset.columnsBySlice || "{}");
-        } catch (error) {
-            columnsBySlice = {};
-        }
-        var groupsByInstitute = {};
-        try {
-            groupsByInstitute = JSON.parse(groupSelect.dataset.groupsByInstitute || "{}");
-        } catch (error) {
-            groupsByInstitute = {};
-        }
-        var allGroups = [];
-        try {
-            allGroups = JSON.parse(groupSelect.dataset.allGroups || "[]");
-        } catch (error) {
-            allGroups = [];
-        }
-
-        // Иерархия институт→группа (решение 2026-09-13): выбранный институт
-        // фильтрует список групп; без института доступны все группы.
-        function fillGroupOptions(institute) {
-            var groups = institute && groupsByInstitute[institute] ? groupsByInstitute[institute] : allGroups;
-            var selected = groupSelect.value;
-            var options = [new Option("Все", "")].concat(groups.map(function (value) {
-                return new Option(value, value);
-            }));
-            groupSelect.replaceChildren.apply(groupSelect, options);
-            if (selected && groups.indexOf(selected) !== -1) {
-                groupSelect.value = selected;
-            }
-        }
-
-        function renderExportColumns(sliceKey) {
-            var columns = columnsBySlice[sliceKey] || columnsBySlice.student || [];
-            var boxes = columns.map(function (column) {
-                var col = document.createElement("div");
-                col.className = "col-auto";
-                var label = document.createElement("label");
-                label.className = "form-check report-export-form__column";
-                var input = document.createElement("input");
-                input.className = "form-check-input report-export-column";
-                input.type = "checkbox";
-                input.name = "columns";
-                input.value = column;
-                input.checked = true;
-                var text = document.createElement("span");
-                text.className = "form-check-label";
-                text.textContent = column;
-                label.appendChild(input);
-                label.appendChild(text);
-                col.appendChild(label);
-                return col;
-            });
-            columnsBox.replaceChildren.apply(columnsBox, boxes);
-        }
-
-        instituteSelect.addEventListener("change", function () {
-            fillGroupOptions(instituteSelect.value);
-        });
-        sliceSelect.addEventListener("change", function () {
-            renderExportColumns(sliceSelect.value);
-        });
-        if (cleanButton) {
-            cleanButton.addEventListener("click", function () {
-                sliceSelect.value = "student";
-                instituteSelect.value = "";
-                if (sportSelect) {
-                    sportSelect.value = "";
-                }
-                fillGroupOptions("");
-                renderExportColumns("student");
-            });
-        }
-    })();
-</script>
-
-{# Лоадер применения фильтра (script.js setLoading) — как на главной. #}
-<div class="loader">
-    <div class="loader__icon"></div>
+    {% if report_applied %}
+    {% include 'report_result.html' %}
+    {% elif not report_error %}
+    <div class="empty-content">Задайте условия и нажмите «Сформировать отчёт»</div>
+    {% endif %}
 </div>
 
 {% endblock content %}

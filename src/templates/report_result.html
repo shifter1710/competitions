@@ -1,0 +1,161 @@
+{# Зона результата отчёта (Reports v2): общий фрагмент для канонической
+   страницы /reports (внутри content-wrapper) и легаси-фрагмента /report.
+   Рендерится ТОЛЬКО по применённым параметрам URL; порядок блоков —
+   контракт UI: чипы → предупреждение о неприменённых изменениях (клиентски)
+   → счётчик → карточки сводки → таблица с «Итого» → панель экспорта. #}
+{% if report_chips %}
+<div class="report-chips-toolbar">
+    {% for chip in report_chips %}
+    <span class="filter-chip">{{ chip.label }}: <strong>{{ chip.value }}</strong><a
+        class="filter-chip__x"
+        href="{{ chip.remove_url }}"
+        title="Убрать условие"
+    >×</a></span>
+    {% endfor %}
+    <a class="filter-chip filter-chip_reset" href="/reports">Сбросить всё</a>
+</div>
+{% endif %}
+{# Показывается скриптом, когда форма «грязная» относительно применённого
+   запроса (data-applied-query на форме условий). #}
+<div class="alert alert-warning report-dirty-warning d-none" role="alert">
+    Условия изменены — таблица ниже рассчитана по прежним условиям.
+</div>
+<div class="table-meta">
+    <span>{{ rows_count }} {{ rows_count_label }} · {{ total_participations }} {{ participations_label }}</span>
+</div>
+<div class="report-stats">
+    <div class="report-stat">
+        <span class="report-stat__label">Участий</span>
+        <span class="report-stat__value">{{ report_summary.count_participation }}</span>
+    </div>
+    <div class="report-stat">
+        <span class="report-stat__label">Побед</span>
+        <span class="report-stat__value">{{ report_summary.count_wins }}</span>
+    </div>
+    <div class="report-stat">
+        <span class="report-stat__label">Призовых</span>
+        <span class="report-stat__value">{{ report_summary.count_prizes }}</span>
+    </div>
+    <div class="report-stat">
+        <span class="report-stat__label">Уникальных участников</span>
+        <span class="report-stat__value">{{ report_summary.count_unique_participants }}</span>
+    </div>
+    <div class="report-stat">
+        <span class="report-stat__label">Уникальных призёров</span>
+        <span class="report-stat__value">{{ report_summary.count_unique_prizers }}</span>
+    </div>
+</div>
+{% if report_rows %}
+<div class="table-card" data-table-view="report">
+    <div class="table-responsive">
+        <table class="table table-striped table-bordered interactive-table">
+            <thead class="table-dark">
+                <tr>
+                    <th scope="col" data-column-key="index" data-sort-type="number">№</th>
+                    {% if report_slice_is_student %}
+                    <th scope="col" data-column-key="student_name" data-sort-type="text">ФИО</th>
+                    <th scope="col" data-column-key="student_sex" data-sort-type="text">Пол</th>
+                    <th scope="col" data-column-key="institute" data-sort-type="text">Институт</th>
+                    <th scope="col" data-column-key="group" data-sort-type="text">Группа</th>
+                    <th scope="col" data-column-key="course" data-sort-type="number">Курс</th>
+                    {% else %}
+                    <th scope="col" data-column-key="slice_value" data-sort-type="{{ report_slice_sort_type }}">{{ report_slice_column }}</th>
+                    {% endif %}
+                    <th scope="col" data-column-key="count_participation" data-sort-type="number">Участий</th>
+                    <th scope="col" data-column-key="count_wins" data-sort-type="number">Побед</th>
+                    <th scope="col" data-column-key="count_prizes" data-sort-type="number">Призовых</th>
+                    {% if not report_slice_is_student %}
+                    <th scope="col" data-column-key="count_unique_participants" data-sort-type="number">Уникальных участников</th>
+                    <th scope="col" data-column-key="count_unique_prizers" data-sort-type="number">Уникальных призёров</th>
+                    {% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in report_rows %}
+                <tr>
+                    <td data-column-key="index">{{ loop.index }}</td>
+                    {% if report_slice_is_student %}
+                    <td data-column-key="student_name"{% if not row.student_name %} class="text-muted"{% endif %}>{{ row.student_name or 'Не указано' }}</td>
+                    <td data-column-key="student_sex"{% if not row.student_sex %} class="text-muted"{% endif %}>{{ row.student_sex or 'Не указано' }}</td>
+                    <td data-column-key="institute"{% if not row.institute %} class="text-muted"{% endif %}>{{ row.institute or 'Не указано' }}</td>
+                    <td data-column-key="group"{% if not row.group %} class="text-muted"{% endif %}>{{ row.group or 'Не указано' }}</td>
+                    <td data-column-key="course">{{ row.course }}</td>
+                    {% else %}
+                    <td data-column-key="slice_value"{% if row.slice_value is none %} class="text-muted" data-sort-value="-1"{% endif %}>{{ 'Не указано' if row.slice_value is none else row.slice_value }}</td>
+                    {% endif %}
+                    <td data-column-key="count_participation">{{ row.count_participation }}</td>
+                    <td data-column-key="count_wins">{{ row.count_wins }}</td>
+                    <td data-column-key="count_prizes">{{ row.count_prizes }}</td>
+                    {% if not report_slice_is_student %}
+                    <td data-column-key="count_unique_participants">{{ row.count_unique_participants }}</td>
+                    <td data-column-key="count_unique_prizers">{{ row.count_unique_prizers }}</td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </tbody>
+            {# «Итого» — метрики всей выборки из сводного запроса:
+               distinct-метрики НЕ суммы по строкам (Reports v2). Клиентская
+               сортировка tfoot не трогает (script.js сортирует tbody). #}
+            <tfoot class="report-table-footer">
+                <tr>
+                    <td data-column-key="index"></td>
+                    {% if report_slice_is_student %}
+                    <td data-column-key="student_name">Итого</td>
+                    <td data-column-key="student_sex"></td>
+                    <td data-column-key="institute"></td>
+                    <td data-column-key="group"></td>
+                    <td data-column-key="course"></td>
+                    {% else %}
+                    <td data-column-key="slice_value">Итого</td>
+                    {% endif %}
+                    <td data-column-key="count_participation">{{ report_summary.count_participation }}</td>
+                    <td data-column-key="count_wins">{{ report_summary.count_wins }}</td>
+                    <td data-column-key="count_prizes">{{ report_summary.count_prizes }}</td>
+                    {% if not report_slice_is_student %}
+                    <td data-column-key="count_unique_participants">{{ report_summary.count_unique_participants }}</td>
+                    <td data-column-key="count_unique_prizers">{{ report_summary.count_unique_prizers }}</td>
+                    {% endif %}
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="empty-content">По заданным условиям записей не найдено</div>
+{% endif %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h3 class="title mb-1">Выгрузить в Excel</h3>
+        <div class="text-muted mb-3">Файл формируется по применённым условиям отчёта — фильтры и разрез передаются из применённого запроса, отметьте колонки файла.</div>
+        <form class="report-export-form" method="get" action="/export/report">
+            {# Применённые параметры (НЕ текущие поля формы): экспорт строится
+               ровно по показанной таблице (Reports v2). #}
+            {% for key, value in report_export_params %}
+            <input type="hidden" name="{{ key }}" value="{{ value }}">
+            {% endfor %}
+            <div class="row align-items-center">
+                <div class="col">
+                    <div class="row align-items-center g-2 report-export-columns" id="report-export-columns">
+                        {% for column in report_export_columns %}
+                        <div class="col-auto">
+                            <label class="form-check report-export-form__column">
+                                <input
+                                    class="form-check-input report-export-column"
+                                    type="checkbox"
+                                    name="columns"
+                                    value="{{ column }}"
+                                    checked
+                                >
+                                <span class="form-check-label">{{ column }}</span>
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <button class="report-export-form__button btn btn-success" type="submit">Экспорт</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
