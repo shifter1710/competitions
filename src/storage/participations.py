@@ -613,7 +613,11 @@ class ParticipationsMixin:
 
     @staticmethod
     def _report_position_clause(position: str, filters: list[str], params: list[object]) -> None:
-        """Условие места: <N / >N и класс «Без результата» position = 0."""
+        """Условие места: <N / >N и класс «Без результата» position = 0.
+
+        Нижняя граница «<N» — место >= 1: ноль («Без результата») и любые
+        внепрограммные значения не попадают в классы «Победа»/«Призовое»
+        (семантика пяти метрик: победы = место 1, призовые = места 1–3)."""
         if not position:
             return
         if position == '0':
@@ -626,7 +630,7 @@ class ParticipationsMixin:
             filters.append('position > ?')
             params.append(value)
         elif sign == '<':
-            filters.append('position < ?')
+            filters.append('position >= 1 AND position < ?')
             params.append(value)
 
     def _report_name_clause(self, name: str, filters: list[str], params: list[object]) -> None:

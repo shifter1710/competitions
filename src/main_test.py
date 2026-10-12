@@ -26,6 +26,7 @@ from src.auth import hash_password
 from src.auth import verify_password
 from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
+from src.conftest import make_report_position_fixture
 from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
 from src.education import academic_year_start
@@ -1250,6 +1251,116 @@ def test_export_report_xlsx_header_shows_parameters_and_metrics(reports_client: 
     assert (None, 3, 2, 3, 3, 3) in header_rows
 
 
+# --- Классы фильтра места (P1 fix): место 0 не входит в «Победа»/«Призовое». ---
+
+
+@pytest.mark.parametrize(
+    'position,expected',
+    [
+        # «Победа» — только место 1 (фикстура мест 0–5).
+        (
+            '<2',
+            [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1']],
+        ),
+        # «Призовое» — места 1–3, без места 0.
+        (
+            '<4',
+            [
+                ['1', 'Второв Виктор', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '1'],
+                ['2', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
+                ['3', 'Третьяков Тимофей', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '1'],
+            ],
+        ),
+        # «Не призовое» — места 4 и далее.
+        (
+            '>3',
+            [
+                ['1', 'Пятов Пётр', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0'],
+                ['2', 'Четвериков Чеслав', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0'],
+            ],
+        ),
+        # «Без результата» — строго место 0.
+        (
+            '0',
+            [['1', 'Нулев Никита', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0']],
+        ),
+    ],
+)
+def test_report_page_position_filter_classes(position_reports_client: SanicTestClient, position, expected):
+    _, response = position_reports_client.get(
+        '/report?' + urlencode({'position': position}), headers=get_auth_headers()
+    )
+
+    assert response.status == 200
+    assert get_report_cells(response.text) == expected
+
+
+def test_report_page_position_win_with_period(position_reports_client: SanicTestClient):
+    # Комбинация «Победа» + учебный год 2024/2025 (охватывает места 0–2):
+    # победа в периоде — только Первов; форма и чипы восстановлены из URL.
+    _, response = position_reports_client.get(
+        '/reports?' + urlencode({'period': '2024-2025', 'position': '<2'}), headers=get_auth_headers()
+    )
+
+    assert response.status == 200
+    assert get_report_cells(response.text) == [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1']]
+    assert 'value="2024-2025" selected' in response.text
+    assert 'value="<2" selected' in response.text
+    assert 'Период: <strong>Учебный год 2024/2025</strong>' in response.text
+    assert 'Место: <strong>Победа</strong>' in response.text
+
+
+def test_report_page_position_zero_with_group_slice(position_reports_client: SanicTestClient):
+    # Комбинация «Без результата» + разрез «группа»: одна группа фикстуры,
+    # в неё попадает только запись с местом 0.
+    _, response = position_reports_client.get(
+        '/report?' + urlencode({'group_by': 'group', 'position': '0'}), headers=get_auth_headers()
+    )
+
+    assert response.status == 200
+    assert get_report_cells(response.text) == [['1', 'ПГС-101', '1', '0', '0', '1', '0']]
+
+
+def test_report_screen_matches_xlsx_export_with_position_filter(position_reports_client: SanicTestClient):
+    # Паритет экран↔XLSX с фильтром места: «Призовое» в срезе «группа» —
+    # места 1–3 одной группы, метрики пересчитаны руками.
+    query = urlencode({'group_by': 'group', 'position': '<4'})
+    _, html_response = position_reports_client.get(f'/report?{query}', headers=get_auth_headers())
+    _, xlsx_response = position_reports_client.get(f'/export/report?{query}', headers=get_auth_headers())
+
+    assert html_response.status == xlsx_response.status == 200
+    cells = get_report_cells(html_response.text)
+    assert cells == [['1', 'ПГС-101', '3', '1', '3', '3', '3']]
+    footer = get_report_footer(html_response.text)
+    xlsx_rows = get_report_xlsx_rows(xlsx_response.body, 'Группа')
+
+    assert xlsx_rows[0] == ('Группа', 'Участий', 'Побед', 'Призовых', 'Уникальных участников', 'Уникальных призёров')
+    assert [tuple(row[1:]) for row in xlsx_rows[1:-1]] == [
+        tuple(int(cell) for cell in cell_row[2:]) for cell_row in cells
+    ]
+    footer_metrics = [int(cell) for cell in footer if cell and cell != 'Итого']
+    assert xlsx_rows[-1] == ('Итого', *footer_metrics)
+    assert footer_metrics == [3, 1, 3, 3, 3]
+
+
+def test_reports_page_position_url_restores_form_and_chip(position_reports_client: SanicTestClient):
+    # Прямые ссылки со старой кодировкой параметра работают с новой
+    # семантикой: форма восстанавливает выбранный класс, чип — метка класса.
+    _, response = position_reports_client.get('/reports?position=' + quote('<2'), headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'value="<2" selected' in response.text
+    assert 'Место: <strong>Победа</strong>' in response.text
+    assert get_report_cells(response.text) == [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1']]
+
+    _, response = position_reports_client.get('/reports?position=0', headers=get_auth_headers())
+
+    assert response.status == 200
+    assert 'value="0" selected' in response.text
+    assert 'Место: <strong>Без результата</strong>' in response.text
+    assert get_report_cells(response.text) == [['1', 'Нулев Никита', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0']]
+
+
 def test_report_routes_available_for_all_non_athlete_roles(client: SanicTestClient):
     for role in ('admin', 'editor', 'viewer'):
         _, response = client.get('/reports?group_by=group', headers=get_auth_headers(role=role))
@@ -1274,6 +1385,20 @@ def reports_client(client: SanicTestClient, tmp_path):
     for review_status, record in make_report_unapproved_fixture():
         storage.save_competitions([record], review_status=review_status, owner_id=9)
     storage.create_custom_field('trainer', 'Тренер', 'text', False, True, True, True, 0)
+    previous = getattr(app.ctx, 'storage', None)
+    app.ctx.storage = storage
+    try:
+        yield client
+    finally:
+        app.ctx.storage = previous
+
+
+@pytest.fixture
+def position_reports_client(client: SanicTestClient, tmp_path):
+    # Фикстура мест 0–5 (make_report_position_fixture): классы фильтра
+    # «Победа»/«Призовое»/«Не призовое»/«Без результата» и комбинации.
+    storage = SQLiteAdapter(str(tmp_path / 'report-positions.sqlite3'))
+    storage.save_competitions(make_report_position_fixture())
     previous = getattr(app.ctx, 'storage', None)
     app.ctx.storage = storage
     try:

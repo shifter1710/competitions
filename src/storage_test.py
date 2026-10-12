@@ -8,6 +8,7 @@ import pytest
 from src.conftest import FailingStudentsDeleteConnection
 from src.conftest import make_report_fixture
 from src.conftest import make_report_identity_fixture
+from src.conftest import make_report_position_fixture
 from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
 from src.models.competition import Competition
@@ -469,6 +470,90 @@ def test_report_position_zero_participates_but_not_prize(adapter):
         'count_unique_prizers': 0,
     }
     assert [info.student_name for info in adapter.get_filtered(position='0')] == ['Легасиев Ларион']
+
+
+# --- Классы фильтра места (P1 fix): 0 не попадает в «Победа»/«Призовое». ---
+# Фикстура make_report_position_fixture — src/conftest.py, места 0–5.
+
+
+def save_report_position_fixture(adapter):
+    adapter.save_competitions(make_report_position_fixture())
+    return adapter
+
+
+def test_report_position_win_filter_is_first_place_only(adapter):
+    # «Победа» (<2) — ТОЛЬКО место 1: место 0 («Без результата») в класс
+    # не попадает (раньше position < 2 зацеплял и ноль).
+    save_report_position_fixture(adapter)
+
+    infos = adapter.get_filtered(position='<2')
+    assert [info.student_name for info in infos] == ['Первов Павел']
+    summary = adapter.get_report_summary(position='<2')
+    assert summary.model_dump() == {
+        'count_participation': 1,
+        'count_wins': 1,
+        'count_prizes': 1,
+        'count_unique_participants': 1,
+        'count_unique_prizers': 1,
+    }
+
+
+def test_report_position_prize_filter_is_places_one_to_three(adapter):
+    # «Призовое» (<4) — места 1, 2, 3; место 0 не входит (раньше
+    # position < 4 зацеплял и ноль).
+    save_report_position_fixture(adapter)
+
+    infos = adapter.get_filtered(position='<4')
+    assert [info.student_name for info in infos] == ['Второв Виктор', 'Первов Павел', 'Третьяков Тимофей']
+    summary = adapter.get_report_summary(position='<4')
+    assert summary.model_dump() == {
+        'count_participation': 3,
+        'count_wins': 1,
+        'count_prizes': 3,
+        'count_unique_participants': 3,
+        'count_unique_prizers': 3,
+    }
+
+
+def test_report_position_no_prize_filter_is_fourth_and_beyond(adapter):
+    # «Не призовое» (>3) — места 4 и далее; 0 и призовые не входят.
+    save_report_position_fixture(adapter)
+
+    infos = adapter.get_filtered(position='>3')
+    assert [info.student_name for info in infos] == ['Пятов Пётр', 'Четвериков Чеслав']
+    summary = adapter.get_report_summary(position='>3')
+    assert summary.model_dump() == {
+        'count_participation': 2,
+        'count_wins': 0,
+        'count_prizes': 0,
+        'count_unique_participants': 2,
+        'count_unique_prizers': 0,
+    }
+
+
+def test_report_position_zero_filter_is_no_result_only(adapter):
+    # «Без результата» (0) — строго position = 0.
+    save_report_position_fixture(adapter)
+
+    infos = adapter.get_filtered(position='0')
+    assert [info.student_name for info in infos] == ['Нулев Никита']
+    summary = adapter.get_report_summary(position='0')
+    assert summary.model_dump() == {
+        'count_participation': 1,
+        'count_wins': 0,
+        'count_prizes': 0,
+        'count_unique_participants': 1,
+        'count_unique_prizers': 0,
+    }
+
+
+def test_report_position_win_filter_combines_with_period(adapter):
+    # Комбинация «Победа» + период: класс места применяется вместе с
+    # датами (учебный 2024/2025 охватывает места 0–2, победа — только 1).
+    save_report_position_fixture(adapter)
+
+    infos = adapter.get_filtered(date_from='01.09.2024', date_to='31.08.2025', position='<2')
+    assert [info.student_name for info in infos] == ['Первов Павел']
 
 
 # --- Reports v2 (P2): фильтры курс/год поступления, casefold-ФИО. ---
