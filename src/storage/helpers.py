@@ -97,27 +97,51 @@ STUDENT_SORT_COLUMNS: dict[str, str] = {
     'group': 'group_name',
 }
 
+# Reports v2, identity-правило уникальных метрик и ключа среза «студент»:
+# при наличии стабильной связи student_ref_id используется она, при
+# отсутствии — сама запись (id). Разных людей по ФИО НЕ объединяем;
+# никакого reconcile/backfill (docs/data-model-decisions.md «Reports v2»).
+# Отдельное имя (а не инлайн в двух местах) нужно, чтобы GROUP BY и
+# COUNT(DISTINCT) считали строго одно и то же выражение.
+REPORT_IDENTITY_SQL = "CASE WHEN student_ref_id IS NOT NULL THEN 'r' || student_ref_id ELSE 'x' || id END"
+
 # Срезы отчёта (замечание №19, docs/data-model-decisions.md «Расширение
 # отчётов»): группировка ВСЕГДА по данным записи — исторический факт на
 # момент соревнования, смена группы/института в профиле строки не склеивает.
-# Ключи синхронны с REPORT_SLICES в src/main.py. Выражения — колонки таблицы
-# competitions; «год» — первые 4 символа ISO-даты записи.
+# Ключи синхронны с REPORT_SLICES в src/routes/reports.py. Выражения —
+# колонки таблицы competitions; «год» — первые 4 символа ISO-даты записи.
 REPORT_GROUPINGS: dict[str, tuple[str, ...]] = {
-    'student': ('student_id', 'student_name', 'student_sex', 'institute', '"group"', 'course'),
+    'student': (
+        REPORT_IDENTITY_SQL,
+        'student_name',
+        'student_sex',
+        'institute',
+        '"group"',
+        'course',
+    ),
     'group': ('"group"',),
     'institute': ('institute',),
     'course': ('course',),
     'sport': ('sport',),
     'level': ('level',),
     'year': ('CAST(substr(date, 1, 4) AS INTEGER)',),
+    # Reports v2: срез «год поступления» — по снимку записи admission_year
+    # (NULL — своя группа, отображение «Не указан», данные не переписываются).
+    'admission_year': ('admission_year',),
 }
 DEFAULT_REPORT_GROUPING = 'student'
 
-# Метрики считаются в SQL (SUM CASE по строкам внутри группы), не в питоне.
+# Метрики считаются в SQL (SUM CASE / COUNT DISTINCT внутри группы),
+# не в питоне. Уникальные участники/призёры — по identity-выражению;
+# в срезе «студент» внутри группы один identity (уникальные там не
+# показываются), в остальных срезах — уникальные ВНУТРИ группы.
 REPORT_METRIC_SELECTS: tuple[str, ...] = (
     'COUNT(*) AS count_participation',
     'SUM(CASE WHEN position = 1 THEN 1 ELSE 0 END) AS count_wins',
     'SUM(CASE WHEN position >= 1 AND position <= 3 THEN 1 ELSE 0 END) AS count_prizes',
+    f'COUNT(DISTINCT {REPORT_IDENTITY_SQL}) AS count_unique_participants',
+    f'COUNT(DISTINCT CASE WHEN position >= 1 AND position <= 3 THEN {REPORT_IDENTITY_SQL} END)'
+    ' AS count_unique_prizers',
 )
 
 # Выборка записи соревнований: общий SELECT для get_competitions и

@@ -763,7 +763,6 @@ function bindIndexMultiDocumentListeners() {
 
 class Main {
     constructor() {
-        this.currentReportUrl = null;
         this.draggedColumnKey = null;
         this.isAthlete = document.body.dataset.role === "athlete";
         this.activeComboBoxes = [];
@@ -789,18 +788,14 @@ class Main {
         this.mergeControls = document.querySelector(".merge-controls");
         this.mergeApplyButton = document.querySelector(".merge-apply-button");
         this.mergeStatus = document.querySelector(".merge-status");
-        this.reportForm = document.querySelector(".filter-form");
+        // Reports v2: форма условий отчёта (.report-form, только /reports) —
+        // GET-навигация; старая механика fetch-обновления /report удалена.
+        this.reportForm = document.querySelector(".report-form");
         this.reportExportForm = document.querySelector(".report-export-form");
         this.fileInput = document.querySelector(".import-form__input");
         this.attachmentFileInput = document.querySelector(".attachment-file-input");
         this.importButton = document.querySelector(".import-form__button");
         this.loader = document.querySelector(".loader");
-        this.inputName = document.querySelector(".filter__name");
-        this.dateFromInput = document.querySelector(".filter__date-from");
-        this.dateToInput = document.querySelector(".filter__date-to");
-        this.levelSelectWrapper = document.querySelector(".filter__level-wrapper");
-        this.positionSelectWrapper = document.querySelector(".filter__position-wrapper");
-        this.cleanFilterButton = document.querySelector(".filter-form__clean-button");
         this.exportButton = document.querySelector(".export-button");
         this.tableLayoutButton = document.querySelector(".table-layout-button");
         this.tableLayoutResetButton = document.querySelector(".table-layout-reset-button");
@@ -815,7 +810,6 @@ class Main {
         this.usersSearchInput = document.querySelector(".users-search-input");
         this.usersRoleFilter = document.querySelector(".users-role-filter");
         this.usersTable = document.querySelector(".users-table");
-        this.filterIsApplied = Boolean(this.tableCard && this.tableCard.dataset.tableView === "report");
     }
 
     createInstances() {
@@ -851,13 +845,14 @@ class Main {
             this.fileInput.addEventListener("change", () => this.setDisabledImportButton(false));
         }
         if (this.reportForm) {
-            this.reportForm.addEventListener("submit", (event) => this.handleSubmitReportForm(event));
+            // Reports v2: GET-навигация — сабмит это переход по ссылке
+            // (пустые поля не попадают в URL), никакого fetch-обновления.
+            this.reportForm.addEventListener("submit", (event) => this.handleReportFormSubmit(event));
+            this.reportForm.addEventListener("input", () => this.updateReportDirtyState());
+            this.reportForm.addEventListener("change", (event) => this.handleReportFormChange(event));
         }
         if (this.reportExportForm) {
-            this.reportExportForm.addEventListener("submit", (event) => this.handleSubmitReportExportForm(event));
-        }
-        if (this.cleanFilterButton) {
-            this.cleanFilterButton.addEventListener("click", () => this.handleResetFilterButton());
+            this.reportExportForm.addEventListener("submit", (event) => this.handleReportExportFormSubmit(event));
         }
         if (this.exportButton) {
             this.exportButton.addEventListener("click", () => this.handleClickExportButton());
@@ -911,7 +906,180 @@ class Main {
         this.initUsersPage();
         this.initIndexFilterCard();
         this.initEventDocumentsForm();
+        this.initReportPage();
         this.bindContentWrapperEvents();
+    }
+
+    // --- Отчёты (Reports v2): GET-навигация /reports. ---
+    // Старая механика (fetch /report + замена content-wrapper, чипы-
+    // кнопки, лоадер) удалена: применённое состояние = URL, чипы — ссылки.
+
+    initReportPage() {
+        if (!this.reportForm) {
+            return;
+        }
+        this.initReportGroupNarrowing();
+        this.updateReportDirtyState();
+    }
+
+    // Иерархия институт→группа (решение 2026-09-13): выбранный институт
+    // сужает список групп; без института доступны все группы. Перенесено
+    // из инлайн-скрипта report.html (Reports v2).
+    initReportGroupNarrowing() {
+        const groupSelect = this.reportForm.querySelector(".report__group");
+        const instituteSelect = this.reportForm.querySelector(".report__institute");
+        if (!groupSelect || !instituteSelect) {
+            return;
+        }
+        let groupsByInstitute = {};
+        let allGroups = [];
+        try {
+            groupsByInstitute = JSON.parse(groupSelect.dataset.groupsByInstitute || "{}");
+            allGroups = JSON.parse(groupSelect.dataset.allGroups || "[]");
+        } catch (error) {
+            groupsByInstitute = {};
+            allGroups = [];
+        }
+        const fillGroupOptions = (institute) => {
+            const groups = institute && groupsByInstitute[institute] ? groupsByInstitute[institute] : allGroups;
+            const selected = groupSelect.value;
+            const options = [new Option("Все", "")].concat(groups.map((value) => new Option(value, value)));
+            groupSelect.replaceChildren.apply(groupSelect, options);
+            if (selected && groups.indexOf(selected) !== -1) {
+                groupSelect.value = selected;
+            }
+        };
+        instituteSelect.addEventListener("change", () => {
+            fillGroupOptions(instituteSelect.value);
+            this.updateReportDirtyState();
+        });
+        // Восстановление из URL: сервер рендерит все группы, при выбранном
+        // институте сужаем сразу (выбранная группа сохраняется, если она в
+        // списке института).
+        if (instituteSelect.value) {
+            fillGroupOptions(instituteSelect.value);
+        }
+    }
+
+    // Сериализация формы условий: пустые значения отбрасываются (пустое не
+    // должно попадать в URL), дефолтный разрез «student» — тоже (сервер
+    // считает его отсутствием, см. collect_applied_report_query).
+    serializeReportForm(options = {}) {
+        const entries = [];
+        new FormData(this.reportForm).forEach((value, key) => {
+            const text = String(value);
+            if (!text) {
+                return;
+            }
+            if (key === "group_by" && (text === "student" || options.excludeSlice)) {
+                return;
+            }
+            entries.push([key, text]);
+        });
+        return entries;
+    }
+
+    static reportEntriesKey(entries) {
+        return entries.map(([key, value]) => `${key}=${value}`).sort().join("&");
+    }
+
+    // Канонизация записей для сравнения с применённым запросом:
+    // period=all — как отсутствие period (нет фильтра дат; так
+    // восстанавливается форма применённого отчёта без period), а
+    // period=custom с датами — как прямые даты (легаси-ссылки без period;
+    // см. collect_applied_report_query / build_report_form_values).
+    static canonicalReportEntries(entries) {
+        const hasDates = entries.some(([key]) => key === "date_from" || key === "date_to");
+        return entries.filter(([key, value]) => (
+            key !== "period" || (value !== "all" && !(value === "custom" && hasDates))
+        ));
+    }
+
+    reportFormIsDirty() {
+        // Отчёт ещё не применён — предупреждать не о чем.
+        if (!this.reportForm.dataset.appliedQuery) {
+            return false;
+        }
+        const applied = Main.canonicalReportEntries(
+            Array.from(new URLSearchParams(this.reportForm.dataset.appliedQuery).entries()),
+        );
+        return Main.reportEntriesKey(applied) !== Main.reportEntriesKey(Main.canonicalReportEntries(this.serializeReportForm()));
+    }
+
+    updateReportDirtyState() {
+        if (!this.reportForm) {
+            return;
+        }
+        const dirty = this.reportFormIsDirty();
+        const warning = document.querySelector(".report-dirty-warning");
+        if (warning) {
+            warning.classList.toggle("d-none", !dirty);
+        }
+        const button = this.reportForm.querySelector(".report-form__submit");
+        if (button) {
+            button.textContent = dirty ? "Применить изменения" : "Сформировать отчёт";
+            button.title = dirty ? "Условия изменены — примените их, чтобы пересчитать отчёт" : "";
+        }
+    }
+
+    handleReportFormChange(event) {
+        // Период ↔ даты: «Произвольный диапазон…» раскрывает поля дат
+        // (DateRangePicker уже привязан к .datetime), любой другой выбор —
+        // поля скрыты И выключены (иначе даты утекут в URL).
+        const periodSelect = this.reportForm.querySelector(".report__period");
+        const datesColumn = this.reportForm.querySelector(".report__dates");
+        if (event.target === periodSelect && datesColumn) {
+            const custom = periodSelect.value === "custom";
+            datesColumn.classList.toggle("d-none", !custom);
+            this.reportForm.querySelectorAll('[name="date_from"], [name="date_to"]').forEach((input) => {
+                input.disabled = !custom;
+            });
+        }
+        // Смена разреза: автоприменение навигацией, если кроме самого
+        // разреза форма не «грязная»; иначе — обычное ожидающее изменение.
+        if (event.target === this.reportForm.querySelector(".report__group-by")) {
+            const appliedQuery = this.reportForm.dataset.appliedQuery;
+            if (appliedQuery) {
+                const applied = Main.canonicalReportEntries(
+                    Array.from(new URLSearchParams(appliedQuery).entries())
+                        .filter(([key]) => key !== "group_by"),
+                );
+                const current = Main.canonicalReportEntries(this.serializeReportForm({excludeSlice: true}));
+                if (Main.reportEntriesKey(applied) === Main.reportEntriesKey(current)) {
+                    this.navigateReportForm();
+                    return;
+                }
+            }
+        }
+        this.updateReportDirtyState();
+    }
+
+    handleReportFormSubmit(event) {
+        event.preventDefault();
+        this.navigateReportForm();
+    }
+
+    // Навигация по применённому URL: пустые поля и дефолтный разрез
+    // выключаются (не отправляются), дальше обычный GET-переход формы.
+    // form.submit() намеренно не зовёт обработчик submit — рекурсии нет.
+    navigateReportForm() {
+        this.reportForm.querySelectorAll("input, select").forEach((control) => {
+            const isDefaultSlice = control.name === "group_by" && control.value === "student";
+            if (!control.value || isDefaultSlice) {
+                control.disabled = true;
+            }
+        });
+        this.reportForm.submit();
+    }
+
+    // Экспорт строится из применённого запроса скрытыми input (сервер);
+    // клиентская проверка — минимум одна колонка (сервер отдаёт 400).
+    handleReportExportFormSubmit(event) {
+        const selectedColumns = this.reportExportForm.querySelectorAll(".report-export-column:checked");
+        if (!selectedColumns.length) {
+            event.preventDefault();
+            notify({type: "warning", text: "Выберите хотя бы одну колонку"});
+        }
     }
 
     // Кнопки «Сгенерировать»/«Копировать» у полей пароля (.password-generate-
@@ -1465,29 +1633,6 @@ class Main {
 
     handleClickExportButton() {
         this.exportCurrentTable();
-    }
-
-    handleResetFilterButton() {
-        this.resetFilter();
-        this.currentReportUrl = null;
-        this.filterIsApplied = false;
-        this.refreshIndexContent();
-    }
-
-    resetFilter() {
-        if (!this.inputName) {
-            return;
-        }
-        this.inputName.value = "";
-        this.levelSelectWrapper.querySelector('li.option[data-value=""]').click();
-        this.positionSelectWrapper.querySelector('li.option[data-value=""]').click();
-        this.destroyInstances();
-        this.createInstances();
-        this.dateFromInput.value = "";
-        this.dateToInput.value = "";
-        this.reportForm.querySelectorAll('[name^="custom__"]').forEach((input) => {
-            input.value = "";
-        });
     }
 
     handleSubmitImportForm(event) {
@@ -2471,12 +2616,6 @@ class Main {
     }
 
     handleContentWrapperClick(event) {
-        const chipRemove = event.target.closest(".filter-chip__x");
-        if (chipRemove) {
-            this.removeReportFilter(chipRemove.dataset.removeKey);
-            return;
-        }
-
         const attachmentAddButton = event.target.closest(".attachment-add-button");
         if (attachmentAddButton && this.attachmentFileInput) {
             this.attachmentFileInput.dataset.recordId = attachmentAddButton.dataset.recordId;
@@ -2568,51 +2707,6 @@ class Main {
         }
     }
 
-    prepareParamsForReport() {
-        const params = new URLSearchParams();
-        const formData = new FormData(this.reportForm);
-        Array.from(formData.entries()).forEach((field) => {
-            const [fieldName, value] = field;
-            if (value) {
-                params.append(fieldName, value);
-            }
-        });
-        return params.toString();
-    }
-
-    handleSubmitReportForm(event) {
-        event.preventDefault();
-        const params = this.prepareParamsForReport();
-        this.getReport(params);
-    }
-
-    // Выгрузка отчёта в Excel: колонки — из чекбоксов панели, фильтры —
-    // текущие (применённые к показанной таблице, а до первого применения —
-    // из полей формы фильтра). Всё уходит GET-параметрами, состояния на
-    // сервере нет.
-    handleSubmitReportExportForm(event) {
-        event.preventDefault();
-        const selectedColumns = Array.from(
-            this.reportExportForm.querySelectorAll(".report-export-column:checked")
-        ).map((input) => input.value);
-        if (!selectedColumns.length) {
-            notify({type: "warning", text: "Выберите хотя бы одну колонку"});
-            return;
-        }
-        const filterParams = this.currentReportUrl
-            ? this.currentReportUrl.split("?")[1] || ""
-            : this.prepareParamsForReport();
-        const params = new URLSearchParams(filterParams);
-        // Срез выгрузки — текущее значение селекта «Группировать по»
-        // (замечание №19): панель колонок экспорта всегда соответствует ему.
-        const reportSliceSelect = document.querySelector(".filter__group-by");
-        if (reportSliceSelect && reportSliceSelect.value) {
-            params.set("group_by", reportSliceSelect.value);
-        }
-        selectedColumns.forEach((column) => params.append("columns", column));
-        window.location.href = `/export/report?${params.toString()}`;
-    }
-
     importFile(formData) {
         this.makeRequest({
             url: "/",
@@ -2659,39 +2753,8 @@ class Main {
         });
     }
 
-    // Сброс одного условия отчёта (прототип 06): крестик на чипе перечитывает
-    // отчёт без этого GET-параметра, остальные условия остаются.
-    removeReportFilter(removeKey) {
-        if (!removeKey) {
-            return;
-        }
-        const params = new URLSearchParams(
-            this.currentReportUrl ? this.currentReportUrl.split("?")[1] || "" : ""
-        );
-        params.delete(removeKey);
-        this.getReport(params.toString());
-    }
-
-    getReport(params) {
-        const url = "/report" + (params ? `?${params}` : "");
-        this.setLoading(true);
-        fetch(url, { method: "GET" })            .then((response) => {
-                if (!response.ok) {
-                    throw new Error("Ошибка применения фильтра");
-                }
-                return response.text();
-            })
-            .then((html) => {
-                this.replaceContentWrapper(html);
-                this.currentReportUrl = url;
-                this.filterIsApplied = true;
-                this.setLoading(false);
-            })
-            .catch(() => {
-                this.setLoading(false);
-                notify({type: "error", text: "Ошибка применения фильтра. Попробуйте позже"});
-            });
-    }
+    // Сброс одного условия отчёта (Reports v2) — крестик чипа: обычная
+    // ссылка на /reports без параметров чипа, JS не участвует.
 
     getCsrfToken() {
         const meta = document.querySelector('meta[name="csrf-token"]');
@@ -2752,10 +2815,8 @@ class Main {
     }
 
     refreshCurrentContent() {
-        if (this.currentReportUrl) {
-            this.getReport(this.currentReportUrl.split("?")[1] || "");
-            return;
-        }
+        // Reports v2: отчёт больше не обновляется fetch-ом — применённое
+        // состояние это URL страницы, правок записей на /reports нет.
         this.refreshIndexContent();
     }
 
@@ -2782,19 +2843,6 @@ class Main {
                 this.setLoading(false);
                 window.location.reload();
             });
-    }
-
-    replaceContentWrapper(html) {
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        const nextContent = doc.querySelector(".content-wrapper") || doc.body.firstElementChild;
-        if (!nextContent || !this.contentWrapper) {
-            window.location.reload();
-            return;
-        }
-        this.contentWrapper.replaceWith(nextContent);
-        this.initializeDomReferences();
-        this.bindContentWrapperEvents();
-        this.initTableFeatures();
     }
 
     initTableFeatures() {

@@ -1369,6 +1369,57 @@ span.pager__btn:hover {
     color: var(--danger);
 }
 
+/* Reports v2: крестик чипа — обычная ссылка (GET-навигация /reports,
+   без JS), сброс «Сбросить всё» — приглушённый чип. */
+a.filter-chip__x {
+    text-decoration: none;
+}
+
+.filter-chip_reset {
+    background: transparent;
+    border-style: dashed;
+}
+
+/* Карточки сводки отчёта (Reports v2): 5 метрик по всей выборке; подпись
+   мелкая, число крупное с табличными цифрами. На токенах темы — как
+   .filter-chip, автоматически корректны в светлой/тёмной. */
+.report-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.report-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-md);
+}
+
+.report-stat__label {
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+}
+
+.report-stat__value {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Строка «Итого» отчёта (tfoot): distinct-метрики из сводного запроса,
+   визуально отделена от полосатых строк данных. */
+.report-table-footer td {
+    font-weight: 500;
+    background: var(--surface-alt);
+    border-top: 2px solid var(--border-strong);
+}
+
 /* Тёмная тема ([data-bs-theme="dark"] на <html>): базовые поверхности и
    компоненты уже переведены на токены прототипа выше, здесь — только
    сторонние виджеты (datepicker), которые про data-bs-theme не знают. */

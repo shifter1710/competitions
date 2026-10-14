@@ -14,6 +14,7 @@ from typing import Sequence
 
 from src.models.competition import Competition
 from src.models.http.report_row import ReportSliceRow
+from src.models.http.report_row import ReportSummary
 from src.models.http.student_info import StudentInfo
 from src.settings import settings
 from src.storage.helpers import competition_insert_records
@@ -26,6 +27,7 @@ from src.storage.helpers import EventParticipationConflictError
 from src.storage.helpers import IDENTITY_MODE_DEFAULT
 from src.storage.helpers import participation_content_key
 from src.storage.helpers import REPORT_GROUPINGS
+from src.storage.helpers import REPORT_IDENTITY_SQL
 from src.storage.helpers import REPORT_METRIC_SELECTS
 
 
@@ -314,8 +316,15 @@ class ParticipationsMixin:
         institute: str = '',
         group: str = '',
         sport: str = '',
+        course: str = '',
+        admission_year: str = '',
     ) -> list[StudentInfo]:
-        """Отчёт по срезу «студент»: группировка по данным записи + метрики."""
+        """Отчёт по срезу «студент»: группировка по данным записи + метрики.
+
+        Reports v2: ключ группы — identity-выражение (student_ref_id ?? id
+        записи), а не легаси-хеш ФИО: однофамильцы не склеиваются, каждая
+        легаси-запись без стабильной связи — своя строка.
+        """
         rows = self._fetch_report_rows(
             DEFAULT_REPORT_GROUPING,
             date_from=date_from,
@@ -326,6 +335,8 @@ class ParticipationsMixin:
             institute=institute,
             group=group,
             sport=sport,
+            course=course,
+            admission_year=admission_year,
             custom_filters=custom_filters,
         )
         return [
@@ -355,12 +366,17 @@ class ParticipationsMixin:
         institute: str = '',
         group: str = '',
         sport: str = '',
+        course: str = '',
+        admission_year: str = '',
         custom_filters: Iterable[tuple[str, str, str]] = (),
     ) -> list[ReportSliceRow]:
-        """Отчёт по произвольному срезу: значение поля записи + метрики.
+        """Отчёт по произвольному срезу: значение поля записи + 5 метрик.
 
         group_by — ключ REPORT_GROUPINGS, кроме 'student' (у него другая
         форма строки, см. get_filtered). Фильтры те же, что у get_filtered.
+        Уникальные участники/призёры — ВНУТРИ группы по identity-выражению
+        (Reports v2); пустое значение среза (NULL/пустая строка) — отдельная
+        группа со значением None («Не указан» на отображении).
         """
         if group_by == DEFAULT_REPORT_GROUPING:
             raise ValueError('Срез «студент» обрабатывает get_filtered')
@@ -376,17 +392,142 @@ class ParticipationsMixin:
             institute=institute,
             group=group,
             sport=sport,
+            course=course,
+            admission_year=admission_year,
             custom_filters=custom_filters,
         )
         return [
             ReportSliceRow(
-                slice_value=row['slice_value'],
+                # Пустое значение среза (NULL или '') — группа «Не указан».
+                slice_value=None if row['slice_value'] in (None, '') else row['slice_value'],
                 count_participation=row['count_participation'],
                 count_wins=row['count_wins'],
                 count_prizes=row['count_prizes'],
+                count_unique_participants=row['count_unique_participants'],
+                count_unique_prizers=row['count_unique_prizers'],
             )
             for row in rows
         ]
+
+    def get_report_summary(
+        self,
+        *,
+        date_from: str = '',
+        date_to: str = '',
+        position: str = '',
+        level: str = '',
+        name: str = '',
+        institute: str = '',
+        group: str = '',
+        sport: str = '',
+        course: str = '',
+        admission_year: str = '',
+        custom_filters: Iterable[tuple[str, str, str]] = (),
+    ) -> ReportSummary:
+        """Сводка 5 метрик по ВСЕЙ отфильтрованной выборке (Reports v2).
+
+        Отдельный агрегатный запрос по тому же WHERE, но без GROUP BY —
+        уникальные участники/призёры выборки не равны сумме уникальных по
+        группам среза (инвариант итогов). Фильтры идентичны get_filtered.
+        """
+        with self._lock:
+            where_clause, params = self._report_filter_where(
+                date_from=date_from,
+                date_to=date_to,
+                position=position,
+                level=level,
+                name=name,
+                institute=institute,
+                group=group,
+                sport=sport,
+                course=course,
+                admission_year=admission_year,
+                custom_filters=custom_filters,
+            )
+            row = self.connection.execute(
+                f'''
+                SELECT
+                    COUNT(*) AS count_participation,
+                    COALESCE(SUM(CASE WHEN position = 1 THEN 1 ELSE 0 END), 0) AS count_wins,
+                    COALESCE(SUM(CASE WHEN position >= 1 AND position <= 3 THEN 1 ELSE 0 END), 0)
+                        AS count_prizes,
+                    COUNT(DISTINCT {REPORT_IDENTITY_SQL}) AS count_unique_participants,
+                    COUNT(DISTINCT CASE WHEN position >= 1 AND position <= 3
+                        THEN {REPORT_IDENTITY_SQL} END) AS count_unique_prizers
+                FROM competitions
+                {where_clause}
+                ''',
+                params,
+            ).fetchone()
+            return ReportSummary(**dict(row))
+
+    def get_report_course_options(self) -> list[str]:
+        """Курсы для фильтра отчёта (Reports v2): точные значения из данных.
+
+        Только approved-записи (отчёт больше не видит), непустые; числовые
+        курсы идут по возрастанию, текстовые («Выпускник 2025/26» и т.п.) —
+        после них (нативный порядок SQLite: числа раньше текста).
+        """
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT DISTINCT CAST(course AS TEXT) AS course_value
+                FROM competitions
+                WHERE review_status = 'approved'
+                    AND course IS NOT NULL
+                    AND TRIM(CAST(course AS TEXT)) != ''
+                ORDER BY course
+                """
+            ).fetchall()
+            return [row['course_value'] for row in rows]
+
+    def get_report_admission_year_options(self) -> tuple[list[int], bool]:
+        """Годы поступления для фильтра/среза отчёта (Reports v2).
+
+        Возвращает (годы по убыванию, есть_ли_NULL-снимки). NULL-снимок —
+        значение фильтра 'none' и группа среза «Не указан», данные в БД не
+        переписываются. Только approved-записи.
+        """
+        with self._lock:
+            year_rows = self.connection.execute(
+                """
+                SELECT DISTINCT admission_year
+                FROM competitions
+                WHERE review_status = 'approved' AND admission_year IS NOT NULL
+                ORDER BY admission_year DESC
+                """
+            ).fetchall()
+            null_row = self.connection.execute(
+                """
+                SELECT 1 FROM competitions
+                WHERE review_status = 'approved' AND admission_year IS NULL
+                LIMIT 1
+                """
+            ).fetchone()
+            return [row['admission_year'] for row in year_rows], null_row is not None
+
+    def get_report_period_year_options(self) -> list[int]:
+        """Учебные годы из данных для селекта периода отчёта (Reports v2).
+
+        Академический год записи (начало 1 сентября, academic_year_start):
+        записи сентября–декабря относятся к текущему календарному году,
+        января–августа — к предыдущему. Только approved, по убыванию.
+        """
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT DISTINCT
+                    CASE
+                        WHEN substr(date, 6, 2) >= '09'
+                            THEN CAST(substr(date, 1, 4) AS INTEGER)
+                        ELSE CAST(substr(date, 1, 4) AS INTEGER) - 1
+                    END AS academic_year_start
+                FROM competitions
+                WHERE review_status = 'approved'
+                ORDER BY academic_year_start DESC
+                """
+            ).fetchall()
+            return [row['academic_year_start'] for row in rows]
 
     @staticmethod
     def _date_range_clauses(date_from: str, date_to: str) -> tuple[list[str], list[object]]:
@@ -409,7 +550,7 @@ class ParticipationsMixin:
             params.extend([bound, bound])
         return clauses, params
 
-    def _report_filter_clauses(
+    def _report_filter_where(
         self,
         *,
         date_from: str,
@@ -420,10 +561,20 @@ class ParticipationsMixin:
         institute: str,
         group: str,
         sport: str,
+        course: str,
+        admission_year: str,
         custom_filters: Iterable[tuple[str, str, str]],
     ) -> tuple[str, list[object]]:
-        """Общий WHERE всех фильтров отчёта: период, место, уровень, ФИО,
-        институт, группа, вид спорта, кастомные поля. Только approved."""
+        """Общий WHERE всех фильтров отчёта: период, место (включая класс
+        «Без результата» position=0), уровень, ФИО, институт, группу, вид
+        спорта, курс, год поступления, кастомные поля. Только approved.
+
+        Reports v2, ФИО-поиск: как на главной, casefold-подстрока в Python
+        (SQL LIKE регистронезависим только для ASCII и не находит кириллицу).
+        Агрегация остаётся в SQL: сначала DISTINCT-подбор имён под прочими
+        фильтрами, затем student_name IN (...) в общий WHERE. Пустой список
+        совпадений — WHERE 1 = 0 (отчёт пуст, но запросы валидны).
+        """
         filters = ["review_status = 'approved'"]
         params: list[object] = []
 
@@ -431,35 +582,27 @@ class ParticipationsMixin:
         filters.extend(date_clauses)
         params.extend(date_params)
 
-        if position:
-            sign = position[0]
-            value = int(position[1:])
-            if sign == '>':
-                filters.append('position > ?')
-                params.append(value)
-            elif sign == '<':
-                filters.append('position < ?')
+        self._report_position_clause(position, filters, params)
+
+        for column, value in (('level', level), ('institute', institute), ('"group"', group), ('sport', sport)):
+            if value:
+                filters.append(f'{column} = ?')
                 params.append(value)
 
-        if level:
-            filters.append('level = ?')
-            params.append(level)
+        if course:
+            # Курс — точное значение; колонка INTEGER, но лёгкий реестр полей
+            # допускает текстовые курсы, сравнение через CAST надёжно для обоих.
+            filters.append('CAST(course AS TEXT) = ?')
+            params.append(course)
 
-        if name:
-            filters.append('student_name LIKE ?')
-            params.append(f'%{name}%')
+        if admission_year:
+            if admission_year == 'none':
+                filters.append('admission_year IS NULL')
+            else:
+                filters.append('CAST(admission_year AS TEXT) = ?')
+                params.append(admission_year)
 
-        if institute:
-            filters.append('institute = ?')
-            params.append(institute)
-
-        if group:
-            filters.append('"group" = ?')
-            params.append(group)
-
-        if sport:
-            filters.append('sport = ?')
-            params.append(sport)
+        self._report_name_clause(name, filters, params)
 
         custom_clauses, custom_params = self._build_custom_filter_clauses(custom_filters)
         filters.extend(custom_clauses)
@@ -467,6 +610,54 @@ class ParticipationsMixin:
 
         where_clause = f'WHERE {" AND ".join(filters)}' if filters else ''
         return where_clause, params
+
+    @staticmethod
+    def _report_position_clause(position: str, filters: list[str], params: list[object]) -> None:
+        """Условие места: <N / >N и класс «Без результата» position = 0.
+
+        Нижняя граница «<N» — место >= 1: ноль («Без результата») и любые
+        внепрограммные значения не попадают в классы «Победа»/«Призовое»
+        (семантика пяти метрик: победы = место 1, призовые = места 1–3)."""
+        if not position:
+            return
+        if position == '0':
+            # Класс «Без результата» (Reports v2): место ещё не вписано.
+            filters.append('position = 0')
+            return
+        sign = position[0]
+        value = int(position[1:])
+        if sign == '>':
+            filters.append('position > ?')
+            params.append(value)
+        elif sign == '<':
+            filters.append('position >= 1 AND position < ?')
+            params.append(value)
+
+    def _report_name_clause(self, name: str, filters: list[str], params: list[object]) -> None:
+        """ФИО-подстрока без регистра (casefold, кириллица) как SQL-условие.
+
+        Дописывает в filters/params student_name IN (...) по именам, найденным
+        casefold-подстрокой под уже собранными условиями; пустой список
+        совпадений — WHERE 1 = 0 (отчёт пуст, но запросы валидны). Вызывается
+        под _lock (общий путь _report_filter_where).
+        """
+        needle = (name or '').strip().casefold()
+        if not needle:
+            return
+        base_where = f'WHERE {" AND ".join(filters)}' if filters else ''
+        candidate_names = self.connection.execute(
+            f'SELECT DISTINCT student_name FROM competitions {base_where}',
+            params,
+        ).fetchall()
+        matched = [
+            row['student_name'] for row in candidate_names if needle in (row['student_name'] or '').strip().casefold()
+        ]
+        if not matched:
+            filters.append('1 = 0')
+            return
+        placeholders = ', '.join('?' for _ in matched)
+        filters.append(f'student_name IN ({placeholders})')
+        params.extend(matched)
 
     def _fetch_report_rows(
         self,
@@ -480,16 +671,21 @@ class ParticipationsMixin:
         institute: str,
         group: str,
         sport: str,
+        course: str,
+        admission_year: str,
         custom_filters: Iterable[tuple[str, str, str]],
     ) -> list[sqlite3.Row]:
         """Агрегирующий запрос отчёта: GROUP BY по данным записи + метрики.
 
-        Один WHERE для всех фильтров отчёта (см. _report_filter_clauses) и
-        метрики SUM CASE — SQL считает всё сам, питон по строкам не ходит.
+        Один WHERE для всех фильтров отчёта (см. _report_filter_where) и
+        метрики SUM CASE / COUNT DISTINCT — SQL считает всё сам, питон по
+        строкам не ходит. Порядок строк — серверный канонический
+        (count_participation ASC, затем ключи среза); экспорт использует
+        его же (контракт «канонический порядок сервера», Reports v2).
         """
         with self._lock:
             group_columns = REPORT_GROUPINGS[group_by]
-            where_clause, params = self._report_filter_clauses(
+            where_clause, params = self._report_filter_where(
                 date_from=date_from,
                 date_to=date_to,
                 position=position,
@@ -498,11 +694,19 @@ class ParticipationsMixin:
                 institute=institute,
                 group=group,
                 sport=sport,
+                course=course,
+                admission_year=admission_year,
                 custom_filters=custom_filters,
             )
             if group_by == DEFAULT_REPORT_GROUPING:
-                select_columns = ',\n'.join(group_columns)
-                order_by = 'count_participation ASC, student_name ASC, institute ASC, "group" ASC, course ASC'
+                select_columns = ',\n'.join([f'{group_columns[0]} AS student_id', *group_columns[1:]])
+                # Последний ключ (student_id = identity) — детерминированный
+                # порядок записей с одинаковыми ФИО и снимком (Reports v2:
+                # это разные строки; без тай-брейка порядок был бы не указан).
+                order_by = (
+                    'count_participation ASC, student_name ASC, institute ASC,'
+                    ' "group" ASC, course ASC, student_id ASC'
+                )
             else:
                 select_columns = f'{group_columns[0]} AS slice_value'
                 order_by = 'count_participation ASC, slice_value ASC'
