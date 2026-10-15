@@ -512,7 +512,7 @@ ZCode may commit the completed changes and push them:
 - commit on a `feature/*` branch created for the task (do not commit directly to `main`);
 - push that `feature/*` branch to origin.
 
-Direct pushes to `main`/`dev`, merges into them, tags and releases still require an explicit owner request. Reason: the repository's documented workflow (README, «Участие в разработке») keeps merging into `main`/`dev` as an owner review decision, so enabling direct push to `main` would conflict with the existing setup. The feature-branch rule is the smallest safe alternative: a pushed `feature/*` revision is fully deployable, so the owner can deploy it by revision or ask for a merge.
+Direct pushes to `main`, merges into it, tags and releases still require an explicit owner request. Reason: the repository's documented workflow (README, «Участие в разработке») keeps merging into `main` as an owner review decision, so enabling direct push to `main` would conflict with the existing setup. The feature-branch rule is the smallest safe alternative: a pushed `feature/*` revision is fully deployable, so the owner can deploy it by revision or ask for a merge.
 
 Still not allowed without separate explicit authorization:
 
@@ -532,7 +532,7 @@ Before commit, push or release, when it is part of the permitted workflow, check
 6. that `.gitignore` is up to date;
 7. that documentation is up to date relative to the change.
 
-This does not cancel the remaining restrictions: Git history rewriting, force-push, merges into `main`/`dev` and tags/releases without an explicit owner request, and the production actions that require separate authorization under Production Operations.
+This does not cancel the remaining restrictions: Git history rewriting, force-push, merges into `main` and tags/releases without an explicit owner request, and the production actions that require separate authorization under Production Operations.
 
 If potentially sensitive data is found, do not assume it is publishable. Stop and ask the project owner for a decision.
 
