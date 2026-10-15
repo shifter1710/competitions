@@ -12,6 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Sequence
 from urllib.parse import parse_qs
+from urllib.parse import urlencode
 
 import pandas as pd
 from pandas import isna
@@ -598,6 +599,70 @@ def event_document_form_result_filter(request: Request) -> str:
     if result_filter not in {key for key, _ in CALENDAR_RESULT_FILTERS if key}:
         return ''
     return result_filter
+
+
+def participant_form_result_filter(request: Request) -> str:
+    """result-фильтр формы добавления участника: то же правило, что у форм
+    документов, но имя поля result_filter — в этой форме «результат
+    участия» тоже называется result, hidden фильтра не должен с ним
+    конфликтовать (get_form_value взял бы первое значение)."""
+    result_filter = (get_form_value(request, 'result_filter') or '').strip()
+    if result_filter not in {key for key, _ in CALENDAR_RESULT_FILTERS if key}:
+        return ''
+    return result_filter
+
+
+# Re-fill формы добавления участника после flash-редиректа с ошибкой (UX
+# P0): введённые значения возвращаются GET-параметрами form_<имя> — паттерн
+# prefill «+ участие» (значения приходят из URL). Префикс form_ отделяет их
+# от служебных параметров страницы (?result=, ?add_participation=, …).
+PARTICIPANT_FORM_ECHO_KEYS: tuple[str, ...] = (
+    'student_name',
+    'student_sex',
+    'institute',
+    'group',
+    'course',
+    'discipline',
+    'position',
+    'result',
+)
+PARTICIPANT_FORM_ECHO_MAX_LENGTH = 200
+
+
+def participant_add_echo_keys(custom_fields: Sequence[CustomField]) -> tuple[str, ...]:
+    """Имена полей формы добавления участника для echo: базовые + ключи
+    participation-кастомов (тот же фильтр, что у рендера поля —
+    event_import_custom_fields)."""
+    return (
+        *PARTICIPANT_FORM_ECHO_KEYS,
+        *(f'custom__{field.key}' for field in event_import_custom_fields(custom_fields)),
+    )
+
+
+def participant_add_echo_params(request: Request, custom_fields: Sequence[CustomField]) -> dict[str, str]:
+    """Непустые значения формы добавления участника → form_<имя> параметры
+    возврата с ошибкой (ввод не теряется). student_ref_id НЕ входит:
+    невалидную карточку нельзя возвращать в форму (ошибка повторялась бы),
+    валидную маршрут дописывает отдельно. Длина >200 — значение не
+    возвращается (URL не резиновый)."""
+    values: dict[str, str] = {}
+    for key in participant_add_echo_keys(custom_fields):
+        value = clean_str(get_form_value(request, key))
+        if value and len(value) <= PARTICIPANT_FORM_ECHO_MAX_LENGTH:
+            values[f'form_{key}'] = value
+    return values
+
+
+def participant_add_form_values(args: dict, custom_fields: Sequence[CustomField]) -> dict[str, str]:
+    """Re-fill значений формы добавления участника из параметров редиректа
+    (см. participant_add_echo_params): form_<имя> → значение поля формы;
+    мусор/длина >200 молча отбрасываются."""
+    values: dict[str, str] = {}
+    for key in participant_add_echo_keys(custom_fields):
+        value = (get_param(args, f'form_{key}') or '').strip()
+        if value and len(value) <= PARTICIPANT_FORM_ECHO_MAX_LENGTH:
+            values[key] = value
+    return values
 
 
 def sanitize_download_filename(value: str | None) -> str:
@@ -2368,6 +2433,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'edit_protocol_data': edit_protocol_data,
                 'result_filter': result_filter,
                 'result_filter_options': CALENDAR_RESULT_FILTERS,
+                # Re-fill строки добавления после редиректа с ошибкой (UX P0):
+                # form_<имя> параметры возврата → значения полей формы.
+                'participant_form_values': participant_add_form_values(args, custom_fields),
                 'sport_options': storage.list_catalog('sport'),
                 'level_options': storage.get_level_names(),
                 # Настройки полей для строки ручного добавления (required/тип
@@ -2400,20 +2468,48 @@ def register(app: Sanic) -> None:  # noqa: C901
         if error is not None:
             return error
 
-        back_url = f'/calendar/{event["id"]}'
+        storage = get_storage(request.app)
+        custom_fields = storage.get_custom_fields()
+
+        # result-фильтр страницы события (hidden-поле формы) сохраняется в
+        # ЛЮБОМ редиректе — успех и ошибки. Введённые значения возвращаются
+        # в редиректе ошибки (form_<имя>), чтобы flash-возврат не терял ввод.
+        result_filter = participant_form_result_filter(request)
+        back_url, _ = event_document_back_urls(event, None, result_filter)
+        echo_params = participant_add_echo_params(request, custom_fields)
+
+        def form_error_url(extra: dict | None = None) -> str:
+            params: dict = {}
+            if result_filter:
+                params['result'] = result_filter
+            params.update(echo_params)
+            if extra:
+                params.update(extra)
+            query = urlencode(params)
+            return f"/calendar/{event['id']}?{query}" if query else f"/calendar/{event['id']}"
+
         student_name = clean_str(get_form_value(request, 'student_name'))
         if not student_name:
-            return build_redirect_with_message(error='ФИО обязательно', url=back_url)
+            return build_redirect_with_message(error='ФИО обязательно', url=form_error_url())
 
         event_date = datetime.fromisoformat(event['date'])
         event_date_to = datetime.fromisoformat(event['date_to']) if event.get('date_to') else None
-        storage = get_storage(request.app)
 
-        student_ref_id, ref_error = resolve_manual_participant_student_ref(storage, request, back_url)
+        # Некорректная карточка не возвращается в форму (иначе ошибка
+        # повторялась бы); прочий ввод — возвращается.
+        student_ref_id, ref_error = resolve_manual_participant_student_ref(storage, request, form_error_url())
         if ref_error is not None:
             return ref_error
 
-        custom_fields = storage.get_custom_fields()
+        # Валидная карточка — в re-fill; форма из prefill-режима «+ участие»
+        # восстанавливает и сам режим (add_participation), чтобы ошибка не
+        # выкидывала модератора из строки второго участия.
+        ref_echo: dict[str, str] = {}
+        if student_ref_id is not None:
+            ref_echo['form_student_ref_id'] = str(student_ref_id)
+            if get_form_value(request, 'prefill') == '1':
+                ref_echo['add_participation'] = str(student_ref_id)
+
         record = {
             'ФИО': student_name,
             'Пол': get_form_value(request, 'student_sex'),
@@ -2453,7 +2549,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             result=get_form_value(request, 'result'),
         )
         if build_error is not None:
-            return build_redirect_with_message(error=build_error, url=back_url)
+            return build_redirect_with_message(error=build_error, url=form_error_url(ref_echo))
 
         competition.student_ref_id = student_ref_id
         # P2: участник события получает явную ссылку на событие — состав
@@ -2464,7 +2560,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         # записей (справочники/участие), существующая строка не меняется.
         guard_error = event_participation_matched_duplicate_guard(storage, event, competition)
         if guard_error is not None:
-            return build_redirect_with_message(error=guard_error, url=back_url)
+            return build_redirect_with_message(error=guard_error, url=form_error_url(ref_echo))
         ensure_catalog_values(storage, [competition])
         storage.save_competitions(
             [competition],

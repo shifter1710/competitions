@@ -11,10 +11,16 @@
 {% if can_write %}
 <form id="participant-add-form" method="post" action="/calendar/{{ event.id }}/participants">
     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    {# Текущий result-фильтр страницы возвращается POST-ом: редиректы (успех
+       и ошибки) сохраняют выбранный вид участников. Имя result_filter, НЕ
+       result: в этой форме «результат участия» тоже называется result. #}
+    <input type="hidden" name="result_filter" value="{{ result_filter }}">
     {% if can_add_for %}
     {# Prefill «+ участие» (P7): снимок участника приходит hidden-полями,
        видимые поля строки — только дисциплина/место/результат участия;
-       ФИО заблокирован, резолвер не нужен. #}
+       ФИО заблокирован, резолвер не нужен. Маркер prefill: редирект с
+       ошибкой восстанавливает режим (?add_participation=<ref>). #}
+    <input type="hidden" name="prefill" value="1">
     <input type="hidden" name="student_ref_id" value="{{ can_add_for.student_ref_id }}">
     <input type="hidden" name="student_name" value="{{ can_add_for.student_name }}">
     <input type="hidden" name="student_sex" value="{{ can_add_for.student_sex }}">
@@ -24,8 +30,8 @@
     {% else %}
     {# Явный выбор карточки студента в резолвере ФИО (script.js) пишет сюда id;
        сброс связи/правка ФИО очищают поле — сервер валидирует его при непустом
-       значении. #}
-    <input type="hidden" name="student_ref_id" value="" id="participant-student-ref">
+       значении. Re-fill после ошибки — из параметров возврата (form_*). #}
+    <input type="hidden" name="student_ref_id" value="{{ participant_form_values.get('student_ref_id', '') }}" id="participant-student-ref">
     {% endif %}
 </form>
 {% endif %}
@@ -640,7 +646,8 @@
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-fio" name="student_name" required aria-label="ФИО" autocomplete="off"
                         placeholder="ФИО: поиск по первым буквам"
-                        title="Известные атлеты и карточки студентов подскажут пол, институт, группу и курс">
+                        title="Известные атлеты и карточки студентов подскажут пол, институт, группу и курс"
+                        value="{{ participant_form_values.get('student_name', '') }}">
                     {# Бейдж выбранной карточки: показывается при явном выборе карточки
                        студента в резолвере (script.js), «сбросить связь» чистит только
                        student_ref_id, не автоподставленные поля. Номер карточки не
@@ -657,18 +664,20 @@
                     <select class="form-select form-select-sm" form="participant-add-form" id="participant-sex"
                         name="student_sex" aria-label="Пол" {% if fs.student_sex.required %}required{% endif %}>
                         <option value="">не указан</option>
-                        <option value="М">М</option>
-                        <option value="Ж">Ж</option>
+                        <option value="М"{% if participant_form_values.get('student_sex') == 'М' %} selected{% endif %}>М</option>
+                        <option value="Ж"{% if participant_form_values.get('student_sex') == 'Ж' %} selected{% endif %}>Ж</option>
                     </select>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-institute" name="institute" aria-label="Институт"
+                        value="{{ participant_form_values.get('institute', '') }}"
                         {% if fs.institute.required %}required{% endif %}>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-group" name="group" aria-label="Группа"
+                        value="{{ participant_form_values.get('group', '') }}"
                         {% if fs.group.required %}required{% endif %}>
                 </td>
                 <td>
@@ -676,26 +685,30 @@
                         {% if fs.course.value_type == 'number' %}type="number" min="1" step="1"
                         {% else %}type="text" placeholder="например, 2"{% endif %}
                         id="participant-course" name="course" aria-label="Курс"
+                        value="{{ participant_form_values.get('course', '') }}"
                         {% if fs.course.required %}required{% endif %}>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-discipline" name="discipline" aria-label="Дисциплина"
                         placeholder="например, 100 м"
-                        title="Дисциплина различает участия одного человека (100 м и 200 м — два участия)">
+                        title="Дисциплина различает участия одного человека (100 м и 200 м — два участия)"
+                        value="{{ participant_form_values.get('discipline', '') }}">
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form"
                         {% if fs.position.value_type == 'number' %}type="number" min="0" step="1"
                         {% else %}type="text"{% endif %} id="participant-position" name="position"
                         aria-label="Место" placeholder="—"
+                        value="{{ participant_form_values.get('position', '') }}"
                         {% if not fs.position.required %}title="Место можно дописать позже"{% endif %}
                         {% if fs.position.required %}required{% endif %}>
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-result" name="result" aria-label="Результат" placeholder="например, 12,3 с"
-                        title="Результат участия — информационное поле (в выгрузке — колонка «Результат»)">
+                        title="Результат участия — информационное поле (в выгрузке — колонка «Результат»)"
+                        value="{{ participant_form_values.get('result', '') }}">
                 </td>
                 <td>
                     <button class="btn btn-sm btn-success" type="submit" form="participant-add-form">Добавить</button>
@@ -724,17 +737,20 @@
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-discipline" name="discipline" aria-label="Дисциплина"
                         placeholder="например, 100 м"
-                        title="Дисциплина различает участия одного человека (100 м и 200 м — два участия)">
+                        title="Дисциплина различает участия одного человека (100 м и 200 м — два участия)"
+                        value="{{ participant_form_values.get('discipline', '') }}">
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form"
                         {% if base_field_settings.position.value_type == 'number' %}type="number" min="0" step="1"
                         {% else %}type="text"{% endif %} id="participant-position" name="position"
-                        aria-label="Место" placeholder="—" title="Место можно дописать позже">
+                        aria-label="Место" placeholder="—" title="Место можно дописать позже"
+                        value="{{ participant_form_values.get('position', '') }}">
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
-                        id="participant-result" name="result" aria-label="Результат" placeholder="например, 12,3 с">
+                        id="participant-result" name="result" aria-label="Результат" placeholder="например, 12,3 с"
+                        value="{{ participant_form_values.get('result', '') }}">
                 </td>
                 <td>
                     <div class="d-flex gap-1">
@@ -755,7 +771,8 @@
                             <label class="form-label small mb-0" for="participant-custom-{{ field.key }}">{{ field.label }}</label>
                             <input class="form-control form-control-sm" form="participant-add-form" type="text"
                                 id="participant-custom-{{ field.key }}" name="custom__{{ field.key }}"
-                                aria-label="{{ field.label }}">
+                                aria-label="{{ field.label }}"
+                                value="{{ participant_form_values.get('custom__' ~ field.key, '') }}">
                         </div>
                         {% endfor %}
                     </div>

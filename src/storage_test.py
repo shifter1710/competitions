@@ -2130,6 +2130,33 @@ def test_competitions_page_count_matches_rows(adapter):
     assert adapter.count_competitions_filtered() == 5
 
 
+def test_competitions_page_sort_key_applies_to_whole_selection(adapter):
+    """Серверная сортировка главной (UX P0 A1): sort_key применяется к
+    ПОСТ-фильтрованной выборке ДО limit/offset — страница 1 это глобальные
+    топ-N, а не сортировка своей страницы; тай-брейк id ASC при любом
+    направлении (стабильная сортировка поверх предсортировки по id)."""
+    seed_page_records(adapter)
+
+    all_rows = adapter.get_competitions_page()
+    all_names = [row.student_name for row in all_rows]
+    assert len(all_names) == 5
+
+    key = lambda row: (row['student_name'] or '').casefold()  # noqa: E731
+    page = adapter.get_competitions_page(limit=2, offset=0, sort_key=key)
+    assert [item.student_name for item in page] == sorted(all_names, key=str.casefold)[:2]
+
+    page = adapter.get_competitions_page(limit=2, offset=0, sort_key=key, sort_reverse=True)
+    assert [item.student_name for item in page] == sorted(all_names, key=str.casefold, reverse=True)[:2]
+
+    # Сортировка сочетается с ФИО-фильтром (Python-пост-фильтр идёт раньше
+    # сортировки и среза; регистр не важен — casefold).
+    page = adapter.get_competitions_page(name='ждун', sort_key=key, sort_reverse=True)
+    assert [item.student_name for item in page] == ['Ждунов Ждун']
+
+    # Без sort_key — прежний дефолтный порядок (date ASC, created_at ASC).
+    assert [item.student_name for item in adapter.get_competitions_page()] == all_names
+
+
 def test_competitions_page_filters_combine(adapter):
     seed_page_records(adapter)
 
