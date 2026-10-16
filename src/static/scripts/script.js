@@ -3583,6 +3583,20 @@ class ParticipantsPage {
         let selectedStudent = null;
         const hintedInputs = [];
 
+        // P0.1: re-fill после ошибки формы — сервер вернул ВАЛИДНУЮ карточку
+        // в скрытое поле (связь не должна молча теряться при повторном
+        // сабмите). Восстанавливаем состояние «карточка выбрана»: бейдж виден,
+        // правка ФИО и «сбросить связь» работают как после выбора в
+        // резолвере. Мусорное значение поля игнорируется (не-число/пустое
+        // ФИО — карточка не считается выбранной).
+        const restoredRef = refInput ? refInput.value.trim() : "";
+        if (restoredRef && /^\d+$/.test(restoredRef) && fioInput.value.trim()) {
+            selectedStudent = {name: fioInput.value, student_id: Number(restoredRef)};
+            if (badge) {
+                badge.classList.remove("d-none");
+            }
+        }
+
         const hideBadge = () => {
             if (badge) {
                 badge.classList.add("d-none");

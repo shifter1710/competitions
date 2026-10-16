@@ -653,15 +653,35 @@ def participant_add_echo_params(request: Request, custom_fields: Sequence[Custom
     return values
 
 
-def participant_add_form_values(args: dict, custom_fields: Sequence[CustomField]) -> dict[str, str]:
+def participant_add_form_values(
+    args: dict,
+    custom_fields: Sequence[CustomField],
+    storage: SQLiteAdapter,
+) -> dict[str, str]:
     """Re-fill значений формы добавления участника из параметров редиректа
     (см. participant_add_echo_params): form_<имя> → значение поля формы;
-    мусор/длина >200 молча отбрасываются."""
+    мусор/длина >200 молча отбрасываются.
+
+    student_ref_id — отдельно от echo-ключей и ТОЛЬКО после серверной
+    валидации (правило resolve_manual_participant_student_ref: строгий int +
+    карточка существует и активна): маршрут кладёт form_student_ref_id в
+    редирект ошибки лишь для валидной карточки, но query-параметр —
+    клиентский ввод, слепо доверять ему нельзя. Мусорный/несуществующий/
+    неактивный id связь не восстанавливает (hidden пуст — как раньше)."""
     values: dict[str, str] = {}
     for key in participant_add_echo_keys(custom_fields):
         value = (get_param(args, f'form_{key}') or '').strip()
         if value and len(value) <= PARTICIPANT_FORM_ECHO_MAX_LENGTH:
             values[key] = value
+    raw_ref = (get_param(args, 'form_student_ref_id') or '').strip()
+    if raw_ref:
+        try:
+            student_ref_id = int(raw_ref)
+        except ValueError:
+            student_ref_id = None
+        student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
+        if student is not None and student['active']:
+            values['student_ref_id'] = str(student_ref_id)
     return values
 
 
@@ -2434,8 +2454,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'result_filter': result_filter,
                 'result_filter_options': CALENDAR_RESULT_FILTERS,
                 # Re-fill строки добавления после редиректа с ошибкой (UX P0):
-                # form_<имя> параметры возврата → значения полей формы.
-                'participant_form_values': participant_add_form_values(args, custom_fields),
+                # form_<имя> параметры возврата → значения полей формы;
+                # form_student_ref_id — после серверной валидации карточки.
+                'participant_form_values': participant_add_form_values(args, custom_fields, storage),
                 'sport_options': storage.list_catalog('sport'),
                 'level_options': storage.get_level_names(),
                 # Настройки полей для строки ручного добавления (required/тип

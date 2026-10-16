@@ -2332,6 +2332,34 @@ def test_script_participant_success_exits_edit_before_navigation():
     assert cancel_index < navigate_index, 'cancelEdit должен идти ДО навигации'
 
 
+def test_script_participant_refill_restores_card_state():
+    """P0.1 (source-контракт; JS-рантайма в CI нет — поведение проверяет
+    browser smoke): attachAddFormResolver обязан восстановить состояние
+    «карточка выбрана» из серверного re-fill (hidden #participant-student-ref
+    с валидным id): только цифровой id и непустое ФИО, бейдж показывается,
+    а правка ФИО дальше сбрасывает связь существующим selectedStudent-
+    механизмом. Восстановление — ДО создания FioResolver (при инициализации,
+    а не по выбору варианта)."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    match = re.search(r'attachAddFormResolver\(\) \{(.*?)\n    \}', script, re.S)
+    assert match is not None, 'attachAddFormResolver не найден'
+    body = match.group(1)
+    assert 'const restoredRef = refInput ? refInput.value.trim() : "";' in body
+    assert re.search(r'/\^\\d\+\$/.test\(restoredRef\)', body), 'нет числового фильтра id'
+    assert 'selectedStudent = {name: fioInput.value, student_id: Number(restoredRef)};' in body
+    assert 'fioInput.value.trim()' in body, 'восстановление требует непустое ФИО'
+    badge_pattern = (
+        r'selectedStudent = \{name: fioInput\.value, student_id: Number\(restoredRef\)\};'
+        r'.*?badge\.classList\.remove\("d-none"\);'
+    )
+    badge_match = re.search(badge_pattern, body, re.S)
+    assert badge_match is not None, 'бейдж карточки не показывается при восстановлении'
+    restore_index = body.find('const restoredRef')
+    resolver_index = body.find('new FioResolver(')
+    assert restore_index != -1 and resolver_index != -1
+    assert restore_index < resolver_index, 'восстановление должно идти до создания резолвера'
+
+
 def test_index_athlete_sees_own_records_and_ignores_status(athlete_index_client: SanicTestClient):
     _, response = athlete_index_client.get('/', headers=athlete_headers())
     assert response.status == 200
@@ -10044,6 +10072,149 @@ def test_participant_add_prefill_error_restores_prefill_mode(calendar_client: Sa
     assert 'value="200 м"' in body
     assert 'value="abc"' in body
     assert 'value="23,4 с"' in body
+
+
+def test_participant_add_error_refill_keeps_valid_student_ref(calendar_client: SanicTestClient):
+    """P0.1 (Student Reference Preservation): ошибка формы не должна молча
+    терять выбранную в резолвере карточку студента. Редирект ошибки несёт
+    form_student_ref_id (валидная карточка), GET-страница рендерит его в
+    hidden #participant-student-ref, повторный сабмит (браузер шлёт ровно то,
+    что в форме) создаёт участие СО связью с карточкой."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Нулевич Николай', 'М', 'ИСИ', 'ПГС-101', '2')
+    storage.save_competitions(
+        [
+            Competition(
+                student_id=f'id-{student_id}',
+                student_name='Нулевич Николай',
+                student_sex='М',
+                institute='ИСИ',
+                group='ПГС-101',
+                course=2,
+                sport='Бег',
+                date=datetime(2026, 6, 25),
+                level='внутривузовские',
+                name='Кросс',
+                position=1,
+                discipline='100 м',
+                extra_data={},
+                student_ref_id=student_id,
+                calendar_event_id=event_id,
+            ),
+        ]
+    )
+
+    editor = get_auth_headers('editor')
+    # Сабмит с выбранной карточкой и той же дисциплиной — matched-инвариант
+    # (P4 QA D2) отвергает добавление: flash-ошибка, редирект с echo.
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'student_name': 'Нулевич Николай',
+            'student_ref_id': str(student_id),
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'discipline': '100 м',
+            'position': '2',
+            'result': '12,3 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    assert 'Такое участие уже существует' in unquote_plus(location)
+    assert storage.count_competitions() == 1
+    # Валидная карточка возвращается в форму наравне с остальным вводом.
+    assert f'form_student_ref_id={student_id}' in location
+
+    _, back = calendar_client.get(location, headers=editor)
+    hidden = f'<input type="hidden" name="student_ref_id" value="{student_id}" id="participant-student-ref">'
+    assert hidden in back.text
+    # Прочий ввод возвращается как раньше.
+    assert 'value="Нулевич Николай"' in back.text
+
+    # Повторный сабмит: hidden несёт связь, пользователь меняет дисциплину —
+    # конфликт уходит, участие создаётся С student_ref_id (не cardless).
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'student_name': 'Нулевич Николай',
+            'student_ref_id': str(student_id),
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'discipline': '200 м',
+            'position': '2',
+            'result': '23,4 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_message=' in response.headers['location']
+    rows = [row for row in storage.get_competitions_page(name='Нулевич') if row.discipline == '200 м']
+    assert len(rows) == 1
+    assert rows[0].student_ref_id == student_id
+
+
+def test_participant_add_refill_ignores_bogus_student_ref(calendar_client: SanicTestClient):
+    """P0.1: form_student_ref_id — клиентский query-параметр, восстановление
+    только после серверной валидации (строгий int + карточка существует и
+    активна): мусор/несуществующий/неактивный id в hidden НЕ рендерятся —
+    повторный сабмит остаётся cardless, как раньше."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Активов Актив', 'М', 'ИСИ', 'ПГС-101', '2')
+    inactive_id = storage.create_student('Спячев Спяч', 'М', 'ИСИ', 'ПГС-101', '2')
+    storage.set_student_active(inactive_id, False)
+
+    editor = get_auth_headers('editor')
+    empty_hidden = 'name="student_ref_id" value="" id="participant-student-ref"'
+    for raw_ref in ('abc', '12.5', '-1', '9999', str(inactive_id)):
+        _, response = calendar_client.get(
+            f'/calendar/{event_id}?form_student_name='
+            + quote_plus('Ручной Ввод')
+            + f'&form_student_ref_id={quote_plus(raw_ref)}',
+            headers=editor,
+        )
+        assert response.status == 200, raw_ref
+        assert empty_hidden in response.text, raw_ref
+        # Плохой ref не «отравляет» форму: прочий ввод возвращается.
+        assert 'value="Ручной Ввод"' in response.text
+
+    # Контроль: валидная активная карточка восстанавливается.
+    _, response = calendar_client.get(f'/calendar/{event_id}?form_student_ref_id={student_id}', headers=editor)
+    assert f'name="student_ref_id" value="{student_id}" id="participant-student-ref"' in response.text
+
+
+def test_participant_add_post_roles_unchanged(calendar_client: SanicTestClient):
+    """P0.1: восстановление ref — только рендер GET-страницы, права не
+    расширяются: viewer POST добавления участника — 403, атлет страницу
+    события (и форму) не видит — 403, как раньше."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Нулевич Николай', 'М', 'ИСИ', 'ПГС-101', '2')
+
+    viewer = get_auth_headers('viewer')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=viewer,
+        data={**csrf_for(viewer), 'student_name': 'Залезов Зал', 'student_ref_id': str(student_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+    _, response = calendar_client.get(
+        f'/calendar/{event_id}?form_student_ref_id={student_id}', headers=get_athlete_headers()
+    )
+    assert response.status == 403
 
 
 def test_team_result_edit_error_url_single_question_mark(calendar_client: SanicTestClient):
