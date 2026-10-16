@@ -377,6 +377,29 @@ def calendar_participant_prefill_group(groups: Sequence[dict], raw_ref: str | No
     return next((group for group in groups if group.get('student_ref_id') == student_ref_id), None)
 
 
+# id карточки студента живёт в SQLite INTEGER — знаковом 64-битном. Python int
+# бесконечной точности, и значение вне диапазона (например, 2^63) sqlite3-бинд
+# отвергает OverflowError'ом (HTTP 500). Общий парсер обоих путей student_ref_id
+# (GET re-fill и POST резолвер) проверяет диапазон ДО передачи в SQLite.
+STUDENT_REF_ID_SQLITE_MAX = 9223372036854775807  # 2**63 - 1
+
+
+def parse_student_ref_id(raw: str | None) -> int | None:
+    """student_ref_id из клиентского ввода: строгий int в диапазоне SQLite
+    INTEGER (1..2^63-1) или None — мусор, пусто, отрицательные/ноль и
+    переполнение до бинда SQLite не доходят."""
+    value = (raw or '').strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    if parsed < 1 or parsed > STUDENT_REF_ID_SQLITE_MAX:
+        return None
+    return parsed
+
+
 def resolve_manual_participant_student_ref(
     storage: SQLiteAdapter,
     request: Request,
@@ -389,10 +412,7 @@ def resolve_manual_participant_student_ref(
     student_ref_raw = get_form_value(request, 'student_ref_id').strip()
     if not student_ref_raw:
         return None, None
-    try:
-        student_ref_id = int(student_ref_raw)
-    except ValueError:
-        student_ref_id = None
+    student_ref_id = parse_student_ref_id(student_ref_raw)
     student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
     if student is None or not student['active']:
         return None, build_redirect_with_message(
@@ -675,10 +695,7 @@ def participant_add_form_values(
             values[key] = value
     raw_ref = (get_param(args, 'form_student_ref_id') or '').strip()
     if raw_ref:
-        try:
-            student_ref_id = int(raw_ref)
-        except ValueError:
-            student_ref_id = None
+        student_ref_id = parse_student_ref_id(raw_ref)
         student = storage.get_student_by_id(student_ref_id) if student_ref_id is not None else None
         if student is not None and student['active']:
             values['student_ref_id'] = str(student_ref_id)

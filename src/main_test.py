@@ -10168,7 +10168,13 @@ def test_participant_add_refill_ignores_bogus_student_ref(calendar_client: Sanic
     """P0.1: form_student_ref_id — клиентский query-параметр, восстановление
     только после серверной валидации (строгий int + карточка существует и
     активна): мусор/несуществующий/неактивный id в hidden НЕ рендерятся —
-    повторный сабмит остаётся cardless, как раньше."""
+    повторный сабмит остаётся cardless, как раньше.
+
+    Final Input Hardening: id вне диапазона SQLite INTEGER (2^63 и больше,
+    включая длинные десятичные строки) не должен ронять страницу 500-й
+    (OverflowError sqlite3-бинда) — значение молча игнорируется, как прочий
+    мусор. Верхняя граница диапазона (2^63-1) — валидный int, просто
+    несуществующий id."""
     storage = app.ctx.storage
     event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
     student_id = storage.create_student('Активов Актив', 'М', 'ИСИ', 'ПГС-101', '2')
@@ -10177,7 +10183,21 @@ def test_participant_add_refill_ignores_bogus_student_ref(calendar_client: Sanic
 
     editor = get_auth_headers('editor')
     empty_hidden = 'name="student_ref_id" value="" id="participant-student-ref"'
-    for raw_ref in ('abc', '12.5', '-1', '9999', str(inactive_id)):
+    bogus_refs = (
+        'abc',
+        '12.5',
+        '-1',
+        '0',
+        '9999',
+        str(inactive_id),
+        # переполнение SQLite INTEGER (Python int бесконечной точности)
+        '9223372036854775808',
+        '99999999999999999999',
+        '9' * 500,
+        # верхняя граница диапазона: парсится, но карточки такой нет
+        '9223372036854775807',
+    )
+    for raw_ref in bogus_refs:
         _, response = calendar_client.get(
             f'/calendar/{event_id}?form_student_name='
             + quote_plus('Ручной Ввод')
@@ -14221,7 +14241,24 @@ def test_calendar_participant_add_rejects_invalid_student_ref(event_import_clien
     student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
     storage.set_student_active(student_id, False)
     headers = get_auth_headers()
-    for raw_ref in ('99999', str(student_id)):
+    # Final Input Hardening: id вне диапазона SQLite INTEGER (2^63 и больше,
+    # включая длинные десятичные строки) не должен ронять POST 500-й
+    # (OverflowError sqlite3-бинда) — существующий контракт валидации карточки:
+    # flash-редирект, запись не создаётся. Граница 2^63-1 — валидный int,
+    # просто несуществующий id.
+    invalid_refs = (
+        '99999',
+        str(student_id),
+        '0',
+        '-1',
+        'abc',
+        '12.5',
+        '9223372036854775808',
+        '99999999999999999999',
+        '9' * 500,
+        '9223372036854775807',
+    )
+    for raw_ref in invalid_refs:
         _, response = event_import_client.post(
             f'/calendar/{event_id}/participants',
             headers=headers,
@@ -14233,7 +14270,7 @@ def test_calendar_participant_add_rejects_invalid_student_ref(event_import_clien
             },
             allow_redirects=False,
         )
-        assert response.status == 302
+        assert response.status == 302, raw_ref
         assert 'Выбранная карточка студента не найдена или неактивна.' in unquote_plus(response.headers['location'])
     assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 0
 
