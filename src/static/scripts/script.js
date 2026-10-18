@@ -3195,6 +3195,8 @@ class Main {
 
 window.addEventListener("DOMContentLoaded", () => {
     new Main();
+    const personPage = document.querySelector("[data-person-page]");
+    if (personPage) new StudentProfilePage(personPage);
     initCalendarPeriodPickers();
     initFlashAutoHide();
     initEventLinksRepeaters();
@@ -4206,5 +4208,151 @@ class ParticipantsPage {
             },
             onError: (message2) => notify({type: "error", text: message2 || "Ошибка удаления записи"}),
         });
+    }
+}
+
+// Student Profile P2: progressive enhancement of existing native POST forms.
+class StudentProfilePage {
+    constructor(root) {
+        this.root = root;
+        this.tabs = [...root.querySelectorAll('[data-person-tab]')];
+        this.search = root.querySelector('#person-history-search');
+        this.dirty = new Set();
+        this.busy = false;
+        const params = new URL(location.href).searchParams;
+        this.returnURL = this.safeReturn(params.get('return')) || this.safeReturn(document.referrer) || '/admin/people';
+        root.querySelector('[data-person-back]').href = this.returnURL;
+        root.classList.add('person-enhanced');
+        root.querySelector('.person-tabs').setAttribute('role', 'tablist');
+        this.tabs.forEach((tab, index) => {
+            tab.id = `person-tab-${tab.dataset.personTab}`;
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-controls', `person-${tab.dataset.personTab}`);
+            tab.addEventListener('click', event => { event.preventDefault(); this.showTab(tab.dataset.personTab); });
+            tab.addEventListener('keydown', event => {
+                let next;
+                if (event.key === 'ArrowRight') next = (index + 1) % this.tabs.length;
+                if (event.key === 'ArrowLeft') next = (index + this.tabs.length - 1) % this.tabs.length;
+                if (event.key === 'Home') next = 0;
+                if (event.key === 'End') next = this.tabs.length - 1;
+                if (next !== undefined) { event.preventDefault(); if (this.showTab(this.tabs[next].dataset.personTab)) this.tabs[next].focus(); }
+            });
+        });
+        root.querySelectorAll('[data-person-panel]').forEach(panel => {
+            panel.setAttribute('role', 'tabpanel');
+            panel.setAttribute('aria-labelledby', `person-tab-${panel.dataset.personPanel}`);
+        });
+        this.search.value = (params.get('history_q') || '').slice(0, 2000);
+        this.showTab(params.get('tab') || location.hash.replace('#person-', '') || 'history', false);
+        this.search.addEventListener('input', () => this.filter());
+        root.querySelectorAll('[data-person-clear]').forEach(button => button.addEventListener('click', () => { this.search.value = ''; this.filter(); this.search.focus(); }));
+        root.querySelector('[data-person-edit]')?.addEventListener('click', () => {
+            if (!this.showTab('data')) return;
+            root.querySelector('#person-edit-details').open = true;
+            root.querySelector('#person-full-name').focus();
+        });
+        root.querySelectorAll('form').forEach(form => {
+            form.addEventListener('input', () => this.dirty.add(form));
+            form.addEventListener('change', () => this.dirty.add(form));
+            if (form.querySelector('input:not([type=hidden]), select')) {
+                const cancel = document.createElement('button');
+                cancel.type = 'button'; cancel.className = 'btn btn-outline-secondary person-cancel'; cancel.textContent = 'Отменить';
+                cancel.addEventListener('click', () => {
+                    if (this.busy) return;
+                    form.reset(); this.dirty.delete(form); form.querySelector('.person-form-error')?.remove();
+                    const details = form.closest('details'); if (details) { details.open = false; details.querySelector('summary').focus(); }
+                });
+                form.append(cancel);
+            }
+            form.addEventListener('submit', event => {
+                if (event.defaultPrevented) return;
+                event.preventDefault(); this.submit(form);
+            });
+        });
+        window.addEventListener('beforeunload', event => {
+            if (this.dirty.size || this.busy) { event.preventDefault(); event.returnValue = ''; }
+        });
+        root.querySelectorAll('table:not(.person-history-table)').forEach(table => {
+            table.classList.add('person-secondary-table');
+            const labels = [...table.querySelectorAll('thead th')].map(cell => cell.textContent.trim());
+            table.querySelectorAll('tbody tr').forEach(row => [...row.cells].forEach((cell, index) => { cell.dataset.label = labels[index] || ''; }));
+        });
+        this.filter();
+        this.viewKey = `competitions:person-view:${root.dataset.personPage}`;
+        try {
+            const view = JSON.parse(sessionStorage.getItem(this.viewKey) || 'null');
+            sessionStorage.removeItem(this.viewKey);
+            if (view && Date.now() - view.at >= 0 && Date.now() - view.at < 60000) requestAnimationFrame(() => {
+                const target = view.focusId ? document.getElementById(view.focusId) : this.tabs.find(tab => tab.dataset.personTab === this.activeTab);
+                target?.focus({preventScroll: true}); window.scrollTo(0, Number(view.scrollY) || 0);
+            });
+        } catch (error) { /* Optional viewport context; never form values. */ }
+    }
+    safeReturn(value) {
+        if (!value) return null;
+        try {
+            const url = new URL(value, location.origin);
+            if (url.origin !== location.origin || !(/^\/admin\/people$/.test(url.pathname) || /^\/calendar\/\d+$/.test(url.pathname))) return null;
+            url.searchParams.delete('admin_message'); url.searchParams.delete('admin_error');
+            return url.pathname + url.search + url.hash;
+        } catch (error) { return null; }
+    }
+    showTab(key, guard = true) {
+        if (guard && (this.dirty.size || this.busy)) { notify({type: 'error', text: 'Сохраните или отмените введённые изменения перед переходом.'}); return false; }
+        if (!this.tabs.some(tab => tab.dataset.personTab === key)) key = 'history';
+        this.activeTab = key;
+        this.tabs.forEach(tab => { const active = tab.dataset.personTab === key; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1; });
+        this.root.querySelectorAll('[data-person-panel]').forEach(panel => { panel.hidden = panel.dataset.personPanel !== key; });
+        this.updateURL(); return true;
+    }
+    updateURL() {
+        const url = new URL(location.href);
+        url.searchParams.set('tab', this.activeTab);
+        if (this.search.value) url.searchParams.set('history_q', this.search.value); else url.searchParams.delete('history_q');
+        url.searchParams.set('return', this.returnURL); url.hash = '';
+        history.replaceState(null, '', url);
+    }
+    filter() {
+        const query = this.search.value.trim().toLocaleLowerCase('ru');
+        const rows = [...this.root.querySelectorAll('[data-history-record]')];
+        let found = 0;
+        rows.forEach(row => { row.hidden = !row.dataset.historySearch.toLocaleLowerCase('ru').includes(query); if (!row.hidden) found++; });
+        this.root.querySelector('[data-person-found]').textContent = `Найдено ${found} из ${rows.length} загруженных участий`;
+        this.root.querySelector('[data-person-no-results]').hidden = !rows.length || found > 0;
+        this.updateURL();
+    }
+    async submit(form) {
+        if (this.busy) return;
+        if ([...this.dirty].some(other => other !== form)) { notify({type: 'error', text: 'Сначала сохраните или отмените изменения в другой форме.'}); return; }
+        const body = new FormData(form);
+        const controls = [...form.querySelectorAll('button, input, select')];
+        const states = controls.map(control => control.disabled);
+        this.busy = true; form.setAttribute('aria-busy', 'true');
+        controls.forEach(control => { control.disabled = true; });
+        form.querySelector('.person-form-error')?.remove();
+        try {
+            const response = await fetch(form.action, {method: 'POST', body, credentials: 'same-origin'});
+            const target = new URL(response.url);
+            if (target.pathname === '/login' || response.status === 401) throw new Error('Сессия завершилась. Введённые данные оставлены в форме; войдите в приложение в другой вкладке и повторите сохранение.');
+            if (target.searchParams.has('admin_error')) throw new Error(target.searchParams.get('admin_error'));
+            if (!response.ok) throw new Error(`Не удалось сохранить данные (HTTP ${response.status}). Повторите попытку.`);
+            this.dirty.delete(form); this.busy = false;
+            if (target.pathname === location.pathname) {
+                target.searchParams.set('tab', this.activeTab);
+                if (this.search.value) target.searchParams.set('history_q', this.search.value);
+                target.searchParams.set('return', this.returnURL);
+                try { sessionStorage.setItem(this.viewKey, JSON.stringify({at: Date.now(), scrollY: window.scrollY, focusId: `person-tab-${this.activeTab}`})); }
+                catch (error) { /* Storage is optional. */ }
+            }
+            location.assign(target.href);
+        } catch (error) {
+            this.busy = false;
+            if (form.querySelector('input:not([type=hidden]), select')) this.dirty.add(form);
+            const alert = document.createElement('div'); alert.className = 'person-form-error'; alert.setAttribute('role', 'alert'); alert.tabIndex = -1;
+            alert.textContent = error.message || 'Ошибка соединения. Введённые данные сохранены в форме.';
+            form.append(alert); alert.focus();
+        } finally {
+            form.removeAttribute('aria-busy'); controls.forEach((control, index) => { control.disabled = states[index]; });
+        }
     }
 }

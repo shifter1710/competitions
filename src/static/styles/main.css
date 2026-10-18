@@ -2206,3 +2206,93 @@ html:has(.event-page){margin-right:0;overflow-x:visible}
 
 .event-add-cancel{display:none;padding:0 20px 12px}
 .event-enhanced.event-add-open .event-add-cancel{display:block}
+
+/* Student Profile P2 — scoped Clean Admin, using the shared production palette. */
+html:has(.person-page) { margin-right: 0; overflow-x: visible; }
+.person-page { max-width: 1440px; margin: 0 auto; font-size: 15px; color: var(--text); min-width: 0; }
+.person-page .person-back { display: inline-block; margin-bottom: 12px; font-size: 14px; }
+.person-header { padding: 0 0 18px; }
+.person-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.person-heading h1 { font-size: 26px; line-height: 1.3; margin: 0; overflow-wrap: anywhere; }
+.person-summary { color: var(--text-2); margin: 9px 0; overflow-wrap: anywhere; }
+.person-header-bottom { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-2); font-size: 14px; }
+.person-tabs { display: flex; flex-wrap: wrap; gap: 4px 20px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+.person-tabs a { display: block; padding: 12px 2px; text-decoration: none; color: var(--text-2); border-bottom: 3px solid transparent; }
+.person-tabs a[aria-selected="true"] { color: var(--accent-fg); border-bottom-color: var(--accent-fg); font-weight: 600; }
+.person-tabs span { font-size: 13px; margin-left: 4px; }
+.person-page h2, .person-page .card-title { font-size: 18px; margin: 0 0 10px; }
+.person-page h6 { font-size: 16px; }
+.person-page .card { background: var(--surface); border: 1px solid var(--border); box-shadow: none !important; }
+.person-page .card-body { padding: 20px; }
+.person-page .person-js-only { display: none; }
+.person-enhanced .person-js-only { display: block; }
+.person-history-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.person-history-toolbar p, .person-record-meta { color: var(--text-2); font-size: 13px; margin: 0; }
+.person-search { width: min(460px, 50%); }
+.person-search label { display: block; font-size: 13px; margin-bottom: 5px; }
+.person-page .table { font-size: 14px; margin-bottom: 0; }
+.person-page .table td { padding: 11px 12px; vertical-align: top; overflow-wrap: anywhere; }
+.person-page .table th { padding: 10px 12px; font-size: 13px; color: var(--text-2); }
+.person-page .table-responsive { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.person-history-table { table-layout: fixed; }
+.person-history-table th:nth-child(1) { width: 14%; }
+.person-history-table th:nth-child(2) { width: 43%; }
+.person-history-table th:nth-child(3) { width: 12%; }
+.person-history-table th:nth-child(4) { width: 17%; }
+.person-history-table th:nth-child(5) { width: 14%; }
+.person-record-meta { margin-top: 5px; }
+.person-missing { color: var(--warn-fg); background: var(--warn-bg); border-radius: 4px; padding: 2px 5px; font-size: 13px; }
+.person-page details > form, .person-page details > div { margin-top: 14px; }
+.person-page details[open] > summary { margin-bottom: 8px; }
+.person-page .person-record-actions select { max-width: 100%; }
+.person-page .person-record-actions[open] { min-width: 0; }
+.person-page .person-danger { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-top: 20px; }
+.person-page .person-form-error { flex-basis: 100%; color: var(--err-fg); background: var(--err-bg); border: 1px solid var(--err-fg); border-radius: 6px; padding: 12px; margin-top: 12px; }
+.person-page .person-cancel { width: auto; align-self: end; margin: 10px 8px 0; }
+.person-page [aria-busy="true"] { opacity: .75; }
+.person-page .btn-outline-danger { color: var(--err-fg); border-color: var(--err-fg); }
+.person-page :is(a, button, input, select, summary):focus-visible { outline: 3px solid var(--accent-fg); outline-offset: 3px; }
+.person-no-results { padding: 24px; border: 1px solid var(--border); border-radius: 8px; }
+@media (max-width: 900px) {
+    .person-page .person-history-table, .person-page .person-history-table tbody { display: block; width: 100%; }
+    .person-page .person-history-table thead { display: none; }
+    .person-page .person-history-table tr { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--border); padding: 12px; gap: 10px; }
+    .person-page .person-history-table tr[hidden] { display: none; }
+    .person-page .person-history-table td { display: block; padding: 0; border: 0; min-width: 0; }
+    .person-page .person-history-table td::before { content: attr(data-label); display: block; color: var(--text-2); font-size: 13px; margin-bottom: 3px; }
+    .person-page .person-history-table td:nth-child(2), .person-page .person-history-table td:last-child { grid-column: 1 / -1; }
+    .person-page .person-history-table td:nth-child(1) { grid-column: 1 / -1; }
+}
+@media (max-width: 600px) {
+    .person-heading h1 { font-size: 23px; }
+    .person-tabs { gap: 0 16px; margin-bottom: 16px; }
+    .person-tabs a { padding: 10px 0; font-size: 14px; }
+    .person-header-bottom, .person-history-toolbar { align-items: start; flex-direction: column; }
+    .person-search { width: 100%; }
+    .person-page .card-body { padding: 14px; }
+    .person-page .input-group { flex-wrap: wrap; min-width: 0; }
+    .person-page .input-group > input { width: 100%; flex-basis: 100%; }
+    .person-page form, .person-page select { min-width: 0 !important; max-width: 100%; }
+    .person-page .form-control, .person-page .form-select { font-size: 16px; }
+    .person-page .table:not(.person-history-table) { min-width: 480px; }
+}
+.person-page .person-header { padding-bottom: 10px; }
+.person-page .person-tabs { margin-bottom: 14px; }
+.person-page .person-history-toolbar { margin-bottom: 10px; }
+.person-page .person-header-bottom .btn { padding: 5px 10px; }
+.person-page a { color: var(--accent-fg); }
+.person-record-info { font-size: 13px; color: var(--text-2); }
+.person-record-info summary { cursor: pointer; }
+.person-record-info p { margin: 6px 0 0; }
+.person-page .btn-outline-warning { color: var(--warn-fg); border-color: var(--warn-fg); }
+.person-page .btn-outline-warning:hover { color: var(--warn-fg); background: var(--warn-bg); }
+.person-record-info { display: inline-block; margin-left: 8px; }
+.person-record-info[open] { display: block; margin-left: 0; }
+@media (max-width: 600px) {
+    .person-page .person-secondary-table, .person-page .person-secondary-table tbody { display: block; min-width: 0 !important; width: 100%; }
+    .person-page .person-secondary-table thead { display: none; }
+    .person-page .person-secondary-table tr { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; border-bottom: 1px solid var(--border); }
+    .person-page .person-secondary-table td { display: block; border: 0; padding: 0; min-width: 0; }
+    .person-page .person-secondary-table td:last-child { flex-basis: 100%; }
+    .person-page .person-secondary-table td::before { content: attr(data-label); display: block; color: var(--text-2); font-size: 13px; }
+}

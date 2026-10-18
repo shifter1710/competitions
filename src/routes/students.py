@@ -3,6 +3,7 @@
 изменения поведения (Architecture v1)."""
 import asyncio
 import hashlib
+import json
 import secrets
 import time
 from datetime import date
@@ -35,6 +36,7 @@ from src.education import derive_course
 from src.gto import build_gto_rows
 from src.gto import build_gto_stage_options
 from src.gto import gto_stage_label
+from src.records import event_participation_effective_values
 from src.storage.sqlite import GTO_STATUS_LABELS
 from src.storage.sqlite import GTO_STATUSES
 from src.storage.sqlite import gto_year_max
@@ -1715,7 +1717,16 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'probably_finished': derived['probably_finished'],
             }
         linked_records = storage.list_linked_records(numeric_id, limit=50)
+        history_custom_fields = storage.get_custom_fields()
         for record in linked_records:
+            extra = record.get('extra_data') or {}
+            if isinstance(extra, str):
+                try:
+                    extra = json.loads(extra)
+                except (ValueError, TypeError):
+                    extra = {}
+            record['extra_data'] = extra if isinstance(extra, dict) else {}
+            record['discipline'], record['result'] = event_participation_effective_values(record, history_custom_fields)
             # Даты — datetime для format_date_range в шаблоне.
             record['date'] = datetime.fromisoformat(record['date']) if record['date'] else None
             record['date_to'] = datetime.fromisoformat(record['date_to']) if record['date_to'] else None

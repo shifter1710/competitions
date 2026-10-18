@@ -10678,7 +10678,8 @@ def test_admin_person_card_record_date_nowrap(people_client: SanicTestClient):
 
     _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
     assert response.status == 200
-    assert 'Бег · <span class="text-nowrap">01.03.2024</span>' in response.text
+    assert '<td data-label="Дата"><span class="text-nowrap">01.03.2024</span></td>' in response.text
+    assert 'Бег' in response.text
 
 
 def test_admin_person_edit_updates_fields(people_client: SanicTestClient):
@@ -12219,7 +12220,7 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
 
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
     assert response.status == 200
-    assert 'Связанные данные' in response.text
+    assert 'data-person-panel="history"' in response.text
     assert 'Привязанных записей пока нет.' in response.text
     assert 'Аккаунтов атлетов нет.' in response.text
 
@@ -12233,7 +12234,7 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     storage.link_user(backuper['id'], student_id)
 
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
-    assert 'Записи о соревнованиях' in response.text
+    assert 'История участий' in response.text
     # ФИО в записи — снимок записи, а не актуальное ФИО карточки
     assert 'Старое ФИО' in response.text
     assert 'Отвязать' in response.text
@@ -12254,7 +12255,8 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     ids = [row['id'] for row in storage.connection.execute('SELECT id FROM competitions WHERE student_ref_id IS NULL')]
     storage.link_competitions(ids, student_id)
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
-    assert '…и ещё 3 записей (показаны первые 50).' in response.text
+    assert 'Показаны последние 50 из 53 участий.' in response.text
+    assert response.text.count('data-history-record=') == 50
 
 
 def test_reconcile_link_extends_athlete_cabinet_by_ref(reconcile_client: SanicTestClient):
@@ -23160,3 +23162,52 @@ def test_event_p1_edit_team_deeplink_selects_team_panel(calendar_client: SanicTe
     assert 'data-initial-tab="teams"' in page.text
     assert 'id="team-result-edit-form"' in page.text
     assert f'action="/calendar/{event_id}/team-results/{team_id}/edit"' in page.text
+
+
+@pytest.mark.parametrize('role', ['admin', 'editor', 'viewer'])
+def test_student_profile_p2_tabs_history_and_roles(people_client: SanicTestClient, role):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Синтетиков Профиль Образец', 'М', 'Тестовый институт', 'QA-101', '3')
+    record_id = save_person_record(storage, 'Историческое Имя Образец')
+    storage.link_competitions([record_id], student_id)
+    _, response = people_client.get(f'/admin/people/{student_id}', headers=get_auth_headers(role))
+    body = response.text
+    assert response.status == 200
+    assert '<h1>Синтетиков Профиль Образец</h1>' in body
+    assert body.count('data-person-tab=') == 5
+    assert body.index('data-person-panel="history"') < body.index('data-person-panel="gto"')
+    assert f'data-history-record="{record_id}"' in body
+    assert 'Историческое Имя Образец' in body
+    assert 'Сведения о записи' in body
+    assert 'Поиск среди показанных записей' in body
+    assert 'Последние 1 из 1' in body
+    assert ('name="full_name"' in body) == (role == 'admin')
+    assert ('/reconcile/relink' in body) == (role == 'admin')
+    assert (f'action="/admin/people/{student_id}/gto"' in body) == (role != 'viewer')
+    # Native fallback: no server-rendered panel is hidden before JS enhancement.
+    assert 'data-person-panel="history" hidden' not in body
+    assert 'data-person-panel="data" hidden' not in body
+
+
+def test_student_profile_p2_history_legacy_and_base_values(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Синтетиков Легаси Образец', 'М', '', '', '')
+    storage.create_custom_field('qa_discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    storage.create_custom_field('qa_result', 'Результат', 'text', False, True, True, True, 1)
+    first = save_person_record(storage, 'Синтетиков Легаси Образец')
+    second = save_person_record(storage, 'Синтетиков Легаси Образец')
+    storage.link_competitions([first, second], student_id)
+    extra = json.dumps({'qa_discipline': 'Легаси дисциплина QA', 'qa_result': 'Легаси результат QA'})
+    storage.connection.execute('UPDATE competitions SET discipline=NULL, result=NULL, position=0, extra_data=? WHERE id=?', (extra, first))
+    storage.connection.execute("UPDATE competitions SET discipline='Базовая дисциплина QA', result='Базовый результат QA', position=2, extra_data=? WHERE id=?", (extra, second))
+    storage.connection.commit()
+    before = [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions ORDER BY id')]
+    _, response = people_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
+    body = response.text
+    rows = {int(record_id): row for record_id, row in re.findall(r'<tr data-history-record="(\d+)"[^>]*>(.*?)</tr>', body, re.S)}
+    assert 'Легаси дисциплина QA' in rows[first] and 'Легаси результат QA' in rows[first]
+    assert 'Без места' in rows[first]
+    assert 'Базовая дисциплина QA' in rows[second] and 'Базовый результат QA' in rows[second]
+    assert 'Легаси результат QA' not in rows[second]
+    assert body.index(f'data-history-record="{second}"') < body.index(f'data-history-record="{first}"')
+    assert [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions ORDER BY id')] == before
