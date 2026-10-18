@@ -151,7 +151,12 @@ def build_redirect_with_message(*, message: str | None = None, error: str | None
     if error:
         params['admin_error'] = error
     query = urlencode(params)
-    return redirect(f'{url}?{query}' if query else url)
+    if not query:
+        return redirect(url)
+    # url может уже нести query (?result=… у возвратов страницы события):
+    # второй «?» ломал бы строку параметров — flash терялся, фильтр сбрасывался.
+    separator = '&' if '?' in url else '?'
+    return redirect(f'{url}{separator}{query}')
 
 
 def get_flash_args(request: Request) -> dict[str, str | None]:

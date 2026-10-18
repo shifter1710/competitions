@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import ANY
 from unittest.mock import Mock
 from urllib.parse import quote
+from urllib.parse import quote_plus
 from urllib.parse import unquote_plus
 from urllib.parse import urlencode
 
@@ -1990,6 +1991,373 @@ def test_index_pager_two_pages_navigation(index_client: SanicTestClient):
     assert get_index_counter(response.text) == (5, 15)
     assert '<span class="pager__btn is-active" aria-current="page">2</span>' in response.text
     assert 'href="/?per_page=10&amp;page=1"' in response.text
+
+
+# --- Серверная сортировка реестра (UX P0 A1) ---
+# Контракт: sort+order применяются только полной валидной парой по белому
+# списку (базовые колонки + ключи активных show_in_table кастомов); порядок
+# считается по ВСЕЙ отфильтрованной выборке до limit/offset; тай-брейк —
+# id ASC; ссылки пагинации и селект «Показывать по» переносят sort/order;
+# индикатор sorted-asc/desc и aria-sort рендерит сервер; клик по заголовку —
+# GET-навигация (script.js), таблица отчёта остаётся клиентской.
+
+
+def index_column_texts(html: str, column_key: str) -> list[str]:
+    """Текст ячеек колонки страницы реестра в порядке строк (без тегов)."""
+    body = re.search(r'<tbody>(.*?)</tbody>', html, re.S)
+    assert body is not None, 'таблица реестра не найдена'
+    values = []
+    for row in re.findall(r'<tr>(.*?)</tr>', body.group(1), re.S):
+        match = re.search(rf'<td data-column-key="{column_key}"[^>]*>(.*?)</td>', row, re.S)
+        if match:
+            values.append(re.sub(r'<[^>]+>', '', match.group(1)).strip())
+    return values
+
+
+def index_sort_values(html: str) -> list[str]:
+    """data-sort-value ячеек «Дата» (ISO-дата начала) в порядке строк."""
+    return re.findall(r'<td data-column-key="date" data-sort-value="([^"]+)"', html)
+
+
+def index_record_ids(html: str) -> list[int]:
+    """id записей страницы реестра в порядке строк: ПЕРВЫЙ data-record-id
+    каждой строки (кнопка «Редактировать»; у вложений свой data-record-id)."""
+    body = re.search(r'<tbody>(.*?)</tbody>', html, re.S)
+    assert body is not None
+    ids = []
+    for row in re.findall(r'<tr>(.*?)</tr>', body.group(1), re.S):
+        match = re.search(r'data-record-id="(\d+)"', row)
+        if match:
+            ids.append(int(match.group(1)))
+    return ids
+
+
+def test_parse_index_sort_whitelist_and_full_pair():
+    from src.models.custom_field import CustomField as Field
+    from src.routes.registry import parse_index_sort
+
+    customs = [Field(field_id=1, key='sortnum', label='Число', field_type='number')]
+    assert parse_index_sort({'sort': ['student_name'], 'order': ['desc']}, []) == ('student_name', 'desc')
+    assert parse_index_sort({'sort': ['sortnum'], 'order': ['asc']}, customs) == ('sortnum', 'asc')
+    # Кастом вне show_in_table — не сортируется.
+    hidden = [Field(field_id=2, key='hidden', label='Скрытое', field_type='text', show_in_table=False)]
+    assert parse_index_sort({'sort': ['hidden'], 'order': ['asc']}, hidden) == ('', '')
+    # Только полной валидной парой (паттерн parse_people_sort).
+    assert parse_index_sort({'sort': ['student_name']}, []) == ('', '')
+    assert parse_index_sort({'sort': ['student_name'], 'order': ['bogus']}, []) == ('', '')
+    assert parse_index_sort({'sort': ['bogus'], 'order': ['asc']}, []) == ('', '')
+    assert parse_index_sort({'order': ['asc']}, []) == ('', '')
+    # «№»/служебные колонки — не колонки данных.
+    assert parse_index_sort({'sort': ['index'], 'order': ['asc']}, []) == ('', '')
+    assert parse_index_sort({'sort': ['actions'], 'order': ['asc']}, []) == ('', '')
+
+
+def test_index_sort_triple_numbers_before_text():
+    from src.routes.registry import _index_sort_triple
+
+    # Пусто < числа < текст (нативный порядок SQLite, паттерн опций курса).
+    assert _index_sort_triple('', 'course') < _index_sort_triple('2', 'course')
+    assert _index_sort_triple('99', 'course') < _index_sort_triple('Выпускник 2025/26', 'course')
+    assert _index_sort_triple(None, 'number') == (0, 0.0, '')
+    # Непарсируемая дата — пустое значение, не ошибка.
+    assert _index_sort_triple('31.02.2026', 'date') == (0, 0.0, '')
+    assert _index_sort_triple('25.06.2026', 'date') == (1, float(datetime(2026, 6, 25).toordinal()), '')
+    assert _index_sort_triple('2026-06-25', 'iso') == (1, float(datetime(2026, 6, 25).toordinal()), '')
+
+
+def test_build_index_query_carries_sort_and_order():
+    from src.routes.registry import build_index_query
+
+    filters = {'name': '', 'institute': ['ИСИ'], 'group': [], 'sport': [], 'level': [], 'status': ''}
+    assert build_index_query(filters, 100, 'student_name', 'desc') == urlencode(
+        {'institute': ['ИСИ'], 'sort': 'student_name', 'order': 'desc'}, doseq=True
+    )
+    # Без сортировки — как раньше (сортировка в URL не попадает).
+    assert build_index_query(filters, 100) == urlencode({'institute': ['ИСИ']}, doseq=True)
+
+
+def test_index_sort_orders_full_selection_across_pages(index_client: SanicTestClient):
+    """Сортировка применяется ко всей выборке, а не к текущей странице:
+    первая страница per_page=10 из 15 записей — глобальные топ-10 по ФИО."""
+    _, response = index_client.get('/?per_page=100', headers=get_auth_headers())
+    all_names = index_column_texts(response.text, 'student_name')
+    assert len(all_names) == 15
+
+    _, response = index_client.get('/?per_page=10&sort=student_name&order=desc', headers=get_auth_headers())
+    page1 = index_column_texts(response.text, 'student_name')
+    assert page1 == sorted(all_names, key=str.casefold, reverse=True)[:10]
+
+    _, response = index_client.get('/?per_page=10&sort=student_name&order=asc', headers=get_auth_headers())
+    assert index_column_texts(response.text, 'student_name') == sorted(all_names, key=str.casefold)[:10]
+
+
+def test_index_sort_base_columns_asc_and_desc(index_client: SanicTestClient):
+    """Каждая базовая текстовая колонка сортируется по всей странице.
+    «Статус» — по значению review_status (approved/pending/rejected),
+    хотя отображается русскими бейджами."""
+    for column in ('student_name', 'student_sex', 'institute', 'group', 'sport', 'level', 'name'):
+        _, response = index_client.get(f'/?per_page=100&sort={column}&order=asc', headers=get_auth_headers())
+        values = index_column_texts(response.text, column)
+        assert values == sorted(values, key=str.casefold), column
+        _, response = index_client.get(f'/?per_page=100&sort={column}&order=desc', headers=get_auth_headers())
+        values = index_column_texts(response.text, column)
+        assert values == sorted(values, key=str.casefold, reverse=True), column
+
+    badge_to_key = {'подтверждена': 'approved', 'на проверке': 'pending', 'отклонена': 'rejected'}
+    _, response = index_client.get('/?per_page=100&sort=status&order=asc', headers=get_auth_headers())
+    badges = index_column_texts(response.text, 'status')
+    keys = [badge_to_key[badge] for badge in badges]
+    assert keys == sorted(keys)
+    _, response = index_client.get('/?per_page=100&sort=status&order=desc', headers=get_auth_headers())
+    badges = index_column_texts(response.text, 'status')
+    keys = [badge_to_key[badge] for badge in badges]
+    assert keys == sorted(keys, reverse=True)
+
+
+def test_index_sort_date_uses_iso_machine_values(index_client: SanicTestClient):
+    _, response = index_client.get('/?per_page=100&sort=date&order=desc', headers=get_auth_headers())
+    values = index_sort_values(response.text)
+    assert len(values) == 15
+    assert values == sorted(values, reverse=True)
+    _, response = index_client.get('/?per_page=100&sort=date&order=asc', headers=get_auth_headers())
+    assert index_sort_values(response.text) == sorted(values)
+
+
+def test_index_sort_position_and_course(index_client: SanicTestClient):
+    storage = app.ctx.storage
+    variety = []
+    for index, (position, course) in enumerate([(5, 4), (0, 1), (3, 2), (1, 3), (2, 1), (4, 'Выпускник 2025/26')]):
+        record = make_index_record(f'Сорткин Сорт {index}', date=datetime(2024, 2, index + 1))
+        record.position = position
+        record.course = course
+        variety.append(record)
+    storage.save_competitions(variety)
+
+    _, response = index_client.get('/?per_page=100&sort=position&order=asc', headers=get_auth_headers())
+    positions = [int(value) for value in index_column_texts(response.text, 'position')]
+    assert positions == sorted(positions)
+    _, response = index_client.get('/?per_page=100&sort=position&order=desc', headers=get_auth_headers())
+    positions = [int(value) for value in index_column_texts(response.text, 'position')]
+    assert positions == sorted(positions, reverse=True)
+
+    # Курс: числа по возрастанию, текстовые («Выпускник…») — после чисел;
+    # пустые (нет значения) — раньше чисел.
+    _, response = index_client.get('/?per_page=100&sort=course&order=asc', headers=get_auth_headers())
+    courses = index_column_texts(response.text, 'course')
+    assert courses == sorted(
+        courses,
+        key=lambda value: (0, 0.0, '')
+        if not value
+        else ((1, float(value), '') if value.isdigit() else (2, 0.0, value.casefold())),
+    )
+
+
+def test_index_sort_invalid_falls_back_to_default(index_client: SanicTestClient):
+    _, default = index_client.get('/?per_page=10', headers=get_auth_headers())
+    default_ids = index_record_ids(default.text)
+    for query in ('sort=bogus&order=desc', 'sort=student_name&order=bogus', 'sort=student_name'):
+        _, response = index_client.get(f'/?per_page=10&{query}', headers=get_auth_headers())
+        assert index_record_ids(response.text) == default_ids, query
+        # Индикатор сортировки не рисуется.
+        assert 'data-sort-direction=' not in response.text, query
+
+
+def test_index_sort_kept_in_pager_and_per_page_select(index_client: SanicTestClient):
+    params = {'per_page': 10, 'sort': 'student_name', 'order': 'desc'}
+    _, response = index_client.get('/?' + urlencode(params), headers=get_auth_headers())
+    # Ссылки пагинации несут фильтры, per_page и сортировку (page добавляет
+    # роут; текущая страница 1 — активный span, поэтому ждём ссылку на 2-ю).
+    assert 'href="/?per_page=10&amp;sort=student_name&amp;order=desc&amp;page=2"' in response.text
+    # Селект «Показывать по» держит сортировку (per_page ставит сам, page сбрасывает).
+    assert 'data-query="sort=student_name&amp;order=desc"' in response.text
+    # Активный заголовок: индикатор + aria-sort + data-sort-direction (JS
+    # переключает направление по нему), скрытые поля формы фильтров.
+    assert (
+        'data-column-key="student_name" data-sort-type="text" data-sortable="true" data-sort-direction="desc"'
+        in response.text
+    )
+    assert 'aria-sort="descending"' in response.text
+    assert 'class="table-header-cell sorted-desc"' in response.text
+    assert '<input type="hidden" name="sort" value="student_name">' in response.text
+    assert '<input type="hidden" name="order" value="desc">' in response.text
+    # Остальные сортируемые заголовки — без индикатора.
+    assert 'data-column-key="sport" data-sort-type="text" data-sortable="true" >Вид спорта<' in response.text
+    # Служебные заголовки не получают data-sortable.
+    assert 'data-column-key="index" data-sort-type="number">№' in response.text
+
+
+def test_index_sort_custom_field_column(index_client: SanicTestClient):
+    storage = app.ctx.storage
+    storage.create_custom_field('sortnum', 'Сортчисло', 'number', False, True, True, True, 0)
+    records = []
+    for index in range(12):
+        record = make_index_record(f'Кастомкин Кастом {index:02d}', date=datetime(2024, 7, index + 1))
+        # Перестановка 0,7,2,9,…: порядок вставки не совпадает с порядку значений.
+        record.extra_data = {'sortnum': str((index * 7) % 12)}
+        records.append(record)
+    storage.save_competitions(records)
+
+    # Только записи с заполненным кастомом: ФИО-фильтр отсекает сид без
+    # sortnum (пустые клетки сортировались бы раньше чисел).
+    _, response = index_client.get(
+        '/?' + urlencode({'name': 'Кастомкин', 'sort': 'sortnum', 'order': 'asc'}), headers=get_auth_headers()
+    )
+    values = index_column_texts(response.text, 'sortnum')
+    assert values == sorted([str((index * 7) % 12) for index in range(12)], key=int)
+    # Заголовок кастомной колонки кликабелен и с индикатором.
+    assert re.search(
+        r'data-column-key="sortnum" data-field-type="number" data-sort-type="number"'
+        r' data-sortable="true" data-sort-direction="asc"',
+        response.text,
+    )
+    _, response = index_client.get(
+        '/?' + urlencode({'name': 'Кастомкин', 'sort': 'sortnum', 'order': 'desc'}), headers=get_auth_headers()
+    )
+    values = index_column_texts(response.text, 'sortnum')
+    assert values == sorted([str((index * 7) % 12) for index in range(12)], key=int, reverse=True)
+
+
+def test_index_sort_tiebreak_by_id_asc(index_client: SanicTestClient):
+    """Равные значения ключа — детерминированный порядок id ASC в обоих
+    направлениях (стабильная сортировка поверх предсортировки по id)."""
+    storage = app.ctx.storage
+    twins = [make_index_record('Одинякин Один', date=datetime(2024, 8, 1)) for _ in range(6)]
+    storage.save_competitions(twins)
+    twin_ids = [record.record_id for record in storage.get_competitions_page(name='Одинякин')]
+
+    _, response = index_client.get(
+        '/?' + urlencode({'name': 'Одинякин', 'sort': 'position', 'order': 'asc'}), headers=get_auth_headers()
+    )
+    assert index_record_ids(response.text) == sorted(int(value) for value in twin_ids)
+    _, response = index_client.get(
+        '/?' + urlencode({'name': 'Одинякин', 'sort': 'position', 'order': 'desc'}), headers=get_auth_headers()
+    )
+    assert index_record_ids(response.text) == sorted(int(value) for value in twin_ids)
+
+
+def test_index_sort_athlete_scope_unchanged(athlete_index_client: SanicTestClient):
+    """Сортировка не расширяет видимость: атлет видит только свои записи,
+    отсортированные в пределах своей выборки."""
+    _, response = athlete_index_client.get('/?sort=student_name&order=desc', headers=athlete_headers())
+    assert response.status == 200
+    assert get_index_counter(response.text) == (2, 2)
+    names = index_column_texts(response.text, 'student_name')
+    assert names == sorted(names, key=str.casefold, reverse=True)
+
+
+def test_index_sort_viewer_allowed(index_client: SanicTestClient):
+    _, response = index_client.get('/?sort=institute&order=asc', headers=get_auth_headers(role='viewer'))
+    assert response.status == 200
+    values = index_column_texts(response.text, 'institute')
+    assert values == sorted(values, key=str.casefold)
+
+
+def test_index_export_button_states_current_page_contract(index_client: SanicTestClient):
+    """A2: контракт «выгрузка = текущая страница» назван прямо на кнопке —
+    счётчик страницы в title (SEMANTика выгрузки не менялась)."""
+    _, response = index_client.get('/?per_page=10', headers=get_auth_headers())
+    assert response.status == 200
+    assert 'title="Выгружается текущая страница — 10 из 15 записей' in response.text
+    _, response = index_client.get('/?per_page=10&page=2', headers=get_auth_headers())
+    assert 'title="Выгружается текущая страница — 5 из 15 записей' in response.text
+
+
+def test_index_date_cell_machine_value_is_iso(index_client: SanicTestClient):
+    """A5: data-sort-value колонки «Дата» — ISO (машиночитаемо для
+    parseDateValue с ISO-веткой)."""
+    _, response = index_client.get('/?per_page=10', headers=get_auth_headers())
+    assert 'data-sort-value="2024-03-01"' in response.text
+    assert index_sort_values(response.text) == sorted(index_sort_values(response.text))
+
+
+def test_script_client_sort_parses_iso_dates():
+    """A5 (source-контракт; JS-рантайма в CI нет — поведение проверяет
+    browser smoke): parseDateValue обязан понимать ISO «2026-06-25»
+    (data-sort-value колонки «Дата»), не только дд.мм.гггг кастомных полей."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    match = re.search(r'parseDateValue\(value\) \{(.*?)\n    \}', script, re.S)
+    assert match is not None, 'parseDateValue не найден'
+    body = match.group(1)
+    assert re.search(r'/\^\(\\d\{4\}\)-\(\\d\{2\}\)-\(\\d\{2\}\)\$/\.exec', body), 'нет ISO-ветки'
+    assert 'split(".")' in body, 'нет ветки дд.мм.гггг'
+
+
+def test_script_unsaved_input_guards_present():
+    """A3 (source-контракт): beforeunload при активной правке (главная и
+    страница участников), confirm перед экспортом с несохранённой правкой —
+    отказ не отменяет правку и не выгружает."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    assert script.count('beforeunload') >= 2
+    assert 'hasActiveRowEdit()' in script
+    export_match = re.search(r'handleClickExportButton\(\) \{(.*?)\n    \}', script, re.S)
+    assert export_match is not None
+    assert 'hasActiveRowEdit()' in export_match.group(1)
+    assert 'confirm(' in export_match.group(1)
+
+
+def test_script_navigate_to_event_keeps_result_filter():
+    """A4 (source-контракт): возврат на страницу события после
+    инлайн-сохранения/удаления участия сохраняет текущий result-фильтр."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    match = re.search(r'navigateToEventWithMessage\(message\) \{(.*?)\n    \}', script, re.S)
+    assert match is not None
+    assert 'result' in match.group(1)
+
+
+def test_script_participant_success_exits_edit_before_navigation():
+    """Регрессия repair 1 (A3×A4, source-контракт): onSuccess сохранения и
+    удаления участия обязан вызывать cancelEdit ДО
+    navigateToEventWithMessage — иначе beforeunload-guard (editingRow ещё
+    установлен) блокирует собственную навигацию приложения: POST проходит,
+    а страница остаётся в режиме правки без flash."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    save_match = re.search(r'saveEdit\(\) \{(.*?)\n    \}', script, re.S)
+    assert save_match is not None, 'saveEdit не найден'
+    save_success = re.search(r'onSuccess: \(\) => \{(.*?)\n            \},', save_match.group(1), re.S)
+    assert save_success is not None
+    cancel_index = save_success.group(1).find('this.cancelEdit()')
+    navigate_index = save_success.group(1).find('this.navigateToEventWithMessage(')
+    assert cancel_index != -1, 'saveEdit onSuccess не выходит из правки'
+    assert navigate_index != -1
+    assert cancel_index < navigate_index, 'cancelEdit должен идти ДО навигации'
+
+    delete_match = re.search(r'deleteParticipant\(recordId.*?\n    \}', script, re.S)
+    assert delete_match is not None, 'deleteParticipant не найден'
+    delete_success = re.search(r'onSuccess: \(\) => \{(.*?)\n            \},', delete_match.group(0), re.S)
+    assert delete_success is not None
+    cancel_index = delete_success.group(1).find('this.cancelEdit()')
+    navigate_index = delete_success.group(1).find('this.navigateToEventWithMessage(')
+    assert cancel_index != -1, 'deleteParticipant onSuccess не выходит из правки'
+    assert navigate_index != -1
+    assert cancel_index < navigate_index, 'cancelEdit должен идти ДО навигации'
+
+
+def test_script_participant_refill_restores_card_state():
+    """P0.1 (source-контракт; JS-рантайма в CI нет — поведение проверяет
+    browser smoke): attachAddFormResolver обязан восстановить состояние
+    «карточка выбрана» из серверного re-fill (hidden #participant-student-ref
+    с валидным id): только цифровой id и непустое ФИО, бейдж показывается,
+    а правка ФИО дальше сбрасывает связь существующим selectedStudent-
+    механизмом. Восстановление — ДО создания FioResolver (при инициализации,
+    а не по выбору варианта)."""
+    script = (Path(__file__).parent / 'static' / 'scripts' / 'script.js').read_text(encoding='utf-8')
+    match = re.search(r'attachAddFormResolver\(\) \{(.*?)\n    \}', script, re.S)
+    assert match is not None, 'attachAddFormResolver не найден'
+    body = match.group(1)
+    assert 'const restoredRef = refInput ? refInput.value.trim() : "";' in body
+    assert re.search(r'/\^\\d\+\$/.test\(restoredRef\)', body), 'нет числового фильтра id'
+    assert 'selectedStudent = {name: fioInput.value, student_id: Number(restoredRef)};' in body
+    assert 'fioInput.value.trim()' in body, 'восстановление требует непустое ФИО'
+    badge_pattern = (
+        r'selectedStudent = \{name: fioInput\.value, student_id: Number\(restoredRef\)\};'
+        r'.*?badge\.classList\.remove\("d-none"\);'
+    )
+    badge_match = re.search(badge_pattern, body, re.S)
+    assert badge_match is not None, 'бейдж карточки не показывается при восстановлении'
+    restore_index = body.find('const restoredRef')
+    resolver_index = body.find('new FioResolver(')
+    assert restore_index != -1 and resolver_index != -1
+    assert restore_index < resolver_index, 'восстановление должно идти до создания резолвера'
 
 
 def test_index_athlete_sees_own_records_and_ignores_status(athlete_index_client: SanicTestClient):
@@ -7717,8 +8085,14 @@ def test_index_renders_bound_link_in_target_column(client: SanicTestClient):
     assert expected in body
     # Запись без ссылки — обычный текст целевой колонки.
     assert '>Кубок «Осень»<' in body
-    # Скрытая link-колонка: остаётся в DOM (инлайн-строка читает типы), но d-none.
-    assert 'data-column-key="comp_link" data-field-type="url" data-sort-type="url" class="d-none"' in body
+    # Скрытая link-колонка: остаётся в DOM (инлайн-строка читает типы), но
+    # d-none. UX P0 A1: кастомные колонки получили серверную сортировку —
+    # у th появился data-sortable (пробелы между атрибутами не фиксируем).
+    assert re.search(
+        r'data-column-key="comp_link" data-field-type="url" data-sort-type="url"'
+        r' data-sortable="true"\s+class="d-none ?"',
+        body,
+    )
     # Не дублируется: у записи со ссылкой отдельная колонка пуста и скрыта.
     assert '<td data-column-key="comp_link" class="d-none">' in body
 
@@ -9442,6 +9816,449 @@ def test_team_results_edit_validation_keeps_edit_mode(calendar_client: SanicTest
         ('Общий зачёт', 1),
         ('Мужчины', 2),
     ]
+
+
+# --- Сохранение result-фильтра и ввода формы участников (UX P0 A4) ---
+# Контракт: hidden result в форме добавления участника; редиректы (успех и
+# ошибки) возвращают ?result=…; ошибка валидации НЕ теряет введённые
+# значения (re-fill из form_-параметров редиректа); query склеивается
+# корректно (один «?»), flash-сообщение доезжает.
+
+
+def make_no_result_participant(event_id: int, name: str = 'Нулевич Николай') -> Competition:
+    """Участие «без результата» (position=0) события — материал фильтра."""
+    return Competition(
+        student_id=f'id-{name}',
+        student_name=name,
+        student_sex='М',
+        institute='ИСИ',
+        group='ПГС-101',
+        course=2,
+        sport='Бег',
+        date=datetime(2026, 6, 25),
+        level='внутривузовские',
+        name='Кросс',
+        position=0,
+        extra_data={},
+        calendar_event_id=event_id,
+    )
+
+
+def test_build_redirect_with_message_joins_existing_query():
+    """url уже с query (?result=…) склеивается через «&»: раньше второй «?»
+    ломал строку параметров — flash терялся, фильтр сбрасывался."""
+    from src.web import build_redirect_with_message
+
+    response = build_redirect_with_message(error='Ошибка', url='/calendar/7?result=without')
+    assert response.headers['location'] == '/calendar/7?result=without&admin_error=%D0%9E%D1%88%D0%B8%D0%B1%D0%BA%D0%B0'
+    response = build_redirect_with_message(message='Готово', url='/calendar/7')
+    assert response.headers['location'] == '/calendar/7?admin_message=%D0%93%D0%BE%D1%82%D0%BE%D0%B2%D0%BE'
+    # Пустой flash — URL не трогается вовсе.
+    response = build_redirect_with_message(url='/calendar/7?result=with')
+    assert response.headers['location'] == '/calendar/7?result=with'
+
+
+def test_participant_add_form_renders_hidden_result(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    storage.save_competitions([make_no_result_participant(event_id)])
+
+    for query in ('?result=without', ''):
+        _, response = calendar_client.get(f'/calendar/{event_id}{query}', headers=get_auth_headers('editor'))
+        assert response.status == 200
+        # hidden result рендерится всегда (пустой — тоже): форма шлёт
+        # текущий фильтр на POST.
+        assert '<input type="hidden" name="result_filter" value="without">' in response.text or query == ''
+
+
+def test_participant_add_keeps_result_filter_on_success(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    storage.save_competitions([make_no_result_participant(event_id)])
+
+    editor = get_auth_headers('editor')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'result_filter': 'without',
+            'student_name': 'Новенький Никита',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '1',
+            'position': '',
+            'result': '13,5 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    # Успех: участник добавлен, возврат — в тот же отфильтрованный вид.
+    assert location.startswith(f'/calendar/{event_id}?result=without&admin_message=')
+    assert 'Новенький Никита' in unquote_plus(location)
+    # Коллизия имён: «результат участия» (result) не затёрт hidden-фильтром
+    # (result_filter) — в запись уходит именно значение поля.
+    stored = storage.get_competitions_page(name='Новенький')[0]
+    assert stored.result == '13,5 с'
+
+
+def test_participant_add_validation_error_refills_and_keeps_filter(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    storage.save_competitions([make_no_result_participant(event_id)])
+
+    editor = get_auth_headers('editor')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'result_filter': 'without',
+            'student_name': 'Пропадайлов Пропал',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'discipline': '100 м',
+            'position': 'abc',
+            'result': '12,3 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    # Ошибка: фильтр и ввод возвращаются (form_-параметры), flash доезжает.
+    assert location.startswith(f'/calendar/{event_id}?result=without&')
+    assert 'form_student_name=' + quote_plus('Пропадайлов Пропал') in location
+    assert 'form_position=abc' in location
+    assert 'admin_error=' in location
+    # Запись не создана.
+    assert storage.count_competitions() == 1
+
+    _, back = calendar_client.get(location, headers=editor)
+    body = back.text
+    # Re-fill полей формы из параметров редиректа.
+    assert 'value="Пропадайлов Пропал"' in body
+    assert 'value="ПГС-101"' in body
+    assert 'value="100 м"' in body
+    assert 'value="abc"' in body
+    assert 'value="12,3 с"' in body
+    assert '<option value="М" selected>' in body
+    # Вид остался отфильтрованным: показано только «без результата».
+    assert 'Нулевич Николай' in body
+    assert 'Пропадайлов Пропал</td>' not in body
+    assert 'Показано <strong>1</strong>' in body
+
+
+def test_participant_add_empty_name_error_keeps_other_input(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+
+    editor = get_auth_headers('editor')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'result_filter': 'with',
+            'student_name': '   ',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    assert 'result=with' in location
+    assert 'admin_error=' in location
+    # Пустое ФИО в echo не попадает, прочий ввод возвращается.
+    assert 'form_student_name' not in location
+    assert 'form_institute=' + quote_plus('ИСИ') in location
+    _, back = calendar_client.get(location, headers=editor)
+    assert 'value="ИСИ"' in back.text
+
+
+def test_participant_add_invalid_student_ref_not_refilled(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+
+    editor = get_auth_headers('editor')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'result_filter': 'without',
+            'student_name': 'Связкин Ссыл',
+            'student_ref_id': '9999',
+            'institute': 'ИСИ',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    # Невалидная карточка НЕ возвращается в форму (иначе ошибка зациклится),
+    # прочий ввод и фильтр — возвращаются.
+    assert 'form_student_ref_id' not in location
+    assert 'form_student_name=' + quote_plus('Связкин Ссыл') in location
+    assert 'result=without' in location
+    assert 'Выбранная карточка студента не найдена' in unquote_plus(location)
+
+
+def test_participant_add_prefill_error_restores_prefill_mode(calendar_client: SanicTestClient):
+    """Prefill «+ участие» + ошибка валидации: редирект возвращает и режим
+    (?add_participation=<ref>), и введённые дисциплину/место/результат —
+    модератор не вылетает из строки второго участия."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Многодисциплинарный Марк', 'М', 'ИСИ', 'ПГС-101', '2')
+    storage.save_competitions(
+        [
+            Competition(
+                student_id=f'id-{student_id}',
+                student_name='Многодисциплинарный Марк',
+                student_sex='М',
+                institute='ИСИ',
+                group='ПГС-101',
+                course=2,
+                sport='Бег',
+                date=datetime(2026, 6, 25),
+                level='внутривузовские',
+                name='Кросс',
+                position=1,
+                discipline='100 м',
+                extra_data={},
+                student_ref_id=student_id,
+                calendar_event_id=event_id,
+            ),
+        ]
+    )
+
+    editor = get_auth_headers('editor')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'result_filter': 'without',
+            'prefill': '1',
+            'student_ref_id': str(student_id),
+            'student_name': 'Многодисциплинарный Марк',
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'discipline': '200 м',
+            'position': 'abc',
+            'result': '23,4 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    assert f'add_participation={student_id}' in location
+    assert 'result=without' in location
+    assert 'form_discipline=' + quote_plus('200 м') in location
+    assert 'form_position=abc' in location
+
+    _, back = calendar_client.get(location, headers=editor)
+    body = back.text
+    # Режим восстановлен: строка второго участия с ФИО-снимком.
+    assert 'Новое участие для этого участника' in body
+    assert 'Многодисциплинарный Марк' in body
+    # Введённые значения — в полях дисциплины/места/результата.
+    assert 'value="200 м"' in body
+    assert 'value="abc"' in body
+    assert 'value="23,4 с"' in body
+
+
+def test_participant_add_error_refill_keeps_valid_student_ref(calendar_client: SanicTestClient):
+    """P0.1 (Student Reference Preservation): ошибка формы не должна молча
+    терять выбранную в резолвере карточку студента. Редирект ошибки несёт
+    form_student_ref_id (валидная карточка), GET-страница рендерит его в
+    hidden #participant-student-ref, повторный сабмит (браузер шлёт ровно то,
+    что в форме) создаёт участие СО связью с карточкой."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Нулевич Николай', 'М', 'ИСИ', 'ПГС-101', '2')
+    storage.save_competitions(
+        [
+            Competition(
+                student_id=f'id-{student_id}',
+                student_name='Нулевич Николай',
+                student_sex='М',
+                institute='ИСИ',
+                group='ПГС-101',
+                course=2,
+                sport='Бег',
+                date=datetime(2026, 6, 25),
+                level='внутривузовские',
+                name='Кросс',
+                position=1,
+                discipline='100 м',
+                extra_data={},
+                student_ref_id=student_id,
+                calendar_event_id=event_id,
+            ),
+        ]
+    )
+
+    editor = get_auth_headers('editor')
+    # Сабмит с выбранной карточкой и той же дисциплиной — matched-инвариант
+    # (P4 QA D2) отвергает добавление: flash-ошибка, редирект с echo.
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'student_name': 'Нулевич Николай',
+            'student_ref_id': str(student_id),
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'discipline': '100 м',
+            'position': '2',
+            'result': '12,3 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    location = response.headers['location']
+    assert 'Такое участие уже существует' in unquote_plus(location)
+    assert storage.count_competitions() == 1
+    # Валидная карточка возвращается в форму наравне с остальным вводом.
+    assert f'form_student_ref_id={student_id}' in location
+
+    _, back = calendar_client.get(location, headers=editor)
+    hidden = f'<input type="hidden" name="student_ref_id" value="{student_id}" id="participant-student-ref">'
+    assert hidden in back.text
+    # Прочий ввод возвращается как раньше.
+    assert 'value="Нулевич Николай"' in back.text
+
+    # Повторный сабмит: hidden несёт связь, пользователь меняет дисциплину —
+    # конфликт уходит, участие создаётся С student_ref_id (не cardless).
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=editor,
+        data={
+            **csrf_for(editor),
+            'student_name': 'Нулевич Николай',
+            'student_ref_id': str(student_id),
+            'student_sex': 'М',
+            'institute': 'ИСИ',
+            'group': 'ПГС-101',
+            'course': '2',
+            'discipline': '200 м',
+            'position': '2',
+            'result': '23,4 с',
+        },
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert 'admin_message=' in response.headers['location']
+    rows = [row for row in storage.get_competitions_page(name='Нулевич') if row.discipline == '200 м']
+    assert len(rows) == 1
+    assert rows[0].student_ref_id == student_id
+
+
+def test_participant_add_refill_ignores_bogus_student_ref(calendar_client: SanicTestClient):
+    """P0.1: form_student_ref_id — клиентский query-параметр, восстановление
+    только после серверной валидации (строгий int + карточка существует и
+    активна): мусор/несуществующий/неактивный id в hidden НЕ рендерятся —
+    повторный сабмит остаётся cardless, как раньше.
+
+    Final Input Hardening: id вне диапазона SQLite INTEGER (2^63 и больше,
+    включая длинные десятичные строки) не должен ронять страницу 500-й
+    (OverflowError sqlite3-бинда) — значение молча игнорируется, как прочий
+    мусор. Верхняя граница диапазона (2^63-1) — валидный int, просто
+    несуществующий id."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Активов Актив', 'М', 'ИСИ', 'ПГС-101', '2')
+    inactive_id = storage.create_student('Спячев Спяч', 'М', 'ИСИ', 'ПГС-101', '2')
+    storage.set_student_active(inactive_id, False)
+
+    editor = get_auth_headers('editor')
+    empty_hidden = 'name="student_ref_id" value="" id="participant-student-ref"'
+    bogus_refs = (
+        'abc',
+        '12.5',
+        '-1',
+        '0',
+        '9999',
+        str(inactive_id),
+        # переполнение SQLite INTEGER (Python int бесконечной точности)
+        '9223372036854775808',
+        '99999999999999999999',
+        '9' * 500,
+        # верхняя граница диапазона: парсится, но карточки такой нет
+        '9223372036854775807',
+    )
+    for raw_ref in bogus_refs:
+        _, response = calendar_client.get(
+            f'/calendar/{event_id}?form_student_name='
+            + quote_plus('Ручной Ввод')
+            + f'&form_student_ref_id={quote_plus(raw_ref)}',
+            headers=editor,
+        )
+        assert response.status == 200, raw_ref
+        assert empty_hidden in response.text, raw_ref
+        # Плохой ref не «отравляет» форму: прочий ввод возвращается.
+        assert 'value="Ручной Ввод"' in response.text
+
+    # Контроль: валидная активная карточка восстанавливается.
+    _, response = calendar_client.get(f'/calendar/{event_id}?form_student_ref_id={student_id}', headers=editor)
+    assert f'name="student_ref_id" value="{student_id}" id="participant-student-ref"' in response.text
+
+
+def test_participant_add_post_roles_unchanged(calendar_client: SanicTestClient):
+    """P0.1: восстановление ref — только рендер GET-страницы, права не
+    расширяются: viewer POST добавления участника — 403, атлет страницу
+    события (и форму) не видит — 403, как раньше."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    student_id = storage.create_student('Нулевич Николай', 'М', 'ИСИ', 'ПГС-101', '2')
+
+    viewer = get_auth_headers('viewer')
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/participants',
+        headers=viewer,
+        data={**csrf_for(viewer), 'student_name': 'Залезов Зал', 'student_ref_id': str(student_id)},
+        allow_redirects=False,
+    )
+    assert response.status == 403
+
+    _, response = calendar_client.get(
+        f'/calendar/{event_id}?form_student_ref_id={student_id}', headers=get_athlete_headers()
+    )
+    assert response.status == 403
+
+
+def test_team_result_edit_error_url_single_question_mark(calendar_client: SanicTestClient):
+    """Регрессия A4: редирект с готовым query (?result=…&edit_team_result=…)
+    склеивается с flash через «&», а не второй «?» — параметры парсятся,
+    flash доезжает до страницы."""
+    storage = app.ctx.storage
+    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
+    editor = get_auth_headers('editor')
+    add_team_result(calendar_client, editor, event_id, 'Общий зачёт', 1)
+    result_id = storage.get_calendar_event(event_id)['team_results'][0]['id']
+
+    _, response = calendar_client.post(
+        f'/calendar/{event_id}/team-results/{result_id}/edit',
+        headers=editor,
+        data={**csrf_for(editor), 'label': 'Общий зачёт', 'place': 'abc', 'result': 'with'},
+        allow_redirects=False,
+    )
+    location = response.headers['location']
+    assert location.count('?') == 1
+    assert f'result=with&edit_team_result={result_id}&admin_error=' in location
+    # Flash реально доезжает: на странице ошибки видно сообщение.
+    _, back = calendar_client.get(location, headers=editor)
+    assert 'Место команды должно быть целым числом' in back.text
 
 
 def test_team_results_edit_delete_not_found_and_invalid_id(calendar_client: SanicTestClient):
@@ -13424,7 +14241,24 @@ def test_calendar_participant_add_rejects_invalid_student_ref(event_import_clien
     student_id = storage.create_student('Иванов Иван Иванович', 'М', 'ИСЭиУ', 'ЭБ-241', '2')
     storage.set_student_active(student_id, False)
     headers = get_auth_headers()
-    for raw_ref in ('99999', str(student_id)):
+    # Final Input Hardening: id вне диапазона SQLite INTEGER (2^63 и больше,
+    # включая длинные десятичные строки) не должен ронять POST 500-й
+    # (OverflowError sqlite3-бинда) — существующий контракт валидации карточки:
+    # flash-редирект, запись не создаётся. Граница 2^63-1 — валидный int,
+    # просто несуществующий id.
+    invalid_refs = (
+        '99999',
+        str(student_id),
+        '0',
+        '-1',
+        'abc',
+        '12.5',
+        '9223372036854775808',
+        '99999999999999999999',
+        '9' * 500,
+        '9223372036854775807',
+    )
+    for raw_ref in invalid_refs:
         _, response = event_import_client.post(
             f'/calendar/{event_id}/participants',
             headers=headers,
@@ -13436,7 +14270,7 @@ def test_calendar_participant_add_rejects_invalid_student_ref(event_import_clien
             },
             allow_redirects=False,
         )
-        assert response.status == 302
+        assert response.status == 302, raw_ref
         assert 'Выбранная карточка студента не найдена или неактивна.' in unquote_plus(response.headers['location'])
     assert storage.connection.execute('SELECT COUNT(*) FROM competitions').fetchone()[0] == 0
 

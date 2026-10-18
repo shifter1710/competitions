@@ -8,6 +8,7 @@ self."""
 import json
 import sqlite3
 from datetime import datetime
+from typing import Callable
 from typing import Collection
 from typing import Iterable
 from typing import Sequence
@@ -166,6 +167,8 @@ class ParticipationsMixin:
         unapproved_only: bool = False,
         date_from: str = '',
         date_to: str = '',
+        sort_key: Callable[[sqlite3.Row], object] | None = None,
+        sort_reverse: bool = False,
     ) -> list[sqlite3.Row]:
         """Все строки под фильтрами главной в порядке реестра (date ASC,
         created_at ASC) — ЕДИНЫЙ путь счётчика и страницы, инвариант
@@ -176,6 +179,13 @@ class ParticipationsMixin:
         search_student_suggestions. Полная выгрузка под _lock приемлема в
         текущем масштабе. Побочный эффект смены LIKE → casefold: % и _ в
         запросе теперь литералы, а не wildcard.
+
+        sort_key — серверная сортировка реестра (страница): применяется к
+        ПОСТ-фильтрованному списку ДО limit/offset, т.е. ко всей выборке, а
+        не к текущей странице. Ключ строит маршрут (белый список колонок,
+        включая кастомные extra_data и производный курс); тай-брейк — id ASC
+        при любом направлении (стабильная сортировка поверх явной
+        предсортировки по id).
         """
         where_clause, params = self._competition_filter_clauses(
             owner_id=owner_id,
@@ -195,9 +205,12 @@ class ParticipationsMixin:
         with self._lock:
             rows = self.connection.execute(query, params).fetchall()
         needle = (name or '').strip().casefold()
-        if not needle:
-            return rows
-        return [row for row in rows if needle in (row['student_name'] or '').strip().casefold()]
+        if needle:
+            rows = [row for row in rows if needle in (row['student_name'] or '').strip().casefold()]
+        if sort_key is not None:
+            rows.sort(key=lambda row: row['id'])
+            rows.sort(key=sort_key, reverse=sort_reverse)
+        return rows
 
     def count_competitions_filtered(
         self,
@@ -257,14 +270,18 @@ class ParticipationsMixin:
         date_to: str = '',
         limit: int | None = None,
         offset: int = 0,
+        sort_key: Callable[[sqlite3.Row], object] | None = None,
+        sort_reverse: bool = False,
     ) -> list[Competition]:
         """Страница реестра с серверной фильтрацией (прототип 02).
 
         Те же фильтры, что у count_competitions_filtered (общий путь —
         _fetch_filtered_competition_rows); сортировка и порядок как в
-        get_competitions (created_at ASC). limit/offset применяются к
-        ПОСТ-фильтрованному списку (ФИО — Python-фильтр) — пагинация главной,
-        None возвращает всё (совпадение с get_competitions).
+        get_competitions (created_at ASC), если не задан sort_key. limit/offset
+        применяются к ПОСТ-фильтрованному и ПОСТ-отсортированному списку
+        (ФИО — Python-фильтр, sort_key — Python-сортировка всей выборки) —
+        пагинация главной, None возвращает всё (совпадение с
+        get_competitions).
         """
         rows = self._fetch_filtered_competition_rows(
             owner_id=owner_id,
@@ -279,6 +296,8 @@ class ParticipationsMixin:
             review_status=review_status,
             date_from=date_from,
             date_to=date_to,
+            sort_key=sort_key,
+            sort_reverse=sort_reverse,
         )
         if limit is None:
             return [self._row_to_competition(row) for row in rows]

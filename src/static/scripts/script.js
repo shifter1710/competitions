@@ -774,6 +774,20 @@ class Main {
         this.createInstances();
         this.hangEvents();
         this.initTableFeatures();
+        this.bindUnsavedInputGuard();
+    }
+
+    // Защита несохранённого ввода (UX P0): закрытие/перезагрузка вкладки во
+    // время инлайн-правки или ввода новой строки — браузерное подтверждение
+    // вместо молчаливой потери. Внутренняя навигация (пагинация, фильтры,
+    // drag-drop) уже защищена guard'ами hasActiveRowEdit в своих обработчиках.
+    bindUnsavedInputGuard() {
+        window.addEventListener("beforeunload", (event) => {
+            if (this.hasActiveRowEdit()) {
+                event.preventDefault();
+                event.returnValue = "";
+            }
+        });
     }
 
     initializeDomReferences() {
@@ -1632,6 +1646,12 @@ class Main {
     }
 
     handleClickExportButton() {
+        // Несохранённая правка не отменяется молча (UX P0): подтверждение.
+        // Отказ — остаёмся в правке, выгрузки не происходит.
+        if (this.hasActiveRowEdit()
+            && !confirm("В таблице есть несохранённая правка. Выгрузить в Excel и отменить правку?")) {
+            return;
+        }
         this.exportCurrentTable();
     }
 
@@ -2928,6 +2948,11 @@ class Main {
     }
 
     bindTableHeaderEvents() {
+        // Реестр (data-server-sort) сортируется сервером: клик по заголовку —
+        // GET-навигация с sort/order в URL (порядок применяется ко всей
+        // отфильтрованной выборке). Таблица отчёта (report_result.html)
+        // сохраняет клиентскую сортировку sortByHeader, как раньше.
+        const serverSort = this.tableElement?.dataset.serverSort === "true";
         const headers = Array.from(this.tableElement.querySelectorAll("thead th"));
         headers.forEach((header) => {
             if (header.dataset.bound === "true") {
@@ -2937,12 +2962,35 @@ class Main {
             header.draggable = header.dataset.columnKey !== "actions";
             header.classList.add("table-header-cell");
             if (header.dataset.sortType !== "none") {
-                header.addEventListener("click", () => this.sortByHeader(header));
+                if (serverSort) {
+                    if (header.dataset.sortable === "true") {
+                        header.addEventListener("click", () => this.handleServerSortClick(header));
+                    }
+                } else {
+                    header.addEventListener("click", () => this.sortByHeader(header));
+                }
             }
             header.addEventListener("dragstart", (event) => this.handleHeaderDragStart(event, header));
             header.addEventListener("dragover", (event) => this.handleHeaderDragOver(event, header));
             header.addEventListener("drop", (event) => this.handleHeaderDrop(event, header));
         });
+    }
+
+    // Серверная сортировка реестра: сохраняем текущие query-параметры
+    // (фильтры, per_page — паттерн per-page-select), page сбрасываем — новая
+    // сортировка возвращает на первую страницу. Активная колонка меняет
+    // направление (asc → desc), новая — всегда asc. Индикатор и aria-sort
+    // рендерит сервер по sort/order из URL.
+    handleServerSortClick(header) {
+        if (this.hasActiveRowEdit()) {
+            return;
+        }
+        const nextOrder = header.dataset.sortDirection === "asc" ? "desc" : "asc";
+        const params = new URLSearchParams(window.location.search);
+        params.delete("page");
+        params.set("sort", header.dataset.columnKey);
+        params.set("order", nextOrder);
+        window.location.href = `/?${params.toString()}`;
     }
 
     handleHeaderDragStart(event, header) {
@@ -2996,7 +3044,8 @@ class Main {
         rows.sort((first, second) => {
             // data-sort-value (если задан) — машинное значение ячейки:
             // «Дата» отображается компактным диапазоном («25-27.06.2026»),
-            // сортируется по ISO-дате начала.
+            // data-sort-value у неё — ISO-дата начала (parseDateValue умеет
+            // оба формата: ISO и дд.мм.гггг кастомных date-полей).
             const firstCell = first.querySelector(`[data-column-key="${columnKey}"]`);
             const secondCell = second.querySelector(`[data-column-key="${columnKey}"]`);
             const firstValue = firstCell?.dataset.sortValue || firstCell?.textContent.trim() || "";
@@ -3019,7 +3068,16 @@ class Main {
     }
 
     parseDateValue(value) {
-        const [day, month, year] = value.split(".");
+        const text = String(value || "").trim();
+        // Два формата дат таблиц: ISO «2026-06-25» (data-sort-value колонки
+        // «Дата» реестра) и дд.мм.гггг (кастомные date-поля). Невалидное
+        // значение → NaN: ECMA-262 трактует NaN-компаратор как +0, такие
+        // ячейки сравниваются как равные и не ломают сортировку.
+        const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+        if (iso) {
+            return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])).getTime();
+        }
+        const [day, month, year] = text.split(".");
         return new Date(Number(year || 0), Number(month || 1) - 1, Number(day || 1)).getTime();
     }
 
@@ -3459,6 +3517,14 @@ class ParticipantsPage {
         this.participationCustomFields = this.parseParticipationCustomFields();
         this.attachAddFormResolver();
         this.table.addEventListener("click", (event) => this.handleClick(event));
+        // Защита несохранённого ввода (UX P0): инлайн-правка участия —
+        // браузерное подтверждение при закрытии/перезагрузке вкладки.
+        window.addEventListener("beforeunload", (event) => {
+            if (this.editingRow) {
+                event.preventDefault();
+                event.returnValue = "";
+            }
+        });
     }
 
     parseParticipationCustomFields() {
@@ -3516,6 +3582,20 @@ class ParticipantsPage {
         const resetLink = document.getElementById("participant-student-reset");
         let selectedStudent = null;
         const hintedInputs = [];
+
+        // P0.1: re-fill после ошибки формы — сервер вернул ВАЛИДНУЮ карточку
+        // в скрытое поле (связь не должна молча теряться при повторном
+        // сабмите). Восстанавливаем состояние «карточка выбрана»: бейдж виден,
+        // правка ФИО и «сбросить связь» работают как после выбора в
+        // резолвере. Мусорное значение поля игнорируется (не-число/пустое
+        // ФИО — карточка не считается выбранной).
+        const restoredRef = refInput ? refInput.value.trim() : "";
+        if (restoredRef && /^\d+$/.test(restoredRef) && fioInput.value.trim()) {
+            selectedStudent = {name: fioInput.value, student_id: Number(restoredRef)};
+            if (badge) {
+                badge.classList.remove("d-none");
+            }
+        }
 
         const hideBadge = () => {
             if (badge) {
@@ -3816,6 +3896,11 @@ class ParticipantsPage {
             body: formData,
             onSuccess: () => {
                 this.participantSaving = false;
+                // Выходим из правки ДО навигации: beforeunload-guard (UX P0
+                // A3) блокирует уход со страницы, пока editingRow установлен,
+                // — собственная навигация после сохранения не должна
+                // упираться в собственный же guard.
+                this.cancelEdit();
                 this.navigateToEventWithMessage("Участие обновлено");
             },
             onError: (message) => {
@@ -3827,13 +3912,17 @@ class ParticipantsPage {
 
     // Возврат на страницу события с flash-сообщением (server-side alert в
     // base.html): id события берём из адреса — разметку таблицы не трогаем.
+    // Текущий result-фильтр страницы («С результатом»/«Без результата»)
+    // сохраняется в возврате — после правки/удаления участия вид не сбрасывается.
     navigateToEventWithMessage(message) {
         const eventId = (window.location.pathname.match(/^\/calendar\/(\d+)/) || [])[1];
         if (!eventId) {
             window.location.reload();
             return;
         }
-        window.location.href = `/calendar/${eventId}?admin_message=${encodeURIComponent(message)}`;
+        const resultFilter = new URLSearchParams(window.location.search).get("result") || "";
+        const prefix = resultFilter ? `?result=${encodeURIComponent(resultFilter)}&` : "?";
+        window.location.href = `/calendar/${eventId}${prefix}admin_message=${encodeURIComponent(message)}`;
     }
 
     cancelEdit() {
@@ -3872,7 +3961,15 @@ class ParticipantsPage {
         }
         this.request(`/competition/${recordId}/delete`, {
             body: new FormData(),
-            onSuccess: () => this.navigateToEventWithMessage("Участие удалено"),
+            // Пользователь уже подтвердил удаление — если в этот момент
+            // открыта правка любой строки, выходим из неё до навигации
+            // (beforeunload-guard A3 не должен блокировать возврат на
+            // страницу события; восстановление innerHTML безвредно — сразу
+            // навигация). cancelEdit сам no-op без активной правки.
+            onSuccess: () => {
+                this.cancelEdit();
+                this.navigateToEventWithMessage("Участие удалено");
+            },
             onError: (message2) => notify({type: "error", text: message2 || "Ошибка удаления записи"}),
         });
     }

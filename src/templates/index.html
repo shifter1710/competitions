@@ -152,6 +152,12 @@
 <div class="card shadow-sm mb-4 index-filter-card">
     <div class="card-body">
         <form class="row g-3 align-items-end" method="get" action="/">
+            {# Применение фильтров не сбрасывает выбранную сортировку
+               (паттерн скрытых sort/order формы «Студенты»). #}
+            {% if index_sort_column %}
+            <input type="hidden" name="sort" value="{{ index_sort_column }}">
+            <input type="hidden" name="order" value="{{ index_sort_order }}">
+            {% endif %}
             <div class="col-12 col-md-4">
                 <label class="form-label" for="index-filter-name">ФИО</label>
                 <input class="form-control" id="index-filter-name" name="name" type="text" data-fio-autocomplete
@@ -204,9 +210,12 @@
     {% if can_write %}
     <button type="button" class="add-empty-row-button btn btn-success">+ Пустая строка</button>
     {% endif %}
-    {# «Выгрузить в Excel» — весь реестр, от фильтров главной не зависит. #}
+    {# «Выгрузить в Excel» — клиентская выгрузка ТЕКУЩЕЙ страницы реестра
+       (видимые колонки + применённые фильтры); серверная выгрузка всего
+       реестра без фильтров — /export/index, в UI не используется. #}
     {% if not is_athlete %}
-    <button type="button" class="export-button btn btn-secondary">Выгрузить в Excel</button>
+    <button type="button" class="export-button btn btn-secondary"
+            title="Выгружается текущая страница — {{ shown_count }} из {{ total_count }} записей (видимые колонки, применённые фильтры)">Выгрузить в Excel</button>
     {% endif %}
     {% if is_moderator %}
     <a class="btn btn-outline-primary" href="/admin/import">Импорт</a>
@@ -228,6 +237,14 @@
     </div>
 </div>
 
+
+{# Серверная сортировка реестра (sort/order в URL): клик по заголовку —
+   GET-навигация (script.js, паттерн per_page-select), порядок применяется
+   ко всей отфильтрованной выборке, а не к текущей странице. Индикатор
+   sorted-asc/desc и aria-sort рендерит сервер (паттерн admin_people). #}
+{% macro index_sort_th_attrs(key) -%}
+{% if key in index_sort_columns %}data-sortable="true" {% endif %}{% if index_sort_column == key %}data-sort-direction="{{ index_sort_order }}" aria-sort="{{ 'ascending' if index_sort_order == 'asc' else 'descending' }}"{% endif %}
+{%- endmacro %}
 
 <div class="content-wrapper">
     {# Подсказки справочников (docs/data-model-decisions.md): datalist живёт
@@ -261,29 +278,32 @@
                справочника, №15/№4): комбобокс «Группа» в инлайн-строке
                фильтрует список выбранным институтом. Только активные. #}
             <table class="table table-striped table-bordered interactive-table"
+                   data-server-sort="true"
                    data-levels='{{ levels | tojson }}'
                    data-groups-by-institute='{{ groups_by_institute | tojson }}'>
                 <thead class="table-dark">
                     <tr>
                         <th scope="col" data-column-key="index" data-sort-type="number">№</th>
-                        <th scope="col" data-column-key="student_name" data-sort-type="text">ФИО</th>
-                        <th scope="col" data-column-key="student_sex" data-sort-type="text">Пол</th>
-                        <th scope="col" data-column-key="institute" data-sort-type="text">Институт</th>
-                        <th scope="col" data-column-key="group" data-sort-type="text">Группа</th>
-                        <th scope="col" data-column-key="sport" data-sort-type="text">Вид спорта</th>
-                        <th scope="col" data-column-key="date" data-sort-type="date">Дата</th>
-                        <th scope="col" data-column-key="level" data-sort-type="text">Уровень соревнований</th>
-                        <th scope="col" data-column-key="name" data-sort-type="text">Название соревнований</th>
-                        <th scope="col" data-column-key="position" data-sort-type="number">Место</th>
-                        <th scope="col" data-column-key="course" data-sort-type="number">Курс</th>
+                        <th scope="col" data-column-key="student_name" data-sort-type="text" {{ index_sort_th_attrs('student_name') }}{% if index_sort_column == 'student_name' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>ФИО</th>
+                        <th scope="col" data-column-key="student_sex" data-sort-type="text" {{ index_sort_th_attrs('student_sex') }}{% if index_sort_column == 'student_sex' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Пол</th>
+                        <th scope="col" data-column-key="institute" data-sort-type="text" {{ index_sort_th_attrs('institute') }}{% if index_sort_column == 'institute' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Институт</th>
+                        <th scope="col" data-column-key="group" data-sort-type="text" {{ index_sort_th_attrs('group') }}{% if index_sort_column == 'group' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Группа</th>
+                        <th scope="col" data-column-key="sport" data-sort-type="text" {{ index_sort_th_attrs('sport') }}{% if index_sort_column == 'sport' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Вид спорта</th>
+                        <th scope="col" data-column-key="date" data-sort-type="date" {{ index_sort_th_attrs('date') }}{% if index_sort_column == 'date' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Дата</th>
+                        <th scope="col" data-column-key="level" data-sort-type="text" {{ index_sort_th_attrs('level') }}{% if index_sort_column == 'level' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Уровень соревнований</th>
+                        <th scope="col" data-column-key="name" data-sort-type="text" {{ index_sort_th_attrs('name') }}{% if index_sort_column == 'name' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Название соревнований</th>
+                        <th scope="col" data-column-key="position" data-sort-type="number" {{ index_sort_th_attrs('position') }}{% if index_sort_column == 'position' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Место</th>
+                        <th scope="col" data-column-key="course" data-sort-type="number" {{ index_sort_th_attrs('course') }}{% if index_sort_column == 'course' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Курс</th>
                         {% for field in custom_fields if field.show_in_table %}
                         {# Привязанное link-поле колонкой скрыто (d-none), но
                            остаётся в DOM: script.js читает типы полей с th для
                            инлайн-строки. #}
-                        <th scope="col" data-column-key="{{ field.key }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}" {% if field.key in bound_link_keys %}class="d-none"{% endif %}>{{ field.label }}</th>
+                        {% set field_is_sorted = index_sort_column == field.key %}
+                        <th scope="col" data-column-key="{{ field.key }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}" {{ index_sort_th_attrs(field.key) }}
+                            class="{% if field.key in bound_link_keys %}d-none {% endif %}{% if field_is_sorted %}table-header-cell sorted-{{ index_sort_order }}{% endif %}">{{ field.label }}</th>
                         {% endfor %}
                         {% if has_unapproved %}
-                        <th scope="col" data-column-key="status" data-sort-type="text" data-exportable="false">Статус</th>
+                        <th scope="col" data-column-key="status" data-sort-type="text" data-exportable="false" {{ index_sort_th_attrs('status') }}{% if index_sort_column == 'status' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Статус</th>
                         {% endif %}
                         {% if can_write %}
                         <th scope="col" data-column-key="attachments" data-sort-type="none" data-exportable="false">Вложения</th>

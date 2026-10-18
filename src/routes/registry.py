@@ -3,6 +3,7 @@
 модерация и вложения. Перенесено из src/main.py без изменения поведения
 (Architecture v1)."""
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -107,6 +108,145 @@ INDEX_STATUS_FILTERS: Sequence[tuple[str, str]] = (
 INDEX_STATUS_KEYS = {key for key, _ in INDEX_STATUS_FILTERS}
 
 
+# Серверная сортировка реестра (GET sort/order; паттерн «Студенты» —
+# STUDENT_SORT_COLUMNS + parse_people_sort): белый список «ключ колонки →
+# вид значения». Применяется ТОЛЬКО полной валидной парой; некорректное
+# любое из значений молча даёт дефолтный порядок (паттерн per_page).
+# «№» — номер строки страницы, «Вложения»/«Действия» — не колонки данных:
+# несортируемы. Ключи кастомных колонок (extra_data) добавляются к белому
+# списку динамически — см. parse_index_sort. Ключ «status» — колонка
+# review_status (данные строки, а не HTML-ключ).
+INDEX_SORT_BASE_COLUMNS: dict[str, tuple[str, str]] = {
+    'student_name': ('student_name', 'text'),
+    'student_sex': ('student_sex', 'text'),
+    'institute': ('institute', 'text'),
+    'group': ('group', 'text'),
+    'sport': ('sport', 'text'),
+    'date': ('date', 'iso'),
+    'level': ('level', 'text'),
+    'name': ('name', 'text'),
+    'position': ('position', 'number'),
+    'course': ('course', 'course'),
+    'status': ('review_status', 'text'),
+}
+
+INDEX_SORT_ORDERS = ('asc', 'desc')
+
+
+def parse_index_sort(args: dict, custom_fields: Sequence[CustomField]) -> tuple[str, str]:
+    """Сортировка главной: sort ∈ базовых колонок ∪ ключей активных
+    show_in_table кастомов, order ∈ {'asc', 'desc'} — только полной валидной
+    парой, иначе дефолтный порядок реестра (date ASC, created_at ASC)."""
+    sort = (get_param(args, 'sort') or '').strip()
+    order = (get_param(args, 'order') or '').strip()
+    if order not in INDEX_SORT_ORDERS:
+        return '', ''
+    if sort in INDEX_SORT_BASE_COLUMNS or sort in {field.key for field in custom_fields if field.show_in_table}:
+        return sort, order
+    return '', ''
+
+
+def _index_sort_iso_triple(value) -> tuple[int, float, str]:
+    """ISO-строка строки БД («2026-06-25…») → тройка; мусор — пусто."""
+    raw = str(value or '').strip()
+    try:
+        return (1, float(datetime.fromisoformat(raw).toordinal()), '')
+    except ValueError:
+        return (0, 0.0, '')
+
+
+def _index_sort_number_triple(value) -> tuple[int, float, str]:
+    """Числовое значение (место/курс/number-кастом): пусто < число < текст
+    («Выпускник 2025/26» после чисел — нативный порядок SQLite, паттерн
+    get_report_course_options)."""
+    text = str(value if value is not None else '').strip()
+    if not text:
+        return (0, 0.0, '')
+    try:
+        return (1, float(text.replace(',', '.')), '')
+    except ValueError:
+        return (2, 0.0, text.casefold())
+
+
+def _index_sort_text_triple(value) -> tuple[int, float, str]:
+    """Текстовое значение: пусто — рангом ниже любого текста, текст — casefold."""
+    text = str(value or '').strip()
+    if not text:
+        return (0, 0.0, '')
+    return (2, 0.0, text.casefold())
+
+
+def _index_sort_dmY_triple(value) -> tuple[int, float, str]:
+    """Дата кастомного date-поля в формате дд.мм.гггг; непарсируемая —
+    пустое значение, не ошибка."""
+    text = str(value or '').strip()
+    try:
+        parsed = datetime.strptime(text, settings.date_format)
+    except ValueError:
+        return (0, 0.0, '')
+    return (1, float(parsed.toordinal()), '')
+
+
+def _index_sort_triple(value, kind: str) -> tuple[int, float, str]:
+    """Сортируемое значение ячейки — тройка (ранг, число, текст): значения
+    одной колонки всегда сравнимы между собой. Ранг: 0 — пусто, 1 — число,
+    2 — текст. Виды: iso (колонка «Дата»), number/course, date (кастомные
+    дд.мм.гггг), прочее — текст."""
+    if kind == 'iso':
+        return _index_sort_iso_triple(value)
+    if kind in ('number', 'course'):
+        return _index_sort_number_triple(value)
+    if kind == 'date':
+        return _index_sort_dmY_triple(value)
+    return _index_sort_text_triple(value)
+
+
+def _index_course_row_value(row) -> object:
+    """Эффективное значение колонки «Курс» — как на экране (build_index_
+    course_cells): производный курс по снимку года поступления; «future» —
+    пусто («—»), без снимка — легаси course записи."""
+    if row['admission_year'] is not None:
+        try:
+            reference_date = datetime.fromisoformat(row['date']).date()
+        except (TypeError, ValueError):
+            reference_date = None
+        if reference_date is not None:
+            derived = derive_course(row['admission_year'], reference_date)
+            if derived['status'] == 'ok':
+                return derived['course']
+        return ''
+    return row['course']
+
+
+def build_index_sort_key(sort: str, custom_fields: Sequence[CustomField]):
+    """Ключ сортировки главной (sort уже валидирован parse_index_sort):
+    значение строки — сравнимая тройка (см. _index_sort_triple). None —
+    дефолтный порядок. Кастомные колонки читаются из extra_data строки."""
+    if not sort:
+        return None
+    custom_by_key = {field.key: field for field in custom_fields}
+    field = custom_by_key.get(sort)
+    if field is not None:
+        kind = {'number': 'number', 'date': 'date'}.get(field.field_type, 'text')
+
+        def custom_key(row):
+            try:
+                extra = json.loads(row['extra_data'] or '{}')
+            except (TypeError, ValueError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            return _index_sort_triple(extra.get(field.key), kind)
+
+        return custom_key
+    if sort == 'course':
+        return lambda row: _index_sort_triple(_index_course_row_value(row), 'course')
+    if sort == 'date':
+        return lambda row: _index_sort_triple(row['date'], 'iso')
+    row_key, kind = INDEX_SORT_BASE_COLUMNS[sort]
+    return lambda row: _index_sort_triple(row[row_key], kind)
+
+
 def parse_index_multi_values(args: dict, key: str) -> list[str]:
     """Повторённые GET-параметры мульти-фильтра главной (institute/group/
     sport/level): точные значения справочников как есть, каждое strip,
@@ -185,15 +325,25 @@ def pager_items(current: int, total: int) -> list[dict]:
     return items
 
 
-def build_index_query(filters: dict[str, object], per_page: int) -> str:
+def build_index_query(
+    filters: dict[str, object],
+    per_page: int,
+    sort: str = '',
+    order: str = '',
+) -> str:
     """GET-параметры главной без page: для ссылок пагинации (page добавит
     шаблон/маршрут) и селекта «Показывать по» (он ставит per_page сам).
-    Пустые значения и дефолтный per_page в URL не попадают — ссылки чище.
-    doseq: мульти-фильтры — повторённые ключи (?institute=A&institute=B),
-    без doseq пагинация и «Показывать по» теряли бы часть выбора."""
+    Пустые значения и дефолтный per_page в URL не попадают — ссылки чище;
+    sort/order переносятся, чтобы пагинация и смена размера страницы не
+    сбрасывали выбранную сортировку. doseq: мульти-фильтры — повторённые
+    ключи (?institute=A&institute=B), без doseq пагинация и «Показывать
+    по» теряли бы часть выбора."""
     params = {key: value for key, value in filters.items() if value}
     if per_page != INDEX_DEFAULT_PER_PAGE:
         params['per_page'] = str(per_page)
+    if sort and order:
+        params['sort'] = sort
+        params['order'] = order
     return urlencode(params, doseq=True)
 
 
@@ -739,6 +889,11 @@ def register(app: Sanic) -> None:  # noqa: C901
                 index_filters['status'] = raw_status
 
         per_page = parse_index_per_page(args)
+        # Серверная сортировка реестра: применяется в Python ко всей
+        # отфильтрованной выборке ДО limit/offset (storage) — порядок честен
+        # на любой странице, состояние живёт в URL и переживает переходы.
+        sort_column, sort_order = parse_index_sort(args, custom_fields)
+        sort_key = build_index_sort_key(sort_column, custom_fields)
         filter_kwargs = dict(
             owner_id=owner_filter,
             student_id_hashes=profile_hashes,
@@ -760,11 +915,13 @@ def register(app: Sanic) -> None:  # noqa: C901
         competitions = storage.get_competitions_page(
             limit=per_page,
             offset=(page - 1) * per_page,
+            sort_key=sort_key,
+            sort_reverse=(sort_order == 'desc'),
             **filter_kwargs,
         )
 
         def page_url(page_number: int) -> str:
-            query = build_index_query(index_filters, per_page)
+            query = build_index_query(index_filters, per_page, sort_column, sort_order)
             separator = '&' if query else ''
             return f'/?{query}{separator}page={page_number}'
 
@@ -846,10 +1003,15 @@ def register(app: Sanic) -> None:  # noqa: C901
                 # Композиция главной (прототип 02): фильтры, счётчик, пагинация.
                 'index_filters': index_filters,
                 'status_filter_options': INDEX_STATUS_FILTERS,
-                'index_filter_query': urlencode(
-                    {key: value for key, value in index_filters.items() if value}, doseq=True
-                ),
+                # Селект «Показывать по» держит фильтры и сортировку (per_page
+                # ставит сам, page сбрасывает).
+                'index_filter_query': build_index_query(index_filters, INDEX_DEFAULT_PER_PAGE, sort_column, sort_order),
                 'index_is_filtered': any(index_filters.values()),
+                # Серверная сортировка: индикатор на th и клик-навигация (JS).
+                'index_sort_column': sort_column,
+                'index_sort_order': sort_order,
+                'index_sort_columns': set(INDEX_SORT_BASE_COLUMNS)
+                | {field.key for field in custom_fields if field.show_in_table},
                 'total_count': total_count,
                 'shown_count': len(competitions),
                 'page': page,
