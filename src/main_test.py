@@ -18615,7 +18615,12 @@ def test_p7_two_participations_render_parent_and_children(client: SanicTestClien
         assert 'Участий: <strong>3</strong>' in body
         assert 'Без места · 2' in body
         # Child-строки: ведущие 6 колонок сжаты в одну ячейку colspan="6"
-        assert body.count('<td colspan="6" class="text-muted ps-4" aria-hidden="true"><span class="event-child-line"></span></td>') == 2
+        assert (
+            body.count(
+                '<td colspan="6" class="text-muted ps-4" aria-hidden="true"><span class="event-child-line"></span></td>'
+            )
+            == 2
+        )
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
@@ -18686,7 +18691,10 @@ def test_p7_child_row_leading_cells_collapsed(client: SanicTestClient):
         body = response.body.decode()
         child_html = body.split('class="row-group-item"', 1)[1].split('</tr>', 1)[0]
         # Ведущие ячейки сжаты: одна colspan-ячейка с маркером…
-        assert '<td colspan="6" class="text-muted ps-4" aria-hidden="true"><span class="event-child-line"></span></td>' in child_html
+        assert (
+            '<td colspan="6" class="text-muted ps-4" aria-hidden="true"><span class="event-child-line"></span></td>'
+            in child_html
+        )
         # …и НИ одной пустой dash-ячейки участника (как было до cleanup)
         assert '<td><span class="text-muted">—</span></td>' not in child_html
         # Поля участия и действия с записью не тронуты
@@ -23151,8 +23159,10 @@ def test_event_p1_edit_team_deeplink_selects_team_panel(calendar_client: SanicTe
     event_id = make_calendar_event(storage, name='Учебный командный зачёт P1')
     headers = get_auth_headers()
     _, created = calendar_client.post(
-        f'/calendar/{event_id}/team-results', headers=headers,
-        data={**csrf_for(headers), 'label': 'Учебная категория', 'place': '2'}, allow_redirects=False,
+        f'/calendar/{event_id}/team-results',
+        headers=headers,
+        data={**csrf_for(headers), 'label': 'Учебная категория', 'place': '2'},
+        allow_redirects=False,
     )
     assert created.status == 302
     event = storage.get_calendar_event(event_id)
@@ -23198,13 +23208,22 @@ def test_student_profile_p2_history_legacy_and_base_values(people_client: SanicT
     second = save_person_record(storage, 'Синтетиков Легаси Образец')
     storage.link_competitions([first, second], student_id)
     extra = json.dumps({'qa_discipline': 'Легаси дисциплина QA', 'qa_result': 'Легаси результат QA'})
-    storage.connection.execute('UPDATE competitions SET discipline=NULL, result=NULL, position=0, extra_data=? WHERE id=?', (extra, first))
-    storage.connection.execute("UPDATE competitions SET discipline='Базовая дисциплина QA', result='Базовый результат QA', position=2, extra_data=? WHERE id=?", (extra, second))
+    storage.connection.execute(
+        'UPDATE competitions SET discipline=NULL, result=NULL, position=0, extra_data=? WHERE id=?', (extra, first)
+    )
+    storage.connection.execute(
+        "UPDATE competitions SET discipline='Базовая дисциплина QA', result='Базовый результат QA', "
+        'position=2, extra_data=? WHERE id=?',
+        (extra, second),
+    )
     storage.connection.commit()
     before = [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions ORDER BY id')]
     _, response = people_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
     body = response.text
-    rows = {int(record_id): row for record_id, row in re.findall(r'<tr data-history-record="(\d+)"[^>]*>(.*?)</tr>', body, re.S)}
+    rows = {
+        int(record_id): row
+        for record_id, row in re.findall(r'<tr data-history-record="(\d+)"[^>]*>(.*?)</tr>', body, re.S)
+    }
     assert 'Легаси дисциплина QA' in rows[first] and 'Легаси результат QA' in rows[first]
     assert 'Без места' in rows[first]
     assert 'Базовая дисциплина QA' in rows[second] and 'Базовый результат QA' in rows[second]

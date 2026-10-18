@@ -5761,8 +5761,17 @@ def test_linked_records_and_users_queries(adapter):
     assert records[0]['sport'] == 'Бег'
     assert records[0]['name'] == 'Кубок'
     assert set(records[0]) == {
-        'id', 'student_name', 'sport', 'date', 'date_to', 'name',
-        'discipline', 'position', 'result', 'calendar_event_id', 'extra_data',
+        'id',
+        'student_name',
+        'sport',
+        'date',
+        'date_to',
+        'name',
+        'discipline',
+        'position',
+        'result',
+        'calendar_event_id',
+        'extra_data',
     }
     # Лимит: показывается не больше limit записей
     assert len(adapter.list_linked_records(student_id, limit=1)) == 1
@@ -7492,13 +7501,17 @@ def test_student_profile_history_read_context_limit_order_and_identity(adapter):
     """P2 read projection retains exact identity, stable order and the 50-row cap."""
     student_id = adapter.create_student('Синтетиков История Образец', 'М', 'Тест', 'QA-1', '2')
     namesake_id = adapter.create_student('Синтетиков История Образец', 'М', 'Тест', 'QA-2', '2')
-    adapter.save_competitions([
-        make_competition('Синтетиков История Образец', datetime(2026, 3, 1), {'qa_result': 'Легаси'})
-        for _ in range(53)
-    ])
+    adapter.save_competitions(
+        [
+            make_competition('Синтетиков История Образец', datetime(2026, 3, 1), {'qa_result': 'Легаси'})
+            for _ in range(53)
+        ]
+    )
     adapter.link_competitions(list(range(1, 52)), student_id)
     adapter.link_competitions([52], namesake_id)
-    adapter.connection.execute("UPDATE competitions SET discipline = '100 м', result = 'Неявка', position = 0 WHERE id = 51")
+    adapter.connection.execute(
+        "UPDATE competitions SET discipline = '100 м', result = 'Неявка', position = 0 WHERE id = 51"
+    )
     adapter.connection.commit()
     before = [tuple(row) for row in adapter.connection.execute('SELECT * FROM competitions ORDER BY id')]
     rows = adapter.list_linked_records(student_id)
