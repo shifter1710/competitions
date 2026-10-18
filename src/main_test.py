@@ -8962,7 +8962,7 @@ def test_calendar_event_page_shows_participants_and_counts(client: SanicTestClie
         # без результата 1
         assert 'Участников: <strong>2</strong>' in body
         assert 'Участий: <strong>2</strong>' in body
-        assert 'Без результата: <strong>1</strong>' in body
+        assert 'Без места · 1' in body
         # Одиночные участия — полные плоские строки (не parent/child)
         assert 'row-group' not in body
         assert 'Бег 100 м' in body
@@ -9566,7 +9566,7 @@ def test_team_results_add_edit_delete_flow(calendar_client: SanicTestClient):
 
 def test_team_results_section_roles_and_readonly(calendar_client: SanicTestClient):
     """Модератор видит таблицу и форму добавления; viewer — таблицу без форм
-    и колонки действий; пустое событие viewer'у секцию не рисует; POST
+    и колонки действий; пустое событие viewer'у показывает пустую вкладку; POST
     viewer'а → 403, аноним POST → 401, аноним GET → редирект на вход."""
     storage = app.ctx.storage
     event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, '', '', links=[])
@@ -9611,7 +9611,12 @@ def test_team_results_section_roles_and_readonly(calendar_client: SanicTestClien
 
     empty_id = storage.create_calendar_event('Пустой', '2026-07-01', None, '', '', links=[])
     _, response = calendar_client.get(f'/calendar/{empty_id}', headers=get_auth_headers('viewer'))
-    assert 'Командные результаты' not in response.body.decode()
+    empty_body = response.body.decode()
+    assert 'data-event-tab="teams"' in empty_body
+    assert 'Командных результатов пока нет.' in empty_body
+    assert f'action="/calendar/{empty_id}/team-results"' not in empty_body
+    assert 'team-result-edit-form' not in empty_body
+    assert 'edit_team_result=' not in empty_body
     _, response = calendar_client.get(f'/calendar/{empty_id}', headers=editor)
     body = response.body.decode()
     assert 'Командных результатов пока нет — добавьте первый ниже.' in body
@@ -10673,7 +10678,8 @@ def test_admin_person_card_record_date_nowrap(people_client: SanicTestClient):
 
     _, response = people_client.get('/admin/people/1', headers=get_auth_headers())
     assert response.status == 200
-    assert 'Бег · <span class="text-nowrap">01.03.2024</span>' in response.text
+    assert '<td data-label="Дата"><span class="text-nowrap">01.03.2024</span></td>' in response.text
+    assert 'Бег' in response.text
 
 
 def test_admin_person_edit_updates_fields(people_client: SanicTestClient):
@@ -12214,7 +12220,7 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
 
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
     assert response.status == 200
-    assert 'Связанные данные' in response.text
+    assert 'data-person-panel="history"' in response.text
     assert 'Привязанных записей пока нет.' in response.text
     assert 'Аккаунтов атлетов нет.' in response.text
 
@@ -12228,7 +12234,7 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     storage.link_user(backuper['id'], student_id)
 
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
-    assert 'Записи о соревнованиях' in response.text
+    assert 'История участий' in response.text
     # ФИО в записи — снимок записи, а не актуальное ФИО карточки
     assert 'Старое ФИО' in response.text
     assert 'Отвязать' in response.text
@@ -12249,7 +12255,8 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     ids = [row['id'] for row in storage.connection.execute('SELECT id FROM competitions WHERE student_ref_id IS NULL')]
     storage.link_competitions(ids, student_id)
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
-    assert '…и ещё 3 записей (показаны первые 50).' in response.text
+    assert 'Показаны последние 50 из 53 участий.' in response.text
+    assert response.text.count('data-history-record=') == 50
 
 
 def test_reconcile_link_extends_athlete_cabinet_by_ref(reconcile_client: SanicTestClient):
@@ -15634,13 +15641,13 @@ def test_calendar_event_page_shows_import_button_and_ref_field(event_import_clie
     event_id = make_calendar_event(storage)
     _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers())
     assert response.status == 200
-    assert 'href="/calendar/%d/participants/import">Импортировать участников из Excel' % event_id in response.text
+    assert 'href="/calendar/%d/participants/import">Импорт Excel' % event_id in response.text
     assert 'name="student_ref_id" value="" id="participant-student-ref"' in response.text
     assert 'id="participant-student-badge"' in response.text
     # viewer — страница события доступна, кнопки импорта нет.
     _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers(role='viewer'))
     assert response.status == 200
-    assert 'Импортировать участников из Excel' not in response.text
+    assert 'Импорт Excel' not in response.text
 
 
 # --- Импорт участников события (Task B): страницы/шаблон/загрузка. ---
@@ -18606,9 +18613,14 @@ def test_p7_two_participations_render_parent_and_children(client: SanicTestClien
         # Счётчики: участников 2 (группа + cardless), участий 3, без результата 2
         assert 'Участников: <strong>2</strong>' in body
         assert 'Участий: <strong>3</strong>' in body
-        assert 'Без результата: <strong>2</strong>' in body
+        assert 'Без места · 2' in body
         # Child-строки: ведущие 6 колонок сжаты в одну ячейку colspan="6"
-        assert body.count('<td colspan="6" class="text-muted ps-4" aria-hidden="true">└─</td>') == 2
+        assert (
+            body.count(
+                '<td colspan="6" class="text-muted ps-4" aria-hidden="true"><span class="event-child-line"></span></td>'
+            )
+            == 2
+        )
     finally:
         app.ctx.storage.get_calendar_event.return_value = None
         app.ctx.storage.list_calendar_event_participants.return_value = []
@@ -18679,7 +18691,10 @@ def test_p7_child_row_leading_cells_collapsed(client: SanicTestClient):
         body = response.body.decode()
         child_html = body.split('class="row-group-item"', 1)[1].split('</tr>', 1)[0]
         # Ведущие ячейки сжаты: одна colspan-ячейка с маркером…
-        assert '<td colspan="6" class="text-muted ps-4" aria-hidden="true">└─</td>' in child_html
+        assert (
+            '<td colspan="6" class="text-muted ps-4" aria-hidden="true"><span class="event-child-line"></span></td>'
+            in child_html
+        )
         # …и НИ одной пустой dash-ячейки участника (как было до cleanup)
         assert '<td><span class="text-muted">—</span></td>' not in child_html
         # Поля участия и действия с записью не тронуты
@@ -18753,8 +18768,19 @@ def test_p7_same_name_different_refs_not_merged(client: SanicTestClient):
         body = response.body.decode()
         # Обе записи одиночные → 2 плоские строки, групп нет
         assert body.count('class="row-group"') == 0
-        # Обе строки показывают ФИО: ячейка + data-student-name строки
-        assert body.count('Иванов Дмитрий Сергеевич') == 4
+        # Проверяем реальные строки и видимые ФИО, а не число повторов в data-*.
+        rows = re.findall(r'<tr\b([^>]*data-record-id="(?:11|21)"[^>]*)>(.*?)</tr>', body, re.S)
+        assert len(rows) == 2
+        assert {re.search(r'data-record-id="(\d+)"', attrs).group(1) for attrs, _ in rows} == {'11', '21'}
+        assert {re.search(r'data-event-group="(\d+)"', attrs).group(1) for attrs, _ in rows} == {'1', '2'}
+        for _, row_body in rows:
+            cells = re.findall(r'<td\b[^>]*>(.*?)</td>', row_body, re.S)
+            assert 'Иванов Дмитрий Сергеевич' in re.sub(r'<[^>]+>', '', cells[1])
+        admin_body = get_event_page(client, 7, role='admin').body.decode()
+        for record_id, student_ref in ((11, 101), (21, 202)):
+            row = re.search(rf'<tr\b[^>]*data-record-id="{record_id}"[^>]*>(.*?)</tr>', admin_body, re.S).group(1)
+            assert f'href="/admin/people/{student_ref}"' in row
+            assert f'data-student-ref-id="{student_ref}"' in row
         # Бейдж «карточка студента» — у обеих linked-строк (без номера ref)
         assert body.count('participant-student-link') == 2
         assert 'Student #' not in body
@@ -18777,8 +18803,21 @@ def test_p7_cardless_same_name_not_merged(client: SanicTestClient):
         body = response.body.decode()
         assert body.count('class="row-group"') == 0
         assert body.count('row-group-item') == 0
-        # ФИО дважды на строку: ячейка + data-student-name
-        assert body.count('Иванов Дмитрий Сергеевич') == 4
+        rows = re.findall(r'<tr\b([^>]*data-record-id="(?:11|21)"[^>]*)>(.*?)</tr>', body, re.S)
+        assert len(rows) == 2
+        assert {re.search(r'data-record-id="(\d+)"', attrs).group(1) for attrs, _ in rows} == {'11', '21'}
+        assert {re.search(r'data-event-group="(\d+)"', attrs).group(1) for attrs, _ in rows} == {'1', '2'}
+        for attrs, row_body in rows:
+            cells = re.findall(r'<td\b[^>]*>(.*?)</td>', row_body, re.S)
+            assert 'Иванов Дмитрий Сергеевич' in re.sub(r'<[^>]+>', '', cells[1])
+            assert ('participant-student-link' in row_body) == ('data-record-id="11"' in attrs)
+        admin_body = get_event_page(client, 7, role='admin').body.decode()
+        linked_row = re.search(r'<tr\b[^>]*data-record-id="11"[^>]*>(.*?)</tr>', admin_body, re.S).group(1)
+        cardless_row = re.search(r'<tr\b[^>]*data-record-id="21"[^>]*>(.*?)</tr>', admin_body, re.S).group(1)
+        assert 'href="/admin/people/101"' in linked_row
+        assert 'data-student-ref-id="101"' in linked_row
+        assert 'href="/admin/people/' not in cardless_row
+        assert 'data-student-ref-id=""' in cardless_row
         # Бейдж — только у linked-строки
         assert body.count('participant-student-link') == 1
     finally:
@@ -18819,7 +18858,7 @@ def test_calendar_card_counters_match_event_page(event_import_client: SanicTestC
     event_body = get_event_page(event_import_client, event_id, role='viewer').text
     assert 'Участников: <strong>3</strong>' in event_body
     assert 'Участий: <strong>4</strong>' in event_body
-    assert 'Без результата: <strong>2</strong>' in event_body
+    assert 'Без места · 2' in event_body
 
 
 def test_p7_discipline_and_result_displayed(client: SanicTestClient):
@@ -19341,7 +19380,7 @@ def test_p7_filter_and_counters_consistent_for_groups(client: SanicTestClient):
         # Счётчики — по всем участиям события
         assert 'Участников: <strong>1</strong>' in body
         assert 'Участий: <strong>2</strong>' in body
-        assert 'Без результата: <strong>1</strong>' in body
+        assert 'Без места · 1' in body
         assert 'Показано <strong>1</strong>' in body
         assert '<strong>2</strong> участий' in body
 
@@ -23067,3 +23106,127 @@ def test_person_card_access_ambiguous_multiple_accounts(people_client: SanicTest
     response = issue_access(people_client, student_id, username='acc3')
     assert 'уже выдан' in unquote_plus(response.headers['location'])
     assert storage.get_user('acc3') is None
+
+
+@pytest.mark.parametrize('role', ['admin', 'editor', 'viewer'])
+def test_event_p1_sections_preserve_forms_and_readonly_contract(event_import_client: SanicTestClient, role):
+    """Participants come first; non-JS fallback and native routes remain intact."""
+    event_id = make_calendar_event(app.ctx.storage, name='Учебный макет P1 — тестовое событие')
+    _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers(role))
+    assert response.status == 200
+    body = response.text
+    assert body.index('data-event-panel="participants"') < body.index('data-event-panel="teams"')
+    assert body.index('data-event-panel="teams"') < body.index('data-event-panel="documents"')
+    assert body.index('data-event-panel="documents"') < body.index('data-event-panel="about"')
+    assert 'data-initial-tab="participants"' in body
+    assert 'data-add-open="false"' in body
+    assert 'id="event-participant-search"' in body
+    assert 'Без места · 0' in body
+    # HTML itself does not hide sections; JS progressively turns them into tabs.
+    assert not re.search(r'<section[^>]+data-event-panel[^>]+\bhidden\b', body)
+    if role == 'viewer':
+        assert 'participant-add-form' not in body
+        assert 'data-event-open-edit' not in body
+        assert 'data-event-toggle-add' not in body
+    else:
+        assert f'action="/calendar/{event_id}/participants"' in body
+        assert f'href="/calendar/{event_id}/participants/import"' in body
+        assert 'name="csrf_token"' in body
+        assert '<details class="event-disclosure"' in body
+        assert 'id="protocol-file"' in body and 'id="document-file"' in body
+        assert 'data-documents-students' in body
+        assert 'data-base-field-settings=' in body
+
+
+def test_event_p1_add_error_reopens_form_and_escapes_search_metadata(event_import_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage, name='Учебное событие: возврат формы')
+    synthetic_name = 'Тестовый <макет> & Образцов'
+    _, response = event_import_client.get(
+        f'/calendar/{event_id}?result=without&form_student_name={quote(synthetic_name)}&form_result=12%2C3',
+        headers=get_auth_headers(),
+    )
+    assert response.status == 200
+    assert 'data-add-open="true"' in response.text
+    assert 'data-result-filter="without"' in response.text
+    assert 'value="Тестовый &lt;макет&gt; &amp; Образцов"' in response.text
+    assert 'value="12,3"' in response.text
+    assert 'name="result_filter" value="without"' in response.text
+
+
+def test_event_p1_edit_team_deeplink_selects_team_panel(calendar_client: SanicTestClient):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage, name='Учебный командный зачёт P1')
+    headers = get_auth_headers()
+    _, created = calendar_client.post(
+        f'/calendar/{event_id}/team-results',
+        headers=headers,
+        data={**csrf_for(headers), 'label': 'Учебная категория', 'place': '2'},
+        allow_redirects=False,
+    )
+    assert created.status == 302
+    event = storage.get_calendar_event(event_id)
+    team_id = event['team_results'][0]['id']
+    _, page = calendar_client.get(f'/calendar/{event_id}?edit_team_result={team_id}', headers=headers)
+    assert page.status == 200
+    assert 'data-initial-tab="teams"' in page.text
+    assert 'id="team-result-edit-form"' in page.text
+    assert f'action="/calendar/{event_id}/team-results/{team_id}/edit"' in page.text
+
+
+@pytest.mark.parametrize('role', ['admin', 'editor', 'viewer'])
+def test_student_profile_p2_tabs_history_and_roles(people_client: SanicTestClient, role):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Синтетиков Профиль Образец', 'М', 'Тестовый институт', 'QA-101', '3')
+    record_id = save_person_record(storage, 'Историческое Имя Образец')
+    storage.link_competitions([record_id], student_id)
+    _, response = people_client.get(f'/admin/people/{student_id}', headers=get_auth_headers(role))
+    body = response.text
+    assert response.status == 200
+    assert '<h1>Синтетиков Профиль Образец</h1>' in body
+    assert body.count('data-person-tab=') == 5
+    assert body.index('data-person-panel="history"') < body.index('data-person-panel="gto"')
+    assert f'data-history-record="{record_id}"' in body
+    assert 'Историческое Имя Образец' in body
+    assert 'Сведения о записи' in body
+    assert 'Поиск среди показанных записей' in body
+    assert 'Последние 1 из 1' in body
+    assert ('name="full_name"' in body) == (role == 'admin')
+    assert ('/reconcile/relink' in body) == (role == 'admin')
+    assert (f'action="/admin/people/{student_id}/gto"' in body) == (role != 'viewer')
+    # Native fallback: no server-rendered panel is hidden before JS enhancement.
+    assert 'data-person-panel="history" hidden' not in body
+    assert 'data-person-panel="data" hidden' not in body
+
+
+def test_student_profile_p2_history_legacy_and_base_values(people_client: SanicTestClient):
+    storage = app.ctx.storage
+    student_id = storage.create_student('Синтетиков Легаси Образец', 'М', '', '', '')
+    storage.create_custom_field('qa_discipline', 'Дисциплина', 'text', False, True, True, True, 0)
+    storage.create_custom_field('qa_result', 'Результат', 'text', False, True, True, True, 1)
+    first = save_person_record(storage, 'Синтетиков Легаси Образец')
+    second = save_person_record(storage, 'Синтетиков Легаси Образец')
+    storage.link_competitions([first, second], student_id)
+    extra = json.dumps({'qa_discipline': 'Легаси дисциплина QA', 'qa_result': 'Легаси результат QA'})
+    storage.connection.execute(
+        'UPDATE competitions SET discipline=NULL, result=NULL, position=0, extra_data=? WHERE id=?', (extra, first)
+    )
+    storage.connection.execute(
+        "UPDATE competitions SET discipline='Базовая дисциплина QA', result='Базовый результат QA', "
+        'position=2, extra_data=? WHERE id=?',
+        (extra, second),
+    )
+    storage.connection.commit()
+    before = [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions ORDER BY id')]
+    _, response = people_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
+    body = response.text
+    rows = {
+        int(record_id): row
+        for record_id, row in re.findall(r'<tr data-history-record="(\d+)"[^>]*>(.*?)</tr>', body, re.S)
+    }
+    assert 'Легаси дисциплина QA' in rows[first] and 'Легаси результат QA' in rows[first]
+    assert 'Без места' in rows[first]
+    assert 'Базовая дисциплина QA' in rows[second] and 'Базовый результат QA' in rows[second]
+    assert 'Легаси результат QA' not in rows[second]
+    assert body.index(f'data-history-record="{second}"') < body.index(f'data-history-record="{first}"')
+    assert [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions ORDER BY id')] == before

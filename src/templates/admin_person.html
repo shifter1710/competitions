@@ -1,135 +1,92 @@
-{% extends "layout/admin.html" %}
+{% extends "layout/base.html" %}
+{% block content %}
+<div class="person-page" data-person-page="{{ student.id }}">
+<a class="person-back" href="/admin/people" data-person-back>← К студентам</a>
+<header class="person-header">
+<div class="person-heading"><h1>{{ student.full_name }}</h1><span class="badge {% if student.active %}text-bg-success{% else %}text-bg-secondary{% endif %}">{% if student.active %}активен{% else %}неактивен{% endif %}</span></div>
+<p class="person-summary">{{ student.institute or 'Институт не указан' }} · {{ student.group_name or 'Группа не указана' }} · Курс в карточке: {{ student.course or 'не указан' }}{% if education and education.course %} · Расчётный курс: {{ education.course }}{% endif %}</p>
+<div class="person-header-bottom"><span>Доступ: {% if access_ambiguous %}несколько аккаунтов — требуется проверка{% elif access_user %}{% if access_user.active %}выдан{% else %}отключён{% endif %}{% else %}не выдан{% endif %}</span>{% if is_admin %}<button class="btn btn-outline-secondary person-js-only" type="button" data-person-edit>Редактировать данные</button>{% endif %}</div>
+</header>
+<nav class="person-tabs" aria-label="Разделы карточки">
+<a href="#person-history" data-person-tab="history">Участия <span>{{ linked_records_count }}</span></a>
+<a href="#person-gto" data-person-tab="gto">ГТО <span>{{ gto_count }}</span></a>
+<a href="#person-aliases" data-person-tab="aliases">Другие имена <span>{{ aliases | length }}</span></a>
+<a href="#person-access" data-person-tab="access">Доступ</a>
+<a href="#person-data" data-person-tab="data">Данные и образование</a>
+</nav>
+<section id="person-history" data-person-panel="history">
+<div class="person-history-toolbar"><div><h2>История участий</h2><p>Последние {{ linked_records | length }} из {{ linked_records_count }} · по дате, новые сверху<br><span class="person-js-only" data-person-found aria-live="polite"></span></p></div>
+<div class="person-js-only person-search"><label for="person-history-search">Поиск среди показанных записей</label><div class="d-flex gap-2"><input id="person-history-search" type="search" class="form-control" maxlength="2000" placeholder="Соревнование, дисциплина, ФИО"><button type="button" class="btn btn-outline-secondary" data-person-clear>Сбросить</button></div></div></div>
 
-{% block admin_title %}Студент: {{ student.full_name }}{% endblock admin_title %}
-{% block admin_back %}
-<a class="btn btn-outline-secondary" href="/admin/people">← К студентам</a>
-{% endblock admin_back %}
-{% block admin_description %}
-    Карточка студента: актуальные данные и псевдонимы ФИО. Правка карточки
-    не меняет исторические записи о соревнованиях.
-{% endblock admin_description %}
-
-{% block admin_content %}
-
-{# Актуальные данные. Сохранение меняет ТОЛЬКО карточку: ФИО и данные
-   существующих записей, отчётов и выгрузок не переписываются. Формы —
-   только admin; editor/viewer видят те же данные read-only (паттерн
-   карточки «Образование»). #}
-<div class="card shadow-sm mb-4">
-    <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
-            <h5 class="card-title mb-0">
-                Данные студента
-                {% if student.active %}
-                <span class="badge text-bg-success">активен</span>
-                {% else %}
-                <span class="badge text-bg-secondary">неактивен</span>
-                {% endif %}
-            </h5>
-            {% if is_admin %}
-            <form action="/admin/people/{{ student.id }}/active" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                {% if student.active %}
-                <button class="btn btn-sm btn-outline-warning" type="submit">Деактивировать</button>
-                {% else %}
-                <button class="btn btn-sm btn-outline-success" type="submit">Активировать</button>
-                {% endif %}
-            </form>
-            {% endif %}
+        {% if linked_records %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle person-history-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Дата</th><th scope="col">Соревнование / дисциплина</th><th scope="col">Место</th><th scope="col">Результат</th>
+                        {% if is_admin %}
+                        <th scope="col">Действия</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in linked_records %}
+                    <tr data-history-record="{{ record.id }}" data-history-search="{{ record.name }} {{ record.sport }} {{ record.discipline }} {{ record.student_name }}">
+                        <td data-label="Дата"><span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td>
+                        <td data-label="Соревнование / дисциплина">
+                            {% if record.calendar_event_id %}<a href="/calendar/{{ record.calendar_event_id }}" data-person-event-link>{{ record.name or 'Соревнование' }}</a>{% else %}<strong>{{ record.name or 'Без названия' }}</strong>{% endif %}
+                            <div>{{ record.discipline or 'Дисциплина не указана' }}</div>
+                            <span class="person-record-meta">{{ record.sport }}{% if record.student_name != student.full_name %} · ФИО отличается от карточки{% endif %}</span>
+                            <details class="person-record-info"><summary>Сведения о записи</summary><p>№{{ record.id }} · ФИО в записи: {{ record.student_name }}</p></details>
+                        </td>
+                        <td data-label="Место">{% if record.position %}{{ record.position }}{% else %}<span class="person-missing">Без места</span>{% endif %}</td>
+                        <td data-label="Результат">{{ record.result or 'Не указан' }}</td>
+                        {% if is_admin %}
+                        <td data-label="Связь записи">
+                            <details class="person-record-actions"><summary class="btn btn-sm btn-outline-secondary">Связь записи</summary><div class="d-flex flex-wrap gap-2 align-items-center">
+                                <form action="/admin/people/reconcile/unlink" method="post"
+                                      onsubmit="return confirm('Отвязать запись №{{ record.id }} от этого студента? Запись сохранится, но снова появится в сопоставлении.')">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                    <input type="hidden" name="record_id" value="{{ record.id }}">
+                                    <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
+                                </form>
+                                <details class="d-inline-block">
+                                    <summary class="btn btn-sm btn-outline-secondary">Перепривязать</summary>
+                                    <form action="/admin/people/reconcile/relink" class="d-flex flex-wrap gap-2 mt-2"
+                                          method="post"
+                                          onsubmit="return confirm('Перепривязать запись №{{ record.id }} на выбранного студента?')">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                                        <input type="hidden" name="record_id" value="{{ record.id }}">
+                                        <select aria-label="Студент" class="form-select form-select-sm" name="student_id" required>
+                                            {% for item in active_students %}
+                                            {% if item.id != student.id %}
+                                            <option value="{{ item.id }}">
+                                                {{ item.full_name }} (#{{ item.id }}, {{ item.institute or '—' }}, {{ item.group_name or '—' }})
+                                            </option>
+                                            {% endif %}
+                                            {% endfor %}
+                                        </select>
+                                        <button class="btn btn-sm btn-primary" type="submit">Перепривязать</button>
+                                    </form>
+                                </details>
+                            </div></details>
+                        </td>
+                        {% endif %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
-        {% if is_admin %}
-        <form action="/admin/people/{{ student.id }}/edit" class="row g-3" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-            <div class="col-md-4">
-                <label class="form-label" for="person-full-name">ФИО</label>
-                <input class="form-control" id="person-full-name" name="full_name" required type="text" value="{{ student.full_name }}">
-            </div>
-            <div class="col-md-2">
-                <label class="form-label" for="person-sex">Пол</label>
-                <select class="form-select" id="person-sex" name="sex">
-                    <option value="" {% if not student.sex %}selected{% endif %}>не указан</option>
-                    <option value="М" {% if student.sex == 'М' %}selected{% endif %}>М</option>
-                    <option value="Ж" {% if student.sex == 'Ж' %}selected{% endif %}>Ж</option>
-                </select>
-            </div>
-            <div class="col-md-3">
-                <label class="form-label" for="person-institute">Институт</label>
-                <input class="form-control" id="person-institute" name="institute" type="text" value="{{ student.institute or '' }}">
-            </div>
-            <div class="col-md-2">
-                <label class="form-label" for="person-group">Группа</label>
-                <input class="form-control" id="person-group" name="group" type="text" value="{{ student.group_name or '' }}">
-            </div>
-            <div class="col-md-2">
-                <label class="form-label" for="person-course">Курс</label>
-                <input class="form-control" id="person-course" name="course" type="text" value="{{ student.course or '' }}">
-            </div>
-            <div class="col-12">
-                <button class="btn btn-primary" type="submit">Сохранить</button>
-                <div class="form-text ui-hint">
-                    Сохранение меняет только актуальные данные карточки. ФИО и данные
-                    в существующих записях о соревнованиях, отчётах и выгрузках не переписываются.
-                </div>
-            </div>
-        </form>
+        {% if linked_records_count > linked_records | length %}
+        <div class="text-muted">Показаны последние {{ linked_records | length }} из {{ linked_records_count }} участий. Поиск работает только по загруженным записям.</div>
+        {% endif %}
         {% else %}
-        <dl class="row mb-0">
-            <dt class="col-sm-4 fw-normal text-muted">ФИО</dt>
-            <dd class="col-sm-8">{{ student.full_name }}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Пол</dt>
-            <dd class="col-sm-8">{% if student.sex %}{{ student.sex }}{% else %}<span class="text-muted">не указан</span>{% endif %}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Институт</dt>
-            <dd class="col-sm-8">{{ student.institute or '—' }}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
-            <dd class="col-sm-8">{{ student.group_name or '—' }}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Курс</dt>
-            <dd class="col-sm-8">{{ student.course or '—' }}</dd>
-        </dl>
+        <div class="text-muted mb-3">Привязанных записей пока нет.</div>
         {% endif %}
-    </div>
-</div>
 
-{# Course / Education, Phase A: read-only сводка образования из учебных данных
-   группы справочника. Рендерится ТОЛЬКО когда пара институт+группа студента
-   резолвится и у группы заданы учебные данные (education is None — карточки
-   нет, ошибки не бывает). Поле «Курс» выше — легаси-поле карточки, не тронуто. #}
-{% if education %}
-<div class="card shadow-sm mb-4">
-    <div class="card-body">
-        <h5 class="card-title">Образование</h5>
-        <div class="text-muted mb-3">Данные берутся из группы в справочнике; курс рассчитывается автоматически — учебный год начинается 1 сентября.</div>
-        <dl class="row mb-0">
-            <dt class="col-sm-4 fw-normal text-muted">Уровень образования</dt>
-            <dd class="col-sm-8">{% if education.level_name %}{{ education.level_name }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
-            <dd class="col-sm-8">{{ student.institute }} · {{ student.group_name }}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Год поступления</dt>
-            <dd class="col-sm-8">{% if education.admission_year %}{{ education.admission_year }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Длительность обучения (лет)</dt>
-            <dd class="col-sm-8">{% if education.effective_duration_years %}{{ education.effective_duration_years }}{% else %}<span class="text-muted">не задана</span>{% endif %}</dd>
-            <dt class="col-sm-4 fw-normal text-muted">Текущий курс</dt>
-            <dd class="col-sm-8">
-                {% if education.course %}
-                {{ education.course }} курс <span class="text-muted small">учебный год {{ education.academic_year_label }}</span>
-                {% if education.probably_finished %}
-                <span class="badge text-bg-warning">Предположительно обучение завершено</span>
-                {% endif %}
-                {% else %}
-                <span class="text-muted">не рассчитывается</span>
-                {% endif %}
-            </dd>
-        </dl>
-        {% if education.probably_finished %}
-        <div class="form-text ui-hint mt-2">
-            Курс больше длительности обучения — проверьте год поступления или длительность
-            в учебных данных группы. Карточка не архивируется автоматически.
-        </div>
-        {% endif %}
-    </div>
-</div>
-{% endif %}
-
-{# ГТО (Готов к труду и обороне): история ступеней и результатов студента
+<div class="person-no-results" data-person-no-results hidden>По вашему запросу ничего не найдено среди загруженных участий. <button type="button" class="btn btn-link" data-person-clear>Сбросить поиск</button></div>
+</section>
+<section id="person-gto" data-person-panel="gto">{# ГТО (Готов к труду и обороне): история ступеней и результатов студента
    по годам. Принадлежит карточке (не событию и не участию), записи —
    исторический факт, из возраста не пересчитываются. Таблица — всему
    штату; формы — модераторам (admin/editor), viewer — только чтение. #}
@@ -199,6 +156,7 @@
         {% endif %}
 
         {% if is_moderator %}
+        <details id="person-gto-add"><summary class="btn btn-outline-primary">Добавить запись ГТО</summary>
         <form action="/admin/people/{{ student.id }}/gto" class="row g-2 align-items-end" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <div class="col-6 col-md-2">
@@ -226,15 +184,17 @@
                 <button class="btn btn-sm btn-outline-primary" type="submit">Добавить запись ГТО</button>
             </div>
         </form>
+        </details>
         {% endif %}
     </div>
 </div>
 
-{# Псевдонимы: другие написания ФИО, встречающиеся в записях и импорте.
+</section>
+<section id="person-aliases" data-person-panel="aliases">{# Псевдонимы: другие написания ФИО, встречающиеся в записях и импорте.
    Таблица — всему штату (read-only), удаление/добавление — только admin. #}
 <div class="card shadow-sm">
     <div class="card-body">
-        <h5 class="card-title">Псевдонимы</h5>
+        <h2 class="card-title">Другие имена</h2>
         <div class="text-muted mb-3">Другие написания ФИО этого студента, встречающиеся в записях и импорте.</div>
 
         {% if aliases %}
@@ -271,6 +231,7 @@
         {% endif %}
 
         {% if is_admin %}
+        <details><summary class="btn btn-outline-primary">Добавить другое имя</summary>
         <form action="/admin/people/{{ student.id }}/alias" class="row g-2 align-items-center" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <div class="col-md-4">
@@ -281,90 +242,13 @@
                 <button class="btn btn-sm btn-outline-primary" type="submit">Добавить</button>
             </div>
         </form>
+        </details>
         {% endif %}
     </div>
 </div>
 
-{# Связанные данные (Phase 2 + P3): записи и аккаунты, привязанные вручную
-   через сопоставление. Привязка меняет только student_ref_id — кабинет
-   атлета с P3 читает эту связь (dual: связь + легаси-хеш ФИО), отчёты и
-   выгрузки работают по легаси-ключу sha256(ФИО) как раньше. Таблицы —
-   всему штату (read-only), отвязка/перепривязка — только admin. #}
-<div class="card shadow-sm mt-4">
-    <div class="card-body">
-        <h5 class="card-title">Связанные данные</h5>
-        <div class="text-muted mb-3">Доступ атлета, записи о соревнованиях и аккаунты, привязанные к этому студенту.</div>
-
-        <h6 class="mb-2">Записи о соревнованиях
-            <span class="badge text-bg-secondary">{{ linked_records_count }}</span>
-        </h6>
-        {% if linked_records %}
-        <div class="table-responsive">
-            <table class="table table-sm align-middle">
-                <thead>
-                    <tr>
-                        <th scope="col">№</th>
-                        <th scope="col">ФИО в записи</th>
-                        <th scope="col">Спорт · Дата</th>
-                        <th scope="col">Название</th>
-                        {% if is_admin %}
-                        <th scope="col">Действия</th>
-                        {% endif %}
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for record in linked_records %}
-                    <tr>
-                        <td>{{ record.id }}</td>
-                        <td>{{ record.student_name }}</td>
-                        {# Дата — одной строкой (span только вокруг даты: вид
-                           спорта может переноситься). #}
-                        <td>{{ record.sport }} · <span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td>
-                        <td>{{ record.name }}</td>
-                        {% if is_admin %}
-                        <td>
-                            <div class="d-flex flex-wrap gap-2 align-items-center">
-                                <form action="/admin/people/reconcile/unlink" method="post"
-                                      onsubmit="return confirm('Отвязать запись №{{ record.id }} от этого студента? Запись сохранится, но снова появится в сопоставлении.')">
-                                    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                    <input type="hidden" name="record_id" value="{{ record.id }}">
-                                    <button class="btn btn-sm btn-outline-warning" type="submit">Отвязать</button>
-                                </form>
-                                <details class="d-inline-block">
-                                    <summary class="btn btn-sm btn-outline-secondary">Перепривязать</summary>
-                                    <form action="/admin/people/reconcile/relink" class="d-flex flex-wrap gap-2 mt-2"
-                                          method="post"
-                                          onsubmit="return confirm('Перепривязать запись №{{ record.id }} на выбранного студента?')">
-                                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
-                                        <input type="hidden" name="record_id" value="{{ record.id }}">
-                                        <select aria-label="Студент" class="form-select form-select-sm" name="student_id" required>
-                                            {% for item in active_students %}
-                                            {% if item.id != student.id %}
-                                            <option value="{{ item.id }}">
-                                                {{ item.full_name }} (#{{ item.id }}, {{ item.institute or '—' }}, {{ item.group_name or '—' }})
-                                            </option>
-                                            {% endif %}
-                                            {% endfor %}
-                                        </select>
-                                        <button class="btn btn-sm btn-primary" type="submit">Перепривязать</button>
-                                    </form>
-                                </details>
-                            </div>
-                        </td>
-                        {% endif %}
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-        {% if linked_records_count > linked_records | length %}
-        <div class="text-muted">…и ещё {{ linked_records_count - linked_records | length }} записей (показаны первые 50).</div>
-        {% endif %}
-        {% else %}
-        <div class="text-muted mb-3">Привязанных записей пока нет.</div>
-        {% endif %}
-
-        {# Выдача доступа атлета (Account Issuance): аккаунт role=athlete
+</section>
+<section id="person-access" data-person-panel="access"><div class="card card-body">        {# Выдача доступа атлета (Account Issuance): аккаунт role=athlete
            создаётся сразу со связью с этой карточкой — не больше одного на
            студента. Пароль существует только до отправки формы (генерация и
            копирование — клиентские кнопки), в базе — один scrypt-хеш;
@@ -532,10 +416,128 @@
         {% else %}
         <div class="text-muted">Аккаунтов атлетов нет.</div>
         {% endif %}
+</div></section>
+<section id="person-data" data-person-panel="data">{# Актуальные данные. Сохранение меняет ТОЛЬКО карточку: ФИО и данные
+   существующих записей, отчётов и выгрузок не переписываются. Формы —
+   только admin; editor/viewer видят те же данные read-only (паттерн
+   карточки «Образование»). #}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+            <h5 class="card-title mb-0">
+                Данные студента
+                {% if student.active %}
+                <span class="badge text-bg-success">активен</span>
+                {% else %}
+                <span class="badge text-bg-secondary">неактивен</span>
+                {% endif %}
+            </h5>
+            {% if is_admin %}
+            <form action="/admin/people/{{ student.id }}/active" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                {% if student.active %}
+                <button class="btn btn-sm btn-outline-warning" type="submit">Деактивировать</button>
+                {% else %}
+                <button class="btn btn-sm btn-outline-success" type="submit">Активировать</button>
+                {% endif %}
+            </form>
+            {% endif %}
+        </div>
+        {% if is_admin %}
+        <details id="person-edit-details"><summary class="btn btn-outline-primary">Редактировать данные</summary>
+        <form action="/admin/people/{{ student.id }}/edit" class="row g-3" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-md-4">
+                <label class="form-label" for="person-full-name">ФИО</label>
+                <input class="form-control" id="person-full-name" name="full_name" required type="text" value="{{ student.full_name }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="person-sex">Пол</label>
+                <select class="form-select" id="person-sex" name="sex">
+                    <option value="" {% if not student.sex %}selected{% endif %}>не указан</option>
+                    <option value="М" {% if student.sex == 'М' %}selected{% endif %}>М</option>
+                    <option value="Ж" {% if student.sex == 'Ж' %}selected{% endif %}>Ж</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label" for="person-institute">Институт</label>
+                <input class="form-control" id="person-institute" name="institute" type="text" value="{{ student.institute or '' }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="person-group">Группа</label>
+                <input class="form-control" id="person-group" name="group" type="text" value="{{ student.group_name or '' }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label" for="person-course">Курс</label>
+                <input class="form-control" id="person-course" name="course" type="text" value="{{ student.course or '' }}">
+            </div>
+            <div class="col-12">
+                <button class="btn btn-primary" type="submit">Сохранить</button>
+                <div class="form-text ui-hint">
+                    Сохранение меняет только актуальные данные карточки. ФИО и данные
+                    в существующих записях о соревнованиях, отчётах и выгрузках не переписываются.
+                </div>
+            </div>
+        </form>
+        </details>
+        {% else %}
+        <dl class="row mb-0">
+            <dt class="col-sm-4 fw-normal text-muted">ФИО</dt>
+            <dd class="col-sm-8">{{ student.full_name }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Пол</dt>
+            <dd class="col-sm-8">{% if student.sex %}{{ student.sex }}{% else %}<span class="text-muted">не указан</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Институт</dt>
+            <dd class="col-sm-8">{{ student.institute or '—' }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
+            <dd class="col-sm-8">{{ student.group_name or '—' }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Курс</dt>
+            <dd class="col-sm-8">{{ student.course or '—' }}</dd>
+        </dl>
+        {% endif %}
     </div>
 </div>
 
-{# Полное удаление ошибочно созданной карточки — только admin и только без
+{# Course / Education, Phase A: read-only сводка образования из учебных данных
+   группы справочника. Рендерится ТОЛЬКО когда пара институт+группа студента
+   резолвится и у группы заданы учебные данные (education is None — карточки
+   нет, ошибки не бывает). Поле «Курс» выше — легаси-поле карточки, не тронуто. #}
+{% if education %}
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Образование</h5>
+        <div class="text-muted mb-3">Данные берутся из группы в справочнике; курс рассчитывается автоматически — учебный год начинается 1 сентября.</div>
+        <dl class="row mb-0">
+            <dt class="col-sm-4 fw-normal text-muted">Уровень образования</dt>
+            <dd class="col-sm-8">{% if education.level_name %}{{ education.level_name }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
+            <dd class="col-sm-8">{{ student.institute }} · {{ student.group_name }}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Год поступления</dt>
+            <dd class="col-sm-8">{% if education.admission_year %}{{ education.admission_year }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Длительность обучения (лет)</dt>
+            <dd class="col-sm-8">{% if education.effective_duration_years %}{{ education.effective_duration_years }}{% else %}<span class="text-muted">не задана</span>{% endif %}</dd>
+            <dt class="col-sm-4 fw-normal text-muted">Текущий курс</dt>
+            <dd class="col-sm-8">
+                {% if education.course %}
+                {{ education.course }} курс <span class="text-muted small">учебный год {{ education.academic_year_label }}</span>
+                {% if education.probably_finished %}
+                <span class="badge text-bg-warning">Предположительно обучение завершено</span>
+                {% endif %}
+                {% else %}
+                <span class="text-muted">не рассчитывается</span>
+                {% endif %}
+            </dd>
+        </dl>
+        {% if education.probably_finished %}
+        <div class="form-text ui-hint mt-2">
+            Курс больше длительности обучения — проверьте год поступления или длительность
+            в учебных данных группы. Карточка не архивируется автоматически.
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% if is_admin %}<details class="person-danger"><summary>Удаление карточки</summary>{# Полное удаление ошибочно созданной карточки — только admin и только без
    связей (records/accounts/ГТО считаются на сервере, форма скрывается при
    блокерах). #}
 {% if is_admin %}
@@ -598,8 +600,7 @@
 </div>
 {% endif %}
 
-{# Подсказки известных ФИО наполняет общий хелпер renderStudentNamesList
-   (script.js): на странице достаточно пустого datalist с этим id. #}
+</details>{% endif %}</section>
 <datalist id="student-names-list"></datalist>
-
-{% endblock admin_content %}
+</div>
+{% endblock content %}

@@ -658,7 +658,8 @@ class StudentsMixin:
         with self._lock:
             rows = self.connection.execute(
                 '''
-                SELECT id, student_name, sport, date, date_to, name
+                SELECT id, student_name, sport, date, date_to, name,
+                       discipline, position, result, calendar_event_id, extra_data
                 FROM competitions
                 WHERE student_ref_id = ?
                 ORDER BY date DESC, id DESC
