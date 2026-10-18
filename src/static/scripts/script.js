@@ -3516,15 +3516,206 @@ class ParticipantsPage {
         // P7: participation-кастомы (label + key) — инпуты правки участия.
         this.participationCustomFields = this.parseParticipationCustomFields();
         this.attachAddFormResolver();
+        this.initEventView();
         this.table.addEventListener("click", (event) => this.handleClick(event));
         // Защита несохранённого ввода (UX P0): инлайн-правка участия —
         // браузерное подтверждение при закрытии/перезагрузке вкладки.
         window.addEventListener("beforeunload", (event) => {
-            if (this.editingRow) {
+            if (this.editingRow || this.addDirty) {
                 event.preventDefault();
                 event.returnValue = "";
             }
         });
+    }
+
+
+    // Progressive enhancement: without JS all sections and normal forms remain reachable.
+    initEventView() {
+        this.root = this.table.closest("[data-event-page]");
+        if (!this.root) return;
+        this.root.classList.add("event-enhanced");
+        this.addDirty = false;
+        this.viewKey = `competitions:event-view:${this.root.dataset.eventPage}`;
+        this.search = this.root.querySelector("#event-participant-search");
+        this.search.value = (new URLSearchParams(location.search).get("q") || "").slice(0, 2000);
+        this.tabs = [...this.root.querySelectorAll("[data-event-tab]")];
+        const nav = this.root.querySelector(".event-tabs");
+        nav.setAttribute("role", "tablist");
+        this.tabs.forEach((tab) => {
+            const key = tab.dataset.eventTab;
+            const panel = this.root.querySelector(`[data-event-panel="${key}"]`);
+            panel.id ||= `event-panel-${key}`;
+            panel.setAttribute("role", "tabpanel");
+            panel.setAttribute("aria-labelledby", `event-tab-${key}`);
+            tab.id = `event-tab-${key}`;
+            tab.setAttribute("role", "tab");
+            tab.setAttribute("aria-controls", panel.id);
+            tab.addEventListener("click", (event) => { event.preventDefault(); this.showTab(key); });
+            tab.addEventListener("keydown", (event) => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const index = this.tabs.indexOf(tab);
+                const next = event.key === "Home" ? 0 : event.key === "End" ? this.tabs.length - 1
+                    : (index + (event.key === "ArrowRight" ? 1 : -1) + this.tabs.length) % this.tabs.length;
+                if (this.showTab(this.tabs[next].dataset.eventTab) !== false) this.tabs[next].focus();
+            });
+        });
+        const params = new URLSearchParams(location.search);
+        const forced = this.root.dataset.initialTab;
+        const hashTab = {"#documents": "documents", "#protocols": "documents", "#event-documents": "documents", "#team-results": "teams", "#event-teams": "teams", "#event-about": "about"}[location.hash];
+        const initial = forced !== "participants" ? forced : (hashTab || params.get("tab") || "participants");
+        this.showTab(initial, false);
+        window.addEventListener("hashchange", () => {
+            const key = {"#documents": "documents", "#protocols": "documents", "#event-documents": "documents", "#team-results": "teams", "#event-teams": "teams", "#event-about": "about"}[location.hash];
+            if (key) this.showTab(key, false);
+        });
+        this.setAddOpen(this.root.dataset.addOpen === "true");
+        this.root.querySelector("[data-event-toggle-add]")?.addEventListener("click", () => {
+            if (this.editingRow) { notify({type: "error", text: "Сохраните или отмените текущую правку участия."}); return; }
+            if (this.addDirty) { notify({type: "error", text: "Сохраните участника или нажмите «Отменить добавление»."}); return; }
+            this.showTab("participants");
+            this.setAddOpen(!this.root.classList.contains("event-add-open"));
+            if (this.root.classList.contains("event-add-open")) this.table.querySelector(".row-new input:not([type=hidden])")?.focus();
+        });
+        const form = document.getElementById("participant-add-form");
+        this.root.querySelector("[data-event-cancel-add]")?.addEventListener("click", () => {
+            form?.reset();
+            document.getElementById("participant-student-reset")?.click();
+            this.addDirty = false;
+            this.setAddOpen(false);
+            this.root.querySelector("[data-event-toggle-add]")?.focus();
+        });
+        if (form) {
+            this.table.querySelectorAll('[form="participant-add-form"]').forEach((input) => {
+                input.addEventListener("input", () => { this.addDirty = true; });
+            });
+            form.addEventListener("submit", () => {
+                this.addDirty = false;
+                this.storeView();
+                this.table.querySelectorAll('[type="submit"][form="participant-add-form"]').forEach(button => { button.disabled = true; });
+            });
+        }
+        this.root.querySelector("[data-event-open-edit]")?.addEventListener("click", () => {
+            if (this.showTab("about") === false) return;
+            const details = this.root.querySelector("#event-edit-form");
+            details.open = true;
+            details.querySelector("input:not([type=hidden])")?.focus();
+        });
+        this.search.addEventListener("input", () => this.filterParticipants());
+        this.root.querySelector("#event-result-filter").addEventListener("change", (event) => this.changeResultFilter(event.target.value));
+        this.root.querySelectorAll("[data-event-result-link]").forEach(link => link.addEventListener("click", event => {
+            event.preventDefault(); this.changeResultFilter(link.href);
+        }));
+        this.root.querySelectorAll("[data-event-clear-search]").forEach(control => control.addEventListener("click", event => {
+            event.preventDefault();
+            if (this.editingRow || this.addDirty) { notify({type: "error", text: "Сохраните или отмените текущий ввод перед сбросом фильтров."}); return; }
+            this.search.value = "";
+            try { sessionStorage.removeItem(this.viewKey); } catch (error) { /* Optional storage. */ }
+            if (this.root.dataset.resultFilter) this.changeResultFilter(`/calendar/${this.root.dataset.eventPage}`);
+            else { this.filterParticipants(); this.search.focus(); }
+        }));
+        this.root.querySelectorAll("form").forEach(formElement => formElement.addEventListener("submit", event => { if (!event.defaultPrevented) this.storeView(); }));
+        this.decorateParticipantCells();
+        this.filterParticipants();
+        try {
+            const stored = JSON.parse(sessionStorage.getItem(this.viewKey) || "null");
+            sessionStorage.removeItem(this.viewKey);
+            if (stored && Date.now() - stored.at >= 0 && Date.now() - stored.at < 60000) {
+                // Native POST redirects do not know client search. Restore its one-shot UI
+                // context only when the destination did not explicitly choose a query.
+                if (!params.has("q") && typeof stored.query === "string") {
+                    this.search.value = stored.query.slice(0, 2000);
+                    this.filterParticipants();
+                }
+                // Server deep-link/edit states take precedence over remembered tab/scroll.
+                if (forced === "participants" && !hashTab && !params.get("tab")) { this.showTab(stored.tab || "participants", false); this.updateViewURL(); }
+                if (forced === "participants" && !hashTab) requestAnimationFrame(() => {
+                    const button = this.table.querySelector(`.participant-edit-button[data-record-id="${Number(stored.recordId)}"]`);
+                    (button || this.root.querySelector("#event-result-filter"))?.focus({preventScroll: true});
+                    window.scrollTo(0, Number(stored.scrollY) || 0);
+                    const wrap = this.table.closest(".table-responsive");
+                    if (wrap) wrap.scrollLeft = Number(stored.scrollX) || 0;
+                });
+            }
+        } catch (error) { /* Storage may be disabled; normal navigation remains available. */ }
+        if (hashTab) requestAnimationFrame(() => document.getElementById(location.hash.slice(1))?.scrollIntoView({block: "start"}));
+    }
+
+    showTab(key, updateURL = true) {
+        if (updateURL && (this.editingRow || this.addDirty)) {
+            notify({type: "error", text: this.editingRow ? "Сохраните или отмените текущую правку участия." : "Сохраните участника или отмените добавление."});
+            return false;
+        }
+        if (!this.tabs.some(tab => tab.dataset.eventTab === key)) key = "participants";
+        this.activeTab = key;
+        this.tabs.forEach(tab => {
+            const active = tab.dataset.eventTab === key;
+            tab.setAttribute("aria-selected", String(active));
+            tab.tabIndex = active ? 0 : -1;
+        });
+        this.root.querySelectorAll("[data-event-panel]").forEach(panel => { panel.hidden = panel.dataset.eventPanel !== key; });
+        if (updateURL) this.updateViewURL(true);
+    }
+
+    updateViewURL(clearHash = false) {
+        const url = new URL(location.href);
+        if (clearHash) url.hash = "";
+        if (this.search.value) url.searchParams.set("q", this.search.value); else url.searchParams.delete("q");
+        if (this.activeTab !== "participants") url.searchParams.set("tab", this.activeTab); else url.searchParams.delete("tab");
+        history.replaceState(null, "", url);
+    }
+
+    storeView(recordId = null) {
+        // One-shot UI context (60s): viewport, tab, typed search only. Never row/form drafts or account data.
+        try { sessionStorage.setItem(this.viewKey, JSON.stringify({at: Date.now(), tab: this.activeTab,
+            scrollY: window.scrollY, scrollX: this.table.closest(".table-responsive")?.scrollLeft || 0, recordId, query: this.search.value.slice(0, 2000)})); }
+        catch (error) { /* Optional view restoration. */ }
+    }
+
+    changeResultFilter(target) {
+        if (this.editingRow || this.addDirty) {
+            const base = `/calendar/${this.root.dataset.eventPage}`;
+            this.root.querySelector("#event-result-filter").value = base + (this.root.dataset.resultFilter ? `?result=${this.root.dataset.resultFilter}` : "");
+            notify({type: "error", text: "Сохраните или отмените текущий ввод перед сменой фильтра места."});
+            return;
+        }
+        const url = new URL(target, location.origin);
+        if (this.search.value) url.searchParams.set("q", this.search.value);
+        this.storeView();
+        window.location.href = url;
+    }
+
+    setAddOpen(open) {
+        this.root.classList.toggle("event-add-open", open);
+        this.root.querySelector("[data-event-toggle-add]")?.setAttribute("aria-expanded", String(open));
+    }
+
+    decorateParticipantCells() {
+        const labels = ["№", "ФИО", "Пол", "Институт", "Группа", "Курс", "Дисциплина", "Место", "Результат", "Действия"];
+        this.table.querySelectorAll("tbody tr").forEach(row => {
+            let index = 0;
+            [...row.children].forEach(cell => {
+                cell.dataset.eventCol = String(index);
+                cell.dataset.label = labels[index] || "Дополнительные поля";
+                index += cell.colSpan || 1;
+            });
+        });
+    }
+
+    filterParticipants() {
+        const term = this.search.value.trim().toLocaleLowerCase("ru");
+        let records = 0;
+        const groups = new Set();
+        this.table.querySelectorAll("[data-event-group]").forEach(row => {
+            const found = `${row.dataset.searchName} ${row.dataset.searchGroup}`.toLocaleLowerCase("ru").includes(term);
+            // An active edit must never disappear while its draft is being entered.
+            row.hidden = !found && row !== this.editingRow;
+            if (found && row.dataset.recordId) { records += 1; groups.add(row.dataset.eventGroup); }
+        });
+        const count = this.root.querySelector("#event-search-count");
+        count.textContent = `В выборке: ${groups.size} участников · ${records} участий`;
+        this.root.querySelector(".event-search-empty").hidden = !term || records > 0;
+        this.updateViewURL();
     }
 
     parseParticipationCustomFields() {
@@ -3551,6 +3742,7 @@ class ParticipantsPage {
         }
         fetch(url, {method: "POST", body})
             .then((response) => {
+                if (response.redirected && new URL(response.url).pathname === "/login") throw new Error("Сессия истекла. Войдите заново; введённые значения остаются в форме.");
                 if (!response.ok) {
                     return response.text().then((message) => {
                         throw new Error(message);
@@ -3704,6 +3896,8 @@ class ParticipantsPage {
     // вместе с полями участия (дисциплина/место/результат). Сохранение —
     // тем же эндпоинтом, что и на главной (историчность — на сервере).
     startEdit(button) {
+        if (this.addDirty) { notify({type: "error", text: "Сначала сохраните участника или отмените добавление."}); return; }
+        this.setAddOpen(false);
         if (this.editingRow) {
             return;
         }
@@ -3713,6 +3907,7 @@ class ParticipantsPage {
         // ведущую ячейку child-строки (colspan="6" с «└─»).
         this.editingBackup = row.innerHTML;
         this.editingRow = row;
+        row.classList.add("event-row-editing");
         // Child-строка группы начинается с ячейки colspan="6" (поля
         // участника — в parent). Перед правкой раскрываем её в 1 + N-1
         // пустых <td>: фиксированные индексы ячеек ниже и row.children[1]
@@ -3753,13 +3948,19 @@ class ParticipantsPage {
         sexInput.dataset.editKey = "student_sex";
         sexInput.value = dataset.studentSex || "М";
 
-        const courseInput = this.buildTextInput("course", dataset.course, "number");
-        const positionInput = this.buildTextInput("position", dataset.position, "number");
+        let fieldSettings = {};
+        try { fieldSettings = JSON.parse(this.table.dataset.baseFieldSettings || "{}"); } catch (error) { /* Legacy fallback. */ }
+        const courseInput = this.buildTextInput("course", dataset.course, fieldSettings.course?.value_type === "text" ? "text" : "number");
+        const positionInput = this.buildTextInput("position", dataset.position, fieldSettings.position?.value_type === "text" ? "text" : "number");
         const instituteInput = this.buildTextInput("institute", dataset.institute);
         const groupInput = this.buildTextInput("group", dataset.group);
         const disciplineInput = this.buildTextInput("discipline", dataset.discipline);
         const resultInput = this.buildTextInput("result", dataset.result);
 
+        fioInput.required = true;
+        [[courseInput, "course"], [positionInput, "position"], [instituteInput, "institute"], [groupInput, "group"]].forEach(([input, key]) => {
+            input.required = Boolean(fieldSettings[key]?.required);
+        });
         instituteCell.replaceChildren(instituteInput);
         groupCell.replaceChildren(groupInput);
         sexCell.replaceChildren(sexInput);
@@ -3787,12 +3988,12 @@ class ParticipantsPage {
         const saveButton = document.createElement("button");
         saveButton.type = "button";
         saveButton.className = "btn btn-sm btn-success participant-save-button";
-        saveButton.textContent = "✓";
+        saveButton.textContent = "Сохранить";
         saveButton.title = "Сохранить";
         const cancelButton = document.createElement("button");
         cancelButton.type = "button";
         cancelButton.className = "btn btn-sm btn-outline-secondary participant-cancel-button";
-        cancelButton.textContent = "✗";
+        cancelButton.textContent = "Отмена";
         cancelButton.title = "Отмена";
         actionsCell.append(saveButton, cancelButton);
 
@@ -3830,7 +4031,11 @@ class ParticipantsPage {
         // Capture-фаза: обработчик строки срабатывает раньше резолвера ФИО
         // (иначе его Enter/Esc в target-фазе съедали клавиши строки).
         row.addEventListener("keydown", this.keydownHandler, true);
-        fioInput.focus();
+        this.decorateParticipantCells();
+        row.querySelectorAll("[data-edit-key]").forEach(input => {
+            input.setAttribute("aria-label", input.closest("td")?.dataset.label || input.dataset.editKey);
+        });
+        resultInput.focus();
     }
 
     buildCustomFieldsSubRow(row) {
@@ -3873,6 +4078,8 @@ class ParticipantsPage {
         if (!this.editingRow || this.participantSaving) {
             return;
         }
+        const invalid = [...this.editingRow.querySelectorAll("input, select")].find(input => !input.checkValidity());
+        if (invalid) { invalid.reportValidity(); return; }
         const recordId = this.editingRow.dataset.recordId;
         const formData = new FormData();
         this.editingRow.querySelectorAll("[data-edit-key]").forEach((input) => {
@@ -3892,6 +4099,10 @@ class ParticipantsPage {
         // Защита от повторного Enter и двойного клика по «✓» (тот же паттерн,
         // что у saveInlineEdit/saveNewRowEdit): один запрос на одно сохранение.
         this.participantSaving = true;
+        this.editingRow.setAttribute("aria-busy", "true");
+        this.editingRow.querySelectorAll("button, input, select").forEach(control => { control.disabled = true; });
+        this.editingSubRow?.querySelectorAll("input").forEach(control => { control.disabled = true; });
+        this.editingRow.querySelector(".participant-save-button").textContent = "Сохранение…";
         this.request(`/competition/${recordId}`, {
             body: formData,
             onSuccess: () => {
@@ -3900,11 +4111,22 @@ class ParticipantsPage {
                 // A3) блокирует уход со страницы, пока editingRow установлен,
                 // — собственная навигация после сохранения не должна
                 // упираться в собственный же guard.
+                this.storeView(recordId);
+                const position = formData.get("position");
+                const disappeared = this.root.dataset.resultFilter === "without" && Number(position) !== 0
+                    || this.root.dataset.resultFilter === "with" && Number(position) === 0;
                 this.cancelEdit();
-                this.navigateToEventWithMessage("Участие обновлено");
+                this.navigateToEventWithMessage(disappeared ? "Участие обновлено. Строка скрыта текущим фильтром места." : "Участие обновлено");
             },
             onError: (message) => {
                 this.participantSaving = false;
+                this.editingRow.removeAttribute("aria-busy");
+                this.editingRow.querySelectorAll("button, input, select").forEach(control => { control.disabled = false; });
+                this.editingSubRow?.querySelectorAll("input").forEach(control => { control.disabled = false; });
+                this.editingRow.querySelector(".participant-save-button").textContent = "Сохранить";
+                let error = this.editingRow.querySelector(".event-edit-error");
+                if (!error) { error = document.createElement("div"); error.className = "event-edit-error"; error.setAttribute("role", "alert"); this.editingRow.lastElementChild.append(error); }
+                error.textContent = message || "Ошибка сохранения. Введённые значения сохранены; повторите попытку.";
                 notify({type: "error", text: message || "Ошибка сохранения записи"});
             }
         });
@@ -3920,12 +4142,17 @@ class ParticipantsPage {
             window.location.reload();
             return;
         }
-        const resultFilter = new URLSearchParams(window.location.search).get("result") || "";
-        const prefix = resultFilter ? `?result=${encodeURIComponent(resultFilter)}&` : "?";
-        window.location.href = `/calendar/${eventId}${prefix}admin_message=${encodeURIComponent(message)}`;
+        const url = new URL(`/calendar/${eventId}`, location.origin);
+        const resultFilter = new URLSearchParams(location.search).get("result");
+        if (resultFilter) url.searchParams.set("result", resultFilter);
+        if (this.search?.value) url.searchParams.set("q", this.search.value);
+        if (this.activeTab && this.activeTab !== "participants") url.searchParams.set("tab", this.activeTab);
+        url.searchParams.set("admin_message", message);
+        window.location.href = url;
     }
 
     cancelEdit() {
+        if (this.participantSaving) return;
         if (!this.editingRow) {
             return;
         }
@@ -3941,9 +4168,15 @@ class ParticipantsPage {
             this.editingSubRow.remove();
             this.editingSubRow = null;
         }
+        const row = this.editingRow;
         this.editingRow.innerHTML = this.editingBackup;
+        this.editingRow.classList.remove("event-row-editing");
+        this.editingRow.removeAttribute("aria-busy");
         this.editingRow = null;
         this.editingBackup = null;
+        this.decorateParticipantCells();
+        row.querySelector(".participant-edit-button")?.focus({preventScroll: true});
+        this.filterParticipants();
     }
 
     // Удаление участия из соревнования — это обычное удаление записи
@@ -3952,6 +4185,7 @@ class ParticipantsPage {
     // P7: подтверждение называет конкретное участие (ФИО — дисциплина);
     // у участия без дисциплины — «без дисциплины».
     deleteParticipant(recordId, studentName, discipline = "") {
+        if (this.editingRow || this.addDirty) { notify({type: "error", text: "Перед удалением завершите или отмените текущий ввод."}); return; }
         const disciplineLabel = String(discipline || "").trim() || "без дисциплины";
         const message = studentName
             ? `Удалить участие «${studentName} — ${disciplineLabel}»? Будет удалена запись о соревновании вместе с результатом и вложениями — действие необратимо.`
