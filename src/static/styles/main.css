@@ -2296,3 +2296,59 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
     .person-page .person-secondary-table td:last-child { flex-basis: 100%; }
     .person-page .person-secondary-table td::before { content: attr(data-label); display: block; color: var(--text-2); font-size: 13px; }
 }
+
+/* Reports: compact draft controls, native searchable repeated checkboxes. */
+.report-form { min-width: 0; }
+.report-filters__primary { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr) minmax(160px, 1fr); gap: 16px; align-items: end; }
+.report-filters__primary > *, .report-filters__categories > * { min-width: 0; }
+.report-filters__dates { grid-column: 1 / -1; order: 1; }
+.report-filters__dates .datetime { display: flex; flex-wrap: wrap; gap: 12px; }
+.report-filters__dates .datetime > div { flex: 1 1 180px; min-width: 0; max-width: 320px; }
+.report-filters__categories { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.report-filters__advanced { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+.report-filters__advanced > summary { width: fit-content; cursor: pointer; padding: 6px 0; color: var(--text); font-weight: 550; }
+.report-filters__advanced-count { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 10px; background: var(--surface-alt); color: var(--text-2); font-size: 13px; }
+.report-filters__advanced-count[hidden] { display: none; }
+.report-filters__advanced-body { margin-top: 0; padding-bottom: 6px; }
+.report-filters__footer { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 20px; }
+.report-multi { position: relative; min-width: 0; }
+.report-multi__toggle { display: block; width: 100%; text-align: left; min-height: 40px; color: var(--text); }
+.report-multi__value { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.report-multi__panel { position: absolute; left: 0; top: 100%; z-index: 1050; margin-top: 5px; width: 100%; min-width: 260px; max-width: min(600px, calc(100vw - 40px)); padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
+.report-multi__panel[hidden], .report-multi__option[hidden], .report-multi__outside[hidden], .report-multi__empty[hidden] { display: none; }
+.report-multi__help { color: var(--text-2); font-size: 12px; margin: 8px 0; }
+.report-multi__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-bottom: 9px; border-bottom: 1px solid var(--border); }
+.report-multi__count { font-size: 12px; color: var(--text-2); margin-left: auto; }
+.report-multi__list { max-height: 280px; overflow-y: auto; margin-top: 7px; overscroll-behavior: contain; }
+.report-multi__option { display: flex; align-items: flex-start; gap: 10px; min-height: 40px; padding: 9px 5px; border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
+.report-multi__option:hover, .report-multi__option:focus-within { background: var(--surface-hover); }
+.report-multi__option .form-check-input { flex-shrink: 0; margin: 3px 0 0; }
+.report-multi__option-text { min-width: 0; }
+.report-multi__option-text > span, .report-multi__option small { display: block; }
+.report-multi__option small { color: var(--text-2); font-size: 12px; line-height: 1.45; }
+.report-multi__empty { margin: 10px 5px; font-size: 13px; color: var(--text-2); }
+.report-chips-toolbar { flex-wrap: wrap; }
+.report-chips-toolbar .filter-chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.report-chips-toolbar .filter-chip strong { min-width: 0; }
+.report-chips-toolbar .filter-chip__x { flex-shrink: 0; }
+@media (max-width: 991px) {
+    .report-filters__primary { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .report-filters__events { grid-column: 1 / -1; order: 1; }
+    .report-filters__dates { order: 2; }
+    .report-filters__categories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .report-multi__panel { min-width: 0; }
+}
+@media (max-width: 575px) {
+    .report-filters__primary, .report-filters__categories { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .report-filters__events, .report-filters__dates { grid-column: auto; order: 0; }
+    .report-filters__dates .datetime > div { max-width: none; }
+    .report-multi__panel { position: relative; top: auto; max-width: 100%; }
+    .report-multi__list { max-height: 240px; }
+    .report-multi__actions .btn, .report-filters__footer .btn { min-height: 40px; }
+}
+
+/* Without JavaScript the native checkbox lists remain usable and submit normally. */
+.report-multi:not([data-enhanced]) .report-multi__panel { position: static; max-width: 100%; min-width: 0; box-shadow: none; }
+.report-multi:not([data-enhanced]) .report-multi__toggle,
+.report-multi:not([data-enhanced]) .report-multi__search,
+.report-multi:not([data-enhanced]) .report-multi__actions { display: none; }

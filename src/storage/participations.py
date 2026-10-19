@@ -328,13 +328,14 @@ class ParticipationsMixin:
         date_from: str = '',
         date_to: str = '',
         position: str = '',
-        level: str = '',
+        level: str | Sequence[str] = '',
         name: str = '',
         custom_filters: Iterable[tuple[str, str, str]] = (),
         *,
-        institute: str = '',
-        group: str = '',
-        sport: str = '',
+        event_id: str | Sequence[str] = (),
+        institute: str | Sequence[str] = '',
+        group: str | Sequence[str] = '',
+        sport: str | Sequence[str] = '',
         course: str = '',
         admission_year: str = '',
     ) -> list[StudentInfo]:
@@ -357,6 +358,7 @@ class ParticipationsMixin:
             course=course,
             admission_year=admission_year,
             custom_filters=custom_filters,
+            event_id=event_id,
         )
         return [
             StudentInfo(
@@ -381,14 +383,15 @@ class ParticipationsMixin:
         date_from: str = '',
         date_to: str = '',
         position: str = '',
-        level: str = '',
+        level: str | Sequence[str] = '',
         name: str = '',
-        institute: str = '',
-        group: str = '',
-        sport: str = '',
+        institute: str | Sequence[str] = '',
+        group: str | Sequence[str] = '',
+        sport: str | Sequence[str] = '',
         course: str = '',
         admission_year: str = '',
         custom_filters: Iterable[tuple[str, str, str]] = (),
+        event_id: str | Sequence[str] = (),
     ) -> list[ReportSliceRow]:
         """Отчёт по произвольному срезу: значение поля записи + 5 метрик.
 
@@ -415,6 +418,7 @@ class ParticipationsMixin:
             course=course,
             admission_year=admission_year,
             custom_filters=custom_filters,
+            event_id=event_id,
         )
         return [
             ReportSliceRow(
@@ -435,14 +439,15 @@ class ParticipationsMixin:
         date_from: str = '',
         date_to: str = '',
         position: str = '',
-        level: str = '',
+        level: str | Sequence[str] = '',
         name: str = '',
-        institute: str = '',
-        group: str = '',
-        sport: str = '',
+        institute: str | Sequence[str] = '',
+        group: str | Sequence[str] = '',
+        sport: str | Sequence[str] = '',
         course: str = '',
         admission_year: str = '',
         custom_filters: Iterable[tuple[str, str, str]] = (),
+        event_id: str | Sequence[str] = (),
     ) -> ReportSummary:
         """Сводка 5 метрик по ВСЕЙ отфильтрованной выборке (Reports v2).
 
@@ -463,6 +468,7 @@ class ParticipationsMixin:
                 course=course,
                 admission_year=admission_year,
                 custom_filters=custom_filters,
+                event_id=event_id,
             )
             row = self.connection.execute(
                 f'''
@@ -576,14 +582,15 @@ class ParticipationsMixin:
         date_from: str,
         date_to: str,
         position: str,
-        level: str,
+        level: str | Sequence[str],
         name: str,
-        institute: str,
-        group: str,
-        sport: str,
+        institute: str | Sequence[str],
+        group: str | Sequence[str],
+        sport: str | Sequence[str],
         course: str,
         admission_year: str,
         custom_filters: Iterable[tuple[str, str, str]],
+        event_id: str | Sequence[str] = (),
     ) -> tuple[str, list[object]]:
         """Общий WHERE всех фильтров отчёта: период, место (включая класс
         «Без результата» position=0), уровень, ФИО, институт, группу, вид
@@ -604,10 +611,18 @@ class ParticipationsMixin:
 
         self._report_position_clause(position, filters, params)
 
-        for column, value in (('level', level), ('institute', institute), ('"group"', group), ('sport', sport)):
+        for column, value in (
+            ('level', level),
+            ('institute', institute),
+            ('"group"', group),
+            ('sport', sport),
+            ('calendar_event_id', event_id),
+        ):
             if value:
-                filters.append(f'{column} = ?')
-                params.append(value)
+                clause, values = self._multi_in_clause(column, value)
+                if clause:
+                    filters.append(clause)
+                    params.extend(values)
 
         if course:
             # Курс — точное значение; колонка INTEGER, но лёгкий реестр полей
@@ -694,6 +709,7 @@ class ParticipationsMixin:
         course: str,
         admission_year: str,
         custom_filters: Iterable[tuple[str, str, str]],
+        event_id: str | Sequence[str] = (),
     ) -> list[sqlite3.Row]:
         """Агрегирующий запрос отчёта: GROUP BY по данным записи + метрики.
 
@@ -717,6 +733,7 @@ class ParticipationsMixin:
                 course=course,
                 admission_year=admission_year,
                 custom_filters=custom_filters,
+                event_id=event_id,
             )
             if group_by == DEFAULT_REPORT_GROUPING:
                 select_columns = ',\n'.join(

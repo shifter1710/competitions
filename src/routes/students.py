@@ -41,6 +41,9 @@ from src.education import derive_course
 from src.gto import build_gto_rows
 from src.gto import build_gto_stage_options
 from src.gto import gto_stage_label
+from src.periods import period_filter_context
+from src.periods import resolve_report_period
+from src.periods import validate_report_period
 from src.records import event_participation_effective_values
 from src.storage.sqlite import GTO_STATUS_LABELS
 from src.storage.sqlite import GTO_STATUSES
@@ -1749,7 +1752,44 @@ def register(app: Sanic) -> None:  # noqa: C901
                 else '',
                 'probably_finished': derived['probably_finished'],
             }
-        linked_records = storage.list_linked_records(numeric_id, limit=50)
+        history_args = dict(request.args)
+        period_error = validate_report_period(history_args)
+        history_period = period_filter_context(history_args, storage.get_linked_record_period_year_options(numeric_id))
+        history_date_from, history_date_to = ('', '') if period_error else resolve_report_period(history_args)
+        filtered_count = (
+            0
+            if period_error
+            else storage.linked_records_count(numeric_id, date_from=history_date_from, date_to=history_date_to)
+        )
+        try:
+            raw_offset = int(get_param(history_args, 'offset') or '0')
+        except ValueError:
+            raw_offset = 0
+        history_offset = min(max(0, raw_offset // 50 * 50), max(0, (filtered_count - 1) // 50 * 50))
+        history_query = [
+            (key, request.args.get(key))
+            for key in ('period', 'date_from', 'date_to', 'history_q')
+            if request.args.get(key)
+        ]
+        safe_return = safe_student_return(request.args.get('return'))
+        if safe_return:
+            history_query.append(('return', safe_return))
+        history_query.append(('tab', 'history'))
+        history_base = f'/admin/people/{numeric_id}'
+        history_reset_query = [
+            (key, value) for key, value in history_query if key not in ('period', 'date_from', 'date_to')
+        ]
+        linked_records = (
+            []
+            if period_error
+            else storage.list_linked_records(
+                numeric_id, limit=50, date_from=history_date_from, date_to=history_date_to, offset=history_offset
+            )
+        )
+        history_self_url = history_base + '?' + urlencode([*history_query, ('offset', history_offset)])
+        history_event_query = urlencode({'return': history_self_url})
+        history_previous_url = history_base + '?' + urlencode([*history_query, ('offset', history_offset - 50)])
+        history_next_url = history_base + '?' + urlencode([*history_query, ('offset', history_offset + 50)])
         history_custom_fields = storage.get_custom_fields()
         for record in linked_records:
             extra = record.get('extra_data') or {}
@@ -1816,6 +1856,16 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'education': education,
                 'linked_records_count': storage.linked_records_count(numeric_id),
                 'linked_records': linked_records,
+                **history_period,
+                'period_error': period_error,
+                'history_filtered_count': filtered_count,
+                'history_offset': history_offset,
+                'history_previous_url': history_previous_url if history_offset else '',
+                'history_next_url': history_next_url if history_offset + 50 < filtered_count else '',
+                'history_reset_url': history_base + '?' + urlencode(history_reset_query),
+                'history_event_query': history_event_query,
+                'history_return': safe_return or '',
+                'history_q': (request.args.get('history_q') or '')[:2000],
                 'linked_users': linked_users,
                 'active_students': [item for item in storage.list_students() if item['active']],
                 # ГТО: предвычисленные строки и опции селектов + границы года
@@ -1835,6 +1885,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'access_suggested_login': access_suggested_login,
                 **get_flash_args(request),
             },
+            status=400 if period_error else 200,
         )
 
     @app.post('/admin/people/<student_id>/edit')

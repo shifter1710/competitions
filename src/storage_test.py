@@ -6885,6 +6885,7 @@ V21_PUBLIC_API = [
     'get_audit_events',
     'get_calendar_event',
     'get_calendar_event_document',
+    'get_calendar_period_year_options',
     'get_catalog_value',
     'get_competition_by_id',
     'get_competition_review',
@@ -6903,6 +6904,7 @@ V21_PUBLIC_API = [
     'get_identity_mode',
     'get_import_queue_entry',
     'get_level_names',
+    'get_linked_record_period_year_options',
     'get_name_aliases',
     'get_profile',
     # Reports v2: опции фильтров и сводный агрегат по выборке.
@@ -6996,7 +6998,8 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     (инвентаризация b0a7586 до разреза + Course/Education Phase A
     + Team Results: calendar_event_team_results
     + Event Documents: calendar_event_documents
-    + ГТО: student_gto_records).
+    + ГТО: student_gto_records
+    + Reports/Calendar UX: два read-only метода учебных лет календаря/истории).
     Регрессионный pin состава."""
     from src.storage.catalogs import CatalogsMixin
     from src.storage.education import EducationMixin

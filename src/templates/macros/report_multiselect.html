@@ -1,0 +1,31 @@
+{% macro report_multiselect(key, label, options, selected, search_label, groups_by_institute=none) %}
+<div class="report-multi" data-filter-key="{{ key }}" data-label="{{ label }}"{% if groups_by_institute is not none %} data-groups-by-institute='{{ groups_by_institute | tojson }}'{% endif %}>
+    <input type="hidden" name="{{ key }}" value="">
+    <label class="form-label" id="report-label-{{ key }}" for="report-filter-{{ key }}">{{ label }}</label>
+    <button class="form-select report-multi__toggle" id="report-filter-{{ key }}" type="button"
+            aria-expanded="false" aria-controls="report-options-{{ key }}" aria-describedby="report-label-{{ key }}">
+        <span class="report-multi__value">{% if selected %}Выбрано: {{ selected | length }}{% else %}Все{% endif %}</span>
+    </button>
+    <div class="report-multi__panel" id="report-options-{{ key }}">
+        <label class="visually-hidden" for="report-search-{{ key }}">{{ search_label }}</label>
+        <input class="form-control report-multi__search" id="report-search-{{ key }}" type="search" autocomplete="off" placeholder="{{ search_label }}">
+        <div class="report-multi__help" id="report-help-{{ key }}">Не выбрано — все значения</div>
+        <div class="report-multi__actions">
+            <button class="btn btn-sm btn-outline-secondary report-multi__all" type="button" title="Выбрать все значения списка">Все</button>
+            <button class="btn btn-sm btn-outline-secondary report-multi__clear" type="button">Сбросить</button>
+            <span class="report-multi__count" aria-live="polite">Выбрано: {{ selected | length }}</span>
+        </div>
+        <div class="report-multi__list" role="group" aria-labelledby="report-label-{{ key }}" aria-describedby="report-help-{{ key }}">
+            {% for option in options %}
+            {% set value = option.value if key == 'event_id' else option %}
+            {% set text = option.label if key == 'event_id' else option %}
+            <label class="report-multi__option">
+                <input class="form-check-input" type="checkbox" name="{{ key }}" value="{{ value }}"{% if value | string in selected %} checked{% endif %}>
+                <span class="report-multi__option-text"><span>{{ text }}</span>{% if key == 'event_id' and option.detail %}<small>{{ option.detail }}</small>{% endif %}<small class="report-multi__outside" hidden>Не входит в выбранные институты</small></span>
+            </label>
+            {% endfor %}
+            <p class="report-multi__empty"{% if options %} hidden{% endif %}>{% if key == 'event_id' and not options %}Нет доступных соревнований{% else %}Ничего не найдено{% endif %}</p>
+        </div>
+    </div>
+</div>
+{% endmacro %}

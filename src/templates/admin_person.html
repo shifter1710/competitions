@@ -1,5 +1,7 @@
 {% extends "layout/base.html" %}
 {% block content %}
+{% from "shared/period_filter.html" import period_filter %}
+<script defer src="/static/scripts/period-filters.js"></script>
 <div class="person-page" data-person-page="{{ student.id }}">
 <a class="person-back" href="{{ person_return_url }}" data-person-back>← {% if person_return_url.split('?')[0].split('#')[0] == '/reports' %}К отчёту{% elif person_return_url.startswith('/calendar/') %}К соревнованию{% else %}К студентам{% endif %}</a>
 <header class="person-header">
@@ -15,8 +17,16 @@
 <a href="#person-data" data-person-tab="data">Данные и образование</a>
 </nav>
 <section id="person-history" data-person-panel="history">
-<div class="person-history-toolbar"><div><h2>История участий</h2><p>Последние {{ linked_records | length }} из {{ linked_records_count }} · по дате, новые сверху<br><span class="person-js-only" data-person-found aria-live="polite"></span></p></div>
+<div class="person-history-toolbar"><div><h2>История участий</h2><p>Показано {% if linked_records %}{{ history_offset + 1 }}–{{ history_offset + linked_records | length }}{% else %}0{% endif %} из {{ history_filtered_count }}{% if period_active %} за выбранный период{% endif %} · по дате, новые сверху<br><span class="person-js-only" data-person-found aria-live="polite"></span></p></div>
 <div class="person-js-only person-search"><label for="person-history-search">Поиск среди показанных записей</label><div class="d-flex gap-2"><input id="person-history-search" type="search" class="form-control" maxlength="2000" placeholder="Соревнование, дисциплина, ФИО"><button type="button" class="btn btn-outline-secondary" data-person-clear>Сбросить</button></div></div></div>
+
+<form class="row g-3 align-items-end mb-3" action="/admin/people/{{ student.id }}" method="get" data-view-period-form>
+    <input type="hidden" name="tab" value="history">
+    {% if history_return %}<input type="hidden" name="return" value="{{ history_return }}">{% endif %}
+    <input type="hidden" name="history_q" value="{{ history_q }}">
+    {{ period_filter('history', period_options, period_value, period_date_from, period_date_to, period_error) }}
+    <div class="col-12 d-flex flex-wrap gap-2"><button type="submit" class="btn btn-primary">Применить период</button><a class="btn btn-outline-secondary" href="{{ history_reset_url }}" data-history-page-link>Сбросить период</a></div>
+</form>
 
         {% if linked_records %}
         <div class="table-responsive">
@@ -34,7 +44,7 @@
                     <tr data-history-record="{{ record.id }}" data-history-search="{{ record.name }} {{ record.sport }} {{ record.discipline }} {{ record.student_name }}">
                         <td data-label="Дата"><span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td>
                         <td data-label="Соревнование / дисциплина">
-                            {% if record.calendar_event_id %}<a href="/calendar/{{ record.calendar_event_id }}" data-person-event-link>{{ record.name or 'Соревнование' }}</a>{% else %}<strong>{{ record.name or 'Без названия' }}</strong>{% endif %}
+                            {% if record.calendar_event_id %}<a href="/calendar/{{ record.calendar_event_id }}?{{ history_event_query }}" data-person-event-link>{{ record.name or 'Соревнование' }}</a>{% else %}<strong>{{ record.name or 'Без названия' }}</strong>{% endif %}
                             <div>{{ record.discipline or 'Дисциплина не указана' }}</div>
                             <span class="person-record-meta">{{ record.sport }}{% if record.student_name != student.full_name %} · ФИО отличается от карточки{% endif %}</span>
                             <details class="person-record-info"><summary>Сведения о записи</summary><p>№{{ record.id }} · ФИО в записи: {{ record.student_name }}</p></details>
@@ -77,11 +87,15 @@
                 </tbody>
             </table>
         </div>
-        {% if linked_records_count > linked_records | length %}
-        <div class="text-muted">Показаны последние {{ linked_records | length }} из {{ linked_records_count }} участий. Поиск работает только по загруженным записям.</div>
-        {% endif %}
+        <div class="text-muted">Поиск работает только по показанным записям.</div>
         {% else %}
-        <div class="text-muted mb-3">Привязанных записей пока нет.</div>
+        {% if period_error %}<div class="text-muted mb-3">Исправьте период, чтобы показать участия.</div>{% elif period_active and linked_records_count %}<div class="text-muted mb-3">За выбранный период участий нет. <a href="{{ history_reset_url }}">Сбросить период</a></div>{% else %}<div class="text-muted mb-3">Привязанных записей пока нет.</div>{% endif %}
+        {% endif %}
+        {% if history_previous_url or history_next_url %}
+        <nav class="d-flex flex-wrap gap-2 my-3" aria-label="Страницы истории участий">
+            {% if history_previous_url %}<a class="btn btn-outline-secondary" href="{{ history_previous_url }}" data-history-page-link>← Предыдущие</a>{% endif %}
+            {% if history_next_url %}<a class="btn btn-outline-secondary" href="{{ history_next_url }}" data-history-page-link>Следующие →</a>{% endif %}
+        </nav>
         {% endif %}
 
 <div class="person-no-results" data-person-no-results hidden>По вашему запросу ничего не найдено среди загруженных участий. <button type="button" class="btn btn-link" data-person-clear>Сбросить поиск</button></div>

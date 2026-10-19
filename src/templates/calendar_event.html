@@ -84,7 +84,7 @@
 <div class="event-page" data-event-page="{{ event.id }}" data-result-filter="{{ result_filter }}" data-initial-tab="{{ 'documents' if edit_document_data or edit_protocol_data else ('teams' if edit_team_result else 'participants') }}" data-add-open="{{ 'true' if can_add_for or participant_form_values else 'false' }}">
 <div class="page-head d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
     <div>
-        <a class="backlink" href="/calendar">← В календарь</a>
+        <a class="backlink" href="{{ calendar_return_url }}">← {% if calendar_return_url.startswith('/admin/people/') %}К студенту{% else %}В календарь{% endif %}</a>
         <h1 class="page-title mt-2">{{ event.name }}</h1>
         <div class="d-flex align-items-center flex-wrap gap-2 mt-1 text-muted">
             <span class="text-nowrap">{{ event.date_label }}</span>
@@ -120,13 +120,13 @@
 <div class="event-toolbar">
     <label class="event-search"><span class="visually-hidden">Поиск по ФИО или группе</span><input type="search" class="form-control" id="event-participant-search" maxlength="2000" placeholder="Поиск по ФИО или группе" autocomplete="off"></label>
     <label><span class="visually-hidden">Наличие места</span><select id="event-result-filter" class="form-select form-select-sm" onchange="if (!this.closest('.event-page').classList.contains('event-enhanced')) window.location = this.value">
-        {% for key, label in result_filter_options %}<option value="/calendar/{{ event.id }}{% if key %}?result={{ key }}{% endif %}" {% if key == result_filter %}selected{% endif %}>{{ 'Без места' if key == 'without' else ('С местом' if key == 'with' else 'Все участия') }}</option>{% endfor %}
+        {% for key, label in result_filter_options %}<option value="/calendar/{{ event.id }}?{% if key %}result={{ key }}&amp;{% endif %}{{ calendar_return_query }}" {% if key == result_filter %}selected{% endif %}>{{ 'Без места' if key == 'without' else ('С местом' if key == 'with' else 'Все участия') }}</option>{% endfor %}
     </select></label>
     {% if can_write %}<div class="event-toolbar-actions"><a class="btn btn-outline-primary" href="/calendar/{{ event.id }}/participants/import">Импорт Excel</a><button type="button" class="btn btn-primary" data-event-toggle-add aria-expanded="false">+ Участник</button></div>{% endif %}
 </div>
 {% if can_write %}<div class="event-add-cancel"><button type="button" class="btn btn-sm btn-outline-secondary" data-event-cancel-add>Отменить добавление</button></div>{% endif %}
-<div class="event-summary"><span>Участников: <strong>{{ participants_count }}</strong> · Участий: <strong>{{ participations_count }}</strong> <span class="event-summary-divider">/</span> Места указаны {{ participations_count - no_result_count }} из {{ participations_count }}</span><a class="event-missing-chip" href="/calendar/{{ event.id }}{{ '' if result_filter == 'without' else '?result=without' }}" data-event-result-link aria-pressed="{{ 'true' if result_filter == 'without' else 'false' }}">Без места · {{ no_result_count }}</a></div>
-<div class="event-filter-help"><span>Место не указано; текст результата учитывается отдельно.</span><span id="event-search-count" aria-live="polite"></span><a href="/calendar/{{ event.id }}" data-event-clear-search>Сбросить фильтры</a></div>
+<div class="event-summary"><span>Участников: <strong>{{ participants_count }}</strong> · Участий: <strong>{{ participations_count }}</strong> <span class="event-summary-divider">/</span> Места указаны {{ participations_count - no_result_count }} из {{ participations_count }}</span><a class="event-missing-chip" href="/calendar/{{ event.id }}?{{ '' if result_filter == 'without' else 'result=without&' }}{{ calendar_return_query }}" data-event-result-link aria-pressed="{{ 'true' if result_filter == 'without' else 'false' }}">Без места · {{ no_result_count }}</a></div>
+<div class="event-filter-help"><span>Место не указано; текст результата учитывается отдельно.</span><span id="event-search-count" aria-live="polite"></span><a href="/calendar/{{ event.id }}{% if calendar_return_query %}?{{ calendar_return_query }}{% endif %}" data-event-clear-search>Сбросить фильтры</a></div>
 <div class="event-search-empty" hidden><h3>Ничего не найдено</h3><p>Измените поиск или снимите фильтр мест.</p><button class="btn btn-outline-primary" type="button" data-event-clear-search>Сбросить фильтры</button></div>
 <datalist id="calendar-levels">
     {% for value in level_options %}
@@ -286,7 +286,7 @@
                     <div class="d-flex gap-1">
                         <button class="btn btn-sm btn-success" type="submit" form="participant-add-form">Добавить участие</button>
                         <a class="btn btn-sm btn-outline-secondary"
-                            href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                            href="/calendar/{{ event.id }}{% if result_filter or calendar_return_query %}?{% endif %}{% if result_filter %}result={{ result_filter }}{% if calendar_return_query %}&amp;{% endif %}{% endif %}{{ calendar_return_query }}">Отмена</a>
                     </div>
                 </td>
             </tr>
@@ -343,7 +343,7 @@
                 {% if can_write %}
                 <td>
                     <a class="btn btn-sm btn-outline-primary" title="Добавить ещё одно участие этого участника (например, другую дисциплину)"
-                        href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ group.student_ref_id }}">+
+                        href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ group.student_ref_id }}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">+
                         участие</a>
                 </td>
                 {% endif %}
@@ -453,7 +453,7 @@
                            строке — тот же prefill-flow, что у parent. #}
                         {% if participation.student_ref_id %}
                         <a class="btn btn-sm btn-outline-primary" title="Добавить ещё одно участие этого участника (например, другую дисциплину)"
-                            href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ participation.student_ref_id }}">+
+                            href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}add_participation={{ participation.student_ref_id }}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">+
                             участие</a>
                         {% endif %}
                         {# Cardless-строка (admin): связать запись с существующей
@@ -555,7 +555,7 @@
                             <button class="btn btn-sm btn-success" type="submit"
                                 form="team-result-edit-form">Сохранить</button>
                             <a class="btn btn-sm btn-outline-secondary"
-                                href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                                href="/calendar/{{ event.id }}{% if result_filter or calendar_return_query %}?{% endif %}{% if result_filter %}result={{ result_filter }}{% if calendar_return_query %}&amp;{% endif %}{% endif %}{{ calendar_return_query }}">Отмена</a>
                         </div>
                     </td>
                 </tr>
@@ -567,7 +567,7 @@
                     <td>
                         <div class="d-flex gap-1">
                             <a class="btn btn-sm btn-outline-primary"
-                                href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}edit_team_result={{ row.id }}">Изменить</a>
+                                href="/calendar/{{ event.id }}{{ ('?result=' ~ result_filter ~ '&') if result_filter else '?' }}edit_team_result={{ row.id }}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">Изменить</a>
                             <form action="/calendar/{{ event.id }}/team-results/{{ row.id }}/delete" method="post"
                                   onsubmit='return confirm({{ ('Удалить командный результат «' ~ row.label ~ '»? Строка будет удалена безвозвратно.') | tojson }})'>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -689,7 +689,7 @@
                                 href="/calendar/{{ event.id }}/documents/{{ p.id }}/download">Скачать</a>
                             {% if can_manage %}
                             <a class="btn btn-sm btn-outline-secondary"
-                                href="/calendar/{{ event.id }}?edit_protocol={{ p.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}">Изменить</a>
+                                href="/calendar/{{ event.id }}?edit_protocol={{ p.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">Изменить</a>
                             <form action="/calendar/{{ event.id }}/protocols/{{ p.id }}/delete" method="post"
                                   onsubmit='return confirm({{ ('Удалить протокол «' ~ p.title ~ '»? Файл будет удалён безвозвратно.') | tojson }})'>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -742,7 +742,7 @@
                 {% if edit_protocol_data %}
                 <button class="btn btn-sm btn-success" type="submit">Сохранить</button>
                 <a class="btn btn-sm btn-link"
-                    href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                    href="/calendar/{{ event.id }}{% if result_filter or calendar_return_query %}?{% endif %}{% if result_filter %}result={{ result_filter }}{% if calendar_return_query %}&amp;{% endif %}{% endif %}{{ calendar_return_query }}">Отмена</a>
                 {% else %}
                 <button class="btn btn-sm btn-success" type="submit">Добавить протокол</button>
                 {% endif %}
@@ -801,7 +801,7 @@
                                 href="/calendar/{{ event.id }}/documents/{{ doc.id }}/download">Скачать</a>
                             {% if can_manage %}
                             <a class="btn btn-sm btn-outline-secondary"
-                                href="/calendar/{{ event.id }}?edit_document={{ doc.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}">Изменить</a>
+                                href="/calendar/{{ event.id }}?edit_document={{ doc.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">Изменить</a>
                             <form action="/calendar/{{ event.id }}/documents/{{ doc.id }}/delete" method="post"
                                   onsubmit='return confirm({{ ('Удалить документ «' ~ doc.title ~ '»? Файл будет удалён безвозвратно.') | tojson }})'>
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -898,7 +898,7 @@
                 {% if edit_document_data %}
                 <button class="btn btn-sm btn-success" type="submit">Сохранить</button>
                 <a class="btn btn-sm btn-link"
-                    href="/calendar/{{ event.id }}{% if result_filter %}?result={{ result_filter }}{% endif %}">Отмена</a>
+                    href="/calendar/{{ event.id }}{% if result_filter or calendar_return_query %}?{% endif %}{% if result_filter %}result={{ result_filter }}{% if calendar_return_query %}&amp;{% endif %}{% endif %}{{ calendar_return_query }}">Отмена</a>
                 {% else %}
                 <button class="btn btn-sm btn-success" type="submit">Добавить документ</button>
                 {% endif %}

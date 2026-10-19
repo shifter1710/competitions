@@ -9,6 +9,8 @@ import json
 from datetime import datetime
 from typing import Sequence
 
+from src.periods import academic_years_for_ranges
+from src.settings import settings
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
 from src.storage.helpers import CalendarEventDuplicateError
 from src.storage.helpers import dedup_text
@@ -647,7 +649,12 @@ class EventsMixin:
             self.connection.execute('DELETE FROM calendar_events WHERE id = ?', (event_id,))
             self.connection.commit()
 
-    def list_calendar_events(self, sport: str = '') -> list[dict]:
+    def get_calendar_period_year_options(self) -> list[int]:
+        with self._lock:
+            rows = self.connection.execute('SELECT date, date_to FROM calendar_events').fetchall()
+            return academic_years_for_ranges([dict(row) for row in rows])
+
+    def list_calendar_events(self, sport: str = '', date_from: str = '', date_to: str = '') -> list[dict]:
         """Все события, начиная с новых (date DESC, при равенстве — больший
         id первым; группировка месяцев и карточки на /calendar наследуют
         этот порядок); рядом — счётчики участников по ссылке
@@ -660,10 +667,17 @@ class EventsMixin:
         строка несёт links — ссылки события по (sort_order, id)."""
         with self._lock:
             params: list[object] = []
-            where = ''
+            filters = []
             if sport:
-                where = 'WHERE e.sport = ?'
+                filters.append('e.sport = ?')
                 params.append(sport)
+            if date_from:
+                filters.append("substr(COALESCE(NULLIF(e.date_to, ''), e.date), 1, 10) >= ?")
+                params.append(datetime.strptime(date_from, settings.date_format).date().isoformat())
+            if date_to:
+                filters.append('substr(e.date, 1, 10) <= ?')
+                params.append(datetime.strptime(date_to, settings.date_format).date().isoformat())
+            where = 'WHERE ' + ' AND '.join(filters) if filters else ''
             rows = self.connection.execute(
                 f'''
                 SELECT

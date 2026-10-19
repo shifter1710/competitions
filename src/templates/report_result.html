@@ -5,11 +5,13 @@
    → счётчик → карточки сводки → таблица с «Итого» → панель экспорта. #}
 {% if report_chips %}
 <div class="report-chips-toolbar">
+    <span class="text-muted">Применено:</span>
     {% for chip in report_chips %}
     <span class="filter-chip">{{ chip.label }}: <strong>{{ chip.value }}</strong><a
         class="filter-chip__x"
         href="{{ chip.remove_url }}"
         title="Убрать условие"
+        aria-label="Убрать {{ chip.label }}: {{ chip.value }}"
     >×</a></span>
     {% endfor %}
     <a class="filter-chip filter-chip_reset" href="/reports">Сбросить всё</a>

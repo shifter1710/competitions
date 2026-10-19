@@ -1,0 +1,146 @@
+"""Reports repeat-aware filters: fictional fixture, real SQLite and HTML/XLSX."""
+from datetime import datetime
+from urllib.parse import parse_qs
+from urllib.parse import urlencode
+
+import pytest
+
+from src import main_test as helpers
+from src.conftest import make_report_record
+from src.main import app
+from src.main_test import fake_get_user
+from src.main_test import get_auth_headers
+from src.main_test import get_report_cells
+from src.main_test import get_report_footer
+from src.main_test import get_report_xlsx_rows
+from src.routes.reports import build_report_chips
+from src.routes.reports import collect_applied_report_query
+from src.storage.sqlite import SQLiteAdapter
+
+
+client = helpers.client
+
+
+@pytest.fixture
+def multi_reports(client, tmp_path):
+    storage = SQLiteAdapter(str(tmp_path / 'synthetic-reports.sqlite3'))
+    event_ids = [
+        storage.create_calendar_event('Тестовый кубок', f'2025-10-{day:02}T00:00:00', None, 'Уровень А', sport, [])
+        for day, sport in ((1, 'Бег'), (2, 'Шахматы'), (3, 'Плавание'))
+    ]
+    data = [
+        ('Альфа', 'Институт А', 'А-1', 'Бег', 'Уровень А', event_ids[0], 1),
+        ('Бета', 'Институт Б', 'Б-1', 'Шахматы', 'Уровень Б', event_ids[1], 3),
+        ('Гамма', 'Институт В', 'В-1', 'Плавание', 'Уровень А', event_ids[2], 4),
+        ('Дельта', 'Институт А', 'А-1', 'Бег', 'Уровень А', None, 0),
+    ]
+    for label, institute, group, sport, level, event, position in data:
+        record = make_report_record(
+            f'Тестовый студент {label}', 'М', institute, group, 1, sport, datetime(2025, 10, 1), level, position
+        )
+        record.calendar_event_id = event
+        storage.save_competitions([record])
+    previous = app.ctx.storage
+    storage.get_user = fake_get_user
+    app.ctx.storage = storage
+    try:
+        yield client, storage, event_ids
+    finally:
+        app.ctx.storage = previous
+        storage.connection.close()
+
+
+def test_or_within_and_between_and_scalar_compatibility(multi_reports):
+    _, storage, ids = multi_reports
+    filters = dict(
+        institute=['Институт А', 'Институт Б'],
+        group=['А-1', 'Б-1'],
+        sport=['Бег', 'Шахматы'],
+        level=['Уровень А', 'Уровень Б'],
+        event_id=[str(ids[0]), str(ids[1])],
+    )
+    assert storage.get_report_summary(**filters).count_participation == 2
+    assert sum(row.count_participation for row in storage.get_grouped_report('sport', **filters)) == 2
+    assert len(storage.get_filtered(**filters)) == 2
+    assert storage.get_report_summary(institute='Институт А').count_participation == 2
+    assert storage.get_report_summary(event_id=[str(ids[0])]).count_participation == 1
+    assert storage.get_report_summary(event_id=[]).count_participation == 4
+    assert storage.get_report_summary(event_id=['9999999']).count_participation == 0
+    assert storage.get_report_summary(institute=["' OR 1=1 --"]).count_participation == 0
+
+
+@pytest.mark.parametrize(
+    'slice_key', ['student', 'group', 'institute', 'course', 'admission_year', 'sport', 'level', 'year']
+)
+def test_html_and_xlsx_same_repeated_selection(multi_reports, slice_key):
+    browser, _, ids = multi_reports
+    query = urlencode(
+        [
+            ('period', 'all'),
+            ('group_by', slice_key),
+            ('institute', 'Институт А'),
+            ('institute', 'Институт Б'),
+            ('sport', 'Бег'),
+            ('sport', 'Шахматы'),
+            ('event_id', str(ids[0])),
+            ('event_id', str(ids[1])),
+        ]
+    )
+    _, screen = browser.get('/reports?' + query, headers=get_auth_headers())
+    _, export = browser.get('/export/report?' + query, headers=get_auth_headers())
+    assert screen.status == export.status == 200
+    first_column = {
+        'student': 'ФИО',
+        'group': 'Группа',
+        'institute': 'Институт',
+        'course': 'Курс',
+        'admission_year': 'Год поступления',
+        'sport': 'Вид спорта',
+        'level': 'Уровень соревнований',
+        'year': 'Год',
+    }[slice_key]
+    xlsx = get_report_xlsx_rows(export.content, first_column)
+    # HTML includes index column; every row, including total, matches the exported metric values.
+    screen_rows = get_report_cells(screen.text)
+    assert len(screen_rows) == len(xlsx) - 2
+    assert [row[-3:] if slice_key == 'student' else row[-5:] for row in screen_rows] == [
+        [str(value) for value in row[-3:] if value is not None]
+        if slice_key == 'student'
+        else [str(value) for value in row[-5:]]
+        for row in xlsx[1:-1]
+    ]
+    metric_count = 3 if slice_key == 'student' else 5
+    assert get_report_footer(screen.text)[-metric_count:] == [str(value) for value in xlsx[-1][-metric_count:]]
+    assert screen.text.count(f'<input type="hidden" name="event_id" value="{ids[0]}">') == 1
+    assert f'№{ids[0]}' in screen.text and f'№{ids[1]}' in screen.text
+
+
+def test_chips_remove_only_one_value_and_repeat_roundtrip():
+    entries = collect_applied_report_query(
+        {'period': ['all'], 'institute': ['Б', '', 'А', 'А'], 'event_id': ['2', '1'], 'sport': ['Бег']}, []
+    )
+    assert [value for key, value in entries if key == 'institute'] == ['А', 'Б']
+    chips = build_report_chips(entries, [])
+    chip = next(chip for chip in chips if chip['label'] == 'Институт' and chip['value'] == 'А')
+    remaining = parse_qs(chip['remove_url'].partition('?')[2])
+    assert remaining['institute'] == ['Б']
+    assert remaining['event_id'] == ['1', '2']
+
+
+def test_stale_event_empty_selection_invalid_event(multi_reports):
+    browser, _, ids = multi_reports
+    _, stale = browser.get('/reports?period=all&event_id=9999999', headers=get_auth_headers())
+    assert stale.status == 200 and 'недоступно' in stale.text
+    assert not get_report_cells(stale.text)
+    _, outside = browser.get(f'/reports?period=2020-2021&event_id={ids[0]}', headers=get_auth_headers())
+    assert outside.status == 200 and f'value="{ids[0]}"' in outside.text and not get_report_cells(outside.text)
+    _, unrestricted = browser.get('/report?event_id=&institute=', headers=get_auth_headers())
+    assert len(get_report_cells(unrestricted.text)) == 4  # All records, including unlinked history
+    for value in ('0', '-1', '1 OR 1=1', '1.5'):
+        query = urlencode({'period': 'all', 'event_id': value})
+        _, screen = browser.get('/reports?' + query, headers=get_auth_headers())
+        _, export = browser.get('/export/report?' + query, headers=get_auth_headers())
+        assert 'Некорректный ID' in screen.text and export.status == 400
+    # Selected, real event with no suitable records is an honest empty result.
+    _, empty = browser.get(f'/reports?period=all&event_id={ids[0]}&sport=Шахматы', headers=get_auth_headers())
+    assert not get_report_cells(empty.text)
