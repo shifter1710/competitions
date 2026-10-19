@@ -47,6 +47,7 @@ from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.periods import period_filter_context
 from src.periods import resolve_report_period
+from src.periods import today_in_timezone
 from src.periods import validate_report_period
 from src.records import build_competition
 from src.records import build_link_diff_rows
@@ -2154,6 +2155,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'request': request,
                 'month_groups': group_calendar_events_by_month(events),
                 **period_context,
+                'period_today': today_in_timezone(settings.app_timezone).strftime(settings.date_format),
                 'period_error': period_error,
                 'period_reset_url': '/calendar' + ('?' + urlencode(period_reset_query) if period_reset_query else ''),
                 'calendar_event_query': urlencode({'return': calendar_return_url}),

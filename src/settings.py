@@ -1,8 +1,11 @@
 from os.path import abspath
 from os.path import dirname
 from os.path import join
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 from pydantic import Field
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
@@ -14,6 +17,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
 
     date_format: str = '%d.%m.%Y'
+    app_timezone: str = Field(default='Asia/Omsk', alias='APP_TIMEZONE')
     data_folder: str = Field(default=join(BASE_DIR, 'data'), alias='DATA_FOLDER')
     database_path: str = Field(default=join(BASE_DIR, 'data', 'competitions.sqlite3'), alias='DATABASE_PATH')
     auth_cookie_name: str = Field(default='competitions_auth', alias='AUTH_COOKIE_NAME')
@@ -25,6 +29,15 @@ class Settings(BaseSettings):
     auth_viewer_username: str = Field(default='', alias='AUTH_VIEWER_USERNAME')
     auth_viewer_password: str = Field(default='', alias='AUTH_VIEWER_PASSWORD')
     auth_session_ttl_seconds: int = Field(default=43200, alias='AUTH_SESSION_TTL_SECONDS')
+
+    @field_validator('app_timezone')
+    @classmethod
+    def validate_app_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError('APP_TIMEZONE must name an available IANA timezone') from exc
+        return value
 
 
 settings = Settings()

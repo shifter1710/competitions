@@ -81,8 +81,8 @@
 
 <section class="card shadow-sm mb-4">
     <div class="card-body">
-        <form class="row g-3 filter-form" method="get" action="/calendar" data-view-period-form>
-            {{ period_filter('calendar', period_options, period_value, period_date_from, period_date_to, period_error) }}
+        <form class="row g-3 filter-form" method="get" action="/calendar" data-view-period-form data-period-today="{{ period_today }}">
+            {{ period_filter('calendar', period_options, period_value, period_date_from, period_date_to, period_error, autofill_today=true) }}
             <div class="col-md-3">
                 <span class="label">Статус</span>
                 <select class="form-select" name="status">

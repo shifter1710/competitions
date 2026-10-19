@@ -1,5 +1,8 @@
 """Reports repeat-aware filters: fictional fixture, real SQLite and HTML/XLSX."""
+import shutil
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import parse_qs
 from urllib.parse import urlencode
 
@@ -14,6 +17,7 @@ from src.main_test import get_report_cells
 from src.main_test import get_report_footer
 from src.main_test import get_report_xlsx_rows
 from src.routes.reports import build_report_chips
+from src.routes.reports import build_report_event_options
 from src.routes.reports import collect_applied_report_query
 from src.storage.sqlite import SQLiteAdapter
 
@@ -144,3 +148,39 @@ def test_stale_event_empty_selection_invalid_event(multi_reports):
     # Selected, real event with no suitable records is an honest empty result.
     _, empty = browser.get(f'/reports?period=all&event_id={ids[0]}&sport=Шахматы', headers=get_auth_headers())
     assert not get_report_cells(empty.text)
+
+
+def test_event_option_metadata_preserves_namesakes_and_missing_selection(multi_reports):
+    _, storage, ids = multi_reports
+    spanning = storage.create_calendar_event('Демо граница', '2026-08-31', '2026-09-02', '', '', [])
+    options = build_report_event_options(storage, ['9999999'])
+    same_name = [option for option in options if option['label'] == 'Тестовый кубок']
+    assert {option['value'] for option in same_name} == {str(value) for value in ids}
+    assert all(option['date_to'] == option['date_from'] for option in same_name)
+    assert next(option for option in options if option['value'] == str(spanning))['date_to'] == '2026-09-02'
+    assert 'date_from' not in options[-1] and options[-1]['value'] == '9999999'
+
+
+def test_outside_period_url_keeps_id_and_html_xlsx_empty_result(multi_reports):
+    browser, _, ids = multi_reports
+    query = urlencode({'period': 'custom', 'date_from': '01.09.2026', 'date_to': '31.10.2026', 'event_id': ids[0]})
+    _, screen = browser.get('/reports?' + query, headers=get_auth_headers())
+    _, export = browser.get('/export/report?' + query, headers=get_auth_headers())
+    assert screen.status == export.status == 200
+    assert not get_report_cells(screen.text)
+    assert len(get_report_xlsx_rows(export.content, 'ФИО')) == 2  # Heading and total, no broadened rows.
+    assert f'name="event_id" value="{ids[0]}" checked' in screen.text
+    assert f'<input type="hidden" name="event_id" value="{ids[0]}">' in screen.text
+    assert 'data-date-from="2025-10-01" data-date-to="2025-10-01"' in screen.text
+    assert 'id="report-event-review-summary"' in screen.text
+    assert f'id="report-event-option-{ids[0]}"' in screen.text
+
+
+@pytest.mark.parametrize('script_name', ['test_report_period_options.cjs', 'test_period_filters.cjs'])
+def test_period_javascript_regressions(script_name):
+    node = shutil.which('node') or shutil.which('nodejs')
+    if not node:
+        pytest.skip('Node is required for the JavaScript regression (available in GitHub CI)')
+    subprocess.run(
+        [node, str(Path(__file__).parents[1] / 'scripts' / script_name)], check=True, capture_output=True, text=True
+    )

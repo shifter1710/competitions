@@ -3,9 +3,15 @@ import re
 from datetime import date
 from datetime import datetime
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from src.education import academic_year_start
 from src.settings import settings
+
+
+def today_in_timezone(timezone_name: str) -> date:
+    """Calendar autofill uses an explicit application zone, independent of host/browser."""
+    return datetime.now(ZoneInfo(timezone_name)).date()
 
 
 def period_param(args: dict, key: str) -> str:
