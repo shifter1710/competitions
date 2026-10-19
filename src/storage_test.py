@@ -399,7 +399,7 @@ def test_report_identity_legacy_row_without_ref_is_own_identity(adapter):
     assert summary.count_unique_participants == 4
 
 
-def test_report_summary_five_metrics_via_separate_aggregate(adapter):
+def test_report_summary_six_metrics_via_separate_aggregate(adapter):
     # Сводка — отдельный агрегатный запрос по всей выборке: участия 6,
     # победы 2, призовые 4, уникальные участники 4, уникальные призёры 2
     # (пересчитано руками по фикстуре).
@@ -407,6 +407,8 @@ def test_report_summary_five_metrics_via_separate_aggregate(adapter):
     summary = adapter.get_report_summary()
 
     assert summary.model_dump() == {
+        'count_events': 0,
+        'count_unlinked_participations': 6,
         'count_participation': 6,
         'count_wins': 2,
         'count_prizes': 4,
@@ -463,6 +465,8 @@ def test_report_position_zero_participates_but_not_prize(adapter):
 
     summary = adapter.get_report_summary(position='0')
     assert summary.model_dump() == {
+        'count_events': 0,
+        'count_unlinked_participations': 1,
         'count_participation': 1,
         'count_wins': 0,
         'count_prizes': 0,
@@ -490,6 +494,8 @@ def test_report_position_win_filter_is_first_place_only(adapter):
     assert [info.student_name for info in infos] == ['Первов Павел']
     summary = adapter.get_report_summary(position='<2')
     assert summary.model_dump() == {
+        'count_events': 0,
+        'count_unlinked_participations': 1,
         'count_participation': 1,
         'count_wins': 1,
         'count_prizes': 1,
@@ -507,6 +513,8 @@ def test_report_position_prize_filter_is_places_one_to_three(adapter):
     assert [info.student_name for info in infos] == ['Второв Виктор', 'Первов Павел', 'Третьяков Тимофей']
     summary = adapter.get_report_summary(position='<4')
     assert summary.model_dump() == {
+        'count_events': 0,
+        'count_unlinked_participations': 3,
         'count_participation': 3,
         'count_wins': 1,
         'count_prizes': 3,
@@ -523,6 +531,8 @@ def test_report_position_no_prize_filter_is_fourth_and_beyond(adapter):
     assert [info.student_name for info in infos] == ['Пятов Пётр', 'Четвериков Чеслав']
     summary = adapter.get_report_summary(position='>3')
     assert summary.model_dump() == {
+        'count_events': 0,
+        'count_unlinked_participations': 2,
         'count_participation': 2,
         'count_wins': 0,
         'count_prizes': 0,
@@ -539,6 +549,8 @@ def test_report_position_zero_filter_is_no_result_only(adapter):
     assert [info.student_name for info in infos] == ['Нулев Никита']
     summary = adapter.get_report_summary(position='0')
     assert summary.model_dump() == {
+        'count_events': 0,
+        'count_unlinked_participations': 1,
         'count_participation': 1,
         'count_wins': 0,
         'count_prizes': 0,

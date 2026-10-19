@@ -449,7 +449,7 @@ class ParticipationsMixin:
         custom_filters: Iterable[tuple[str, str, str]] = (),
         event_id: str | Sequence[str] = (),
     ) -> ReportSummary:
-        """Сводка 5 метрик по ВСЕЙ отфильтрованной выборке (Reports v2).
+        """Сводка 6 метрик по ВСЕЙ отфильтрованной выборке (Reports v2).
 
         Отдельный агрегатный запрос по тому же WHERE, но без GROUP BY —
         уникальные участники/призёры выборки не равны сумме уникальных по
@@ -473,6 +473,8 @@ class ParticipationsMixin:
             row = self.connection.execute(
                 f'''
                 SELECT
+                    COUNT(DISTINCT calendar_event_id) AS count_events,
+                    COUNT(CASE WHEN calendar_event_id IS NULL THEN 1 END) AS count_unlinked_participations,
                     COUNT(*) AS count_participation,
                     COALESCE(SUM(CASE WHEN position = 1 THEN 1 ELSE 0 END), 0) AS count_wins,
                     COALESCE(SUM(CASE WHEN position >= 1 AND position <= 3 THEN 1 ELSE 0 END), 0)

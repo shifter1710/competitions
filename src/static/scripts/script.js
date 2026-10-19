@@ -2991,6 +2991,14 @@ class Main {
             return;
         }
 
+        if (this.tableElement.dataset.reportTable === "true") {
+            // Rowspans make physical cell offsets differ between rows.
+            const order = headers.map((item) => item.dataset.columnKey);
+            order.splice(currentIndex, 1);
+            order.splice(targetIndex, 0, columnKey);
+            this.reorderReportCells(order);
+            return;
+        }
         const rows = Array.from(this.tableElement.querySelectorAll("tr"));
         rows.forEach((row) => {
             const cells = Array.from(row.children);
@@ -3003,6 +3011,16 @@ class Main {
             } else {
                 row.insertBefore(cell, cells[targetIndex]);
             }
+        });
+    }
+
+    reorderReportCells(order = Array.from(this.tableElement.querySelectorAll("thead th")).map((item) => item.dataset.columnKey)) {
+        this.tableElement.querySelectorAll("tr").forEach((row) => {
+            const cells = new Map(Array.from(row.children).map((cell) => [cell.dataset.columnKey, cell]));
+            order.forEach((key) => {
+                const cell = cells.get(key);
+                if (cell) row.appendChild(cell);
+            });
         });
     }
 
@@ -3037,6 +3055,16 @@ class Main {
                     }
                 } else {
                     header.addEventListener("click", () => this.sortByHeader(header));
+                    if (this.tableElement.dataset.reportTable === "true") {
+                        header.tabIndex = 0;
+                        header.setAttribute("aria-sort", "none");
+                        header.addEventListener("keydown", (event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                this.sortByHeader(header);
+                            }
+                        });
+                    }
                 }
             }
             header.addEventListener("dragstart", (event) => this.handleHeaderDragStart(event, header));
@@ -3095,21 +3123,28 @@ class Main {
     }
 
     sortByHeader(header) {
-        if (this.hasActiveRowEdit()) {
+        if (this.hasActiveRowEdit() || header.dataset.sortType === "none") {
             return;
         }
+        const isReport = this.tableElement.dataset.reportTable === "true";
         const columnKey = header.dataset.columnKey;
         const sortType = header.dataset.sortType || "text";
         const currentDirection = header.dataset.sortDirection === "asc" ? "desc" : "asc";
         this.tableElement.querySelectorAll("thead th").forEach((item) => {
             item.dataset.sortDirection = "";
             item.classList.remove("sorted-asc", "sorted-desc");
+            if (isReport) item.removeAttribute("aria-sort");
         });
+        if (isReport) header.setAttribute("aria-sort", currentDirection === "asc" ? "ascending" : "descending");
         header.dataset.sortDirection = currentDirection;
         header.classList.add(currentDirection === "asc" ? "sorted-asc" : "sorted-desc");
 
         const body = this.tableElement.querySelector("tbody");
         const rows = Array.from(body.querySelectorAll("tr"));
+        if (isReport) {
+            this.sortReportRows(body, rows, columnKey, sortType, currentDirection);
+            return;
+        }
         rows.sort((first, second) => {
             // data-sort-value (если задан) — машинное значение ячейки:
             // «Дата» отображается компактным диапазоном («25-27.06.2026»),
@@ -3122,6 +3157,42 @@ class Main {
             return this.compareValues(firstValue, secondValue, sortType, currentDirection);
         });
         rows.forEach((row) => body.appendChild(row));
+    }
+
+    sortReportRows(body, rows, columnKey, sortType, direction) {
+        // Group IDs come from the server's confirmed identity + exact name.
+        // Never infer identity from link text, numeric totals or current profile.
+        const groups = new Map();
+        rows.forEach((row) => {
+            const key = row.dataset.reportGroup;
+            if (!groups.has(key)) groups.set(key, {rows: [], nameCell: null});
+            const group = groups.get(key);
+            group.rows.push(row);
+            group.nameCell ||= row.querySelector('[data-column-key="student_name"]');
+        });
+        const value = (row, group) => {
+            const cell = columnKey === "student_name" ? group.nameCell : row.querySelector(`[data-column-key="${columnKey}"]`);
+            return cell?.dataset.sortValue ?? cell?.textContent.trim() ?? "";
+        };
+        const compare = (first, firstGroup, second, secondGroup) =>
+            this.compareValues(value(first, firstGroup), value(second, secondGroup), sortType, direction);
+        const blocks = Array.from(groups.values());
+        // Native stable sorting preserves ties, including zero-valued metrics.
+        blocks.forEach((group) => group.rows.sort((a, b) => compare(a, group, b, group)));
+        blocks.sort((a, b) => compare(a.rows[0], a, b.rows[0], b));
+        let index = 0;
+        blocks.forEach((group) => {
+            if (group.nameCell) {
+                group.nameCell.rowSpan = group.rows.length;
+                group.rows[0].appendChild(group.nameCell);
+            }
+            group.rows.forEach((row, offset) => {
+                row.classList.toggle("report-group-start", offset === 0);
+                row.querySelector('[data-column-key="index"]').textContent = String(++index);
+                body.appendChild(row);
+            });
+        });
+        this.reorderReportCells();
     }
 
     compareValues(firstValue, secondValue, sortType, direction) {
