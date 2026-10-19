@@ -3,7 +3,7 @@
     <input type="hidden" name="{{ key }}" value="">
     <label class="form-label" id="report-label-{{ key }}" for="report-filter-{{ key }}">{{ label }}</label>
     <button class="form-select report-multi__toggle" id="report-filter-{{ key }}" type="button"
-            aria-expanded="false" aria-controls="report-options-{{ key }}" aria-describedby="report-label-{{ key }}">
+            aria-expanded="false" aria-controls="report-options-{{ key }}" aria-describedby="report-label-{{ key }}{% if key == 'event_id' %} report-event-review-summary{% endif %}">
         <span class="report-multi__value">{% if selected %}Выбрано: {{ selected | length }}{% else %}Все{% endif %}</span>
     </button>
     <div class="report-multi__panel" id="report-options-{{ key }}">
@@ -19,13 +19,17 @@
             {% for option in options %}
             {% set value = option.value if key == 'event_id' else option %}
             {% set text = option.label if key == 'event_id' else option %}
-            <label class="report-multi__option">
-                <input class="form-check-input" type="checkbox" name="{{ key }}" value="{{ value }}"{% if value | string in selected %} checked{% endif %}>
-                <span class="report-multi__option-text"><span>{{ text }}</span>{% if key == 'event_id' and option.detail %}<small>{{ option.detail }}</small>{% endif %}<small class="report-multi__outside" hidden>Не входит в выбранные институты</small></span>
+            <label class="report-multi__option"{% if key == 'event_id' %} data-date-from="{{ option.date_from | default('') }}" data-date-to="{{ option.date_to | default('') }}"{% endif %}>
+                <input class="form-check-input" type="checkbox"{% if key == 'event_id' %} id="report-event-option-{{ value }}"{% endif %} name="{{ key }}" value="{{ value }}"{% if value | string in selected %} checked{% endif %}>
+                <span class="report-multi__option-text"><span>{{ text }}</span>{% if key == 'event_id' and option.detail %}<small>{{ option.detail }}</small>{% endif %}<small class="report-multi__outside" hidden>{% if key == 'event_id' %}Не входит в выбранный период или недоступно — снимите выбор или измените период{% else %}Не входит в выбранные институты{% endif %}</small></span>
             </label>
             {% endfor %}
             <p class="report-multi__empty"{% if options %} hidden{% endif %}>{% if key == 'event_id' and not options %}Нет доступных соревнований{% else %}Ничего не найдено{% endif %}</p>
+            {% if key == 'event_id' %}
+            <div class="report-multi__review report-multi__help" hidden>Требуют пересмотра — снимите выбор или измените период</div>
+            {% endif %}
         </div>
     </div>
+    {% if key == 'event_id' %}<div class="form-text" id="report-event-review-summary" role="status" aria-live="polite" hidden></div>{% endif %}
 </div>
 {% endmacro %}

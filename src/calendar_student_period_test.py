@@ -1,8 +1,10 @@
 """Synthetic regression coverage for shared periods, calendar and linked history."""
 from datetime import datetime
+from datetime import timezone
 from urllib.parse import urlencode
 
 import pytest
+from pydantic import ValidationError
 
 from src.auth import create_auth_cookie_value
 from src.main import app
@@ -11,8 +13,10 @@ from src.periods import academic_years_for_ranges
 from src.periods import period_filter_context
 from src.periods import report_period_label
 from src.periods import resolve_report_period
+from src.periods import today_in_timezone
 from src.periods import validate_report_period
 from src.routes.calendar import safe_calendar_return
+from src.settings import Settings
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
 
@@ -183,3 +187,83 @@ def test_calendar_and_card_athlete_denied(client, store):
     for url in ('/calendar?period=2024-2025', f'/admin/people/{student}?period=2024-2025'):
         _, response = client.get(url, headers=headers('athlete'))
         assert response.status == 403
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        {'date_from': '01.09.2026'},
+        {'date_to': '01.10.2026'},
+        {'date_from': '31.02.2026', 'date_to': '01.03.2026'},
+        {'date_from': '02.10.2026', 'date_to': '01.10.2026'},
+    ],
+)
+def test_calendar_invalid_custom_dates_retained_without_results(client, values):
+    _, response = client.get('/calendar?' + urlencode({'period': 'custom', **values}), headers=headers('viewer'))
+    assert response.status == 400
+    for value in values.values():
+        assert f'value="{value}"' in response.text
+    assert 'id="calendar-period-error"' in response.text
+    assert 'data-period-today=' in response.text
+
+
+def test_calendar_equal_day_custom_period_is_valid(client, store):
+    store.create_calendar_event('Учебное событие дня', '2026-09-01', None, '', '', [])
+    _, response = client.get(
+        '/calendar?period=custom&date_from=01.09.2026&date_to=01.09.2026', headers=headers('viewer')
+    )
+    assert response.status == 200 and 'Учебное событие дня' in response.text
+
+
+@pytest.mark.parametrize(
+    'instant,zone,expected',
+    [
+        ('2026-12-31T21:30:00+00:00', 'Europe/Moscow', '2027-01-01'),
+        ('2026-12-31T19:30:00+00:00', 'Asia/Omsk', '2027-01-01'),
+        ('2026-12-31T19:30:00+00:00', 'Europe/Moscow', '2026-12-31'),
+    ],
+)
+def test_calendar_today_uses_explicit_zone_at_date_boundary(monkeypatch, instant, zone, expected):
+    frozen = datetime.fromisoformat(instant).astimezone(timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is not None
+            return frozen.astimezone(tz)
+
+    monkeypatch.setattr('src.periods.datetime', FrozenDateTime)
+    assert today_in_timezone(zone).isoformat() == expected
+
+
+@pytest.mark.parametrize('invalid_zone', ['Fictional/Unavailable', '', '/invalid/absolute'])
+def test_app_timezone_rejects_invalid_configuration(invalid_zone):
+    with pytest.raises(ValidationError, match='APP_TIMEZONE must name an available IANA timezone'):
+        Settings(_env_file=None, APP_TIMEZONE=invalid_zone)
+
+
+def test_app_timezone_defaults_to_local_sibadi(monkeypatch):
+    monkeypatch.delenv('APP_TIMEZONE', raising=False)
+    assert Settings(_env_file=None).app_timezone == 'Asia/Omsk'
+
+
+def test_calendar_renders_server_today_in_application_zone_without_changing_url_dates(client, store, monkeypatch):
+    frozen = datetime.fromisoformat('2026-12-31T19:30:00+00:00')
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is not None
+            return frozen.astimezone(tz)
+
+    monkeypatch.setattr('src.periods.datetime', FrozenDateTime)
+    monkeypatch.setattr(settings, 'app_timezone', 'Asia/Omsk')
+    # No custom date validation is needed here, so the clock subclass cannot
+    # affect server strptime validation of restored user strings.
+    _, response = client.get('/calendar?period=all&date_to=01.10.2026', headers=headers('viewer'))
+    assert response.status == 200
+    assert 'data-period-today="01.01.2027"' in response.text
+    assert 'name="date_to"' in response.text and 'value="01.10.2026"' in response.text
+    student = store.create_student('Учебный студент Гамма', 'М', '', '', '')
+    _, history = client.get(f'/admin/people/{student}', headers=headers('viewer'))
+    assert history.status == 200 and 'data-period-today=' not in history.text

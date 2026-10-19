@@ -602,7 +602,15 @@ def build_report_event_options(storage, selected: Sequence[str] = ()) -> list[di
             )
             if value
         )
-        options.append({'value': str(event['id']), 'label': event['name'], 'detail': detail})
+        options.append(
+            {
+                'value': str(event['id']),
+                'label': event['name'],
+                'detail': detail,
+                'date_from': start,
+                'date_to': end or start,
+            }
+        )
     known = {option['value'] for option in options}
     options.extend(
         {'value': value, 'label': f'Соревнование №{value} (недоступно)', 'detail': 'Условие сохранено'}

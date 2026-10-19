@@ -863,7 +863,10 @@ class Main {
             // (пустые поля не попадают в URL), никакого fetch-обновления.
             this.reportForm.addEventListener("submit", (event) => this.handleReportFormSubmit(event));
             this.reportForm.addEventListener("input", (event) => {
-                if (event.target.name) this.updateReportDirtyState();
+                if (event.target.name) {
+                    this.refreshReportMultiselects();
+                    this.updateReportDirtyState();
+                }
             });
             this.reportForm.addEventListener("change", (event) => this.handleReportFormChange(event));
         }
@@ -934,6 +937,7 @@ class Main {
         if (!this.reportForm) {
             return;
         }
+        this.reportInitialEntriesKey = Main.reportEntriesKey(Main.canonicalReportEntries(this.serializeReportForm()));
         this.initReportMultiselects();
         this.updateReportDirtyState();
     }
@@ -982,6 +986,7 @@ class Main {
                 this.updateReportDirtyState();
             });
         });
+        this.reportForm.addEventListener("keydown", event => this.handleReportOptionsTab(event));
         document.addEventListener("click", event => {
             controls.forEach(control => { if (!control.contains(event.target)) close(control); });
         });
@@ -998,10 +1003,69 @@ class Main {
         advanced?.addEventListener("toggle", () => {
             if (!advanced.open) controls.filter(control => advanced.contains(control)).forEach(control => close(control));
         });
+        this.reportForm.querySelectorAll('[name="date_from"], [name="date_to"]').forEach(input => {
+            input.addEventListener("changeDate", () => {
+                this.refreshReportMultiselects();
+                this.updateReportDirtyState();
+            });
+        });
         this.refreshReportMultiselects();
     }
 
+    handleReportOptionsTab(event) {
+        if (event.key !== "Tab") return;
+        // Match visual review order without moving named controls (native Back).
+        // Keep native Space/checkbox behavior and the surrounding form's Tab order.
+        const focusable = [...this.reportForm.querySelectorAll('input, select, button, a[href]')]
+            .filter(input => !input.disabled && input.type !== "hidden" && input.getClientRects().length);
+        const isEventOption = input => input.name === "event_id" && input.type === "checkbox";
+        const eventOptions = focusable.filter(isEventOption).sort((a, b) =>
+            Number(a.closest("label").dataset.review === "true") - Number(b.closest("label").dataset.review === "true"));
+        let position = 0;
+        const order = focusable.map(input => isEventOption(input) ? eventOptions[position++] : input);
+        const current = order.indexOf(event.target);
+        const next = order[current + (event.shiftKey ? -1 : 1)];
+        if (current >= 0 && next && (isEventOption(event.target) || isEventOption(next))) {
+            event.preventDefault();
+            next.focus();
+        }
+    }
+
+    // Compare calendar components, never browser/UTC instants or normalized invalid dates.
+    static reportDateISO(value) {
+        const match = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(value.trim());
+        if (!match) return null;
+        const [, day, month, year] = match.map(Number);
+        const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+        const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month - 1]) return null;
+        return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+
+    reportLegacyPeriodUnchanged() {
+        const applied = new URLSearchParams(this.reportForm.dataset.appliedQuery || "");
+        return !applied.has("period") && (applied.has("date_from") || applied.has("date_to"))
+            && ["date_from", "date_to"].every(key => this.reportForm.querySelector(`[name="${key}"]`).value === (applied.get(key) || ""));
+    }
+
+    reportDraftPeriod() {
+        const period = this.reportForm.querySelector(".report__period").value;
+        if (period === "all") return {valid: true, start: "", end: ""};
+        const year = /^(\d{4})-(\d{4})$/.exec(period);
+        if (year && Number(year[1]) >= 1 && Number(year[1]) <= 9998 && Number(year[2]) === Number(year[1]) + 1) {
+            return {valid: true, start: `${year[1]}-09-01`, end: `${year[2]}-08-31`};
+        }
+        if (period !== "custom") return {valid: false};
+        const values = ["date_from", "date_to"].map(key => this.reportForm.querySelector(`[name="${key}"]`).value.trim());
+        const [start, end] = values.map(value => value ? Main.reportDateISO(value) : "");
+        const legacy = this.reportLegacyPeriodUnchanged();
+        return {valid: (legacy || Boolean(start && end)) && start !== null && end !== null && (!start || !end || start <= end), start, end};
+    }
+
     refreshReportMultiselects() {
+        const period = this.reportDraftPeriod();
+        const eventPeriod = period.valid ? period : (this.reportLastValidPeriod || period);
+        if (period.valid) this.reportLastValidPeriod = period;
         const institutes = [...this.reportForm.querySelectorAll('[name="institute"]:checked')].map(input => input.value);
         const groupControl = this.reportForm.querySelector('.report-multi[data-filter-key="group"]');
         let groupsByInstitute = {};
@@ -1020,20 +1084,42 @@ class Main {
             control.querySelector(".report-multi__count").textContent = `Выбрано: ${checked.length}`;
             const query = control.querySelector(".report-multi__search").value.trim().toLocaleLowerCase("ru");
             let shown = 0;
+            let reviewCount = 0;
+            const isEvent = control.dataset.filterKey === "event_id";
             control.querySelectorAll(".report-multi__option").forEach(option => {
                 const input = option.querySelector("input");
-                const available = control !== groupControl || !institutes.length || allowedGroups.has(input.value);
+                const available = isEvent
+                    ? eventPeriod.valid && Boolean(option.dataset.dateFrom)
+                        && (!eventPeriod.end || option.dataset.dateFrom <= eventPeriod.end)
+                        && (!eventPeriod.start || option.dataset.dateTo >= eventPeriod.start)
+                    : control !== groupControl || !institutes.length || allowedGroups.has(input.value);
                 option.dataset.available = String(available);
                 option.querySelector(".report-multi__outside").hidden = available || !input.checked;
                 const matches = option.querySelector(".report-multi__option-text > span").textContent.toLocaleLowerCase("ru").includes(query)
                     || input.value.toLocaleLowerCase("ru").includes(query)
                     || [...option.querySelectorAll("small:not(.report-multi__outside)")].some(item => item.textContent.toLocaleLowerCase("ru").includes(query));
-                option.hidden = (!available && !input.checked) || !matches;
-                if (!option.hidden) shown++;
+                const review = isEvent && !available && input.checked;
+                if (isEvent) {
+                    // Native Back restoration pairs repeated names by DOM position.
+                    // Keep controls in stable ID order; CSS separates the review section.
+                    option.dataset.review = String(review);
+                    if (review) reviewCount++;
+                }
+                option.hidden = review ? false : (!available && !input.checked) || !matches;
+                if (!option.hidden && !review) shown++;
             });
             const empty = control.querySelector(".report-multi__empty");
             empty.hidden = shown > 0;
-            if (control.querySelector(".report-multi__option")) empty.textContent = query ? "Ничего не найдено" : "Нет доступных значений";
+            if (control.querySelector(".report-multi__option")) empty.textContent = query ? "Ничего не найдено" : isEvent ? "За выбранный период соревнований нет" : "Нет доступных значений";
+            if (isEvent) {
+                control.querySelector(".report-multi__review").hidden = !reviewCount;
+                const status = control.querySelector("#report-event-review-summary");
+                status.hidden = period.valid && !reviewCount;
+                status.textContent = !period.valid
+                    ? "Укажите корректные границы периода для обновления списка. Выбор сохранён."
+                    : reviewCount ? `Вне периода или недоступно: ${reviewCount}. Снимите эти соревнования или измените период, чтобы применить изменения.` : "";
+                this.reportEventReviewCount = reviewCount;
+            }
         });
     }
 
@@ -1118,6 +1204,7 @@ class Main {
                 input.disabled = !custom;
             });
         }
+        this.refreshReportMultiselects();
         // Смена разреза: автоприменение навигацией, если кроме самого
         // разреза форма не «грязная»; иначе — обычное ожидающее изменение.
         if (event.target === this.reportForm.querySelector(".report__group-by")) {
@@ -1146,6 +1233,20 @@ class Main {
     // выключаются (не отправляются), дальше обычный GET-переход формы.
     // form.submit() намеренно не зовёт обработчик submit — рекурсии нет.
     navigateReportForm() {
+        this.refreshReportMultiselects();
+        const changed = this.reportFormIsDirty() || this.reportInitialEntriesKey !== Main.reportEntriesKey(Main.canonicalReportEntries(this.serializeReportForm()));
+        if (changed && this.reportEventReviewCount) {
+            this.updateReportDirtyState();
+            const status = this.reportForm.querySelector("#report-event-review-summary");
+            status.hidden = false;
+            status.textContent = "Снимите соревнования вне периода или недоступные, либо измените период, чтобы применить изменения.";
+            this.reportForm.querySelector('[data-filter-key="event_id"] .report-multi__toggle').focus();
+            return;
+        }
+        // Preserve valid single-bound legacy URLs when only another filter/slice changes.
+        if (this.reportForm.querySelector(".report__period").value === "custom" && this.reportLegacyPeriodUnchanged()) {
+            this.reportForm.querySelector(".report__period").disabled = true;
+        }
         this.reportForm.querySelectorAll("input, select").forEach((control) => {
             const isDefaultSlice = control.name === "group_by" && control.value === "student";
             if (!control.value || isDefaultSlice) {

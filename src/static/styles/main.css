@@ -2320,6 +2320,10 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
 .report-multi__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-bottom: 9px; border-bottom: 1px solid var(--border); }
 .report-multi__count { font-size: 12px; color: var(--text-2); margin-left: auto; }
 .report-multi__list { max-height: 280px; overflow-y: auto; margin-top: 7px; overscroll-behavior: contain; }
+.report-multi[data-filter-key="event_id"] .report-multi__list { display: flex; flex-direction: column; }
+.report-multi[data-filter-key="event_id"] .report-multi__list > * { flex-shrink: 0; }
+.report-multi__review { order: 1; border-top: 1px solid var(--border); padding-top: 9px; }
+.report-multi__option[data-review="true"] { order: 2; }
 .report-multi__option { display: flex; align-items: flex-start; gap: 10px; min-height: 40px; padding: 9px 5px; border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
 .report-multi__option:hover, .report-multi__option:focus-within { background: var(--surface-hover); }
 .report-multi__option .form-check-input { flex-shrink: 0; margin: 3px 0 0; }
