@@ -13,10 +13,12 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import ANY
 from unittest.mock import Mock
+from urllib.parse import parse_qs
 from urllib.parse import quote
 from urllib.parse import quote_plus
 from urllib.parse import unquote_plus
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
 
 import pandas as pd
 import pytest
@@ -20107,9 +20109,12 @@ def test_data_guide_page_for_moderators_only(client: SanicTestClient):
     for identifier in HELP_DB_IDENTIFIERS:
         assert identifier not in body
     assert 'Карта данных' not in body
+    assert 'href="/admin/data-map"' in body
+    assert 'Админ → «Как работает система»' not in body
 
     _, response = client.get('/admin/data-guide', headers=get_auth_headers(role='editor'))
     assert response.status == 200
+    assert 'href="/admin/data-map"' not in response.text
 
     _, response = client.get('/admin/data-guide', headers=get_auth_headers(role='viewer'))
     assert response.status == 403
@@ -20144,15 +20149,18 @@ def test_data_map_page_admin_only_and_renamed(client: SanicTestClient):
     assert response.headers['location'] == '/login'
 
 
-def test_admin_hub_help_cards_renamed(client: SanicTestClient):
-    """Хаб /admin: карточка «Как работает система» вместо «Карта данных»,
-    ссылка прежняя — /admin/data-map."""
-    _, response = client.get('/admin', headers=get_auth_headers(role='admin'))
-    assert response.status == 200
-    body = response.text
-    assert 'Как работает система' in body
-    assert 'Карта данных' not in body
-    assert '/admin/data-map' in body
+@pytest.mark.parametrize('role', ['admin', 'editor', 'viewer'])
+def test_admin_hub_help_removed(client: SanicTestClient, role):
+    _, response = client.get('/admin', headers=get_auth_headers(role=role))
+    assert response.status == (403 if role == 'viewer' else 200)
+    for text in (
+        '>Справка<',
+        'Инструкция простыми словами',
+        'Как работает система',
+        '/admin/data-map',
+        '/admin/data-guide',
+    ):
+        assert text not in response.text
 
 
 # --- Course / Education, Phase A: уровни образования, учебные данные групп,
@@ -23230,3 +23238,225 @@ def test_student_profile_p2_history_legacy_and_base_values(people_client: SanicT
     assert 'Легаси результат QA' not in rows[second]
     assert body.index(f'data-history-record="{second}"') < body.index(f'data-history-record="{first}"')
     assert [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions ORDER BY id')] == before
+
+
+# Stabilization quick wins: all identities and files below are synthetic.
+@pytest.mark.parametrize('mode', ['dual', 'ref'])
+@pytest.mark.parametrize('access', ['owner', 'ref', 'hash', 'wrong_ref', 'orphan'])
+def test_attachment_authorization_fails_closed(reconcile_client, tmp_path, monkeypatch, mode, access):
+    monkeypatch.setattr(settings, 'data_folder', str(tmp_path))
+    storage = app.ctx.storage
+    ensure_staff_users(storage)
+    athlete = storage.get_user('sportik')
+    storage.set_profile(athlete['id'], {'student_name': 'Синтетиков Атлет Образец', 'student_sex': 'М'})
+    own_card = storage.create_student('Синтетиков Атлет Образец', 'М', '', '', '')
+    other_card = storage.create_student('Синтетиков Другой Образец', 'М', '', '', '')
+    storage.link_user(athlete['id'], own_card)
+    record_id = save_reconcile_record(
+        storage,
+        'Синтетиков Атлет Образец' if access == 'hash' else 'Синтетиков Запись Образец',
+        datetime(2024, 3, 1),
+        owner_id=athlete['id'] if access == 'owner' else None,
+    )
+    if access in ('ref', 'wrong_ref'):
+        storage.link_competitions([record_id], own_card if access == 'ref' else other_card)
+    storage.set_identity_mode(mode)
+    attachment_id = storage.create_attachment(record_id, 'qa.png', 'qa.png', 'image/png', len(PNG_BYTES), None)
+    path = tmp_path / 'files' / str(record_id) / 'qa.png'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(PNG_BYTES)
+    metadata_before = storage.get_attachment(attachment_id)
+    if access == 'orphan':
+        storage.delete_all_competitions()
+    records_before = [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions')]
+
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=athlete_headers())
+    allowed = access in ('owner', 'ref') or (access == 'hash' and mode == 'dual')
+    assert response.status == (200 if allowed else 403)
+    if allowed:
+        assert response.body == PNG_BYTES
+    else:
+        assert PNG_BYTES not in response.body
+        assert 'content-disposition' not in response.headers
+    for role in ('admin', 'editor', 'viewer'):
+        _, staff_response = reconcile_client.get(f'/attachment/{attachment_id}', headers=get_auth_headers(role))
+        assert staff_response.status == 200
+        assert staff_response.body == PNG_BYTES
+    _, anonymous = reconcile_client.get(f'/attachment/{attachment_id}', allow_redirects=False)
+    assert anonymous.status == 302 and anonymous.headers['location'].startswith('/login')
+    assert PNG_BYTES not in anonymous.body
+    assert path.read_bytes() == PNG_BYTES
+    assert storage.get_attachment(attachment_id) == metadata_before
+    assert [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions')] == records_before
+
+
+@pytest.mark.parametrize('mode', ['dual', 'ref'])
+@pytest.mark.parametrize('wipe_mode', ['scope', 'date'])
+def test_attachment_after_actual_wipe_preserving_files(reconcile_client, tmp_path, monkeypatch, mode, wipe_mode):
+    monkeypatch.setattr(settings, 'data_folder', str(tmp_path))
+    monkeypatch.setattr(settings, 'database_path', str(tmp_path / 'reconcile.sqlite3'))
+    storage = app.ctx.storage
+    ensure_staff_users(storage)
+    storage.set_identity_mode(mode)
+    record_id = save_reconcile_record(
+        storage, 'Синтетиков Очистка Образец', datetime(2024, 3, 1), owner_id=storage.get_user('sportik')['id']
+    )
+    attachment_id = storage.create_attachment(record_id, 'qa.png', 'qa.png', 'image/png', len(PNG_BYTES), None)
+    path = tmp_path / 'files' / str(record_id) / 'qa.png'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(PNG_BYTES)
+    before = storage.get_attachment(attachment_id)
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=athlete_headers())
+    assert response.status == 200
+    _, response = wipe_request(
+        reconcile_client,
+        get_auth_headers(),
+        scope='records',
+        mode=wipe_mode,
+        date_before='01.01.2025',
+        with_attachments='0',
+    )
+    assert response.status == 302
+    assert storage.get_competition_review(record_id) is None
+    assert storage.get_attachment(attachment_id) == before
+    assert path.read_bytes() == PNG_BYTES
+    _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=athlete_headers())
+    assert response.status == 403 and PNG_BYTES not in response.body
+    for role in ('admin', 'editor', 'viewer'):
+        _, response = reconcile_client.get(f'/attachment/{attachment_id}', headers=get_auth_headers(role))
+        assert response.status == 200 and response.body == PNG_BYTES
+    assert storage.get_attachment(attachment_id) == before
+    assert path.read_bytes() == PNG_BYTES
+    assert list((tmp_path / 'backups').glob('pre-wipe-*.xlsx'))
+
+
+@pytest.mark.parametrize('role', ['admin', 'editor', 'viewer'])
+def test_report_links_use_explicit_cards_and_preserve_filtered_return(people_client, role):
+    storage = app.ctx.storage
+    ensure_staff_users(storage)
+    first = storage.create_student('Синтетиков Новое Имя', 'М', '', '', '')
+    second = storage.create_student('Синтетиков Тёзка Образец', 'М', '', '', '')
+    storage.set_student_active(first, False)
+    storage.create_custom_field('qa_tag', 'Тестовая метка', 'text', False, True, True, True, 0)
+    records = [
+        make_report_record(
+            'Синтетиков Тёзка Образец',
+            'М',
+            'Тестовый институт',
+            'ТЕСТ-01',
+            2,
+            'Тестовый спорт',
+            datetime(2024, 3, 1),
+            'Тестовый уровень',
+            1,
+            extra={'qa_tag': 'проверка & фильтр'},
+            student_ref_id=ref,
+        )
+        for ref in (first, second, None, 987654)
+    ]
+    storage.save_competitions(records)
+    snapshot = [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions')]
+    query = {
+        'period': 'custom',
+        'date_from': '01.01.2024',
+        'date_to': '31.12.2024',
+        'name': 'синтетиков',
+        'institute': 'Тестовый институт',
+        'group': 'ТЕСТ-01',
+        'sport': 'Тестовый спорт',
+        'level': 'Тестовый уровень',
+        'course': '2',
+        'position': '<4',
+        'custom__qa_tag': 'проверка & фильтр',
+    }
+    headers = get_auth_headers(role)
+    _, response = people_client.get('/reports?' + urlencode(query), headers=headers)
+    assert response.status == 200
+    links = re.findall(r'<a href="(/admin/people/[^\"]+)">Синтетиков Тёзка Образец</a>', response.text)
+    assert len(links) == 2
+    assert {int(link.split('/people/')[1].split('?')[0]) for link in links} == {first, second}
+    assert len(get_report_cells(response.text)) == 4
+    for link in links:
+        _, card = people_client.get(html.unescape(link), headers=headers)
+        assert card.status == 200
+        back = html.unescape(re.search(r'href="([^\"]+)" data-person-back', card.text).group(1))
+        assert back.startswith('/reports?')
+        assert 'К отчёту' in card.text
+        assert parse_qs(urlsplit(back).query) == {key: [value] for key, value in query.items()}
+        _, returned = people_client.get(back, headers=headers)
+        assert get_report_cells(returned.text) == get_report_cells(response.text)
+    assert storage.get_filtered()[0].student_ref_id in (None, first, second)
+    assert all('student_ref_id' not in row.model_dump(by_alias=True) for row in storage.get_filtered())
+    _, exported = people_client.get(
+        '/export/report?' + urlencode({**query, 'columns': ['ФИО', 'Участий']}, doseq=True), headers=headers
+    )
+    assert exported.status == 200
+    xlsx_rows = get_report_xlsx_rows(exported.body, 'ФИО')
+    assert xlsx_rows[0] == ('ФИО', 'Участий')
+    assert xlsx_rows[1:5] == [('Синтетиков Тёзка Образец', 1)] * 4
+    assert [tuple(row) for row in storage.connection.execute('SELECT * FROM competitions')] == snapshot
+
+
+def test_report_legacy_empty_query_card_return_is_applied_all_time(people_client):
+    storage = app.ctx.storage
+    card_id = storage.create_student('Синтетиков Легаси Образец', 'М', '', '', '')
+    record_id = save_person_record(storage, 'Синтетиков Исторический Образец')
+    storage.link_competitions([record_id], card_id)
+    _, response = people_client.get('/report', headers=get_auth_headers())
+    link = re.search(r'<a href="(/admin/people/[^\"]+)">Синтетиков Исторический Образец</a>', response.text).group(1)
+    _, card = people_client.get(html.unescape(link), headers=get_auth_headers())
+    assert 'href="/reports?period=all" data-person-back' in card.text
+    _, returned = people_client.get('/reports?period=all', headers=get_auth_headers())
+    assert get_report_cells(returned.text) == get_report_cells(response.text)
+    storage.create_user('sportik', 'hash', 'athlete')
+    for path in ('/reports?period=all', '/report', f'/admin/people/{card_id}'):
+        _, denied = people_client.get(path, headers=athlete_headers())
+        assert denied.status == 403
+
+
+@pytest.mark.parametrize(
+    'destination',
+    [
+        'https://example.invalid/reports',
+        '//example.invalid/reports',
+        '/\\example.invalid/reports',
+        '/reports/../reports',
+        '/%72eports',
+        '/reports%2f..',
+        '/reports\n',
+        '/reports?x=%0d%0aLocation:evil',
+        '/reports?x=%255c',
+        '/admin/users',
+        '/reports-evil',
+    ],
+)
+def test_student_card_rejects_unsafe_return(people_client, destination):
+    card_id = app.ctx.storage.create_student('Синтетиков Возврат Образец', 'М', '', '', '')
+    _, response = people_client.get(
+        f'/admin/people/{card_id}?' + urlencode({'return': destination}),
+        headers=get_auth_headers(),
+    )
+    assert response.status == 200
+    assert 'href="/admin/people" data-person-back>← К студентам' in response.text
+
+
+@pytest.mark.parametrize(
+    'destination,label',
+    [
+        ('/reports?period=all&custom__qa_tag=100%25', 'К отчёту'),
+        ('/calendar/123?tab=participants', 'К соревнованию'),
+        ('/admin/people?q=Синтетиков', 'К студентам'),
+    ],
+)
+def test_student_card_renders_safe_return_without_javascript(people_client, destination, label):
+    from src.routes.students import safe_student_return
+
+    card_id = app.ctx.storage.create_student('Синтетиков Возврат Образец', 'М', '', '', '')
+    _, response = people_client.get(
+        f'/admin/people/{card_id}?' + urlencode({'return': destination}),
+        headers=get_auth_headers(),
+    )
+    assert response.status == 200
+    back = html.unescape(re.search(r'href="([^\"]+)" data-person-back', response.text).group(1))
+    assert back == safe_student_return(destination)
+    assert f'data-person-back>← {label}' in response.text

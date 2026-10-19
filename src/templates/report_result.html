@@ -75,7 +75,7 @@
                 <tr>
                     <td data-column-key="index">{{ loop.index }}</td>
                     {% if report_slice_is_student %}
-                    <td data-column-key="student_name"{% if not row.student_name %} class="text-muted"{% endif %}>{{ row.student_name or 'Не указано' }}</td>
+                    <td data-column-key="student_name"{% if not row.student_name %} class="text-muted"{% endif %}>{% if row.student_ref_id is not none %}<a href="/admin/people/{{ row.student_ref_id }}?{{ {'return': report_return_url} | urlencode }}">{{ row.student_name or 'Не указано' }}</a>{% else %}{{ row.student_name or 'Не указано' }}{% endif %}</td>
                     <td data-column-key="student_sex"{% if not row.student_sex %} class="text-muted"{% endif %}>{{ row.student_sex or 'Не указано' }}</td>
                     <td data-column-key="institute"{% if not row.institute %} class="text-muted"{% endif %}>{{ row.institute or 'Не указано' }}</td>
                     <td data-column-key="group"{% if not row.group %} class="text-muted"{% endif %}>{{ row.group or 'Не указано' }}</td>

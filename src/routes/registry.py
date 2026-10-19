@@ -1606,7 +1606,9 @@ def register(app: Sanic) -> None:  # noqa: C901
         if attachment is None:
             return text(body='Not Found', status=404)
         review = storage.get_competition_review(attachment['record_id'])
-        if review is not None and not user_owns_record(request, review):
+        if (review is None and user_is_athlete(request)) or (
+            review is not None and not user_owns_record(request, review)
+        ):
             return forbidden(request)
 
         file_path = attachments_dir() / str(attachment['record_id']) / attachment['stored_name']
