@@ -11496,8 +11496,14 @@ def test_admin_person_card_role_gating(people_client: SanicTestClient):
     assert 'Иванов Иван Иванович' in response.text
     assert 'Иванов И.И.' in response.text
     assert 'VIII ступень (20–24)' in response.text
-    # Никаких форм вовсе
-    assert '<form' not in response.text.replace('<form action="/logout"', '')
+    # Viewer can filter history through GET; mutation POST forms remain absent.
+    forms = re.findall(r'<form\b[^>]*>', response.text)
+    viewing_forms = [form for form in forms if 'action="/logout"' not in form]
+    assert len(viewing_forms) == 1
+    assert 'method="get"' in viewing_forms[0]
+    assert 'data-view-period-form' in viewing_forms[0]
+    assert 'action="/admin/people/1"' in viewing_forms[0]
+    assert all('method="post"' not in form for form in viewing_forms)
 
 
 def test_admin_person_delete_blocked_by_gto_http(people_client: SanicTestClient):
