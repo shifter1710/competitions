@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime
 from typing import Sequence
 
+from src.education import current_group_course
+from src.education import current_student_values
 from src.periods import academic_years_for_ranges
 from src.settings import settings
 from src.storage.helpers import STUDENT_SEX_VALUES
@@ -38,7 +40,7 @@ class StudentsMixin:
             cursor = self.connection.execute(
                 'INSERT INTO students (full_name, sex, institute, group_name, course, active, created_at, updated_at) '
                 'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
-                (full_name, sex, institute, group_name, course, now, now),
+                (full_name, sex, institute, group_name, None, now, now),
             )
             self.connection.commit()
             return cursor.lastrowid
@@ -60,7 +62,7 @@ class StudentsMixin:
                         'INSERT INTO students '
                         '(full_name, sex, institute, group_name, course, active, created_at, updated_at) '
                         'VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
-                        (full_name, sex, institute, group_name, course, now, now),
+                        (full_name, sex, institute, group_name, None, now, now),
                     )
                     ids.append(cursor.lastrowid)
                 self.connection.commit()
@@ -76,7 +78,7 @@ class StudentsMixin:
                 'created_at, updated_at FROM students WHERE id = ?',
                 (student_id,),
             ).fetchone()
-            return dict(row) if row else None
+            return current_student_values(row) if row else None
 
     def list_students(self, search: str = '', sort: str = '', order: str = '') -> list[dict]:
         """Все карточки (активные И неактивные — контракт страницы «Студенты»).
@@ -109,7 +111,7 @@ class StudentsMixin:
             else:
                 order_by = 'active DESC, full_name ASC, id ASC'
             rows = [
-                dict(row)
+                current_student_values(row)
                 for row in self.connection.execute(
                     f'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
                     f'created_at, updated_at FROM students ORDER BY {order_by}'
@@ -144,9 +146,9 @@ class StudentsMixin:
         Возвращает False, если студента с таким id нет."""
         with self._lock:
             cursor = self.connection.execute(
-                'UPDATE students SET full_name = ?, sex = ?, institute = ?, group_name = ?, course = ?, '
+                'UPDATE students SET full_name = ?, sex = ?, institute = ?, group_name = ?, '
                 'updated_at = ? WHERE id = ?',
-                (full_name, sex, institute, group_name, course, datetime.utcnow().isoformat(), student_id),
+                (full_name, sex, institute, group_name, datetime.utcnow().isoformat(), student_id),
             )
             self.connection.commit()
             return cursor.rowcount > 0
@@ -315,7 +317,8 @@ class StudentsMixin:
             rows = self.connection.execute(
                 f'''
                 SELECT
-                    id, student_name, student_sex, institute, "group", course,
+                    id, student_name, student_sex, institute, "group",
+                    education_course("group", date) AS course,
                     sport, date, date_to, name, level, position, review_status
                 FROM competitions
                 {where}
@@ -373,7 +376,7 @@ class StudentsMixin:
                 'sex': row['sex'],
                 'institute': row['institute'],
                 'group_name': row['group_name'],
-                'course': row['course'],
+                'course': current_group_course(row['group_name']),
                 'match_type': 'full_name',
                 'alias_name': None,
             }
@@ -386,7 +389,7 @@ class StudentsMixin:
                 'sex': row['sex'],
                 'institute': row['institute'],
                 'group_name': row['group_name'],
-                'course': row['course'],
+                'course': current_group_course(row['group_name']),
                 'match_type': 'alias',
                 'alias_name': matching_alias[row['id']],
             }
@@ -444,7 +447,7 @@ class StudentsMixin:
                 'sex': row['sex'],
                 'institute': row['institute'],
                 'group_name': row['group_name'],
-                'course': row['course'],
+                'course': current_group_course(row['group_name']),
                 'match_type': 'full_name',
                 'alias_name': None,
             }
@@ -457,7 +460,7 @@ class StudentsMixin:
                 'sex': row['sex'],
                 'institute': row['institute'],
                 'group_name': row['group_name'],
-                'course': row['course'],
+                'course': current_group_course(row['group_name']),
                 'match_type': 'alias',
                 'alias_name': matching_alias[row['id']],
             }
@@ -569,7 +572,7 @@ class StudentsMixin:
                     'sex': (sex or '').strip(),
                     'institute': (institute or '').strip(),
                     'group_name': (group_name or '').strip(),
-                    'course': (course or '').strip(),
+                    'course': None,
                 }
                 if not values['full_name']:
                     return None, 'invalid_full_name'
@@ -768,7 +771,7 @@ class StudentsMixin:
                     'sex': (row['sex'] or '').strip(),
                     'institute': (row['institute'] or '').strip(),
                     'group': (row['group_name'] or '').strip(),
-                    'course': '' if row['course'] is None else str(row['course']).strip(),
+                    'course': current_group_course(row['group_name']),
                 }
             )
             if len(suggestions) >= limit:

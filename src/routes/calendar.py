@@ -37,6 +37,7 @@ from src.auth import user_can_write
 from src.auth import user_is_admin
 from src.auth import user_is_athlete
 from src.auth import user_is_moderator
+from src.education import group_course
 from src.files import ATTACHMENT_EXTENSIONS
 from src.files import ATTACHMENT_MAX_SIZE
 from src.files import calendar_regulation_dir
@@ -838,7 +839,6 @@ EVENT_PARTICIPANT_IMPORT_BASE_COLUMNS: Sequence[str] = (
     'Пол',
     'Институт',
     'Группа',
-    'Курс',
     'Место',
     'Дисциплина',
     'Результат',
@@ -916,13 +916,13 @@ def parse_event_participant_rows(
 
     Строка staging: row_number = index + 2 (заголовок — строка 1), статус
     pending/error. Пол — normalize_student_sex («м» → «М», недопустимое —
-    ошибка строки, а не молчаливая правка); курс и место — числовая
-    нормализация Excel. Дубли строк в файле здесь НЕ помечаются: группы
+    ошибка строки, а не молчаливая правка); место — числовая
+    нормализация Excel. Старая колонка курса игнорируется. Дубли строк в файле здесь НЕ помечаются: группы
     пересчитываются при каждом рендере (правки строк меняют состав).
     """
     import_columns = set(event_participant_import_columns(custom_fields))
     columns = [str(column) for column in df.columns]
-    unknown_columns = [column for column in columns if column not in import_columns]
+    unknown_columns = [column for column in columns if column not in import_columns and column != 'Курс']
     custom_by_label = {field.label: field for field in custom_fields if field.show_in_template}
     custom_columns = [column for column in columns if column in custom_by_label]
     rows: list[dict] = []
@@ -941,7 +941,7 @@ def parse_event_participant_rows(
                 'sex': sex or '',
                 'institute': clean_str(record.get('Институт')),
                 'group': clean_str(record.get('Группа')),
-                'course': normalize_import_course(record.get('Курс')),
+                'course': '',
                 'position': normalize_import_position(record.get('Место')),
                 # P4: фиксированные опциональные колонки участия (clean_str,
                 # пустая ячейка → «»); дисциплина идёт в запись через
@@ -1116,7 +1116,7 @@ def event_import_row_record(
         'Пол': row['sex'],
         'Институт': row['institute'],
         'Группа': row['group'],
-        'Курс': row['course'],
+        'Курс': '',
         'Место': row['position'],
         # P4: дисциплина — фиксированной колонкой в build_competition (путь
         # P5a, обязательный для реестра); результат — только в participation-
@@ -1135,7 +1135,6 @@ def event_import_row_record(
             ('Пол', 'sex'),
             ('Институт', 'institute'),
             ('Группа', 'group_name'),
-            ('Курс', 'course'),
         ):
             value = str(student.get(student_key) or '').strip()
             if value and not str(record.get(column) or '').strip():
@@ -1435,11 +1434,15 @@ def event_import_row_display(record: dict, competition: Competition | None) -> d
             'discipline': competition.discipline or '',
             'result': competition.result or '',
         }
+    try:
+        reference_date, _ = parse_date_value(record.get('Дата'), manual_input=True)
+    except (ValueError, TypeError):
+        reference_date = None
     return {
         'sex': record.get('Пол', ''),
         'institute': record.get('Институт', ''),
         'group': record.get('Группа', ''),
-        'course': record.get('Курс', ''),
+        'course': group_course(record.get('Группа'), reference_date),
         'position': record.get('Место', ''),
         'discipline': record.get('Дисциплина', ''),
         'result': record.get('Результат', ''),
@@ -1852,7 +1855,7 @@ def event_import_create_student_participation(
         'sex': sex,
         'institute': hints['institute'],
         'group_name': hints['group'],
-        'course': course,
+        'course': '',
     }
     custom_fields = event_import_custom_fields(storage.get_custom_fields())
     record, _, _ = event_import_row_record(
@@ -1875,7 +1878,7 @@ def event_import_create_student_participation(
     if guard_error is not None:
         return guard_error
 
-    student_id = storage.create_student(full_name, sex, hints['institute'], hints['group'], course)
+    student_id = storage.create_student(full_name, sex, hints['institute'], hints['group'], '')
     log_audit_event(
         request,
         'student_created',
@@ -2631,7 +2634,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             'Название соревнований': event['name'],
             # Место опционально («можно дописать позже»): пусто → position = 0.
             'Место': get_form_value(request, 'position'),
-            'Курс': get_form_value(request, 'course'),
+            'Курс': '',
             # P4: дисциплина участия — та же фиксированная колонка, что у импорта
             # (build_competition кладёт её в базовую колонку записи); поле формы
             # опциональное, пусто → NULL.
@@ -3826,7 +3829,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         row['sex'] = get_form_value(request, 'sex').strip()
         row['institute'] = get_form_value(request, 'institute').strip()
         row['group'] = get_form_value(request, 'group').strip()
-        row['course'] = get_form_value(request, 'course').strip()
+        row['course'] = ''
         row['position'] = get_form_value(request, 'position').strip()
         row['discipline'] = get_form_value(request, 'discipline').strip()
         row['result'] = get_form_value(request, 'result').strip()
@@ -4055,7 +4058,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         sex = get_form_value(request, 'sex').strip()
         institute = get_form_value(request, 'institute').strip()
         group_name = get_form_value(request, 'group').strip()
-        course = get_form_value(request, 'course').strip()
+        course = ''
         form_error = None
         if not full_name:
             form_error = 'Пустое ФИО.'

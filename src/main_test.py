@@ -1274,29 +1274,29 @@ def test_export_report_xlsx_header_shows_parameters_and_metrics(reports_client: 
         # «Победа» — только место 1 (фикстура мест 0–5).
         (
             '<2',
-            [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1']],
+            [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1']],
         ),
         # «Призовое» — места 1–3, без места 0.
         (
             '<4',
             [
-                ['1', 'Второв Виктор', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '1'],
-                ['2', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
-                ['3', 'Третьяков Тимофей', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '1'],
+                ['1', 'Второв Виктор', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '1'],
+                ['2', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1'],
+                ['3', 'Третьяков Тимофей', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '1'],
             ],
         ),
         # «Не призовое» — места 4 и далее.
         (
             '>3',
             [
-                ['1', 'Пятов Пётр', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0'],
-                ['2', 'Четвериков Чеслав', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0'],
+                ['1', 'Пятов Пётр', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '0'],
+                ['2', 'Четвериков Чеслав', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '0'],
             ],
         ),
         # «Без результата» — строго место 0.
         (
             '0',
-            [['1', 'Нулев Никита', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0']],
+            [['1', 'Нулев Никита', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '0']],
         ),
     ],
 )
@@ -1317,7 +1317,7 @@ def test_report_page_position_win_with_period(position_reports_client: SanicTest
     )
 
     assert response.status == 200
-    assert get_report_cells(response.text) == [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1']]
+    assert get_report_cells(response.text) == [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1']]
     assert 'value="2024-2025" selected' in response.text
     assert 'value="<2" selected' in response.text
     assert 'Период: <strong>Учебный год 2024/2025</strong>' in response.text
@@ -1365,14 +1365,14 @@ def test_reports_page_position_url_restores_form_and_chip(position_reports_clien
     assert response.status == 200
     assert 'value="<2" selected' in response.text
     assert 'Место: <strong>Победа</strong>' in response.text
-    assert get_report_cells(response.text) == [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1']]
+    assert get_report_cells(response.text) == [['1', 'Первов Павел', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1']]
 
     _, response = position_reports_client.get('/reports?position=0', headers=get_auth_headers())
 
     assert response.status == 200
     assert 'value="0" selected' in response.text
     assert 'Место: <strong>Без результата</strong>' in response.text
-    assert get_report_cells(response.text) == [['1', 'Нулев Никита', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0']]
+    assert get_report_cells(response.text) == [['1', 'Нулев Никита', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '0']]
 
 
 def test_report_routes_available_for_all_non_athlete_roles(client: SanicTestClient):
@@ -1440,14 +1440,14 @@ def test_report_page_student_slice_with_metrics(reports_client: SanicTestClient)
 
     assert response.status == 200
     assert get_report_cells(response.text) == [
-        ['1', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
-        ['2', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '1'],
-        ['3', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0'],
-        ['4', 'Козлов Кирилл', 'М', 'ИМИ', 'ТД-303', '2', '1', '0', '1'],
-        ['5', 'Козлов Кирилл', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
-        ['6', 'Петров Пётр', 'Ж', 'ИМИ', 'СБ-202', '2', '1', '0', '1'],
-        ['7', 'Петров Пётр', 'Ж', 'ИМИ', 'СБ-202', '2', '1', '1', '1'],
-        ['8', 'Сидоров Сидор', 'М', 'ИСИ', 'ПГС-102', '3', '1', '0', '0'],
+        ['1', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1'],
+        ['2', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '1'],
+        ['3', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '0'],
+        ['4', 'Козлов Кирилл', 'М', 'ИМИ', 'ТД-303', '—', '1', '0', '1'],
+        ['5', 'Козлов Кирилл', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1'],
+        ['6', 'Петров Пётр', 'Ж', 'ИМИ', 'СБ-202', '—', '1', '0', '1'],
+        ['7', 'Петров Пётр', 'Ж', 'ИМИ', 'СБ-202', '—', '1', '1', '1'],
+        ['8', 'Сидоров Сидор', 'М', 'ИСИ', 'ПГС-102', '—', '1', '0', '0'],
     ]
     assert 'Участий' in response.text and 'Побед' in response.text and 'Призовых' in response.text
 
@@ -1473,9 +1473,7 @@ def test_report_page_student_slice_with_metrics(reports_client: SanicTestClient)
             'course',
             'Курс',
             [
-                ['1', '3', '1', '0', '0', '1', '0'],
-                ['2', '2', '3', '1', '3', '3', '3'],
-                ['3', '1', '4', '2', '3', '4', '3'],
+                ['1', 'Не указано', '8', '3', '6', '8', '6'],
             ],
         ),
         (
@@ -1521,16 +1519,16 @@ def test_report_page_filters_institute_group_sport(reports_client: SanicTestClie
     )
     assert response.status == 200
     assert get_report_cells(response.text) == [
-        ['1', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
-        ['2', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '1'],
-        ['3', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '1', '1', '0', '0'],
-        ['4', 'Козлов Кирилл', 'М', 'ИСИ', 'ПГС-101', '1', '1', '1', '1'],
+        ['1', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1'],
+        ['2', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '1'],
+        ['3', 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '—', '1', '0', '0'],
+        ['4', 'Козлов Кирилл', 'М', 'ИСИ', 'ПГС-101', '—', '1', '1', '1'],
     ]
 
     _, response = reports_client.get('/report?sport=' + quote('Шахматы'), headers=get_auth_headers())
     assert response.status == 200
     assert get_report_cells(response.text) == [
-        ['1', 'Сидоров Сидор', 'М', 'ИСИ', 'ПГС-102', '3', '1', '0', '0'],
+        ['1', 'Сидоров Сидор', 'М', 'ИСИ', 'ПГС-102', '—', '1', '0', '0'],
     ]
 
     # Новый фильтр работает и на другом срезе: группы института ИМИ.
@@ -2143,7 +2141,7 @@ def test_index_sort_position_and_course(index_client: SanicTestClient):
     for index, (position, course) in enumerate([(5, 4), (0, 1), (3, 2), (1, 3), (2, 1), (4, 'Выпускник 2025/26')]):
         record = make_index_record(f'Сорткин Сорт {index}', date=datetime(2024, 2, index + 1))
         record.position = position
-        record.course = course
+        record.group = f'Синтетика-{24 - course:02d}А' if isinstance(course, int) else 'Выпуск'
         variety.append(record)
     storage.save_competitions(variety)
 
@@ -2161,7 +2159,7 @@ def test_index_sort_position_and_course(index_client: SanicTestClient):
     assert courses == sorted(
         courses,
         key=lambda value: (0, 0.0, '')
-        if not value
+        if value in ('', '—')
         else ((1, float(value), '') if value.isdigit() else (2, 0.0, value.casefold())),
     )
 
@@ -4970,7 +4968,7 @@ def test_profile_save_and_fetch(client: SanicTestClient):
     assert response.status == 200
 
 
-def test_profile_rejects_bad_sex_and_course(client: SanicTestClient):
+def test_profile_rejects_bad_sex_ignores_manual_course(client: SanicTestClient):
     headers = athlete_headers()
     _, response = client.post(
         '/api/profile',
@@ -4984,7 +4982,8 @@ def test_profile_rejects_bad_sex_and_course(client: SanicTestClient):
         headers=headers,
         data={**csrf_for(headers), 'course': 'второй'},
     )
-    assert response.status == 400
+    assert response.status == 200
+    assert 'course' not in app.ctx.storage.set_profile.call_args[0][1]
 
 
 def test_athlete_record_uses_profile_defaults(client: SanicTestClient):
@@ -6687,7 +6686,7 @@ def test_field_settings_defaults_lock_name_and_date():
     merged = get_base_field_settings(None)
     assert merged['student_name'] == {'value_type': 'text', 'required': True}
     assert merged['date'] == {'value_type': 'text', 'required': True}
-    assert merged['course'] == {'value_type': 'number', 'required': True}
+    assert merged['course'] == {'value_type': 'number', 'required': False, 'readonly': True}
 
 
 def test_field_settings_locked_fields_survive_bad_storage_rows():
@@ -6718,10 +6717,10 @@ def test_build_competition_text_course_graduate_case():
         custom_fields=[],
         storage=storage,
     )
-    assert competition.course == 'Выпускник 2025/26'
+    assert competition.course is None  # Unrecognized own group never falls back to manual text.
 
 
-def test_build_competition_number_course_rejects_graduate_case():
+def test_build_competition_number_course_ignores_graduate_case():
     from src.records import BASE_FIELD_SETTING_DEFAULTS
 
     settings = {
@@ -6730,12 +6729,8 @@ def test_build_competition_number_course_rejects_graduate_case():
     }
     settings['course'] = {'value_type': 'number', 'required': True}
     storage = FakeSettingsStorage(settings)
-    with pytest.raises(ValueError):
-        build_competition(
-            make_import_record(Курс='Выпускник 2025/26'),
-            custom_fields=[],
-            storage=storage,
-        )
+    competition = build_competition(make_import_record(Курс='Выпускник 2025/26'), custom_fields=[], storage=storage)
+    assert competition.course is None
 
 
 def test_build_competition_required_text_field_rejects_empty():
@@ -6779,15 +6774,16 @@ def test_save_base_field_settings_updates_and_audits(client: SanicTestClient):
             **csrf_for(headers),
             'type_course': 'text',
             'required_course': 'on',
-            'type_position': 'number',
+            'type_position': 'text',
+            'required_position': 'on',
         },
         allow_redirects=False,
     )
     assert response.status == 302
     app.ctx.storage.update_field_settings.assert_called_once()
     saved = app.ctx.storage.update_field_settings.call_args[0][0]
-    assert saved['course'] == ('text', True)
-    assert saved['position'] == ('number', False)
+    assert saved['course'] == ('number', False)
+    assert saved['position'] == ('text', True)
     # Заблокированные поля игнорируют форму: обязательность не отключается.
     assert saved['student_name'][1] is True
     assert saved['date'][1] is True
@@ -7100,7 +7096,8 @@ def test_template_contains_optional_discipline_column(client: SanicTestClient):
     assert response.status == 200
     headers = get_xlsx_headers(response.body)
     assert headers.count('Дисциплина') == 1
-    assert headers.index('Дисциплина') == headers.index('Курс') + 1
+    assert 'Курс' not in headers
+    assert headers.index('Дисциплина') == headers.index('Место') + 1
     assert 'Результат' not in headers
 
 
@@ -7633,7 +7630,7 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
     assert saved.level == 'городские'
     assert saved.name == 'Кубок edited'
     assert saved.position == 1
-    assert saved.course == 3
+    assert saved.course is None
     assert saved.discipline == 'Коньки 500 м'
     app.ctx.storage.set_import_queue_status.assert_called_once_with(15, 'accepted')
     audit_kwargs = app.ctx.storage.add_audit_event.call_args[1]
@@ -7703,7 +7700,7 @@ def test_import_queue_edit_uses_payload_date_range_from_payload(client: SanicTes
     assert saved.level == 'городские'
     assert saved.name == 'Спартакиада edited'
     assert saved.position == 5
-    assert saved.course == 2
+    assert saved.course is None
 
 
 def test_import_queue_edit_course_text_allowed_by_field_settings(client: SanicTestClient):
@@ -7757,7 +7754,7 @@ def test_import_queue_edit_course_text_allowed_by_field_settings(client: SanicTe
     )
     assert response.status == 302
     saved = app.ctx.storage.save_competitions.call_args[0][0][0]
-    assert saved.course == 'Выпускник 2025/26'
+    assert saved.course is None
 
 
 def test_import_queue_edit_rejects_bad_date(client: SanicTestClient):
@@ -7946,7 +7943,7 @@ def test_upload_autofills_empty_fields_from_known_athlete(client: SanicTestClien
     assert saved_rows[0].student_sex == 'Ж'
     assert saved_rows[0].institute == 'ИМИ'
     assert saved_rows[0].group == 'СБ-202'
-    assert saved_rows[0].course == 2
+    assert saved_rows[0].course is None
     app.ctx.storage.find_athlete_fields.side_effect = None
     app.ctx.storage.find_athlete_fields.return_value = {}
 
@@ -8036,7 +8033,7 @@ def test_upload_keeps_filled_fields_and_counts_duplicates_after_autofill(client:
     row = saved_rows[0]
     assert row.student_name == 'Петров Пётр'
     assert row.student_sex == 'М'
-    assert row.course == 1
+    assert row.course is None
     assert row.institute == 'ИМИ'
     assert row.group == 'СБ-202'
     app.ctx.storage.find_athlete_fields.side_effect = None
@@ -11013,7 +11010,7 @@ def test_admin_person_delete_blocked_by_linked_records(people_client: SanicTestC
     assert student['sex'] == 'М'
     assert student['institute'] == 'ИСИ'
     assert student['group_name'] == 'ПГС-101'
-    assert student['course'] == '2'
+    assert student['course'] is None
     assert student['active'] == 1
     assert [alias['name'] for alias in storage.list_student_aliases(1)] == ['Иванов И.И.']
 
@@ -13024,7 +13021,7 @@ def test_student_import_template_headers_only(student_import_client: SanicTestCl
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
     assert response.headers['content-disposition'].startswith('attachment; filename="Шаблон_студенты_')
-    assert get_xlsx_headers(response.body) == ['ФИО', 'Пол', 'Институт', 'Группа', 'Курс']
+    assert get_xlsx_headers(response.body) == ['ФИО', 'Пол', 'Институт', 'Группа']
     # Только заголовки: ни одной строки данных
     assert len(get_xlsx_rows(response.body)) == 1
 
@@ -13146,7 +13143,8 @@ def test_student_import_preview_row_normalization(student_import_client: SanicTe
     assert 'Пустое ФИО.' in page.text
     # strip значений, NaN → пустые, курс 2.0 → «2»
     assert '<strong>Иванов Иван</strong>' in page.text
-    assert '>2</td>' in page.text
+    assert 'Значения в прежней колонке «Курс» не используются' in page.text
+    assert 'name="course"' not in page.text
     # Кнопка завершения задизейблена, пока есть неразобранные строки
     assert 'Кнопка «Завершить импорт» станет активной' in page.text
     assert 'disabled>Завершить импорт</button>' in page.text
@@ -13156,7 +13154,7 @@ def test_student_import_preview_row_normalization(student_import_client: SanicTe
     assert 'data-bs-target="#import-row-2-edit"' in page.text
     assert 'data-bs-toggle="collapse"' in page.text
     assert 'Сохранить правку' in page.text
-    assert 'placeholder="например, 2"' in page.text
+    assert 'placeholder="например, 2"' not in page.text
 
 
 def test_student_import_infile_duplicates_flagged_and_both_creatable(
@@ -13668,7 +13666,7 @@ def test_student_import_use_existing_no_writes_no_links(student_import_client: S
     assert f'Строка 2: использован существующий студент #{existing}.' in unquote_plus(used.headers['location'])
 
     # Только пометка в сессии: ничего не создано, не связано, не записано в аудит
-    assert students_snapshot(storage) == [(existing, 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', '2')]
+    assert students_snapshot(storage) == [(existing, 'Иванов Иван', 'М', 'ИСИ', 'ПГС-101', None)]
     assert audit_details(storage, 'student_created') == []
     refs = storage.connection.execute('SELECT student_ref_id FROM competitions').fetchall()
     assert [row['student_ref_id'] for row in refs] == [None]
@@ -14164,7 +14162,6 @@ def test_athletes_search_finds_student_without_history(event_import_client: Sani
             'sex': 'М',
             'institute': 'ИСЭиУ',
             'group': 'ЭБ-241',
-            'course': '2',
         }
     ]
 
@@ -14491,7 +14488,7 @@ def test_linked_record_edit_ignores_forged_event_fields_and_keeps_identity(event
         'SELECT institute, "group", position, course FROM competitions WHERE id = ?',
         (record_id,),
     ).fetchone()
-    assert tuple(row) == ('ИСИ', 'ПГС-201', 3, 3)
+    assert tuple(row) == ('ИСИ', 'ПГС-201', 3, '')
 
 
 def test_null_record_edit_updates_event_owned_fields(event_import_client: SanicTestClient):
@@ -14835,7 +14832,7 @@ def test_link_event_post_preserves_participation_fields(event_import_client: San
     record = storage.get_competition_by_id(record_id)
     assert record.institute == 'ИСИ'
     assert record.group == 'ПГС-101'
-    assert record.course == 2
+    assert record.course is None
     assert record.position == 1
     assert record.discipline == 'Эстафета'
     assert record.result == '3:21'
@@ -15253,7 +15250,7 @@ def test_forged_event_fields_ignored_right_after_link(event_import_client: Sanic
     row = storage.connection.execute(
         'SELECT institute, "group", course, position FROM competitions WHERE id = ?', (record_id,)
     ).fetchone()
-    assert tuple(row) == ('ИСЭиУ', 'ПГС-201', 3, 3)
+    assert tuple(row) == ('ИСЭиУ', 'ПГС-201', '', 3)
 
 
 def test_registry_name_becomes_event_link_after_linking(event_import_client: SanicTestClient):
@@ -15735,7 +15732,6 @@ def test_event_import_template_headers_only(event_import_client: SanicTestClient
         'Пол',
         'Институт',
         'Группа',
-        'Курс',
         'Место',
         'Дисциплина',
         'Результат',
@@ -15880,9 +15876,10 @@ def test_event_import_parsing_rejects_invalid_values(event_import_client: SanicT
     )
     token = import_session_token(response)
     page = get_event_preview(event_import_client, event_id, token)
-    assert 'ошибочные: 4' in page.text
+    assert 'ошибочные: 3' in page.text
+    assert 'готовы к добавлению: 1' in page.text
     assert 'Пол должен быть «М» или «Ж».' in page.text
-    assert 'Поле &#34;Курс&#34; должно быть числом' in page.text
+    assert 'Поле &#34;Курс&#34; должно быть числом' not in page.text
     assert 'Поле &#34;Место&#34; должно быть числом' in page.text
     assert 'Пустое ФИО.' in page.text
 
@@ -15969,13 +15966,13 @@ def test_event_import_autofill_priority_and_master_unchanged(event_import_client
     assert record[1] == 'М'  # пол — из карточки (Excel пуст)
     assert record[2] == 'ИСЭиУ'  # институт — из карточки
     assert record[3] == 'G-101'  # группа — из карточки (Excel пуст)
-    assert record[4] == 2  # курс — ЯВНЫЙ Excel перекрыл карточку
+    assert record[4] == ''  # Independent Excel course is never persisted.
     assert record[10] == 1  # место — из Excel
     assert record[11] == student_id
 
     # Карточка-мастер не мутировалась: курс остался 1.
     master = storage.get_student_by_id(student_id)
-    assert (master['sex'], master['institute'], master['group_name'], master['course']) == ('М', 'ИСЭиУ', 'G-101', '1')
+    assert (master['sex'], master['institute'], master['group_name'], master['course']) == ('М', 'ИСЭиУ', 'G-101', None)
 
 
 def test_event_import_place_empty_awaits_result(event_import_client: SanicTestClient):
@@ -15995,7 +15992,7 @@ def test_event_import_place_empty_awaits_result(event_import_client: SanicTestCl
     assert records[0][10] == 0
 
 
-def test_event_import_course_required_when_not_autofilled(event_import_client: SanicTestClient):
+def test_event_import_course_not_required_when_group_unknown(event_import_client: SanicTestClient):
     storage = app.ctx.storage
     event_id = make_calendar_event(storage)
     # Карточка без курса: пусто и в файле, и в карточке → ошибка строки.
@@ -16003,8 +16000,9 @@ def test_event_import_course_required_when_not_autofilled(event_import_client: S
     response = upload_event_xlsx(event_import_client, event_id, [{'ФИО': 'Безкурсов Студент Студентович'}])
     token = import_session_token(response)
     page = get_event_preview(event_import_client, event_id, token)
-    assert 'ошибочные: 1' in page.text
-    assert 'Курс обязателен' in page.text
+    assert 'готовы к добавлению: 1' in page.text
+    assert 'Курс обязателен' not in page.text
+    assert 'Значения в прежней колонке «Курс» не используются' in page.text
 
 
 def test_event_import_custom_fields(event_import_client: SanicTestClient):
@@ -17645,7 +17643,7 @@ def test_event_import_course_optional_accepts_name_only_row(event_import_client:
     post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
     records = event_records_snapshot(storage)
     assert len(records) == 1
-    assert records[0][4] == 0  # пустой опциональный курс → 0 (как Место)
+    assert records[0][4] == ''  # No independently stored course.
     assert records[0][11] == student_id
 
 
@@ -17660,9 +17658,9 @@ def test_event_import_course_optional_autofills_from_student(event_import_client
     assert 'готовы к добавлению: 1' in page.text
     # Курс подтянут из карточки (Excel пуст) — автозаполнение не зависит от
     # обязательности поля.
-    assert f'поля из карточки #{student_id}: Пол, Институт, Группа, Курс' in re.sub(r'\s+', ' ', page.text)
+    assert f'поля из карточки #{student_id}: Пол, Институт, Группа' in re.sub(r'\s+', ' ', page.text)
     post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
-    assert event_records_snapshot(storage)[0][4] == 3
+    assert event_records_snapshot(storage)[0][4] == ''
 
 
 def test_event_import_course_optional_excel_overrides_student(event_import_client: SanicTestClient):
@@ -17678,7 +17676,7 @@ def test_event_import_course_optional_excel_overrides_student(event_import_clien
     assert f'поля из карточки #{student_id}: Пол, Институт, Группа, Курс' not in re.sub(r'\s+', ' ', page.text)
     post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
     records = event_records_snapshot(storage)
-    assert records[0][4] == 5  # ЯВНЫЙ Excel-курс перекрыл карточку
+    assert records[0][4] == ''  # Excel course is ignored.
 
 
 # --- Url-поля вне импорта участников события (UX v2). ---
@@ -17826,7 +17824,7 @@ def test_event_import_row_search_select_writes_student_ref(event_import_client: 
     assert 'По запросу «иван» найдено: 1.' in collapsed
     assert 'collapse show" id="import-row-2-search"' in collapsed
     assert f'<a href="/admin/people/{student_id}">Иванов Иван Иванович</a>' in collapsed
-    assert f'#{student_id} · ИСЭиУ · G-101 · курс 1' in collapsed
+    assert f'#{student_id} · ИСЭиУ · G-101 · курс —' in collapsed
     assert f'Выбрать карточку #{student_id}' in collapsed
     # Форма выбора результата — POST select-student с csrf (переиспользованный
     # макрос); бейдж «ФИО» у результатов поиска не выводится.
@@ -17873,8 +17871,8 @@ def test_event_import_row_search_by_alias_and_namesakes(event_import_client: San
     page = get_event_search(event_import_client, event_id, token, 2, 'сидоров')
     collapsed = re.sub(r'\s+', ' ', page.text)
     assert 'По запросу «сидоров» найдено: 2.' in collapsed
-    assert f'#{first} · ИСИ · ПГС-201 · курс 1' in collapsed
-    assert f'#{second} · ИМИ · СБ-202 · курс 2' in collapsed
+    assert f'#{first} · ИСИ · ПГС-201 · курс —' in collapsed
+    assert f'#{second} · ИМИ · СБ-202 · курс —' in collapsed
 
 
 def test_event_import_row_search_inactive_and_empty_result(event_import_client: SanicTestClient):
@@ -18072,10 +18070,10 @@ def test_event_import_auto_preselect_single_candidate(event_import_client: Sanic
     assert 'готовы к добавлению: 1' in page.text
     assert f'найден автоматически · карточка #{first}' in collapsed
     assert f'<a href="/admin/people/{first}">Иванов Иван Иванович</a>' in collapsed
-    assert f'#{first} · ИСЭиУ · G-101 · курс 2' in collapsed
+    assert f'#{first} · ИСЭиУ · G-101 · курс —' in collapsed
     assert 'выбрана вручную' not in collapsed
     # Автозаполнение пустых полей файла из подобранной карточки.
-    assert f'поля из карточки #{first}: Пол, Институт, Группа, Курс' in collapsed
+    assert f'поля из карточки #{first}: Пол, Институт, Группа' in collapsed
 
     # Явная смена карточки: происхождение — «выбрана вручную», автозаполнение
     # пересчиталось на новую карточку.
@@ -18085,7 +18083,7 @@ def test_event_import_auto_preselect_single_candidate(event_import_client: Sanic
     page = get_event_preview(event_import_client, event_id, token)
     collapsed = re.sub(r'\s+', ' ', page.text)
     assert f'выбрана вручную · карточка #{second}' in collapsed
-    assert f'поля из карточки #{second}: Пол, Институт, Группа, Курс' in collapsed
+    assert f'поля из карточки #{second}: Пол, Институт, Группа' in collapsed
     assert f'поля из карточки #{first}' not in collapsed
 
 
@@ -18293,10 +18291,8 @@ def test_calendar_event_manual_form_course_required_default(event_import_client:
     body = response.text
     assert 'required' in manual_form_input(body, 'participant-fio')
     assert 'aria-label="ФИО"' in manual_form_input(body, 'participant-fio')
-    course_input = manual_form_input(body, 'participant-course')
-    assert 'required' in course_input
-    assert 'type="number"' in course_input
-    assert 'min="1"' in course_input
+    assert 'id="participant-course"' not in response.text
+    assert 'Рассчитывается по группе и дате' in response.text
     position_input = manual_form_input(body, 'participant-position')
     assert 'required' not in position_input
     assert 'title="Место можно дописать позже"' in position_input
@@ -18324,8 +18320,9 @@ def test_calendar_event_manual_form_course_required_default(event_import_client:
         allow_redirects=False,
     )
     assert response.status == 302
-    assert 'Курс обязателен' in unquote_plus(response.headers['location'])
-    assert event_records_snapshot(storage) == []
+    assert 'Курс обязателен' not in unquote_plus(response.headers['location'])
+    assert len(event_records_snapshot(storage)) == 1
+    assert event_records_snapshot(storage)[0][4] == ''
 
 
 def test_calendar_event_manual_form_course_optional(event_import_client: SanicTestClient):
@@ -18336,9 +18333,8 @@ def test_calendar_event_manual_form_course_optional(event_import_client: SanicTe
     event_id = make_calendar_event(storage)
     _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers())
     assert response.status == 200
-    course_input = manual_form_input(response.text, 'participant-course')
-    assert 'required' not in course_input
-    assert 'type="number"' in course_input
+    assert 'id="participant-course"' not in response.text
+    assert 'Рассчитывается по группе и дате' in response.text
 
     headers = get_auth_headers()
     _, response = event_import_client.post(
@@ -18358,7 +18354,7 @@ def test_calendar_event_manual_form_course_optional(event_import_client: SanicTe
     assert response.status == 302
     records = event_records_snapshot(storage)
     assert len(records) == 1
-    assert records[0][4] == 0  # пустой опциональный курс → 0
+    assert records[0][4] == ''  # No independently stored course.
     assert records[0][11] is None  # без карточки — без связи
 
 
@@ -18370,11 +18366,8 @@ def test_calendar_event_manual_form_course_text_type(event_import_client: SanicT
     event_id = make_calendar_event(storage)
     _, response = event_import_client.get(f'/calendar/{event_id}', headers=get_auth_headers())
     assert response.status == 200
-    course_input = manual_form_input(response.text, 'participant-course')
-    assert 'type="text"' in course_input
-    assert 'required' in course_input
-    assert 'placeholder="например, 2"' in course_input
-    assert 'min=' not in course_input
+    assert 'id="participant-course"' not in response.text
+    assert 'Рассчитывается по группе и дате' in response.text
     position_input = manual_form_input(response.text, 'participant-position')
     assert 'type="text"' in position_input
     assert 'required' not in position_input
@@ -18399,7 +18392,7 @@ def test_calendar_event_manual_form_course_text_type(event_import_client: SanicT
     assert response.status == 302
     records = event_records_snapshot(storage)
     assert len(records) == 1
-    assert records[0][4] == 'Выпускник 2025/26'
+    assert records[0][4] == ''
 
 
 def test_calendar_event_manual_form_position_required(event_import_client: SanicTestClient):
@@ -20357,8 +20350,9 @@ def test_group_academic_page_prefill_and_save(education_client: SanicTestClient)
 
     _, response = education_client.get(f'/admin/catalogs/group/{group["id"]}/academic', headers=headers)
     assert response.status == 200
-    assert 'value="2023"' in response.text
-    assert 'Предложено автоматически' in response.text
+    assert '>2023</div>' in response.text
+    assert 'name="admission_year"' not in response.text
+    assert 'Определено по названию группы' in response.text
 
     # Неуверенный парсер («Без Года») — предзаполнения нет.
     unclear = seed_education_group(storage, group='Без Года')
@@ -20389,7 +20383,8 @@ def test_group_academic_page_prefill_and_save(education_client: SanicTestClient)
 
     # После сохранения подсказка парсера не показывается (значение уже задано).
     _, response = education_client.get(f'/admin/catalogs/group/{group["id"]}/academic', headers=headers)
-    assert 'value="2023"' in response.text
+    assert '>2023</div>' in response.text
+    assert 'name="admission_year"' not in response.text
     assert 'Предложено автоматически' not in response.text
 
     # Некорректный год — error flash, сохранённые данные не меняются.
@@ -20400,7 +20395,13 @@ def test_group_academic_page_prefill_and_save(education_client: SanicTestClient)
         allow_redirects=False,
     )
     assert response.status == 302
-    assert 'Год поступления' in unquote_plus(response.headers['location'])
+    assert 'admin_message' in response.headers['location']
+    assert (
+        storage.connection.execute(
+            'SELECT admission_year FROM group_academic WHERE group_catalog_value_id = ?', (group['id'],)
+        ).fetchone()[0]
+        is None
+    )
     assert storage.get_group_academic(group['id'])['admission_year'] == 2023
 
     # Институт вместо группы / несуществующее значение — редирект с ошибкой.
@@ -20462,7 +20463,8 @@ def test_manual_record_create_writes_snapshot_edit_keeps_it(education_client: Sa
         'SELECT admission_year, course FROM competitions WHERE id = ?', (first_id,)
     ).fetchone()
     assert row['admission_year'] is None
-    assert row['course'] == 5
+    assert row['course'] == ''
+    assert storage.get_competition_by_id(first_id).course == 3
 
     # Новая запись той же пары — снимок заполняется из учебных данных группы.
     _, response = education_client.post(
@@ -20475,7 +20477,8 @@ def test_manual_record_create_writes_snapshot_edit_keeps_it(education_client: Sa
     second_row = storage.connection.execute(
         'SELECT id, admission_year FROM competitions WHERE student_name = ?', ('Второв Снимок Снимкович',)
     ).fetchone()
-    assert second_row['admission_year'] == 2023
+    assert second_row['admission_year'] is None
+    set_record_admission_year(storage, second_row['id'], 2023)
 
     # Заданный снимок правка не перезаписывает.
     _, response = education_client.post(
@@ -20517,7 +20520,8 @@ def test_calendar_participant_add_writes_snapshot(education_client: SanicTestCli
     )
     assert response.status == 302
     row = storage.connection.execute('SELECT admission_year FROM competitions').fetchone()
-    assert row['admission_year'] == 2022
+    assert row['admission_year'] is None
+    assert storage.get_competitions()[0].admission_year == 2023
 
     # Пара есть в справочнике, но учебных данных нет → снимок NULL.
     seed_education_group(storage, group='Безметад Группа')
@@ -20601,15 +20605,15 @@ def test_registry_course_cell_derived_and_legacy_fallback(education_client: Sani
         row['student_name']: row['admission_year']
         for row in storage.connection.execute('SELECT student_name, admission_year FROM competitions')
     }
-    assert snapshots['Производнов Кур Курсович'] == 2023
-    assert snapshots['Будущев Кур Курсович'] == 2027
+    assert snapshots['Производнов Кур Курсович'] is None
+    assert snapshots['Будущев Кур Курсович'] is None
     assert snapshots['Легачев Кур Курсович'] is None
 
     _, response = education_client.get('/', headers=get_auth_headers())
     assert response.status == 200
     assert '<td data-column-key="course">3</td>' in response.text
-    assert 'Год поступления позже даты соревнования' in response.text
-    assert '<td data-column-key="course">Выпускник 2025/26</td>' in response.text
+    assert 'Курс не определён по группе и дате соревнования' in response.text
+    assert 'Выпускник 2025/26' not in response.text
     # Легаси-курс записи со снимком не показывается (заменён производным).
     assert '<td data-column-key="course">1</td>' not in response.text
 
@@ -20639,14 +20643,16 @@ def test_person_card_education_block_with_and_without_metadata(education_client:
     plain_id = storage.create_student('Простов Прост Простович', 'М', 'ИСИ', 'Безметад Группа', '1')
     _, response = education_client.get(f'/admin/people/{plain_id}', headers=headers)
     assert response.status == 200
-    assert '<h5 class="card-title">Образование</h5>' not in response.text
+    assert '<h5 class="card-title">Образование</h5>' in response.text
+    assert 'не определён по названию группы' in response.text
     assert 'Предположительно обучение завершено' not in response.text
 
     # Пара не резолвится (группы нет в справочнике) — блока тоже нет.
     unknown_id = storage.create_student('Неизвестов Неиз Неизвестович', 'М', 'ИСИ', 'Нет Такой', '1')
     _, response = education_client.get(f'/admin/people/{unknown_id}', headers=headers)
     assert response.status == 200
-    assert '<h5 class="card-title">Образование</h5>' not in response.text
+    assert '<h5 class="card-title">Образование</h5>' in response.text
+    assert 'не определён по названию группы' in response.text
 
 
 def test_maintenance_admission_years_preview_and_apply(education_client: SanicTestClient):
@@ -20698,39 +20704,21 @@ def test_maintenance_admission_years_preview_and_apply(education_client: SanicTe
         ]
     )
 
-    # Карточка хаба обслуживания + страница предпросмотра.
+    # Retired maintenance links cannot rewrite legacy snapshots.
+    before = list(storage.connection.execute('SELECT id, admission_year, course FROM competitions'))
     _, response = education_client.get('/admin/maintenance', headers=headers)
     assert response.status == 200
-    assert 'Годы поступления (записи)' in response.text
-    assert '/admin/maintenance/admission-years' in response.text
-
+    assert '/admin/maintenance/admission-years' not in response.text
     _, response = education_client.get('/admin/maintenance/admission-years', headers=headers)
-    assert response.status == 200
-    assert 'Однозначов Год Годович' in response.text
-    assert 'Заполнить год у 1 записей' in response.text
-    assert 'Нужно проверить' in response.text
-    assert 'НГр-27Б1' in response.text
-    assert 'Не распознано' in response.text
-
-    # Применение: только SAFE; аудит; повтор — нечего заполнять.
+    assert response.status == 409
     _, response = education_client.post(
         '/admin/maintenance/admission-years/apply', headers=headers, data=csrf_for(headers), allow_redirects=False
     )
-    assert response.status == 302
-    assert 'заполнены: 1 записей' in unquote_plus(response.headers['location'])
-    years = {
-        row['student_name']: row['admission_year']
-        for row in storage.connection.execute('SELECT student_name, admission_year FROM competitions')
-    }
-    assert years['Однозначов Год Годович'] == 2023
-    assert years['Будущев Год Годович'] is None
-    assert years['Мусоров Год Годович'] is None
-    assert 'group_admission_backfill_applied' in audit_actions(storage)
-
-    _, response = education_client.get('/admin/maintenance/admission-years', headers=headers)
-    assert response.status == 200
-    assert 'Записей без года поступления нет' not in response.text  # future/junk ещё есть
-    assert 'Заполнить год у' not in response.text  # но SAFE пуст
+    assert response.status == 409
+    assert [
+        tuple(row) for row in storage.connection.execute('SELECT id, admission_year, course FROM competitions')
+    ] == [tuple(row) for row in before]
+    assert 'group_admission_backfill_applied' not in audit_actions(storage)
 
 
 def test_export_index_unchanged_with_admission_year(client: SanicTestClient):
@@ -20877,7 +20865,7 @@ def test_regression_registry_edit_keeps_admission_year(education_client: SanicTe
     row = competition_db_row(storage, record_id)
     assert row['admission_year'] == 2022
     assert row['group'] == 'Другая-99А1'
-    assert row['course'] == 5
+    assert row['course'] == 2  # Existing compatibility bytes are preserved.
     assert row['date'] == '2025-05-12T00:00:00'
 
 
@@ -21328,15 +21316,14 @@ def test_regression_admission_years_apply_never_touches_filled_rows(education_cl
     _, response = education_client.post(
         '/admin/maintenance/admission-years/apply', headers=headers, data=csrf_for(headers), allow_redirects=False
     )
-    assert response.status == 302
-    assert 'заполнены: 1 записей' in unquote_plus(response.headers['location'])
+    assert response.status == 409
     years = {
         row['student_name']: row['admission_year']
         for row in storage.connection.execute('SELECT student_name, admission_year FROM competitions')
     }
     assert years['Заполнен Год Заполненов'] == 2022  # никогда не выбирается/не меняется
     assert years['Выпускников Год Выпускников'] is None  # «Выпуск» не заполняется
-    assert years['Безопаснов Год Безопаснов'] == 2023  # SAFE заполняется
+    assert years['Безопаснов Год Безопаснов'] is None  # Retired backfill writes nothing.
 
 
 def test_regression_exact_duplicate_import_keeps_admission_year(education_client: SanicTestClient):
@@ -23361,7 +23348,7 @@ def test_report_links_use_explicit_cards_and_preserve_filtered_return(people_cli
             'Синтетиков Тёзка Образец',
             'М',
             'Тестовый институт',
-            'ТЕСТ-01',
+            'ТЕСТ-22',
             2,
             'Тестовый спорт',
             datetime(2024, 3, 1),
@@ -23380,7 +23367,7 @@ def test_report_links_use_explicit_cards_and_preserve_filtered_return(people_cli
         'date_to': '31.12.2024',
         'name': 'синтетиков',
         'institute': 'Тестовый институт',
-        'group': 'ТЕСТ-01',
+        'group': 'ТЕСТ-22',
         'sport': 'Тестовый спорт',
         'level': 'Тестовый уровень',
         'course': '2',

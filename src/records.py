@@ -14,6 +14,8 @@ import pandas as pd
 from pandas import isna
 from sanic import Request
 
+from src.education import group_course
+from src.education import parse_group_admission_year
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.settings import settings
@@ -41,7 +43,7 @@ BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
 )
 
 
-REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS)
+REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS if field['key'] != 'course')
 
 
 # Event Model, P5a (docs/data-model-decisions.md «Event Model, P5a»):
@@ -105,7 +107,7 @@ BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
     'level': ('text', False),
     'name': ('text', False),
     'position': ('number', False),
-    'course': ('number', True),
+    'course': ('number', False),
 }
 
 
@@ -156,6 +158,7 @@ def get_base_field_settings(storage: SQLiteAdapter | None) -> dict[str, dict]:
         # даже если в таблице оказалась иная настройка.
         default_type = BASE_FIELD_SETTING_DEFAULTS[key][0]
         merged[key] = {'value_type': default_type, 'required': True}
+    merged['course'] = {'value_type': 'number', 'required': False, 'readonly': True}
     return merged
 
 
@@ -306,16 +309,6 @@ def build_competition(
             setting=field_settings['position'],
             empty_error='Поле "Место" обязательно',
         ),
-        course=(
-            parse_base_text_field(record['Курс'], label=BASE_FIELD_LABELS['course'], setting=field_settings['course'])
-            if field_settings['course']['value_type'] != 'number'
-            else parse_base_number_field(
-                record['Курс'],
-                label=BASE_FIELD_LABELS['course'],
-                setting=field_settings['course'],
-                empty_error='Курс обязателен',
-            )
-        ),
         # Event Model, P5a: опциональная колонка «Дисциплина» импорта/форм —
         # в базовую колонку записи, пустая ячейка → None. Если активен кастом
         # с тем же label, значение попадает и в extra_data (ниже) — двойная
@@ -325,6 +318,8 @@ def build_competition(
     )
     if storage is not None:
         apply_catalog_canonical_values(storage, competition)
+    competition.course = group_course(competition.group, competition.date)
+    competition.admission_year = parse_group_admission_year(competition.group)
     return competition
 
 
@@ -386,6 +381,7 @@ def competition_to_export_row(
     export_custom_fields: Sequence[CustomField],
 ) -> dict[str, str | int]:
     row = competition.model_dump(by_alias=True)
+    row['Курс'] = group_course(competition.group, competition.date)
     row.pop('_id', None)
     row.pop('Время создания записи (UTC)', None)
     row.pop('extra_data', None)
@@ -404,8 +400,7 @@ def competition_to_export_row(
     row.pop('discipline', None)
     row.pop('result', None)
     row.pop('calendar_event_id', None)
-    # Course/Education Phase A: снимок года поступления — внутренняя колонка,
-    # формат экспорта не меняется (курс в выгрузке остаётся легаси-полем).
+    # Admission year is derived; the export course uses the participation date.
     row.pop('admission_year', None)
     # Даты-диапазоны: экспорт компактной строкой в существующей колонке
     # «Дата» — шаблон импорта не ломается, выгрузку можно импортировать

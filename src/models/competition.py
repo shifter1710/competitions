@@ -2,7 +2,10 @@ from datetime import datetime
 
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
+from src.education import group_course
+from src.education import parse_group_admission_year
 from src.models.student import Student
 
 
@@ -44,10 +47,18 @@ class Competition(Student):
     discipline: str | None = Field(default=None)
     result: str | None = Field(default=None)
     calendar_event_id: int | None = Field(default=None)
-    # Course / Education, Phase A: замороженный снимок года поступления
-    # участия. Заполняется storage при создании записи (строгое разрешение
-    # пары институт+группа по учебным данным справочника, см.
-    # _fill_admission_year_snapshots) и backfill'ем лет; update_competition
-    # его НЕ меняет и НЕ дополняет. Отображение курса записи: сначала этот
-    # снимок (производный курс), NULL — фолбэк на легаси course.
+    # Computed presentation value, never a persisted source snapshot.
     admission_year: int | None = Field(default=None)
+
+    @model_validator(mode='before')
+    @classmethod
+    def education_from_source_facts(cls, values):
+        if isinstance(values, dict):
+            values = dict(values)
+            group = values.get('Группа', values.get('group', ''))
+            reference_date = values.get('Дата', values.get('date'))
+            course = group_course(group, reference_date)
+            values['Курс'] = course
+            values['course'] = course
+            values['admission_year'] = parse_group_admission_year(group)
+        return values

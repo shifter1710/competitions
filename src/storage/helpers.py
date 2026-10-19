@@ -110,6 +110,8 @@ REPORT_IDENTITY_SQL = "CASE WHEN student_ref_id IS NOT NULL THEN 'r' || student_
 # момент соревнования, смена группы/института в профиле строки не склеивает.
 # Ключи синхронны с REPORT_SLICES в src/routes/reports.py. Выражения —
 # колонки таблицы competitions; «год» — первые 4 символа ISO-даты записи.
+REPORT_COURSE_SQL = 'education_course("group", date)'
+REPORT_ADMISSION_YEAR_SQL = 'education_admission_year("group")'
 REPORT_GROUPINGS: dict[str, tuple[str, ...]] = {
     'student': (
         REPORT_IDENTITY_SQL,
@@ -117,17 +119,16 @@ REPORT_GROUPINGS: dict[str, tuple[str, ...]] = {
         'student_sex',
         'institute',
         '"group"',
-        'course',
+        REPORT_COURSE_SQL,
     ),
     'group': ('"group"',),
     'institute': ('institute',),
-    'course': ('course',),
+    'course': (REPORT_COURSE_SQL,),
     'sport': ('sport',),
     'level': ('level',),
     'year': ('CAST(substr(date, 1, 4) AS INTEGER)',),
-    # Reports v2: срез «год поступления» — по снимку записи admission_year
-    # (NULL — своя группа, отображение «Не указан», данные не переписываются).
-    'admission_year': ('admission_year',),
+    # Historical source group determines year; unknown remains its own NULL slice.
+    'admission_year': (REPORT_ADMISSION_YEAR_SQL,),
 }
 DEFAULT_REPORT_GROUPING = 'student'
 
@@ -286,7 +287,7 @@ def participation_content_key(
     """Полный контент участия для сравнения ТОЧНЫХ дублей (P4).
 
     Контент-ключ CARDLESS-строк: ФИО + дисциплина (ключ повторов без
-    карточки) + пол/институт/группа/курс/место/результат + custom-значения
+    карточки) + пол/институт/группа/место/результат + custom-значения
     (сравниваются только непустые — пустая ячейка и отсутствие колонки
     неразличимы). Одна реализация для классификации предпросмотра
     (src/main.py) и серверной проверки apply_event_participation_batch:
@@ -298,6 +299,7 @@ def participation_content_key(
     exclude_custom_keys выкидывает их СИММЕТРИЧНО у существующей строки и
     вставляемой (легаси-строка до P4 несёт дисциплину только в extra_data,
     вставляемая — только в базовой колонке). Остальные customs — как раньше."""
+    # `course` is retained only for callable compatibility, never part of identity/content.
     exclude = {str(key) for key in exclude_custom_keys}
     customs = tuple(
         sorted(
@@ -312,7 +314,6 @@ def participation_content_key(
         dedup_text(sex),
         dedup_text(institute),
         dedup_text(group),
-        dedup_place(course),
         dedup_place(position),
         dedup_text(result),
         customs,
@@ -332,7 +333,7 @@ def competition_insert_records(
             item.student_sex,
             item.institute,
             item.group,
-            item.course,
+            '',  # inert NOT NULL compatibility column
             item.sport,
             item.date.isoformat(),
             item.date_to.isoformat() if item.date_to else None,
@@ -348,9 +349,8 @@ def competition_insert_records(
             item.discipline,
             item.result,
             item.calendar_event_id,
-            # Course/Education Phase A: снимок года поступления; storage
-            # заполняет его до вставки (_fill_admission_year_snapshots).
-            item.admission_year,
+            # Legacy column retained solely for database compatibility.
+            None,  # no independent admission-year snapshot
         )
         for item in competitions
     ]
@@ -369,7 +369,7 @@ BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
     'level': ('text', False),
     'name': ('text', False),
     'position': ('number', False),
-    'course': ('number', True),
+    'course': ('number', False),
 }
 
 

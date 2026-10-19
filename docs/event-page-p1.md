@@ -55,8 +55,8 @@ POST-редирект формы не терял выборку. Ключ огр
 | Выбор карточки в подсказках | FioResolver, скрытый student_ref_id, автозаполнение и сброс связи | P0 regression + browser |
 | «+ участие» для связанной одиночной строки/группы | Прежний prefill со снимком и той же карточкой | P7 regression + browser |
 | Ошибка добавления | Серверные form_* возвращаются; форма раскрыта | Target tests + browser |
-| Полная inline-правка | ФИО, пол, институт, группа, курс, дисциплина, место, результат, custom | Regression + browser/SQLite |
-| Кастомные поля и исторические данные | Прежний payload; сервер сохраняет связи, legacy extras и admission_year | Regression + SQLite |
+| Полная inline-правка | ФИО, пол, институт, группа, дисциплина, место, результат, custom; курс вычисляется | Regression + browser/SQLite |
+| Кастомные поля и исторические данные | Прежний payload; сервер сохраняет связи, legacy extras и инертные прежние course/admission_year | Regression + SQLite |
 | Ошибка/повтор/отмена/выход | Loading guard, сохранение ввода, beforeunload | Browser |
 | Удаление участия | Admin-only, прежнее подтверждение и endpoint | Roles + browser |
 | Связывание/создание карточки из участия | Прежняя отдельная страница, admin-only | Existing regression |

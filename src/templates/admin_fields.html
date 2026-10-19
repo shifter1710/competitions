@@ -12,7 +12,7 @@
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <h3 class="title mb-1">Базовые поля</h3>
-        <div class="text-muted mb-3">Тип и обязательность основных колонок записей. ФИО и Дата всегда обязательны: по ним работает дедупликация импорта и срезы отчётов. Тип «текст» разрешает нечисловые значения (например, Курс «Выпускник 2025/26»).</div>
+        <div class="text-muted mb-3">Тип и обязательность основных колонок записей. ФИО и Дата всегда обязательны: по ним работает дедупликация импорта и срезы отчётов. Курс вычисляется автоматически по группе и дате соревнования.</div>
         <form action="/admin/fields/base" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <div class="table-responsive">
@@ -25,7 +25,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        {% for key in base_field_labels %}
+                        {% for key in base_field_labels if key != 'course' %}
                         {% set setting = base_field_settings[key] %}
                         {% set locked = key in always_required_base_fields %}
                         <tr>

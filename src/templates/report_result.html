@@ -97,7 +97,7 @@
                     <td headers="report-col-student_sex{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="student_sex"{% if not row.student_sex %} class="text-muted"{% endif %}>{{ row.student_sex or 'Не указано' }}</td>
                     <td headers="report-col-institute{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="institute"{% if not row.institute %} class="text-muted"{% endif %}>{{ row.institute or 'Не указано' }}</td>
                     <td headers="report-col-group{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="group"{% if not row.group %} class="text-muted"{% endif %}>{{ row.group or 'Не указано' }}</td>
-                    <td headers="report-col-course{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="course">{{ row.course }}</td>
+                    <td headers="report-col-course{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="course">{{ row.course if row.course is not none else '—' }}</td>
                     {% else %}
                     <td headers="report-col-slice_value{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="slice_value"{% if row.slice_value is none %} class="text-muted" data-sort-value="-1"{% endif %}>{{ 'Не указано' if row.slice_value is none else row.slice_value }}</td>
                     {% endif %}

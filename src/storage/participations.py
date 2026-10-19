@@ -27,6 +27,8 @@ from src.storage.helpers import DEFAULT_REPORT_GROUPING
 from src.storage.helpers import EventParticipationConflictError
 from src.storage.helpers import IDENTITY_MODE_DEFAULT
 from src.storage.helpers import participation_content_key
+from src.storage.helpers import REPORT_ADMISSION_YEAR_SQL
+from src.storage.helpers import REPORT_COURSE_SQL
 from src.storage.helpers import REPORT_GROUPINGS
 from src.storage.helpers import REPORT_IDENTITY_SQL
 from src.storage.helpers import REPORT_METRIC_SELECTS
@@ -490,49 +492,25 @@ class ParticipationsMixin:
             return ReportSummary(**dict(row))
 
     def get_report_course_options(self) -> list[str]:
-        """Курсы для фильтра отчёта (Reports v2): точные значения из данных.
-
-        Только approved-записи (отчёт больше не видит), непустые; числовые
-        курсы идут по возрастанию, текстовые («Выпускник 2025/26» и т.п.) —
-        после них (нативный порядок SQLite: числа раньше текста).
-        """
+        """Distinct calculated positive courses; legacy text never becomes an option."""
         with self._lock:
             rows = self.connection.execute(
-                """
-                SELECT DISTINCT CAST(course AS TEXT) AS course_value
-                FROM competitions
-                WHERE review_status = 'approved'
-                    AND course IS NOT NULL
-                    AND TRIM(CAST(course AS TEXT)) != ''
-                ORDER BY course
-                """
+                f'SELECT DISTINCT {REPORT_COURSE_SQL} AS course_value FROM competitions '
+                f"WHERE review_status = 'approved' AND {REPORT_COURSE_SQL} IS NOT NULL "
+                'ORDER BY course_value'
             ).fetchall()
-            return [row['course_value'] for row in rows]
+            return [str(row['course_value']) for row in rows]
 
     def get_report_admission_year_options(self) -> tuple[list[int], bool]:
-        """Годы поступления для фильтра/среза отчёта (Reports v2).
-
-        Возвращает (годы по убыванию, есть_ли_NULL-снимки). NULL-снимок —
-        значение фильтра 'none' и группа среза «Не указан», данные в БД не
-        переписываются. Только approved-записи.
-        """
         with self._lock:
-            year_rows = self.connection.execute(
-                """
-                SELECT DISTINCT admission_year
-                FROM competitions
-                WHERE review_status = 'approved' AND admission_year IS NOT NULL
-                ORDER BY admission_year DESC
-                """
+            rows = self.connection.execute(
+                f'SELECT DISTINCT {REPORT_ADMISSION_YEAR_SQL} AS year_value FROM competitions '
+                "WHERE review_status = 'approved' ORDER BY year_value DESC"
             ).fetchall()
-            null_row = self.connection.execute(
-                """
-                SELECT 1 FROM competitions
-                WHERE review_status = 'approved' AND admission_year IS NULL
-                LIMIT 1
-                """
-            ).fetchone()
-            return [row['admission_year'] for row in year_rows], null_row is not None
+            return (
+                [row['year_value'] for row in rows if row['year_value'] is not None],
+                any(row['year_value'] is None for row in rows),
+            )
 
     def get_report_period_year_options(self) -> list[int]:
         """Учебные годы из данных для селекта периода отчёта (Reports v2).
@@ -629,14 +607,14 @@ class ParticipationsMixin:
         if course:
             # Курс — точное значение; колонка INTEGER, но лёгкий реестр полей
             # допускает текстовые курсы, сравнение через CAST надёжно для обоих.
-            filters.append('CAST(course AS TEXT) = ?')
+            filters.append(f'CAST({REPORT_COURSE_SQL} AS TEXT) = ?')
             params.append(course)
 
         if admission_year:
             if admission_year == 'none':
-                filters.append('admission_year IS NULL')
+                filters.append(f'{REPORT_ADMISSION_YEAR_SQL} IS NULL')
             else:
-                filters.append('CAST(admission_year AS TEXT) = ?')
+                filters.append(f'CAST({REPORT_ADMISSION_YEAR_SQL} AS TEXT) = ?')
                 params.append(admission_year)
 
         self._report_name_clause(name, filters, params)
@@ -741,7 +719,8 @@ class ParticipationsMixin:
                 select_columns = ',\n'.join(
                     [
                         f'{group_columns[0]} AS student_id',
-                        *group_columns[1:],
+                        *group_columns[1:-1],
+                        f'{REPORT_COURSE_SQL} AS course',
                         'MAX(CASE WHEN EXISTS (SELECT 1 FROM students '
                         'WHERE students.id = competitions.student_ref_id) '
                         'THEN competitions.student_ref_id END) AS student_ref_id',
@@ -986,18 +965,7 @@ class ParticipationsMixin:
             return cursor.rowcount
 
     def _fill_admission_year_snapshots(self, competitions: list[Competition]) -> list[Competition]:
-        """Заполнить NULL-снимки года поступления перед вставкой записей.
-
-        Course/Education Phase A: источник — ТОЛЬКО учебные данные группы
-        (строгое разрешение пары институт+группа, resolve_group_admission_
-        year). Парсер названий здесь НЕ работает и никогда не будет: он
-        предзаполнение формы и backfill-классификация, не доменная истина.
-        Уже заданное значение не перезаписывается; пара без учебных данных
-        остаётся NULL (фолбэк отображения — легаси course).
-        """
-        for item in competitions:
-            if item.admission_year is None:
-                item.admission_year = self.resolve_group_admission_year(item.institute, item.group)
+        """Compatibility seam: source facts are derived on reads, never backfilled."""
         return competitions
 
     def _sync_catalogs_from_records(self) -> None:
@@ -1031,7 +999,6 @@ class ParticipationsMixin:
                     student_sex = ?,
                     institute = ?,
                     "group" = ?,
-                    course = ?,
                     sport = ?,
                     date = ?,
                     date_to = ?,
@@ -1049,7 +1016,6 @@ class ParticipationsMixin:
                     competition.student_sex,
                     competition.institute,
                     competition.group,
-                    competition.course,
                     competition.sport,
                     competition.date.isoformat(),
                     competition.date_to.isoformat() if competition.date_to else None,
@@ -1106,8 +1072,8 @@ class ParticipationsMixin:
         result, calendar_event_id) нужны общему _row_to_competition;
         в сам xlsx-архив они НЕ попадают (competition_to_export_row
         вырезает) — ограничение pre-wipe архива см. docs/data-model.md.
-        Course/Education Phase A: admission_year — так же внутренняя
-        колонка, в архив не попадает (легаси-колонка course остаётся).
+        Admission year stays internal; exported course is derived by the
+        shared export helper from the historical group/start date.
         """
         with self._lock:
             rows = self.connection.execute(

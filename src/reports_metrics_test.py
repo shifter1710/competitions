@@ -89,11 +89,11 @@ def test_metrics_and_safe_visual_blocks_preserve_raw_history(metrics_history):
     raw = storage.get_filtered()
     groups = build_report_display_groups(raw, 'student')
     assert summary.count_participation == sum(row.count_participation for row in raw) == 16
-    assert len(raw) == 13 and len(groups) == 9
+    assert len(raw) == 12 and len(groups) == 9
     assert summary.count_unique_participants == 5  # orphan ref remains the existing identity rule
     assert summary.count_events == 2 and summary.count_unlinked_participations == 5
-    assert sorted(map(len, groups)) == [1] * 8 + [5]
-    combined = next(group for group in groups if len(group) == 5)
+    assert sorted(map(len, groups)) == [1] * 8 + [4]
+    combined = next(group for group in groups if len(group) == 4)
     assert {row.student_ref_id for row in combined} == {first}
     assert {row.student_name for row in combined} == {'Тестовый Исторический'}
     assert any(group[0].student_ref_id == twin for group in groups)
@@ -114,8 +114,8 @@ def test_metrics_and_safe_visual_blocks_preserve_raw_history(metrics_history):
         ({'group': ['А-3']}, (1, 0, 1)),
         ({'sport': ['Плавание']}, (0, 0, 0)),
         ({'level': ['Другой']}, (0, 0, 0)),
-        ({'course': '3'}, (1, 0, 1)),
-        ({'admission_year': 'none'}, (0, 0, 0)),
+        ({'course': '3'}, (0, 0, 0)),
+        ({'admission_year': 'none'}, (2, 5, 16)),
         ({'name': 'ДРУГОЕ'}, (0, 1, 1)),
         ({'date_from': '01.01.2027'}, (0, 0, 0)),
         ({'date_to': '30.09.2026'}, (0, 0, 0)),
@@ -137,11 +137,11 @@ def test_html_xlsx_grouping_metrics_and_safe_links(metrics_history, role):
     assert screen.status == export.status == 200
     html = screen.text
     body = re.search(r'<tbody>(.*?)</tbody>', html, re.S).group(1)
-    assert len(re.findall(r'<tr\b', body)) == 13
-    assert re.findall(r'data-column-key="index">(\d+)', body) == list(map(str, range(1, 14)))
+    assert len(re.findall(r'<tr\b', body)) == 12
+    assert re.findall(r'data-column-key="index">(\d+)', body) == list(map(str, range(1, 13)))
     names = re.findall(r'<th scope="row".*?</th>', body, re.S)
     assert len(names) == 9
-    assert len([cell for cell in names if 'rowspan="5"' in cell]) == 1
+    assert len([cell for cell in names if 'rowspan="4"' in cell]) == 1
     assert f'href="/admin/people/{first}?' in body and f'href="/admin/people/{twin}?' in body
     assert 'href="/admin/people/999999?' not in body
     assert 'report-col-count_participation report-student-' in body
@@ -150,7 +150,7 @@ def test_html_xlsx_grouping_metrics_and_safe_links(metrics_history, role):
     assert len(re.findall(r'class="report-stat"', html)) == 6
     assert 'data-column-key="index" data-sort-type="none"' in html
     xlsx = get_report_xlsx_rows(export.content, 'ФИО')
-    assert len(xlsx[1:-1]) == 13
+    assert len(xlsx[1:-1]) == 12
     assert [tuple(row[:5]) + tuple(row[5:]) for row in xlsx[1:-1]] == [
         (
             row.student_name,

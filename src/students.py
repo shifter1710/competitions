@@ -91,7 +91,7 @@ def parse_student_form(request: Request) -> tuple[dict, str | None]:
     sex = get_form_value(request, 'sex').strip()
     institute = get_form_value(request, 'institute').strip()
     group_name = get_form_value(request, 'group').strip()
-    course = get_form_value(request, 'course').strip()
+    course = ''  # Compatibility argument only; the current course is derived from group.
     if not full_name:
         return {}, 'Укажите ФИО студента.'
     if sex not in STUDENT_SEX_OPTIONS:
@@ -132,10 +132,10 @@ def reconcile_link_error(
 
 
 def normalize_import_course(value) -> str:
-    """Курс из ячейки Excel как строка: 2.0 → «2», NaN/None → «».
+    """Generic legacy cell normalizer, also reused for place/result cells.
 
-    Числовые ячейки pandas отдаёт float'ами («2» в Excel → 2.0); целые
-    выводятся без дробной части, остальное (текст, нецелые) — как str().
+    Course import callers ignore the supplied course; retain this conversion
+    for unrelated numeric cells and callable compatibility.
     """
     if value is None or isna(value):
         return ''

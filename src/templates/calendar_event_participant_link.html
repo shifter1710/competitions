@@ -148,11 +148,7 @@
                     <input class="form-control" id="participant-link-group" name="group" type="text"
                         value="{{ record.group or '' }}">
                 </div>
-                <div class="col-md-2">
-                    <label class="label" for="participant-link-course">Курс</label>
-                    <input class="form-control" id="participant-link-course" name="course" type="text"
-                        value="{{ '' if record.course is none else record.course }}">
-                </div>
+                <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
                 <div class="col-12">
                     <button class="btn btn-primary" type="submit">Создать и связать</button>
                     <div class="form-text ui-hint">

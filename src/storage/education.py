@@ -1,7 +1,6 @@
 """Учебные данные хранилища Competitions: уровни образования, учебные
-данные групп (год поступления/уровень/длительность), строгий резолв года
-поступления по паре институт+группа, снимок года поступления записей и его
-backfill.
+данные групп (уровень/длительность) и вычисление года по названию группы.
+Старые колонки года сохранены без изменений; запись backfill отключена.
 
 Course / Education, Phase A. Контракт примеси (Architecture v2.1): не
 создаёт соединение и блокировку (self.connection / self._lock принадлежат
@@ -13,9 +12,7 @@ from datetime import datetime
 
 from src.education import derive_course
 from src.education import effective_duration_years
-from src.education import MAX_ADMISSION_YEAR
 from src.education import MAX_DURATION_YEARS
-from src.education import MIN_ADMISSION_YEAR
 from src.education import MIN_DURATION_YEARS
 from src.education import parse_group_admission_year
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
@@ -161,10 +158,12 @@ class EducationMixin:
         with self._lock:
             row = self.connection.execute(
                 '''
-                SELECT ga.group_catalog_value_id, ga.education_level_id, ga.admission_year,
+                SELECT ga.group_catalog_value_id, ga.education_level_id,
+                       education_admission_year(groups.value) AS admission_year,
                        ga.duration_years_override, ga.source, ga.updated_at,
                        el.name AS education_level_name, el.default_duration_years AS level_default_duration_years
                 FROM group_academic AS ga
+                JOIN catalog_values AS groups ON groups.id = ga.group_catalog_value_id
                 LEFT JOIN education_levels AS el ON el.id = ga.education_level_id
                 WHERE ga.group_catalog_value_id = ?
                 ''',
@@ -186,9 +185,9 @@ class EducationMixin:
         Валидация здесь, а не в CHECK-ограничениях (паттерн проекта):
         целевая строка справочника — category='group'; уровень существует
         (может быть скрытым — метаданные переживают деактивацию уровня);
-        год поступления — NULL или int в допустимом диапазоне; длительность
-        — NULL или int в допустимом диапазоне. Все поля пишутся целиком:
-        форма отправляет полный набор, «пусто» = очистить.
+        Длительность — NULL или int в допустимом диапазоне.
+        Уровень и длительность пишутся целиком; старый год не изменяется.
+        Параметр admission_year игнорируется для совместимости вызовов.
         """
         if education_level_id is not None:
             with self._lock:
@@ -198,11 +197,6 @@ class EducationMixin:
                 ).fetchone()
             if level is None:
                 raise ValueError('Уровень образования не найден')
-        if admission_year is not None:
-            if not isinstance(admission_year, int) or isinstance(admission_year, bool):
-                raise ValueError('Год поступления должен быть целым числом или пустым')
-            if not MIN_ADMISSION_YEAR <= admission_year <= MAX_ADMISSION_YEAR:
-                raise ValueError(f'Год поступления должен быть от {MIN_ADMISSION_YEAR} до {MAX_ADMISSION_YEAR}')
         self._assert_valid_duration(duration_years_override, field='Длительность обучения')
         now = datetime.utcnow().isoformat()
         with self._lock:
@@ -221,7 +215,6 @@ class EducationMixin:
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(group_catalog_value_id) DO UPDATE SET
                         education_level_id = excluded.education_level_id,
-                        admission_year = excluded.admission_year,
                         duration_years_override = excluded.duration_years_override,
                         source = excluded.source,
                         updated_at = excluded.updated_at
@@ -229,7 +222,7 @@ class EducationMixin:
                     (
                         group_catalog_value_id,
                         education_level_id,
-                        admission_year,
+                        None,  # inert legacy column; source is the group name
                         duration_years_override,
                         source,
                         now,
@@ -254,7 +247,8 @@ class EducationMixin:
         with self._lock:
             rows = self.connection.execute(
                 '''
-                SELECT ga.group_catalog_value_id, ga.education_level_id, ga.admission_year,
+                SELECT ga.group_catalog_value_id, ga.education_level_id,
+                       education_admission_year(groups.value) AS admission_year,
                        ga.duration_years_override, ga.source, ga.updated_at,
                        groups.value AS group_value, institutes.value AS institute_value,
                        el.name AS education_level_name
@@ -285,60 +279,45 @@ class EducationMixin:
             return self.find_catalog_row('group', group_text, parent_id=institute_row['id'])
 
     def resolve_group_admission_year(self, institute: str, group: str) -> int | None:
-        """Год поступления пары институт+группа из учебных данных группы.
+        """Confirmed group naming rule; no catalog or stored-year fallback."""
+        return parse_group_admission_year(group)
 
-        Только строгое разрешение пары по справочнику; фолбэка на парсер
-        названий здесь НЕТ и не будет (парсер — предзаполнение формы и
-        классификация backfill, не доменная истина). Нет пары в справочнике,
-        нет учебных данных или не задан год — None.
-        """
+    def get_student_education_context(self, institute: str, group: str) -> dict:
+        """Derived year is independent of optional duration/level catalog metadata."""
+        result = {
+            'level_name': None,
+            'admission_year': parse_group_admission_year(group),
+            'duration_years_override': None,
+            'level_default_duration_years': None,
+            'effective_duration_years': None,
+            'group_value': group,
+        }
         row = self._resolve_group_catalog_row(institute, group)
         if row is None:
-            return None
+            return result
         with self._lock:
             academic = self.connection.execute(
-                'SELECT admission_year FROM group_academic WHERE group_catalog_value_id = ?',
-                (row['id'],),
-            ).fetchone()
-        if academic is None or academic['admission_year'] is None:
-            return None
-        return int(academic['admission_year'])
-
-    def get_student_education_context(self, institute: str, group: str) -> dict | None:
-        """Учебный контекст для карточки студента: уровень, год поступления,
-        эффективная длительность.
-
-        None — пара институт+группа не резолвится в строку справочника ИЛИ у
-        группы нет строки group_academic (карточка «Образование» не
-        рендерится). Курс считаем в роуте (src.education.derive_course).
-        """
-        row = self._resolve_group_catalog_row(institute, group)
-        if row is None:
-            return None
-        with self._lock:
-            academic = self.connection.execute(
-                '''
-                SELECT ga.education_level_id, ga.admission_year, ga.duration_years_override,
-                       el.name AS education_level_name, el.default_duration_years AS level_default_duration_years
+                """
+                SELECT ga.duration_years_override, el.name AS education_level_name,
+                       el.default_duration_years AS level_default_duration_years
                 FROM group_academic AS ga
                 LEFT JOIN education_levels AS el ON el.id = ga.education_level_id
                 WHERE ga.group_catalog_value_id = ?
-                ''',
+                """,
                 (row['id'],),
             ).fetchone()
-        if academic is None:
-            return None
-        duration = effective_duration_years(
-            academic['duration_years_override'], academic['level_default_duration_years']
-        )
-        return {
-            'level_name': academic['education_level_name'],
-            'admission_year': academic['admission_year'],
-            'duration_years_override': academic['duration_years_override'],
-            'level_default_duration_years': academic['level_default_duration_years'],
-            'effective_duration_years': duration,
-            'group_value': row['value'],
-        }
+        if academic is not None:
+            result.update(
+                {
+                    'level_name': academic['education_level_name'],
+                    'duration_years_override': academic['duration_years_override'],
+                    'level_default_duration_years': academic['level_default_duration_years'],
+                    'effective_duration_years': effective_duration_years(
+                        academic['duration_years_override'], academic['level_default_duration_years']
+                    ),
+                }
+            )
+        return result
 
     # ---- Снимок года поступления записей: счётчик и backfill ----
 
@@ -348,7 +327,7 @@ class EducationMixin:
         with self._lock:
             return int(
                 self.connection.execute(
-                    'SELECT COUNT(*) AS total FROM competitions WHERE admission_year IS NULL'
+                    'SELECT COUNT(*) AS total FROM competitions WHERE education_admission_year("group") IS NULL'
                 ).fetchone()['total']
             )
 
@@ -432,42 +411,5 @@ class EducationMixin:
             }
 
     def apply_group_admission_backfill(self) -> dict[str, int]:
-        """Заполнить admission_year ТОЛЬКО у SAFE-записей (одна транзакция).
-
-        Классификация пересчитывается в момент применения (предпросмотр мог
-        устареть); каждая строка — guarded UPDATE `WHERE id = ? AND
-        admission_year IS NULL`: запись, которую успели заполнить, —
-        пропуск (skipped), не откат пакета. Возвращает {'matched',
-        'applied', 'skipped'}.
-        """
-        with self._lock:
-            rows = self.connection.execute(
-                '''
-                SELECT id, student_name, institute, "group", date
-                FROM competitions
-                WHERE admission_year IS NULL
-                ORDER BY id ASC
-                '''
-            ).fetchall()
-            counters = {'matched': 0, 'applied': 0, 'skipped': 0}
-            try:
-                for row in rows:
-                    category, year, _reason = self._classify_admission_year_row(row)
-                    if category != 'safe':
-                        continue
-                    counters['matched'] += 1
-                    cursor = self.connection.execute(
-                        'UPDATE competitions SET admission_year = ? WHERE id = ? AND admission_year IS NULL',
-                        (year, row['id']),
-                    )
-                    if cursor.rowcount:
-                        counters['applied'] += 1
-                    else:
-                        # Кто-то заполнил запись между предпросмотром и apply —
-                        # не ломаем пакет, считаем пропуском.
-                        counters['skipped'] += 1
-                self.connection.commit()
-            except BaseException:
-                self.connection.rollback()
-                raise
-            return counters
+        """Retired: automatic writes to historical year columns are prohibited."""
+        raise ValueError('Заполнение сохранённых годов отключено: год и курс определяются по группе.')

@@ -36,7 +36,7 @@ from src.auth import user_is_athlete
 from src.auth import user_is_moderator
 from src.auth import user_owns_record
 from src.auth import USER_ROLES
-from src.education import derive_course
+from src.education import group_course
 from src.files import ATTACHMENT_MAX_SIZE
 from src.files import attachments_dir
 from src.files import detect_attachment_type
@@ -202,20 +202,8 @@ def _index_sort_triple(value, kind: str) -> tuple[int, float, str]:
 
 
 def _index_course_row_value(row) -> object:
-    """Эффективное значение колонки «Курс» — как на экране (build_index_
-    course_cells): производный курс по снимку года поступления; «future» —
-    пусто («—»), без снимка — легаси course записи."""
-    if row['admission_year'] is not None:
-        try:
-            reference_date = datetime.fromisoformat(row['date']).date()
-        except (TypeError, ValueError):
-            reference_date = None
-        if reference_date is not None:
-            derived = derive_course(row['admission_year'], reference_date)
-            if derived['status'] == 'ok':
-                return derived['course']
-        return ''
-    return row['course']
+    """Displayed course from the historical group's own participation date."""
+    return group_course(row['group'], row['date'])
 
 
 def build_index_sort_key(sort: str, custom_fields: Sequence[CustomField]):
@@ -389,28 +377,15 @@ def build_link_bindings(custom_fields: Sequence[CustomField]) -> dict[str, str]:
 
 
 def build_index_course_cells(competitions: Sequence[Competition]) -> dict[str, dict]:
-    """Course/Education Phase A: ячейки колонки «Курс» реестра с производным
-    курсом по снимку года поступления.
-
-    У записи есть admission_year → показывается производный курс НА ДАТУ
-    СОРЕВНОВАНИЯ (ok — число; future — «—» с подсказкой). Записи без снимка
-    в словарь не попадают: шаблон показывает легаси competition.course как
-    раньше (включая текстовые значения вроде «Выпускник 2025/26»).
-    Расчёт живёт только в src.education.derive_course.
-    """
-    cells: dict[str, dict] = {}
-    for competition in competitions:
-        if competition.admission_year is None:
-            continue
-        derived = derive_course(competition.admission_year, competition.date.date())
-        if derived['status'] == 'ok':
-            cells[competition.record_id] = {'value': str(derived['course'])}
-        elif derived['status'] == 'future':
-            cells[competition.record_id] = {
-                'value': '—',
-                'title': 'Год поступления позже даты соревнования',
-            }
-    return cells
+    """Calculated historical courses, including explicit unknown states."""
+    return {
+        item.record_id: {
+            'value': str(value) if value is not None else '—',
+            'title': '' if value is not None else 'Курс не определён по группе и дате соревнования',
+        }
+        for item in competitions
+        for value in [group_course(item.group, item.date)]
+    }
 
 
 # Конфликт-режим импорта (№6/№8, docs/data-model-decisions.md «Конфликт-режим
@@ -443,7 +418,7 @@ def queue_candidate_view(payload: dict) -> list[tuple[str, str]]:
     """Поля кандидата из очереди как пары (название, значение) для страницы."""
     view = []
     for key in QUEUE_FIELD_ORDER:
-        value = payload.get(key)
+        value = group_course(payload.get('group'), payload.get('date')) if key == 'course' else payload.get(key)
         if key in ('date', 'date_to') and value:
             try:
                 value = format_date_range(
@@ -474,7 +449,7 @@ def queue_edit_values(payload: dict) -> dict:
         'student_sex': '' if payload.get('student_sex') is None else str(payload.get('student_sex')),
         'institute': '' if payload.get('institute') is None else str(payload.get('institute')),
         'group': '' if payload.get('group') is None else str(payload.get('group')),
-        'course': '' if payload.get('course') is None else str(payload.get('course')),
+        'course': group_course(payload.get('group'), payload.get('date')),
         'sport': '' if payload.get('sport') is None else str(payload.get('sport')),
         'date': date_display,
         'level': '' if payload.get('level') is None else str(payload.get('level')),
@@ -551,11 +526,11 @@ def autofill_record_from_known_athlete(
 ) -> None:
     """№23доп (docs/feedback-live.md): автозаполнение пустых полей строки импорта.
 
-    Для строки с пустыми Пол/Институт/Группа/Курс — данные известного атлета
+    Для строки с пустыми Пол/Институт/Группа — данные известного атлета
     (профиль или последняя запись, точное ФИО). Заполненные поля строки НЕ
     перезаписываются: запись — исторический факт. Заполняется ДО
     build_competition и подсчёта дублей: дубль-ключ считается после
-    автозаполнения, и пустой Курс проходит валидацию только после неё.
+    автозаполнения. Курс вычисляется по итоговой группе и дате участия.
     """
     name = clean_str(record.get('ФИО', ''))
     if not name:
@@ -573,8 +548,6 @@ def autofill_record_from_known_athlete(
     ):
         if import_record_value_is_empty(record.get(column)) and known.get(result_key):
             record[column] = known[result_key]
-    if import_record_value_is_empty(record.get('Курс')) and known.get('course'):
-        record['Курс'] = known['course']
 
 
 def build_import_competitions(df: pd.DataFrame, custom_fields, storage: SQLiteAdapter) -> list[Competition]:
@@ -797,7 +770,7 @@ def competition_update_record(
         'Уровень соревнований': get_form_value(request, 'level'),
         'Название соревнований': get_form_value(request, 'name'),
         'Место': get_form_value(request, 'position'),
-        'Курс': get_form_value(request, 'course'),
+        'Курс': '',
     }
     custom_values, discipline_from_form_custom = competition_update_custom_values(request, existing, custom_fields)
     record.update(custom_values)
@@ -957,7 +930,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 # №24: карта «целевая колонка → ключ link-поля» для рендера.
                 'link_bindings': build_link_bindings(custom_fields),
                 # Course/Education Phase A: ячейки производного курса по
-                # снимку года поступления (нет снимка — легаси course).
+                # собственной исторической группе и дате участия.
                 'course_cells': build_index_course_cells(competitions),
                 'admin_custom_fields': storage.get_custom_fields(include_inactive=True),
                 'field_type_options': FIELD_TYPE_OPTIONS,
@@ -1188,7 +1161,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             'Уровень соревнований': get_form_value(request, 'level'),
             'Название соревнований': get_form_value(request, 'name'),
             'Место': get_form_value(request, 'position'),
-            'Курс': get_form_value(request, 'course'),
+            'Курс': '',
             # Event Model, P5a: дисциплина правится вместе с остальными полями.
             'Дисциплина': get_form_value(request, 'discipline'),
         }
@@ -1373,7 +1346,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                     'kind': 'student',
                     'student_id': item['student_id'],
                     'name': item['name'],
-                    **{key: item[key] for key in ('sex', 'institute', 'group', 'course') if item.get(key)},
+                    **{key: item[key] for key in ('sex', 'institute', 'group') if item.get(key)},
                 }
                 for item in students
             ]
@@ -1410,7 +1383,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             'Уровень соревнований': get_form_value(request, 'level'),
             'Название соревнований': get_form_value(request, 'name'),
             'Место': get_form_value(request, 'position'),
-            'Курс': get_form_value(request, 'course'),
+            'Курс': '',
         }
         record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
 
@@ -1420,7 +1393,6 @@ def register(app: Sanic) -> None:  # noqa: C901
             ('Пол', 'student_sex'),
             ('Институт', 'institute'),
             ('Группа', 'group'),
-            ('Курс', 'course'),
         ):
             if not str(record.get(form_key, '')).strip() and profile_key in profile_defaults:
                 record[form_key] = profile_defaults[profile_key]

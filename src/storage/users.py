@@ -12,6 +12,8 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Sequence
 
+from src.education import current_group_course
+from src.education import parse_group_admission_year
 from src.storage.helpers import IDENTITY_MODE_DEFAULT
 from src.storage.helpers import IDENTITY_MODES
 
@@ -194,6 +196,14 @@ class UsersMixin:
             self.connection.commit()
             return detached
 
+    @staticmethod
+    def _profile_presentation(profile_data: str) -> dict:
+        profile = json.loads(profile_data or '{}')
+        if profile:
+            profile['course'] = current_group_course(profile.get('group'))
+            profile['admission_year'] = parse_group_admission_year(profile.get('group'))
+        return profile
+
     def get_profile(self, user_id: int) -> dict:
         with self._lock:
             row = self.connection.execute(
@@ -202,9 +212,10 @@ class UsersMixin:
             ).fetchone()
             if row is None:
                 return {}
-            return json.loads(row['profile_data'] or '{}')
+            return self._profile_presentation(row['profile_data'])
 
     def set_profile(self, user_id: int, profile: dict) -> None:
+        profile = {key: value for key, value in profile.items() if key not in {'course', 'admission_year'}}
         with self._lock:
             self.connection.execute(
                 'UPDATE users SET profile_data = ? WHERE id = ?',
@@ -368,7 +379,7 @@ class UsersMixin:
                     'id': row['id'],
                     'username': row['username'],
                     'active': row['active'],
-                    'profile_data': json.loads(row['profile_data'] or '{}'),
+                    'profile_data': self._profile_presentation(row['profile_data']),
                     'name_aliases': json.loads(row['name_aliases'] or '[]'),
                 }
                 for row in rows
@@ -389,7 +400,7 @@ class UsersMixin:
                 'id': row['id'],
                 'username': row['username'],
                 'active': row['active'],
-                'profile_data': json.loads(row['profile_data'] or '{}'),
+                'profile_data': self._profile_presentation(row['profile_data']),
                 'name_aliases': json.loads(row['name_aliases'] or '[]'),
             }
 
@@ -652,7 +663,6 @@ class UsersMixin:
         ('student_sex', 'sex'),
         ('institute', 'institute'),
         ('group', 'group'),
-        ('course', 'course'),
     )
 
     @classmethod
@@ -704,6 +714,8 @@ class UsersMixin:
                 self._merge_athlete_entry(merged, entry)
         for row in record_rows:
             self._merge_athlete_entry(merged, self._athlete_entry_from_record(row))
+        for entry in merged.values():
+            entry['course'] = current_group_course(entry.get('group'))
         return merged
 
     @staticmethod
@@ -711,6 +723,6 @@ class UsersMixin:
         """Дозаполнить вариант атлета первыми встреченными непустыми значениями."""
         key = entry['name'].lower()
         target = merged.setdefault(key, {'name': entry['name']})
-        for result_key in ('sex', 'institute', 'group', 'course'):
+        for result_key in ('sex', 'institute', 'group'):
             if result_key not in target and result_key in entry:
                 target[result_key] = entry[result_key]
