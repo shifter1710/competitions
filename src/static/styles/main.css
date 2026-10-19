@@ -1380,7 +1380,7 @@ a.filter-chip__x {
     border-style: dashed;
 }
 
-/* Карточки сводки отчёта (Reports v2): 5 метрик по всей выборке; подпись
+/* Карточки сводки отчёта (Reports v2): 6 метрик по всей выборке; подпись
    мелкая, число крупное с табличными цифрами. На токенах темы — как
    .filter-chip, автоматически корректны в светлой/тёмной. */
 .report-stats {
@@ -2352,3 +2352,18 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
 .report-multi:not([data-enhanced]) .report-multi__toggle,
 .report-multi:not([data-enhanced]) .report-multi__search,
 .report-multi:not([data-enhanced]) .report-multi__actions { display: none; }
+
+/* HTML-only report blocks keep historical rows distinct in both themes. */
+.report-table .report-group-start > * {
+    border-top: 2px solid var(--border-strong);
+}
+.report-table tbody th[data-column-key="student_name"] {
+    vertical-align: middle;
+    font-weight: 500;
+    min-width: 160px;
+    background: var(--surface-alt);
+}
+.report-table thead th:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
+}

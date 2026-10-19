@@ -32,6 +32,8 @@ class ReportSummary(BaseModel):
     среза = 2 строки таблицы, но 1 уникальный участник выборки).
     """
 
+    count_events: int = 0
+    count_unlinked_participations: int = 0
     count_participation: int = 0
     count_wins: int = 0
     count_prizes: int = 0

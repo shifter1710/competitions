@@ -1,6 +1,6 @@
 """Маршруты отчётов: страница отчётов, отчёт по фильтрам и выгрузка в Excel.
 
-Reports v2 (docs/data-model-decisions.md «Reports v2»): 5 метрик с
+Reports v2 (docs/data-model-decisions.md «Reports v2»): 6 метрик с
 identity-правилом уникальных, период-учебный год, фильтры курс/год
 поступления, GET-навигация /reports (канонический адрес). /report остаётся
 фрагментом результата для существующих ссылок и тестов.
@@ -418,8 +418,8 @@ def build_report_workbook(
 ) -> BytesIO:
     """XLSX отчёта: шапка параметров, заголовки, данные, «Итого».
 
-    Строки данных — в каноническом порядке сервера (контракт Reports v2:
-    экспорт и экран показывают одинаковый порядок). Защита от formula
+    Строки данных — в каноническом порядке сервера, до визуальной
+    группировки HTML. Защита от formula
     injection — sanitize_spreadsheet_value (как в реестре).
     """
     slice_column = REPORT_SLICE_COLUMNS[slice_key][0]
@@ -454,6 +454,7 @@ def build_report_workbook(
             'Призовых',
             'Уникальных участников',
             'Уникальных призёров',
+            'Соревнований',
         ]
     )
     sheet.append(
@@ -464,6 +465,14 @@ def build_report_workbook(
             summary.count_prizes,
             summary.count_unique_participants,
             summary.count_unique_prizers,
+            summary.count_events,
+        ]
+    )
+    sheet.append(
+        [
+            'Соревнований: уникальные ID событий; участия без связи не учитываются.',
+            'Участий без связи с событием:',
+            summary.count_unlinked_participations,
         ]
     )
     sheet.append([])
@@ -487,6 +496,21 @@ def build_report_workbook(
     return buffer
 
 
+def build_report_display_groups(report_rows: Sequence, slice_key: str) -> list[list]:
+    """HTML-only blocks. A confirmed card and exact historical name are required.
+
+    Keep SQL/XLSX rows unchanged; an absent card or empty name is a singleton.
+    Dict insertion order preserves the first canonical occurrence of each block.
+    """
+    groups: dict[tuple, list] = {}
+    for index, row in enumerate(report_rows):
+        key = ('row', index)
+        if slice_key == DEFAULT_REPORT_SLICE and row.student_ref_id is not None and row.student_name.strip():
+            key = ('student', row.student_ref_id, row.student_name)
+        groups.setdefault(key, []).append(row)
+    return list(groups.values())
+
+
 def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     """Контекст зоны результата отчёта (общий для /reports и /report).
 
@@ -502,8 +526,11 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     report_rows = get_report_rows(storage, slice_key, filter_kwargs)
     summary = storage.get_report_summary(**filter_kwargs)
     rows_count = len(report_rows)
+    display_groups = build_report_display_groups(report_rows, slice_key)
     return {
         'report_rows': report_rows,
+        'report_display_groups': display_groups,
+        'visual_groups_count': len(display_groups),
         # Пустой /report — всё время; /reports без условий не показывает результат.
         'report_return_url': '/reports?' + urlencode(entries or [('period', REPORT_PERIOD_ALL)]),
         'report_slice': slice_key,

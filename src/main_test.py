@@ -1252,9 +1252,17 @@ def test_export_report_xlsx_header_shows_parameters_and_metrics(reports_client: 
     assert re.fullmatch(r'\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}', formed[1])
     assert formed[2] == 'Строк:'
     assert formed[3] == 1
-    assert ('Метрики:', 'Участий', 'Побед', 'Призовых', 'Уникальных участников', 'Уникальных призёров') in header_rows
+    assert (
+        'Метрики:',
+        'Участий',
+        'Побед',
+        'Призовых',
+        'Уникальных участников',
+        'Уникальных призёров',
+        'Соревнований',
+    ) in header_rows
     # Значения метрик (первая пустая ячейка после чтения XLSX — None).
-    assert (None, 3, 2, 3, 3, 3) in header_rows
+    assert (None, 3, 2, 3, 3, 3, 0) in header_rows
 
 
 # --- Классы фильтра места (P1 fix): место 0 не входит в «Победа»/«Призовое». ---
@@ -1417,9 +1425,10 @@ def get_report_cells(html: str) -> list[list[str]]:
     body = re.search(r'<tbody>(.*?)</tbody>', html, re.S)
     if body is None:
         return []
-    rows = re.findall(r'<tr>(.*?)</tr>', body.group(1), re.S)
+    rows = re.findall(r'<tr\b[^>]*>(.*?)</tr>', body.group(1), re.S)
     return [
-        [re.sub(r'<[^>]+>', '', cell).strip() for cell in re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)] for row in rows
+        [re.sub(r'<[^>]+>', '', cell).strip() for cell in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row, re.S)]
+        for row in rows
     ]
 
 
@@ -12315,8 +12324,8 @@ def test_reconcile_link_extends_athlete_cabinet_by_ref(reconcile_client: SanicTe
 
     assert '2 строки · 2 участия' in report_linked.text
     assert '2 строки · 2 участия' in report_unlinked.text
-    assert report_stat_values(report_linked.text) == ['2', '2', '2', '1', '1']
-    assert report_stat_values(report_unlinked.text) == ['2', '2', '2', '2', '2']
+    assert report_stat_values(report_linked.text) == ['2', '2', '2', '1', '1', '0']
+    assert report_stat_values(report_unlinked.text) == ['2', '2', '2', '2', '2', '0']
 
 
 def test_reconcile_endpoints_reject_missing_csrf(reconcile_client: SanicTestClient):

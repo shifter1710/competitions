@@ -23,8 +23,12 @@
     Условия изменены — таблица ниже рассчитана по прежним условиям.
 </div>
 <div class="table-meta">
-    <span>{{ rows_count }} {{ rows_count_label }} · {{ total_participations }} {{ participations_label }}</span>
+    <span>{{ rows_count }} {{ rows_count_label }} · {{ total_participations }} {{ participations_label }}{% if report_slice_is_student %} · Блоков студентов: {{ visual_groups_count }}{% endif %}</span>
 </div>
+<p class="text-muted small" id="report-counts-help">{% if report_slice_is_student %}Строки отражают исторические состояния: институт, группа и курс могут различаться у одного студента.{% else %}Строки отражают значения выбранного среза по историческим данным записей.{% endif %}
+    Уникальные участники считаются по Student Identity; каждая запись без связи — отдельно.
+    {% if report_slice_is_student %}ФИО объединено только при подтверждённой общей карточке и одинаковом историческом имени.
+    При сортировке строки блока остаются рядом: внутри — по выбранному столбцу, блоки — по первой строке (минимум ↑, максимум ↓). Номера показывают текущие позиции строк.{% endif %}</p>
 <div class="report-stats">
     <div class="report-stat">
         <span class="report-stat__label">Участий</span>
@@ -46,53 +50,66 @@
         <span class="report-stat__label">Уникальных призёров</span>
         <span class="report-stat__value">{{ report_summary.count_unique_prizers }}</span>
     </div>
+    <div class="report-stat">
+        <span class="report-stat__label">Соревнований</span>
+        <span class="report-stat__value">{{ report_summary.count_events }}</span>
+    </div>
 </div>
+<p class="text-muted small" id="report-events-help">Соревнования считаются по ID события, независимо от названия и числа участий.
+    Участий без связи с событием: {{ report_summary.count_unlinked_participations }} — они не входят в число соревнований.</p>
 {% if report_rows %}
 <div class="table-card" data-table-view="report">
     <div class="table-responsive">
-        <table class="table table-striped table-bordered interactive-table">
+        <table class="table table-striped table-bordered interactive-table report-table" data-report-table="true" aria-describedby="report-counts-help report-events-help">
             <thead class="table-dark">
                 <tr>
-                    <th scope="col" data-column-key="index" data-sort-type="number">№</th>
+                    <th scope="col" id="report-col-index" data-column-key="index" data-sort-type="none">№</th>
                     {% if report_slice_is_student %}
-                    <th scope="col" data-column-key="student_name" data-sort-type="text">ФИО</th>
-                    <th scope="col" data-column-key="student_sex" data-sort-type="text">Пол</th>
-                    <th scope="col" data-column-key="institute" data-sort-type="text">Институт</th>
-                    <th scope="col" data-column-key="group" data-sort-type="text">Группа</th>
-                    <th scope="col" data-column-key="course" data-sort-type="number">Курс</th>
+                    <th scope="col" id="report-col-student_name" data-column-key="student_name" data-sort-type="text">ФИО</th>
+                    <th scope="col" id="report-col-student_sex" data-column-key="student_sex" data-sort-type="text">Пол</th>
+                    <th scope="col" id="report-col-institute" data-column-key="institute" data-sort-type="text">Институт</th>
+                    <th scope="col" id="report-col-group" data-column-key="group" data-sort-type="text">Группа</th>
+                    <th scope="col" id="report-col-course" data-column-key="course" data-sort-type="number">Курс</th>
                     {% else %}
-                    <th scope="col" data-column-key="slice_value" data-sort-type="{{ report_slice_sort_type }}">{{ report_slice_column }}</th>
+                    <th scope="col" id="report-col-slice_value" data-column-key="slice_value" data-sort-type="{{ report_slice_sort_type }}">{{ report_slice_column }}</th>
                     {% endif %}
-                    <th scope="col" data-column-key="count_participation" data-sort-type="number">Участий</th>
-                    <th scope="col" data-column-key="count_wins" data-sort-type="number">Побед</th>
-                    <th scope="col" data-column-key="count_prizes" data-sort-type="number">Призовых</th>
+                    <th scope="col" id="report-col-count_participation" data-column-key="count_participation" data-sort-type="number">Участий</th>
+                    <th scope="col" id="report-col-count_wins" data-column-key="count_wins" data-sort-type="number">Побед</th>
+                    <th scope="col" id="report-col-count_prizes" data-column-key="count_prizes" data-sort-type="number">Призовых</th>
                     {% if not report_slice_is_student %}
-                    <th scope="col" data-column-key="count_unique_participants" data-sort-type="number">Уникальных участников</th>
-                    <th scope="col" data-column-key="count_unique_prizers" data-sort-type="number">Уникальных призёров</th>
+                    <th scope="col" id="report-col-count_unique_participants" data-column-key="count_unique_participants" data-sort-type="number">Уникальных участников</th>
+                    <th scope="col" id="report-col-count_unique_prizers" data-column-key="count_unique_prizers" data-sort-type="number">Уникальных призёров</th>
                     {% endif %}
                 </tr>
             </thead>
             <tbody>
-                {% for row in report_rows %}
-                <tr>
-                    <td data-column-key="index">{{ loop.index }}</td>
+                {% set position = namespace(value=0) %}
+                {% for block in report_display_groups %}
+                {% set block_index = loop.index %}
+                {% for row in block %}
+                {% set position.value = position.value + 1 %}
+                <tr data-report-group="{{ block_index }}"{% if loop.first %} class="report-group-start"{% endif %}>
+                    <td headers="report-col-index{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="index">{{ position.value }}</td>
                     {% if report_slice_is_student %}
-                    <td data-column-key="student_name"{% if not row.student_name %} class="text-muted"{% endif %}>{% if row.student_ref_id is not none %}<a href="/admin/people/{{ row.student_ref_id }}?{{ {'return': report_return_url} | urlencode }}">{{ row.student_name or 'Не указано' }}</a>{% else %}{{ row.student_name or 'Не указано' }}{% endif %}</td>
-                    <td data-column-key="student_sex"{% if not row.student_sex %} class="text-muted"{% endif %}>{{ row.student_sex or 'Не указано' }}</td>
-                    <td data-column-key="institute"{% if not row.institute %} class="text-muted"{% endif %}>{{ row.institute or 'Не указано' }}</td>
-                    <td data-column-key="group"{% if not row.group %} class="text-muted"{% endif %}>{{ row.group or 'Не указано' }}</td>
-                    <td data-column-key="course">{{ row.course }}</td>
-                    {% else %}
-                    <td data-column-key="slice_value"{% if row.slice_value is none %} class="text-muted" data-sort-value="-1"{% endif %}>{{ 'Не указано' if row.slice_value is none else row.slice_value }}</td>
+                    {% if loop.first %}
+                    <th scope="row" id="report-student-{{ block_index }}" headers="report-col-student_name" rowspan="{{ block | length }}" data-column-key="student_name"{% if not row.student_name %} class="text-muted"{% endif %}>{% if row.student_ref_id is not none %}<a href="/admin/people/{{ row.student_ref_id }}?{{ {'return': report_return_url} | urlencode }}">{{ row.student_name or 'Не указано' }}</a>{% else %}{{ row.student_name or 'Не указано' }}{% endif %}</th>
                     {% endif %}
-                    <td data-column-key="count_participation">{{ row.count_participation }}</td>
-                    <td data-column-key="count_wins">{{ row.count_wins }}</td>
-                    <td data-column-key="count_prizes">{{ row.count_prizes }}</td>
+                    <td headers="report-col-student_sex{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="student_sex"{% if not row.student_sex %} class="text-muted"{% endif %}>{{ row.student_sex or 'Не указано' }}</td>
+                    <td headers="report-col-institute{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="institute"{% if not row.institute %} class="text-muted"{% endif %}>{{ row.institute or 'Не указано' }}</td>
+                    <td headers="report-col-group{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="group"{% if not row.group %} class="text-muted"{% endif %}>{{ row.group or 'Не указано' }}</td>
+                    <td headers="report-col-course{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="course">{{ row.course }}</td>
+                    {% else %}
+                    <td headers="report-col-slice_value{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="slice_value"{% if row.slice_value is none %} class="text-muted" data-sort-value="-1"{% endif %}>{{ 'Не указано' if row.slice_value is none else row.slice_value }}</td>
+                    {% endif %}
+                    <td headers="report-col-count_participation{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_participation">{{ row.count_participation }}</td>
+                    <td headers="report-col-count_wins{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_wins">{{ row.count_wins }}</td>
+                    <td headers="report-col-count_prizes{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_prizes">{{ row.count_prizes }}</td>
                     {% if not report_slice_is_student %}
-                    <td data-column-key="count_unique_participants">{{ row.count_unique_participants }}</td>
-                    <td data-column-key="count_unique_prizers">{{ row.count_unique_prizers }}</td>
+                    <td headers="report-col-count_unique_participants{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_unique_participants">{{ row.count_unique_participants }}</td>
+                    <td headers="report-col-count_unique_prizers{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_unique_prizers">{{ row.count_unique_prizers }}</td>
                     {% endif %}
                 </tr>
+                {% endfor %}
                 {% endfor %}
             </tbody>
             {# «Итого» — метрики всей выборки из сводного запроса:
