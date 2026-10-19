@@ -253,14 +253,14 @@ def test_report_student_slice_counts_metrics_in_sql(adapter):
         )
         for info in infos
     ] == [
-        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 1, 1, 1),  # запись id 1: 1 место
-        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 1, 0, 1),  # запись id 2: 3 место
-        ('Иванов Иван', 'ИСИ', 'ПГС-101', 1, 1, 0, 0),  # запись id 3: 5 место
-        ('Козлов Кирилл', 'ИМИ', 'ТД-303', 2, 1, 0, 1),  # запись id 8: 2 место
-        ('Козлов Кирилл', 'ИСИ', 'ПГС-101', 1, 1, 1, 1),  # запись id 7: 1 место
-        ('Петров Пётр', 'ИМИ', 'СБ-202', 2, 1, 0, 1),  # запись id 4: 2 место
-        ('Петров Пётр', 'ИМИ', 'СБ-202', 2, 1, 1, 1),  # запись id 5: 1 место
-        ('Сидоров Сидор', 'ИСИ', 'ПГС-102', 3, 1, 0, 0),  # запись id 6: 4 место
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', None, 1, 1, 1),  # запись id 1: 1 место
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', None, 1, 0, 1),  # запись id 2: 3 место
+        ('Иванов Иван', 'ИСИ', 'ПГС-101', None, 1, 0, 0),  # запись id 3: 5 место
+        ('Козлов Кирилл', 'ИМИ', 'ТД-303', None, 1, 0, 1),  # запись id 8: 2 место
+        ('Козлов Кирилл', 'ИСИ', 'ПГС-101', None, 1, 1, 1),  # запись id 7: 1 место
+        ('Петров Пётр', 'ИМИ', 'СБ-202', None, 1, 0, 1),  # запись id 4: 2 место
+        ('Петров Пётр', 'ИМИ', 'СБ-202', None, 1, 1, 1),  # запись id 5: 1 место
+        ('Сидоров Сидор', 'ИСИ', 'ПГС-102', None, 1, 0, 0),  # запись id 6: 4 место
     ]
 
 
@@ -281,11 +281,8 @@ def test_report_slices_group_by_record_data(adapter):
         ('ИСИ', 5, 2, 3),
     ]
 
-    assert slice_rows(adapter.get_grouped_report('course')) == [
-        (3, 1, 0, 0),
-        (2, 3, 1, 3),
-        (1, 4, 2, 3),
-    ]
+    # None is the explicit unknown slice: these legacy group labels do not parse.
+    assert slice_rows(adapter.get_grouped_report('course')) == [(None, 8, 3, 6)]
 
     assert slice_rows(adapter.get_grouped_report('sport')) == [
         ('Шахматы', 1, 0, 0),
@@ -589,14 +586,15 @@ def test_report_name_filter_is_casefold_substring(adapter):
 
 
 def test_report_course_filter_is_exact_value(adapter):
-    # Курс 1 фикстуры: Иванов ×3 + Козлов ИСИ = 4 участия; курсы 2 (Петров,
-    # Козлов ИМИ) и 3 (Сидоров) не мешают.
+    # Neither a former numeric value nor arbitrary legacy text widens the filter.
     save_report_fixture(adapter)
-
-    summary = adapter.get_report_summary(course='1')
-    assert summary.count_participation == 4
-    assert summary.count_wins == 2
-    assert [info.course for info in adapter.get_filtered(course='1')] == [1, 1, 1, 1]
+    for course in ('1', 'Legacy manual course'):
+        assert adapter.get_report_summary(course=course).count_participation == 0
+        assert adapter.get_filtered(course=course) == []
+    known = make_competition('Синтетический Курс Пример', datetime(2026, 9, 1)).model_copy(update={'group': 'Синт-24А'})
+    adapter.save_competitions([known])
+    assert adapter.get_report_summary(course='3').count_participation == 1
+    assert [info.course for info in adapter.get_filtered(course='3')] == [3]
 
 
 def save_report_admission_fixture(adapter):
@@ -607,7 +605,7 @@ def save_report_admission_fixture(adapter):
                 'Абрамов Артём',
                 'М',
                 'ИПТ',
-                'Гр-1',
+                'Синт-23А',
                 2,
                 'Бег',
                 datetime(2025, 3, 1),
@@ -619,7 +617,7 @@ def save_report_admission_fixture(adapter):
                 'Борисов Борис',
                 'М',
                 'ИПТ',
-                'Гр-1',
+                'Синт-23А',
                 1,
                 'Бег',
                 datetime(2025, 4, 1),
@@ -631,7 +629,7 @@ def save_report_admission_fixture(adapter):
                 'Викторов Виктор',
                 'М',
                 'ИПТ',
-                'Гр-2',
+                'Синт-24А',
                 1,
                 'Лыжи',
                 datetime(2025, 5, 1),
@@ -640,7 +638,7 @@ def save_report_admission_fixture(adapter):
                 admission_year=2024,
             ),
             make_report_record(
-                'Григорьев Григорий', 'М', 'ИПТ', 'Гр-2', 2, 'Лыжи', datetime(2025, 6, 1), 'внутривузовские', 4
+                'Григорьев Григорий', 'М', 'ИПТ', 'Неизвестная', 2, 'Лыжи', datetime(2025, 6, 1), 'внутривузовские', 4
             ),
         ]
     )
@@ -2535,14 +2533,17 @@ def test_field_settings_defaults_reflect_current_behavior(adapter):
     settings = adapter.get_field_settings()
     assert settings['student_name'] == {'value_type': 'text', 'required': True}
     assert settings['date'] == {'value_type': 'text', 'required': True}
-    assert settings['course'] == {'value_type': 'number', 'required': True}
+    assert settings['course'] == {'value_type': 'number', 'required': False}
     assert settings['position'] == {'value_type': 'number', 'required': False}
     for key in ('student_sex', 'institute', 'group', 'sport', 'level', 'name'):
         assert settings[key] == {'value_type': 'text', 'required': False}
 
 
 def test_field_settings_defaults_idempotent(adapter):
-    adapter.update_field_settings({'course': ('text', False)})
+    # Preexisting settings bytes survive startup; new settings cannot enable editing.
+    adapter.connection.execute("UPDATE field_settings SET value_type='text', required=0 WHERE key='course'")
+    adapter.connection.commit()
+    adapter.update_field_settings({'course': ('number', True)})
     # Повторная инициализация (как при обновлении легаси-БД) не сбрасывает.
     adapter._populate_field_settings_defaults()
     assert adapter.get_field_settings()['course'] == {'value_type': 'text', 'required': False}
@@ -2558,7 +2559,8 @@ def test_text_course_stored_and_read_back(adapter):
     )
     adapter.connection.commit()
     record = list(adapter.get_competitions())[0]
-    assert record.course == 'Выпускник 2025/26'
+    assert record.course is None
+    assert adapter.connection.execute('SELECT course FROM competitions').fetchone()[0] == 'Выпускник 2025/26'
 
 
 # --- Очередь конфликтов импорта (волна 3, №6/№8) ---
@@ -2624,7 +2626,7 @@ def test_search_athletes_substring_case_insensitive(adapter):
     # lower() в SQLite не приводит кириллицу — сравнение в Python.
     results = adapter.search_athletes('ИВА')
     assert [entry['name'] for entry in results] == ['Иванов Иван']
-    assert results[0] == {'name': 'Иванов Иван', 'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': '2'}
+    assert results[0] == {'name': 'Иванов Иван', 'sex': 'М', 'institute': 'ИСИ', 'group': 'ПГС-101', 'course': None}
 
 
 def test_search_athletes_empty_query(adapter):
@@ -2665,7 +2667,7 @@ def test_known_athlete_merges_profile_and_record(adapter):
     )
     fields = adapter.find_athlete_fields('Смирнов Сергей')
     # Профиль приоритетнее, курс добирается из последней записи.
-    assert fields == {'name': 'Смирнов Сергей', 'sex': 'М', 'institute': 'ИЭиТ', 'group': 'Э-201', 'course': '3'}
+    assert fields == {'name': 'Смирнов Сергей', 'sex': 'М', 'institute': 'ИЭиТ', 'group': 'Э-201', 'course': None}
 
 
 # №24 (docs/feedback-live.md): настройка link_target у link-полей.
@@ -4708,7 +4710,7 @@ def test_student_crud_lifecycle(adapter):
     updated = adapter.get_student_by_id(first)
     assert updated['institute'] == 'ИСИ'
     assert updated['group_name'] == 'ПГС-102'
-    assert updated['course'] == '3'
+    assert updated['course'] is None
     assert updated['created_at'] == created_at
     assert updated['updated_at'] >= created_at
     assert adapter.update_student(999999, 'Никто', '', '', '', '') is False
@@ -5162,7 +5164,7 @@ def test_find_student_candidates_exact_full_name_and_alias(adapter):
             'sex': 'М',
             'institute': 'ИСИ',
             'group_name': 'ПГС-101',
-            'course': '2',
+            'course': None,
             'match_type': 'full_name',
             'alias_name': None,
         }
@@ -5321,7 +5323,7 @@ def test_create_student_and_link_participation_success(adapter):
         student['group_name'],
         student['course'],
         student['active'],
-    ) == ('Иванов Иван', 'М', 'ИСЭиУ', 'ЭБ-241', '2', 1)
+    ) == ('Иванов Иван', 'М', 'ИСЭиУ', 'ЭБ-241', None, 1)
     row = adapter.connection.execute('SELECT student_ref_id FROM competitions WHERE id = ?', (record_id,)).fetchone()
     assert row['student_ref_id'] == student_id
 
@@ -5815,7 +5817,7 @@ def test_search_student_suggestions_substring_casefold_and_order(adapter):
         'sex': 'М',
         'institute': 'ИСЭиУ',
         'group': 'ЭБ-241',
-        'course': '2',
+        'course': None,
     }
 
     # Регистр запроса не важен, тёзки различимы по student_id.
@@ -5861,7 +5863,7 @@ def test_search_student_candidates_substring_priority_and_limit(adapter):
             'sex': 'М',
             'institute': 'ИСЭиУ',
             'group_name': 'ЭБ-241',
-            'course': '2',
+            'course': None,
             'match_type': 'full_name',
             'alias_name': None,
         }
@@ -7239,7 +7241,7 @@ def test_group_academic_upsert_get_delete(adapter):
     adapter.upsert_group_academic(group['id'], education_level_id=None, admission_year=None)
     cleared = adapter.get_group_academic(group['id'])
     assert cleared['education_level_id'] is None
-    assert cleared['admission_year'] is None
+    assert cleared['admission_year'] == 2023
     assert cleared['duration_years_override'] is None
 
     # Валидация: неизвестная группа/уровень, диапазоны года и длительности.
@@ -7247,10 +7249,11 @@ def test_group_academic_upsert_get_delete(adapter):
         adapter.upsert_group_academic(999999)
     with pytest.raises(ValueError, match='Уровень образования не найден'):
         adapter.upsert_group_academic(group['id'], education_level_id=999999)
-    with pytest.raises(ValueError, match='Год поступления'):
-        adapter.upsert_group_academic(group['id'], admission_year=1800)
-    with pytest.raises(ValueError, match='Год поступления'):
-        adapter.upsert_group_academic(group['id'], admission_year=2200)
+    # Forged manual years are ignored, not persisted or validated as input.
+    adapter.upsert_group_academic(group['id'], admission_year=1800)
+    adapter.upsert_group_academic(group['id'], admission_year=2200)
+    assert adapter.get_group_academic(group['id'])['admission_year'] == 2023
+    assert adapter.connection.execute('SELECT admission_year FROM group_academic').fetchone()[0] is None
     with pytest.raises(ValueError, match='Длительность'):
         adapter.upsert_group_academic(group['id'], duration_years_override=42)
 
@@ -7268,36 +7271,24 @@ def test_group_academic_upsert_get_delete(adapter):
     adapter.delete_group_academic(group['id'])  # повтор — не ошибка
 
 
-def test_resolve_group_admission_year_strict_pair(adapter):
-    """Одноимённые группы разных институтов: год поступления резолвится
-    строго по паре; неизвестный/пустой институт и пара без метаданных —
-    None. Парсер названий здесь не участвует."""
+def test_resolve_group_admission_year_uses_group_without_catalog_authority(adapter):
     first = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
     second = seed_group_pair(adapter, 'ИМИ', 'Тестб-23А1')
-    adapter.upsert_group_academic(first['id'], admission_year=2023)
-    adapter.upsert_group_academic(second['id'], admission_year=2021)
-
-    assert adapter.resolve_group_admission_year('ИСИ', 'Тестб-23А1') == 2023
-    assert adapter.resolve_group_admission_year('ИМИ', 'Тестб-23А1') == 2021
-    # Регистр значения не важен (резолв справочника), пары — важны.
-    assert adapter.resolve_group_admission_year('иси', 'ТЕСТБ-23А1') == 2023
+    adapter.upsert_group_academic(first['id'], admission_year=2021)
+    adapter.upsert_group_academic(second['id'], admission_year=2020)
+    for institute in ('ИСИ', 'ИМИ', '', 'НетИнститута'):
+        assert adapter.resolve_group_admission_year(institute, 'Тестб-23А1') == 2023
     assert adapter.resolve_group_admission_year('ИСИ', 'НетТакой') is None
-    assert adapter.resolve_group_admission_year('', 'Тестб-23А1') is None
-    assert adapter.resolve_group_admission_year('НетИнститута', 'Тестб-23А1') is None
-
-    # Группа известна, но учебных данных (года) нет — None.
-    plain = seed_group_pair(adapter, 'ИСИ', 'БезМетаданных-20А1')
-    assert adapter.resolve_group_admission_year('ИСИ', 'БезМетаданных-20А1') is None
-    assert plain is not None
+    assert adapter.resolve_group_admission_year('', 'БезМетаданных-20А1') == 2020
 
 
 def test_student_education_context_and_duration_fallback(adapter):
     """Контекст карточки студента: без пары/метаданных — None; длительность
     — цепочка override ?? default уровня ?? None."""
-    assert adapter.get_student_education_context('ИСИ', 'НетТакой') is None
+    assert adapter.get_student_education_context('ИСИ', 'НетТакой')['admission_year'] is None
     group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
     # Пара есть, метаданных нет — карточки «Образование» не будет.
-    assert adapter.get_student_education_context('ИСИ', 'Тестб-23А1') is None
+    assert adapter.get_student_education_context('ИСИ', 'Тестб-23А1')['admission_year'] == 2023
 
     level_default = adapter.create_education_level('Тестовый бакалавриат', 4)
     adapter.upsert_group_academic(group['id'], education_level_id=level_default, admission_year=2023)
@@ -7348,7 +7339,7 @@ def test_admission_year_snapshot_filled_on_save_and_import(adapter):
         ]
     )
     brand_new = [comp for comp in adapter.get_competitions() if comp.student_name == 'Новов Пара'][0]
-    assert brand_new.admission_year is None
+    assert brand_new.admission_year == 2024
 
 
 def test_admission_year_snapshot_event_participation_batch(adapter):
@@ -7367,7 +7358,7 @@ def test_admission_year_snapshot_event_participation_batch(adapter):
         ],
     )
     record = adapter.get_competitions()[0]
-    assert record.admission_year == 2022
+    assert record.admission_year == 2023
 
     adapter.apply_event_participation_batch(
         event_id,
@@ -7378,36 +7369,36 @@ def test_admission_year_snapshot_event_participation_batch(adapter):
         ],
     )
     record = [comp for comp in adapter.get_competitions() if comp.student_name == 'Безпаров Без'][0]
-    assert record.admission_year is None
+    assert record.admission_year == 2099
+    assert record.course is None  # admission lies in the future
 
 
-def test_update_competition_never_touches_admission_year_snapshot(adapter):
-    """Снимок года поступления заморожен: обычная правка не меняет заданное
-    значение и НЕ заполняет пустое, даже если учебные данные появились."""
-    group = seed_group_pair(adapter, 'ИСИ', 'Тестб-23А1')
+def test_update_competition_preserves_legacy_bytes_but_recalculates_own_facts(adapter):
     adapter.save_competitions(
-        [make_competition('Заморожен Снимок', datetime(2026, 3, 1)).model_copy(update={'group': 'Тестб-23А1'})]
+        [
+            make_competition('Синтетический Исторический Пример', datetime(2026, 3, 1)).model_copy(
+                update={'group': 'Тестб-23А1'}
+            )
+        ]
     )
-    record = adapter.get_competitions()[0]
-    assert record.admission_year is None
-
-    # Метаданные появились ПОСЛЕ вставки записи — правка не дополняет снимок.
-    adapter.upsert_group_academic(group['id'], admission_year=2020)
-    adapter.update_competition(record.record_id, record.model_copy(update={'course': 5}))
-    updated = adapter.get_competition_by_id(int(record.record_id))
-    assert updated.admission_year is None
-    assert updated.course == 5
-
-    # Заданный снимок правка не перезаписывает.
-    adapter.save_competitions(
-        [make_competition('Снимок Есть', datetime(2026, 3, 2)).model_copy(update={'group': 'Тестб-23А1'})]
+    adapter.connection.execute("UPDATE competitions SET admission_year=2000, course='Original legacy value' WHERE id=1")
+    adapter.connection.commit()
+    record = adapter.get_competition_by_id(1)
+    assert (record.admission_year, record.course) == (2023, 3)
+    adapter.update_competition('1', record.model_copy(update={'course': 99, 'position': 2}))
+    assert tuple(adapter.connection.execute('SELECT admission_year,course FROM competitions').fetchone()) == (
+        2000,
+        'Original legacy value',
     )
-    with_snapshot = [comp for comp in adapter.get_competitions() if comp.student_name == 'Снимок Есть'][0]
-    assert with_snapshot.admission_year == 2020
-    adapter.update_competition(with_snapshot.record_id, with_snapshot.model_copy(update={'group': 'Другая-99А1'}))
-    after = adapter.get_competition_by_id(int(with_snapshot.record_id))
-    assert after.group == 'Другая-99А1'
-    assert after.admission_year == 2020
+    updated = adapter.get_competition_by_id(1)
+    assert (updated.admission_year, updated.course, updated.position) == (2023, 3, 2)
+    adapter.update_competition('1', updated.model_copy(update={'group': 'Другая-24А'}))
+    after = adapter.get_competition_by_id(1)
+    assert (after.admission_year, after.course) == (2024, 2)
+    assert tuple(adapter.connection.execute('SELECT admission_year,course FROM competitions').fetchone()) == (
+        2000,
+        'Original legacy value',
+    )
 
 
 def test_delete_catalog_value_removes_group_academic(adapter):
@@ -7449,67 +7440,20 @@ def seed_backfill_records(adapter: SQLiteAdapter) -> None:
     adapter.connection.commit()
 
 
-def test_group_admission_backfill_classification_and_apply(adapter):
-    """Классификация по СВОЕМУ тексту группы записи: SAFE заполняется,
-    MANUAL (future + известные справочнику группы без года, включая
-    «Выпуск») и UNRESOLVED (мусор) не трогаются; уже заполненная строка не
-    выбирается и не меняется (REGRESS RULE 1-13); apply идемпотентен."""
-    seed_group_pair(adapter, 'ИСИ', 'Выпуск')
-    seed_group_pair(adapter, 'ИСИ', 'БезГода Группа')
+def test_group_admission_backfill_retired_without_rewriting_bytes(adapter):
     seed_backfill_records(adapter)
-
-    preview = adapter.group_admission_backfill_preview()
-    assert preview['counters']['considered'] == 6
-    assert preview['counters']['safe'] == 1
-    assert preview['counters']['manual'] == 3
-    assert preview['counters']['unresolved'] == 2
-    assert preview['counters']['already_filled'] == 1
-    assert [row['admission_year'] for row in preview['safe']] == [2023]
-    manual_groups = {row['group'] for row in preview['manual']}
-    assert manual_groups == {'НГр-27Б1', 'Выпуск', 'БезГода Группа'}
-    unresolved_groups = {row['group'] for row in preview['unresolved']}
-    assert unresolved_groups == {'nan', 'БезЦифр'}
-    # already_filled растёт после apply.
-    counters = adapter.apply_group_admission_backfill()
-    assert counters == {'matched': 1, 'applied': 1, 'skipped': 0}
-
-    rows = {
-        row['student_name']: row['admission_year']
-        for row in adapter.connection.execute('SELECT student_name, admission_year FROM competitions')
-    }
-    assert rows['Однозначов Год'] == 2023
-    assert rows['Будущев Год'] is None  # future — никогда автоматически
-    assert rows['Выпускников Год'] is None  # «Выпуск» — не заполняется
-    assert rows['Известков Год'] is None
-    assert rows['Мусоров Год'] is None
-    assert rows['Пустов Год'] is None
-    assert rows['Заполнен Год'] == 2022  # заданный снимок apply не трогает
-
-    # Идемпотентность: повторный apply ничего не находит.
-    second = adapter.apply_group_admission_backfill()
-    assert second == {'matched': 0, 'applied': 0, 'skipped': 0}
-    repeat_preview = adapter.group_admission_backfill_preview()
-    assert repeat_preview['counters']['safe'] == 0
-    assert repeat_preview['counters']['already_filled'] == 2
-    filled_after = adapter.connection.execute(
-        "SELECT admission_year FROM competitions WHERE student_name = 'Заполнен Год'"
-    ).fetchone()['admission_year']
-    assert filled_after == 2022
-
-
-def test_group_admission_backfill_apply_skips_raced_rows(adapter):
-    """Guarded UPDATE: запись, заполненная между предпросмотром и apply,
-    пропускается (skipped), пакет не ломается."""
-    seed_backfill_records(adapter)
-    # «Гонка»: год уже проставлен мимо backfill — apply видит строку SAFE по
-    # классификации только у NULL-строк, поэтому пропуска нет — имитируем
-    # иначе: заполняем ПОСЛЕ выборки, подменяя соединение не будем, просто
-    # проверяем, что уже заполненная SAFE-строка не считается вовсе.
-    adapter.connection.execute("UPDATE competitions SET admission_year = 2023 WHERE student_name = 'Однозначов Год'")
-    adapter.connection.commit()
-    counters = adapter.apply_group_admission_backfill()
-    assert counters['matched'] == 0
-    assert counters['applied'] == 0
+    before = [
+        tuple(row)
+        for row in adapter.connection.execute('SELECT id, course, admission_year FROM competitions ORDER BY id')
+    ]
+    with pytest.raises(ValueError, match='отключено'):
+        adapter.apply_group_admission_backfill()
+    assert [
+        tuple(row)
+        for row in adapter.connection.execute('SELECT id, course, admission_year FROM competitions ORDER BY id')
+    ] == before
+    # Counters describe derived unknown education, not absent legacy snapshots.
+    assert adapter.count_participations_without_admission_year() == 4
 
 
 def test_student_profile_history_read_context_limit_order_and_identity(adapter):

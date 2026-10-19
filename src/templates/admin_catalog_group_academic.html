@@ -5,15 +5,15 @@
 <a class="btn btn-outline-secondary" href="/admin/catalogs">← К справочникам</a>
 {% endblock admin_back %}
 {% block admin_description %}
-    Уровень образования, год поступления и длительность обучения группы. От года
-    поступления считается текущий курс студентов группы — в карточке студента и
-    новых записях о соревнованиях.
+    Уровень и длительность обучения задаются для группы; год поступления определяется
+    по её названию. Текущий курс карточки рассчитывается на сегодня в Asia/Omsk.
+    Курс любого участия, включая вновь внесённое историческое, рассчитывается
+    по собственной исторической группе и дате начала соревнования.
 {% endblock admin_description %}
 
 {% block admin_content %}
 
-{# Course / Education, Phase A. Год поступления из названия группы — ТОЛЬКО
-   предзаполнение (подсказка), сохраняется только явное значение админа. #}
+
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <h5 class="card-title">Группа «{{ group_value }}» — институт «{{ institute_value }}»</h5>
@@ -29,15 +29,9 @@
                 </select>
             </div>
             <div class="col-md-2">
-                <label class="form-label" for="group-academic-year">Год поступления</label>
-                {# Сохранённое значение приоритетнее предзаполнения парсером. #}
-                {% set year_value = stored.admission_year if (stored and stored.admission_year is not none) else suggested_admission_year %}
-                <input class="form-control" id="group-academic-year" max="{{ max_admission_year }}" min="{{ min_admission_year }}"
-                       name="admission_year" type="number"
-                       {% if year_value is not none %}value="{{ year_value }}"{% endif %}>
-                {% if suggested_admission_year is not none %}
-                <div class="form-text">Предложено автоматически по названию группы — проверьте и исправьте при необходимости.</div>
-                {% endif %}
+                <div class="form-label">Год поступления</div>
+                <div>{{ suggested_admission_year if suggested_admission_year is not none else '—' }}</div>
+                <div class="form-text">{% if suggested_admission_year is not none %}Определено по названию группы{% else %}Не удалось определить по названию группы{% endif %}</div>
             </div>
             <div class="col-md-2">
                 <label class="form-label" for="group-academic-duration">Длительность обучения (лет)</label>

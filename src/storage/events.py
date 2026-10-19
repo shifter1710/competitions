@@ -757,7 +757,7 @@ class EventsMixin:
                     c.student_sex,
                     c.institute,
                     c."group" AS group_name,
-                    c.course,
+                    education_course(c."group", c.date) AS course,
                     c.position,
                     c.student_ref_id,
                     c.discipline,

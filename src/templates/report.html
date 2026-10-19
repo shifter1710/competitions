@@ -82,6 +82,9 @@
                 <label class="form-label" for="report-filter-course">Курс</label>
                 <select class="form-select" id="report-filter-course" name="course">
                     <option value="">Все</option>
+                    {% if report_form.course and report_form.course not in course_options %}
+                    <option value="{{ report_form.course }}" selected>{{ report_form.course }} (нет доступных значений)</option>
+                    {% endif %}
                     {% for value in course_options %}
                     <option value="{{ value }}"{% if value == report_form.course %} selected{% endif %}>{{ value }}</option>
                     {% endfor %}
@@ -89,12 +92,16 @@
             </div>
             <div class="col-6 col-md-2">
                 <label class="form-label" for="report-filter-admission-year">Год поступления</label>
+                {% set admission_year_option_values = admission_year_options | map('string') | list %}
                 <select class="form-select" id="report-filter-admission-year" name="admission_year">
                     <option value="">Все</option>
-                    {% if admission_has_none %}
+                    {% if admission_has_none or report_form.admission_year == 'none' %}
                     <option value="none"{% if report_form.admission_year == 'none' %} selected{% endif %}>Не указан</option>
                     {% endif %}
-                    {% for value in admission_year_options %}
+                    {% if report_form.admission_year and report_form.admission_year != 'none' and report_form.admission_year not in admission_year_option_values %}
+                    <option value="{{ report_form.admission_year }}" selected>{{ report_form.admission_year }} (нет доступных значений)</option>
+                    {% endif %}
+                    {% for value in admission_year_option_values %}
                     <option value="{{ value }}"{% if value == report_form.admission_year %} selected{% endif %}>{{ value }}</option>
                     {% endfor %}
                 </select>

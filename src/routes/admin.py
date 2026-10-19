@@ -6,7 +6,6 @@ import logging
 import re
 import shutil
 import zipfile
-from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -54,6 +53,7 @@ from src.files import files_dir
 from src.files import remove_attachment_files
 from src.files import remove_attachment_record_dirs
 from src.models.custom_field import CustomField
+from src.periods import today_in_timezone
 from src.records import ALWAYS_REQUIRED_BASE_FIELDS
 from src.records import BASE_FIELD_LABELS
 from src.records import BASE_FIELD_SETTING_DEFAULTS
@@ -175,6 +175,9 @@ def parse_base_field_settings_form(request: Request) -> dict[str, tuple[str, boo
     settings_form: dict[str, tuple[str, bool]] = {}
     for key in BASE_FIELD_SETTING_DEFAULTS:
         default_type, default_required = BASE_FIELD_SETTING_DEFAULTS[key]
+        if key == 'course':
+            settings_form[key] = (default_type, False)
+            continue
         if key in ALWAYS_REQUIRED_BASE_FIELDS:
             settings_form[key] = (default_type, True)
             continue
@@ -356,20 +359,22 @@ def group_academic_duration_hint(stored: dict | None) -> str:
     return f'Пусто — используется длительность уровня «{level_name}» по умолчанию ({default}).'
 
 
-def group_academic_course_preview(stored: dict | None) -> str:
-    """Строка предпросмотра «какой курс сейчас» по сохранённым данным."""
-    if stored is None or stored.get('admission_year') is None:
-        return 'Курс пока не рассчитывается: не указан год поступления.'
+def group_academic_course_preview(stored: dict | None, group_value: str = '') -> str:
+    """Текущий курс по названию группы и дате приложения."""
+    admission_year = parse_group_admission_year(group_value)
+    if admission_year is None:
+        return 'Курс не определён по названию группы.'
+    stored = stored or {}
     duration = effective_duration_years(
         stored.get('duration_years_override'), stored.get('level_default_duration_years')
     )
-    derived = derive_course(stored['admission_year'], date.today(), duration)
+    derived = derive_course(admission_year, today_in_timezone(settings.app_timezone), duration)
     if derived['status'] == 'future':
         return 'Курс пока не рассчитывается: год поступления позже текущей даты.'
     if derived['status'] != 'ok' or derived['course'] is None:
-        return 'Курс пока не рассчитывается: не указан год поступления.'
+        return 'Курс не определён по названию группы.'
     return (
-        f'По сохранённым данным сейчас: {derived["course"]} курс '
+        f'По названию группы сейчас: {derived["course"]} курс '
         f'(учебный год {academic_year_label(derived["academic_year_start"])}).'
     )
 
@@ -1360,8 +1365,7 @@ def register(app: Sanic) -> None:  # noqa: C901
 
     @app.get('/admin/catalogs/group/<value_id>/academic')
     async def catalog_group_academic_page(request: Request, value_id: str):
-        """Учебные данные группы: уровень образования, год поступления,
-        длительность. Год из названия группы — ТОЛЬКО предзаполнение."""
+        """Явные уровень/длительность, read-only год по названию группы."""
         auth_error = require_admin(request)
         if auth_error is not None:
             return auth_error
@@ -1371,11 +1375,7 @@ def register(app: Sanic) -> None:  # noqa: C901
 
         storage = get_storage(request.app)
         stored = storage.get_group_academic(group['id'])
-        suggested_year = (
-            parse_group_admission_year(group['value'])
-            if stored is None or stored.get('admission_year') is None
-            else None
-        )
+        suggested_year = parse_group_admission_year(group['value'])
         return await render(
             template_name=jinja_env.get_template('admin_catalog_group_academic.html'),
             context={
@@ -1390,7 +1390,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 if suggested_year is not None
                 else None,
                 'duration_hint': group_academic_duration_hint(stored),
-                'course_preview': group_academic_course_preview(stored),
+                'course_preview': group_academic_course_preview(stored, group['value']),
                 'min_admission_year': MIN_ADMISSION_YEAR,
                 'max_admission_year': MAX_ADMISSION_YEAR,
                 'min_duration_years': MIN_DURATION_YEARS,
@@ -1418,9 +1418,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             )
             if level_error is not None:
                 return build_redirect_with_message(error=level_error, url=back_url)
-        admission_year, year_error = parse_optional_int_form(request, 'admission_year', label='Год поступления')
-        if year_error is not None:
-            return build_redirect_with_message(error=year_error, url=back_url)
+        admission_year = parse_group_admission_year(group['value'])
         duration_override, duration_error = parse_optional_int_form(
             request, 'duration_years_override', label='Длительность обучения'
         )
@@ -1431,7 +1429,6 @@ def register(app: Sanic) -> None:  # noqa: C901
             get_storage(request.app).upsert_group_academic(
                 group['id'],
                 education_level_id=education_level_id,
-                admission_year=admission_year,
                 duration_years_override=duration_override,
             )
         except ValueError as exc:
@@ -1834,8 +1831,6 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'records_count': storage.count_competitions(),
                 'attachments_count': storage.count_attachments(),
                 'unlinked_records_count': storage.count_participations_without_event(),
-                # Course/Education Phase A: записи без снимка года поступления.
-                'without_admission_year_count': storage.count_participations_without_admission_year(),
                 'stats': stats,
                 **get_flash_args(request),
             },
@@ -1885,76 +1880,16 @@ def register(app: Sanic) -> None:  # noqa: C901
             message = f'Связывание завершено: связано {counters["linked"]}.'
         return build_redirect_with_message(message=message, url='/admin/maintenance/calendar-links')
 
-    # --- Course / Education, Phase A: backfill снимка года поступления. ---
-
-    def decorate_admission_year_preview(preview: dict) -> dict:
-        """Строки предпросмотра с датами-подписями и «уликой» парсера."""
-
-        def decorate_record_row(row: dict) -> dict:
-            return {
-                **row,
-                'record_date_label': format_date_range(
-                    datetime.fromisoformat(row['date']),
-                    None,
-                ),
-                'evidence': parse_group_admission_year_evidence(row['group']),
-            }
-
-        return {
-            'counters': preview['counters'],
-            'safe': [decorate_record_row(row) for row in preview['safe']],
-            'manual': [decorate_record_row(row) for row in preview['manual']],
-            'unresolved': [decorate_record_row(row) for row in preview['unresolved']],
-            'apply_confirm_text': (
-                f'Заполнить год поступления у {preview["counters"]["safe"]} записей? '
-                'Обновится только снимок года поступления в записях о соревнованиях.'
-            ),
-        }
-
-    @app.get('/admin/maintenance/admission-years')
-    async def admin_maintenance_admission_years_page(request: Request):
-        """Предпросмотр заполнения года поступления у записей без снимка:
-        классификация по историческому названию группы в самой записи."""
+    @app.get('/admin/maintenance/admission-years', name='admin_maintenance_admission_years_page')
+    @app.post('/admin/maintenance/admission-years/apply', name='apply_maintenance_admission_years')
+    async def retired_admission_year_backfill(request: Request):
+        """Old links cannot write unused historical admission snapshots."""
         auth_error = require_admin(request)
         if auth_error is not None:
             return auth_error
-        storage = get_storage(request.app)
-        preview = decorate_admission_year_preview(storage.group_admission_backfill_preview())
-        return await render(
-            template_name=jinja_env.get_template('admin_maintenance_admission_years.html'),
-            context={
-                'request': request,
-                'preview': preview,
-                **get_flash_args(request),
-            },
+        return text(
+            'Год поступления и курс рассчитываются по группе. Заполнение снимков больше не требуется.', status=409
         )
-
-    @app.post('/admin/maintenance/admission-years/apply')
-    async def apply_maintenance_admission_years(request: Request):
-        """Заполнить год поступления ТОЛЬКО у однозначных (SAFE) записей.
-
-        Классификация пересчитывается в момент применения; записи, которые
-        успели получить год между предпросмотром и кликом, пропускаются
-        (guarded UPDATE), пакет не ломается.
-        """
-        auth_error = require_admin(request)
-        if auth_error is not None:
-            return auth_error
-
-        counters = get_storage(request.app).apply_group_admission_backfill()
-        log_audit_event(
-            request,
-            'group_admission_backfill_applied',
-            {
-                'applied': counters['applied'],
-                'skipped': counters['skipped'],
-                'matched': counters['matched'],
-            },
-        )
-        message = f'Годы поступления заполнены: {counters["applied"]} записей.'
-        if counters['skipped']:
-            message += f' пропущено {counters["skipped"]} (год уже задан или данные изменились).'
-        return build_redirect_with_message(message=message, url='/admin/maintenance/admission-years')
 
     @app.get('/admin/maintenance/export')
     async def export_database(request: Request):

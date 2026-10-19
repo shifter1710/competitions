@@ -83,11 +83,7 @@
                 <input class="form-control" id="reconcile-group" name="group" type="text"
                        value="{{ form.group_name }}">
             </div>
-            <div class="col-md-2">
-                <label class="form-label" for="reconcile-course">Курс</label>
-                <input class="form-control" id="reconcile-course" name="course" type="text"
-                       value="{{ form.course }}">
-            </div>
+            <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Создать и привязать</button>
                 <a class="btn btn-outline-secondary" href="{{ back_url }}">Отмена</a>

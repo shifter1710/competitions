@@ -6,7 +6,7 @@
 <a class="person-back" href="{{ person_return_url }}" data-person-back>← {% if person_return_url.split('?')[0].split('#')[0] == '/reports' %}К отчёту{% elif person_return_url.startswith('/calendar/') %}К соревнованию{% else %}К студентам{% endif %}</a>
 <header class="person-header">
 <div class="person-heading"><h1>{{ student.full_name }}</h1><span class="badge {% if student.active %}text-bg-success{% else %}text-bg-secondary{% endif %}">{% if student.active %}активен{% else %}неактивен{% endif %}</span></div>
-<p class="person-summary">{{ student.institute or 'Институт не указан' }} · {{ student.group_name or 'Группа не указана' }} · Курс в карточке: {{ student.course or 'не указан' }}{% if education and education.course %} · Расчётный курс: {{ education.course }}{% endif %}</p>
+<p class="person-summary">{{ student.institute or 'Институт не указан' }} · {{ student.group_name or 'Группа не указана' }} · Текущий курс: {{ student.course or 'не определён' }}</p>
 <div class="person-header-bottom"><span>Доступ: {% if access_ambiguous %}несколько аккаунтов — требуется проверка{% elif access_user %}{% if access_user.active %}выдан{% else %}отключён{% endif %}{% else %}не выдан{% endif %}</span>{% if is_admin %}<button class="btn btn-outline-secondary person-js-only" type="button" data-person-edit>Редактировать данные</button>{% endif %}</div>
 </header>
 <nav class="person-tabs" aria-label="Разделы карточки">
@@ -481,10 +481,7 @@
                 <label class="form-label" for="person-group">Группа</label>
                 <input class="form-control" id="person-group" name="group" type="text" value="{{ student.group_name or '' }}">
             </div>
-            <div class="col-md-2">
-                <label class="form-label" for="person-course">Курс</label>
-                <input class="form-control" id="person-course" name="course" type="text" value="{{ student.course or '' }}">
-            </div>
+            <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Сохранить</button>
                 <div class="form-text ui-hint">
@@ -511,22 +508,21 @@
     </div>
 </div>
 
-{# Course / Education, Phase A: read-only сводка образования из учебных данных
-   группы справочника. Рендерится ТОЛЬКО когда пара институт+группа студента
-   резолвится и у группы заданы учебные данные (education is None — карточки
-   нет, ошибки не бывает). Поле «Курс» выше — легаси-поле карточки, не тронуто. #}
+{# Учебная сводка всегда доступна, включая неизвестную группу и отсутствие
+   метаданных справочника. Год/курс вычисляются по собственной текущей группе;
+   справочник задаёт только уровень и длительность обучения. #}
 {% if education %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <h5 class="card-title">Образование</h5>
-        <div class="text-muted mb-3">Данные берутся из группы в справочнике; курс рассчитывается автоматически — учебный год начинается 1 сентября.</div>
+        <div class="text-muted mb-3">Год поступления определяется по названию группы; курс рассчитывается автоматически — учебный год начинается 1 сентября.</div>
         <dl class="row mb-0">
             <dt class="col-sm-4 fw-normal text-muted">Уровень образования</dt>
             <dd class="col-sm-8">{% if education.level_name %}{{ education.level_name }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
             <dt class="col-sm-4 fw-normal text-muted">Группа</dt>
             <dd class="col-sm-8">{{ student.institute }} · {{ student.group_name }}</dd>
             <dt class="col-sm-4 fw-normal text-muted">Год поступления</dt>
-            <dd class="col-sm-8">{% if education.admission_year %}{{ education.admission_year }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
+            <dd class="col-sm-8">{% if education.admission_year %}{{ education.admission_year }}{% else %}<span class="text-muted">не определён по названию группы</span>{% endif %}</dd>
             <dt class="col-sm-4 fw-normal text-muted">Длительность обучения (лет)</dt>
             <dd class="col-sm-8">{% if education.effective_duration_years %}{{ education.effective_duration_years }}{% else %}<span class="text-muted">не задана</span>{% endif %}</dd>
             <dt class="col-sm-4 fw-normal text-muted">Текущий курс</dt>
@@ -537,13 +533,13 @@
                 <span class="badge text-bg-warning">Предположительно обучение завершено</span>
                 {% endif %}
                 {% else %}
-                <span class="text-muted">не рассчитывается</span>
+                <span class="text-muted">не определён по группе и текущей дате</span>
                 {% endif %}
             </dd>
         </dl>
         {% if education.probably_finished %}
         <div class="form-text ui-hint mt-2">
-            Курс больше длительности обучения — проверьте год поступления или длительность
+            Курс больше длительности обучения — проверьте название группы и длительность
             в учебных данных группы. Карточка не архивируется автоматически.
         </div>
         {% endif %}

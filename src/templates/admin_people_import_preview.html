@@ -138,11 +138,7 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-group"
                                name="group" type="text" value="{{ row.group }}">
                     </div>
-                    <div class="col-md-3">
-                        <label class="form-label" for="import-row-{{ row.row_number }}-course">Курс</label>
-                        <input class="form-control" id="import-row-{{ row.row_number }}-course"
-                               name="course" placeholder="например, 2" type="text" value="{{ row.course }}">
-                    </div>
+                    <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
                     <div class="col-12">
                         <button class="btn btn-primary btn-sm" type="submit">Сохранить правку</button>
                     </div>
@@ -155,6 +151,7 @@
 {% endmacro %}
 
 {% block admin_content %}
+<p class="text-muted">Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.</p>
 
 <div class="text-muted mb-2">
     Всего строк: {{ total }} · новые: {{ new_count }} · требуют решения: {{ review_count }} · ошибочные: {{ error_count }}
@@ -212,7 +209,7 @@
                         <th>Пол</th>
                         <th>Институт</th>
                         <th>Группа</th>
-                        <th>Курс</th>
+                        <th>Курс (расчёт)</th>
                         <th>Замечания и кандидаты</th>
                         <th class="text-end">Действия</th>
                     </tr>

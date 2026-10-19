@@ -5,6 +5,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from src.education import group_course
+from src.education import parse_group_admission_year
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.storage.catalogs import CatalogsMixin
@@ -89,6 +91,8 @@ class SQLiteAdapter(
             detect_types=sqlite3.PARSE_DECLTYPES,
             check_same_thread=False,
         )
+        self.connection.create_function('education_admission_year', 1, parse_group_admission_year, deterministic=True)
+        self.connection.create_function('education_course', 2, group_course, deterministic=True)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute('PRAGMA journal_mode=WAL')
         self._create_schema()

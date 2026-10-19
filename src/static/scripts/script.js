@@ -1923,11 +1923,12 @@ class Main {
         event.preventDefault();
         const formData = new FormData(this.profileForm);
         const profile = {};
-        ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
+        ["student_name", "student_sex", "institute", "group"].forEach((key) => {
             profile[key] = String(formData.get(key) || "").trim();
         });
         this.saveProfile(profile)
             .then(() => {
+                this.fillProfileForm();
                 if (this.profileFormStatus) {
                     this.profileFormStatus.textContent = "Профиль сохранён";
                 }
@@ -1945,6 +1946,10 @@ class Main {
             return;
         }
         const profile = this.loadProfile();
+        const educationOutput = this.profileForm.querySelector("#profile-education");
+        if (educationOutput) {
+            educationOutput.textContent = `Год поступления: ${profile.admission_year || "—"}. Текущий курс: ${profile.course || "—"}. Рассчитываются по группе после сохранения.`;
+        }
         this.profileForm.querySelectorAll("input, select").forEach((input) => {
             const value = profile[input.name];
             if (value !== undefined) {
@@ -1957,7 +1962,7 @@ class Main {
         if (!this.profileForm) {
             return;
         }
-        this.clearProfile();
+        this.clearProfile().then(() => this.fillProfileForm());
         this.profileForm.reset();
         if (this.profileFormStatus) {
             this.profileFormStatus.textContent = "";
@@ -2035,7 +2040,7 @@ class Main {
         }
         const profile = this.loadProfile();
         const defaults = {};
-        ["student_name", "student_sex", "institute", "group", "course"].forEach((key) => {
+        ["student_name", "student_sex", "institute", "group"].forEach((key) => {
             const value = String(profile[key] ?? "").trim();
             if (value) {
                 defaults[key] = value;
@@ -2266,7 +2271,7 @@ class Main {
     // docs/data-model-decisions.md). Синтетический input обновляет список
     // групп при подстановке института.
     applyAthleteDefaults(row, athlete) {
-        const mapping = {sex: "student_sex", institute: "institute", group: "group", course: "course"};
+        const mapping = {sex: "student_sex", institute: "institute", group: "group"};
         Object.entries(mapping).forEach(([athleteKey, editKey]) => {
             const value = athlete[athleteKey];
             if (!value) {
@@ -2302,6 +2307,12 @@ class Main {
     // FormData собирает и заблокированные значения, они уходят на сервер
     // неизменными (сервер всё равно берёт их из записи-события).
     createInlineInput(key, value, fieldTypes, eventOwned = false) {
+        if (key === "course") {
+            const output = document.createElement("span");
+            output.className = "text-muted small";
+            output.textContent = "Рассчитывается по группе и дате";
+            return output;
+        }
         const readOnly = eventOwned && EVENT_OWNED_EDIT_KEYS.includes(key);
         let input;
         if (readOnly) {
@@ -4081,7 +4092,6 @@ class ParticipantsPage {
             fill(athlete, "sex", "participant-sex");
             fill(athlete, "institute", "participant-institute");
             fill(athlete, "group", "participant-group");
-            fill(athlete, "course", "participant-course");
         }, {students: true});
 
         // Ручная правка ФИО после выбора карточки: связь больше не
@@ -4196,7 +4206,6 @@ class ParticipantsPage {
 
         let fieldSettings = {};
         try { fieldSettings = JSON.parse(this.table.dataset.baseFieldSettings || "{}"); } catch (error) { /* Legacy fallback. */ }
-        const courseInput = this.buildTextInput("course", dataset.course, fieldSettings.course?.value_type === "text" ? "text" : "number");
         const positionInput = this.buildTextInput("position", dataset.position, fieldSettings.position?.value_type === "text" ? "text" : "number");
         const instituteInput = this.buildTextInput("institute", dataset.institute);
         const groupInput = this.buildTextInput("group", dataset.group);
@@ -4204,13 +4213,13 @@ class ParticipantsPage {
         const resultInput = this.buildTextInput("result", dataset.result);
 
         fioInput.required = true;
-        [[courseInput, "course"], [positionInput, "position"], [instituteInput, "institute"], [groupInput, "group"]].forEach(([input, key]) => {
+        [[positionInput, "position"], [instituteInput, "institute"], [groupInput, "group"]].forEach(([input, key]) => {
             input.required = Boolean(fieldSettings[key]?.required);
         });
         instituteCell.replaceChildren(instituteInput);
         groupCell.replaceChildren(groupInput);
         sexCell.replaceChildren(sexInput);
-        courseCell.replaceChildren(courseInput);
+        courseCell.textContent = "Рассчитывается по группе и дате";
         positionCell.replaceChildren(positionInput);
         row.children[1].replaceChildren(fioInput);
         disciplineCell.replaceChildren(disciplineInput);
@@ -4249,7 +4258,7 @@ class ParticipantsPage {
         this.editingSubRow = this.buildCustomFieldsSubRow(row);
 
         this.activeFioResolver = new FioResolver(fioInput, (athlete) => {
-            const mapping = {sex: sexInput, institute: instituteInput, group: groupInput, course: courseInput};
+            const mapping = {sex: sexInput, institute: instituteInput, group: groupInput};
             Object.entries(mapping).forEach(([athleteKey, input]) => {
                 const value = athlete[athleteKey];
                 if (value && String(input.value) !== String(value)) {

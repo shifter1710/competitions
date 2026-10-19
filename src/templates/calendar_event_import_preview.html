@@ -348,11 +348,7 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-group"
                                name="group" type="text" value="{{ row.group }}">
                     </div>
-                    <div class="col-md-3">
-                        <label class="form-label" for="import-row-{{ row.row_number }}-course">Курс</label>
-                        <input class="form-control" id="import-row-{{ row.row_number }}-course"
-                               name="course" placeholder="например, 2" type="text" value="{{ row.course }}">
-                    </div>
+                    <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
                     <div class="col-md-3">
                         <label class="form-label" for="import-row-{{ row.row_number }}-position">Место</label>
                         <input class="form-control" id="import-row-{{ row.row_number }}-position"
@@ -415,11 +411,7 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-create-group"
                                name="group" type="text" value="{{ row.group }}">
                     </div>
-                    <div class="col-md-3">
-                        <label class="form-label" for="import-row-{{ row.row_number }}-create-course">Курс</label>
-                        <input class="form-control" id="import-row-{{ row.row_number }}-create-course"
-                               name="course" placeholder="например, 2" type="text" value="{{ row.course }}">
-                    </div>
+                    <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
                     <div class="col-12">
                         <button class="btn btn-success btn-sm" type="submit">Создать карточку и добавить участника</button>
                         <span class="form-text ui-hint">Участие получит student_ref_id новой карточки.</span>
@@ -434,6 +426,7 @@
 {% endmacro %}
 
 {% block content %}
+<p class="text-muted">Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.</p>
 
 <div class="page-head">
     <div>
@@ -506,7 +499,7 @@
                         <th>Пол</th>
                         <th>Институт</th>
                         <th>Группа</th>
-                        <th>Курс</th>
+                        <th>Курс (расчёт)</th>
                         <th>Место</th>
                         <th>Дисциплина</th>
                         <th>Результат</th>

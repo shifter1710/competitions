@@ -1,24 +1,13 @@
-"""Учебные данные: год поступления, уровень образования и производный курс.
+"""Education is derived from the own group and reference date.
 
-Course / Education, Phase A (docs/data-model-decisions.md «Курс и уровень
-образования»): чистые функции без обращений к БД и Sanic — хранилище и роуты
-только вызывают их. Контракты:
-
-- Год поступления НИКОГДА не выводится из уровня образования или группы
-  иначе как парсером-ПОДСКАЗКОЙ (parse_group_admission_year): доменная
-  истина — явное значение в учебных данных группы (group_academic) или
-  снимок записи (competitions.admission_year).
-- Учебный год начинается 1 сентября: academic_year_start(1 сентября) уже
-  новый год, 31 августа — ещё прошлый.
-- course = academic_year_start - admission_year + 1; course <= 0 — год
-  поступления позже даты (future), производить «0 курс» нельзя.
-- «Предположительно обучение завершено» — только когда длительность
-  известна и course > duration; авто-архирования нет и в этой фазе не будет.
+The first exact two digits after an ASCII hyphen mean 20YY. Historical
+participation uses its start date; current cards use application-local today.
+Legacy persisted course/year columns are inert compatibility data.
 """
 import re
 from datetime import date
 
-# Парсер-подсказка года поступления по названию группы (СИБADI-вид:
+# Достоверное правило года поступления по названию группы (СИБADI-вид:
 # «АДб-22С1» → 2022). Первое вхождение «ровно две цифры после дефиса»;
 # три и больше цифр после дефиса — НЕ год («-2231»), любые другие формы —
 # None. Никаких догадок: непонятное название остаётся без года.
@@ -40,8 +29,7 @@ def parse_group_admission_year(group_value) -> int | None:
     Первое «ровно 2 цифры после дефиса» → 2000 + число («См-24МА1» →
     2024, «Тестб-23А1» → 2023). Всё остальное — None: нет дефиса, после
     дефиса не 2 цифры («-2231»), «Выпуск», пустая строка, None, мусорные
-    значения строкой («nan»). Это ПОДСКАЗКА для предзаполнения формы и
-    классификации backfill, НЕ доменная истина.
+    значения строкой («nan»). Это источник года поступления; сохранённые старые годы не используются.
     """
     if group_value is None:
         return None
@@ -122,3 +110,31 @@ def derive_course(
 def effective_duration_years(override: int | None, level_default: int | None) -> int | None:
     """Эффективная длительность обучения: override ?? default уровня ?? None."""
     return override if override is not None else level_default
+
+
+def group_course(group_value, reference_date) -> int | None:
+    """Pure group/date calculation, also safe as a SQLite scalar function."""
+    if isinstance(reference_date, str):
+        try:
+            reference_date = date.fromisoformat(reference_date[:10])
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(reference_date, date):
+        return None
+    return derive_course(parse_group_admission_year(group_value), reference_date)['course']
+
+
+def current_group_course(group_value) -> int | None:
+    # Local import avoids periods -> education import cycle.
+    from src.periods import today_in_timezone
+    from src.settings import settings
+
+    return group_course(group_value, today_in_timezone(settings.app_timezone))
+
+
+def current_student_values(row) -> dict:
+    """Decorate a card without exposing its inert persisted course."""
+    values = dict(row)
+    values['course'] = current_group_course(values.get('group_name', values.get('group', '')))
+    values['admission_year'] = parse_group_admission_year(values.get('group_name', values.get('group', '')))
+    return values

@@ -7,7 +7,6 @@ import json
 import re
 import secrets
 import time
-from datetime import date
 from datetime import datetime
 from io import BytesIO
 from typing import Sequence
@@ -37,21 +36,24 @@ from src.auth import user_is_admin
 from src.auth import user_is_moderator
 from src.auth import username_error
 from src.education import academic_year_label
+from src.education import current_group_course
 from src.education import derive_course
+from src.education import parse_group_admission_year
 from src.gto import build_gto_rows
 from src.gto import build_gto_stage_options
 from src.gto import gto_stage_label
 from src.periods import period_filter_context
 from src.periods import resolve_report_period
+from src.periods import today_in_timezone
 from src.periods import validate_report_period
 from src.records import event_participation_effective_values
+from src.settings import settings
 from src.storage.sqlite import GTO_STATUS_LABELS
 from src.storage.sqlite import GTO_STATUSES
 from src.storage.sqlite import gto_year_max
 from src.storage.sqlite import GTO_YEAR_MIN
 from src.storage.sqlite import SQLiteAdapter
 from src.storage.sqlite import STUDENT_SORT_COLUMNS
-from src.students import normalize_import_course
 from src.students import normalize_student_sex
 from src.students import parse_student_form
 from src.students import reconcile_link_error
@@ -102,7 +104,7 @@ def safe_student_return(value: str | None) -> str | None:
 # Импорт студентов из Excel (Student Identity v1, Phase 2.5): колонки файла
 # (обязательна только «ФИО», остальные опциональны), лимит строк на файл и
 # TTL staging-сессии предпросмотра (см. student_import_sessions).
-STUDENT_IMPORT_COLUMNS: Sequence[str] = ('ФИО', 'Пол', 'Институт', 'Группа', 'Курс')
+STUDENT_IMPORT_COLUMNS: Sequence[str] = ('ФИО', 'Пол', 'Институт', 'Группа')
 
 
 STUDENT_IMPORT_MAX_ROWS = 5000
@@ -137,7 +139,7 @@ def student_field_changes(student: dict, form: dict) -> dict:
     """Diff изменённых полей карточки для аудита: поле → {old, new}."""
     return {
         field: {'old': student[field], 'new': form[field]}
-        for field in ('full_name', 'sex', 'institute', 'group_name', 'course')
+        for field in ('full_name', 'sex', 'institute', 'group_name')
         if student[field] != form[field]
     }
 
@@ -260,21 +262,21 @@ def parse_student_import_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]:
 
     Возвращает строки staging: row_number = index + 2 (заголовок — строка 1)
     и статус pending/error. Значения — clean_str (NaN → пустая строка), курс —
-    normalize_import_course, пол — normalize_student_sex (регистр «м»/«ж»
+    по группе и текущей дате приложения, пол — normalize_student_sex (регистр «м»/«ж»
     приводится к «М»/«Ж»). Ошибки строки: пустое ФИО, недопустимый Пол
     (ошибка, а не молчаливая правка). Дубли ФИО в файле здесь НЕ помечаются
     — группы пересчитываются при каждом использовании (правки строк меняют
     их состав естественно).
     """
     columns = [str(column) for column in df.columns]
-    unknown_columns = [column for column in columns if column not in STUDENT_IMPORT_COLUMNS]
+    unknown_columns = [column for column in columns if column not in (*STUDENT_IMPORT_COLUMNS, 'Курс')]
     rows: list[dict] = []
     for index, record in df.iterrows():
         full_name = clean_str(record.get('ФИО'))
         sex = normalize_student_sex(clean_str(record.get('Пол')))
         institute = clean_str(record.get('Институт'))
         group = clean_str(record.get('Группа'))
-        course = normalize_import_course(record.get('Курс'))
+        course = current_group_course(group)
         error = None
         if not full_name:
             error = 'Пустое ФИО.'
@@ -394,10 +396,17 @@ def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dic
             pending += 1
         elif status in resolved_counts:
             resolved_counts[status] += 1
-        view = {**row, 'candidates': [], 'hints': None, 'duplicate_rows': duplicates.get(row['row_number'])}
+        view = {
+            **row,
+            'course': current_group_course(row['group']),
+            'candidates': [],
+            'hints': None,
+            'duplicate_rows': duplicates.get(row['row_number']),
+        }
         if status == 'pending':
             view['candidates'] = storage.find_student_candidates(row['full_name'])
             view['hints'] = student_catalog_hints(storage, row['institute'], row['group'], file_groups)
+            view['course'] = current_group_course(view['hints']['group'])
             # Классификация рендера фиксируется в строке сессии: массовое
             # создание (bulk-create) берёт только «чистые» строки (без
             # кандидатов на момент предпросмотра) и отменяется целиком,
@@ -458,7 +467,7 @@ def create_imported_student(
         row['sex'],
         hints['institute'],
         hints['group'],
-        row['course'],
+        '',
     )
     row['status'] = 'created'
     row['student_id'] = student_id
@@ -1372,7 +1381,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         prepared = []
         for row in bulk_rows:
             hints = student_catalog_hints(storage, row['institute'], row['group'], file_groups)
-            prepared.append((row['full_name'], row['sex'], hints['institute'], hints['group'], row['course']))
+            prepared.append((row['full_name'], row['sex'], hints['institute'], hints['group'], ''))
         student_ids = await asyncio.to_thread(storage.create_students, prepared)
         for row, student_id in zip(bulk_rows, student_ids):
             row['status'] = 'created'
@@ -1514,7 +1523,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         row['sex'] = get_form_value(request, 'sex').strip()
         row['institute'] = get_form_value(request, 'institute').strip()
         row['group'] = get_form_value(request, 'group').strip()
-        row['course'] = get_form_value(request, 'course').strip()
+        row['course'] = current_group_course(row['group'])
         error = None
         if not row['full_name']:
             error = 'Пустое ФИО.'
@@ -1730,28 +1739,25 @@ def register(app: Sanic) -> None:  # noqa: C901
         student = storage.get_student_by_id(numeric_id)
         if student is None:
             return build_redirect_with_message(error='Студент не найден.', url='/admin/people')
-        # Course/Education Phase A: read-only карточка «Образование» —
-        # учебный контекст группы студента (пара институт+группа строго
-        # резолвится справочником). Нет пары или учебных данных группы —
-        # карточки нет вообще (образование не выводится из имени группы).
-        education = None
-        education_context = storage.get_student_education_context(
-            student.get('institute') or '', student.get('group_name') or ''
+        # Current education uses the card's own group and application-local date.
+        education_context = (
+            storage.get_student_education_context(student.get('institute') or '', student.get('group_name') or '') or {}
         )
-        if education_context is not None:
-            derived = derive_course(
-                education_context['admission_year'],
-                date.today(),
-                education_context['effective_duration_years'],
-            )
-            education = {
-                **education_context,
-                'course': derived['course'],
-                'academic_year_label': academic_year_label(derived['academic_year_start'])
-                if derived['academic_year_start'] is not None
-                else '',
-                'probably_finished': derived['probably_finished'],
-            }
+        admission_year = parse_group_admission_year(student.get('group_name'))
+        derived = derive_course(
+            admission_year,
+            today_in_timezone(settings.app_timezone),
+            education_context.get('effective_duration_years'),
+        )
+        education = {
+            **education_context,
+            'admission_year': admission_year,
+            'course': derived['course'],
+            'academic_year_label': academic_year_label(derived['academic_year_start'])
+            if derived['academic_year_start'] is not None
+            else '',
+            'probably_finished': derived['probably_finished'],
+        }
         history_args = dict(request.args)
         period_error = validate_report_period(history_args)
         history_period = period_filter_context(history_args, storage.get_linked_record_period_year_options(numeric_id))

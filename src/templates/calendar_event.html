@@ -26,7 +26,6 @@
     <input type="hidden" name="student_sex" value="{{ can_add_for.student_sex }}">
     <input type="hidden" name="institute" value="{{ can_add_for.institute }}">
     <input type="hidden" name="group" value="{{ can_add_for.group_name }}">
-    <input type="hidden" name="course" value="{{ can_add_for.course }}">
     {% else %}
     {# Явный выбор карточки студента в резолвере ФИО (script.js) пишет сюда id;
        сброс связи/правка ФИО очищают поле — сервер валидирует его при непустом
@@ -176,7 +175,7 @@
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-fio" name="student_name" required aria-label="ФИО" autocomplete="off"
                         placeholder="ФИО: поиск по первым буквам"
-                        title="Известные атлеты и карточки студентов подскажут пол, институт, группу и курс"
+                        title="Известные атлеты и карточки студентов подскажут пол, институт и группу"
                         value="{{ participant_form_values.get('student_name', '') }}">
                     {# Бейдж выбранной карточки: показывается при явном выборе карточки
                        студента в резолвере (script.js), «сбросить связь» чистит только
@@ -210,14 +209,7 @@
                         value="{{ participant_form_values.get('group', '') }}"
                         {% if fs.group.required %}required{% endif %}>
                 </td>
-                <td>
-                    <input class="form-control form-control-sm" form="participant-add-form"
-                        {% if fs.course.value_type == 'number' %}type="number" min="1" step="1"
-                        {% else %}type="text" placeholder="например, 2"{% endif %}
-                        id="participant-course" name="course" aria-label="Курс"
-                        value="{{ participant_form_values.get('course', '') }}"
-                        {% if fs.course.required %}required{% endif %}>
-                </td>
+                <td><span class="text-muted small">Рассчитывается по группе и дате</span></td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form" type="text"
                         id="participant-discipline" name="discipline" aria-label="Дисциплина"
@@ -246,8 +238,8 @@
             </tr>
             {% elif can_add_for %}
             {# Prefill «+ участие» (P7): строка добавления ВТОРОГО участия
-               существующего участника — снимок (ФИО/пол/институт/группа/курс)
-               уходит hidden-полями формы и показывается plaintext, редактируются
+               существующего участника — снимок ФИО/пола/института/группы
+               уходит hidden-полями формы; курс показан вычисляемым значением, редактируются
                только дисциплина/место/результат нового участия. #}
             <tr class="row-new">
                 <td class="text-center text-muted">+</td>
@@ -336,7 +328,7 @@
                 <td>{{ group.student_sex }}</td>
                 <td>{{ group.institute }}</td>
                 <td>{{ group.group_name }}</td>
-                <td>{{ group.course }}</td>
+                <td>{{ group.course or '—' }}</td>
                 <td><span class="text-muted">—</span></td>
                 <td><span class="text-muted">—</span></td>
                 <td><span class="text-muted">—</span></td>
@@ -381,7 +373,7 @@
                         <button class="btn btn-sm btn-outline-primary participant-edit-button" type="button"
                             data-record-id="{{ participation.record_id }}" data-student-name="{{ group.student_name }}"
                             data-student-sex="{{ group.student_sex }}" data-institute="{{ group.institute }}"
-                            data-group="{{ group.group_name }}" data-course="{{ group.course }}"
+                            data-group="{{ group.group_name }}" data-course="{{ group.course or '—' }}"
                             data-position="{{ participation.position }}"
                             data-discipline="{{ participation.effective_discipline }}"
                             data-result="{{ participation.effective_result }}"
@@ -423,7 +415,7 @@
                 <td>{{ participation.student_sex }}</td>
                 <td>{{ participation.institute }}</td>
                 <td>{{ participation.group_name }}</td>
-                <td>{{ participation.course }}</td>
+                <td>{{ participation.course or '—' }}</td>
                 <td>
                     {% if participation.effective_discipline %}{{ participation.effective_discipline }}{% else %}<span
                         class="text-muted"
@@ -444,7 +436,7 @@
                             data-student-name="{{ participation.student_name }}"
                             data-student-sex="{{ participation.student_sex }}"
                             data-institute="{{ participation.institute }}"
-                            data-group="{{ participation.group_name }}" data-course="{{ participation.course }}"
+                            data-group="{{ participation.group_name }}" data-course="{{ participation.course or '—' }}"
                             data-position="{{ participation.position }}"
                             data-discipline="{{ participation.effective_discipline }}"
                             data-result="{{ participation.effective_result }}"
@@ -495,8 +487,10 @@
 
 {% if can_write %}
 <div class="calendar-note mt-4">
-    <span>Участники — обычные записи реестра: ФИО ищется по первым буквам среди известных атлетов, пол, институт,
-        группа и курс подставляются (поля формы всегда имеют приоритет). Место можно дописать позже — «Редактировать»
+    <span>Участники — обычные записи реестра: ФИО ищется по первым буквам среди известных атлетов.
+        Пол, институт и группа подставляются только в пустые поля; значения формы имеют приоритет.
+        Курс рассчитывается по собственной исторической группе участия и дате начала соревнования.
+        Место можно дописать позже — «Редактировать»
         в строке участника. Несколько участий одного участника (например, разные дисциплины) показываются группой:
         общая строка — участник, ниже — его дисциплины; кнопка «+ участие» добавляет ещё одно участие к той же
         карточке студента.</span>

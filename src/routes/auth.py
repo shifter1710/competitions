@@ -64,7 +64,7 @@ def clear_login_failures(ip: str):
     login_failures.pop(ip, None)
 
 
-PROFILE_FIELDS = ('student_name', 'student_sex', 'institute', 'group', 'course')
+PROFILE_FIELDS = ('student_name', 'student_sex', 'institute', 'group')
 
 
 def read_profile_payload(request: Request) -> tuple[dict, str | None]:
@@ -75,11 +75,6 @@ def read_profile_payload(request: Request) -> tuple[dict, str | None]:
             profile[field] = value
     if profile.get('student_sex') not in (None, '', 'М', 'Ж'):
         return {}, 'Пол должен быть М или Ж'
-    if 'course' in profile:
-        try:
-            profile['course'] = str(int(profile['course']))
-        except ValueError:
-            return {}, 'Курс должен быть числом'
     return profile, None
 
 
@@ -179,7 +174,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         storage.set_profile(user_id, profile)
         if profile.get('student_name'):
             storage.add_name_alias(user_id, profile['student_name'])
-        return json_response({'profile': profile})
+        return json_response({'profile': storage.get_profile(user_id)})
 
     @app.get('/api/students/lookup')
     async def lookup_student(request: Request):

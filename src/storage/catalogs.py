@@ -27,6 +27,8 @@ class CatalogsMixin:
         """
         with self._lock:
             for key, (value_type, required) in entries.items():
+                if key == 'course':
+                    continue
                 self.connection.execute(
                     '''
                     INSERT INTO field_settings (key, value_type, required)
