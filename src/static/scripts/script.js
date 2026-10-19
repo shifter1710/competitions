@@ -862,7 +862,9 @@ class Main {
             // Reports v2: GET-навигация — сабмит это переход по ссылке
             // (пустые поля не попадают в URL), никакого fetch-обновления.
             this.reportForm.addEventListener("submit", (event) => this.handleReportFormSubmit(event));
-            this.reportForm.addEventListener("input", () => this.updateReportDirtyState());
+            this.reportForm.addEventListener("input", (event) => {
+                if (event.target.name) this.updateReportDirtyState();
+            });
             this.reportForm.addEventListener("change", (event) => this.handleReportFormChange(event));
         }
         if (this.reportExportForm) {
@@ -932,47 +934,107 @@ class Main {
         if (!this.reportForm) {
             return;
         }
-        this.initReportGroupNarrowing();
+        this.initReportMultiselects();
         this.updateReportDirtyState();
     }
 
-    // Иерархия институт→группа (решение 2026-09-13): выбранный институт
-    // сужает список групп; без института доступны все группы. Перенесено
-    // из инлайн-скрипта report.html (Reports v2).
-    initReportGroupNarrowing() {
-        const groupSelect = this.reportForm.querySelector(".report__group");
-        const instituteSelect = this.reportForm.querySelector(".report__institute");
-        if (!groupSelect || !instituteSelect) {
-            return;
-        }
-        let groupsByInstitute = {};
-        let allGroups = [];
-        try {
-            groupsByInstitute = JSON.parse(groupSelect.dataset.groupsByInstitute || "{}");
-            allGroups = JSON.parse(groupSelect.dataset.allGroups || "[]");
-        } catch (error) {
-            groupsByInstitute = {};
-            allGroups = [];
-        }
-        const fillGroupOptions = (institute) => {
-            const groups = institute && groupsByInstitute[institute] ? groupsByInstitute[institute] : allGroups;
-            const selected = groupSelect.value;
-            const options = [new Option("Все", "")].concat(groups.map((value) => new Option(value, value)));
-            groupSelect.replaceChildren.apply(groupSelect, options);
-            if (selected && groups.indexOf(selected) !== -1) {
-                groupSelect.value = selected;
-            }
+    // Local checkbox/search actions only change the draft. Native repeated
+    // checkbox names are the submitted contract; search has no name.
+    initReportMultiselects() {
+        const controls = [...this.reportForm.querySelectorAll(".report-multi")];
+        const close = (control, restoreFocus = false) => {
+            const toggle = control.querySelector(".report-multi__toggle");
+            control.querySelector(".report-multi__panel").hidden = true;
+            toggle.setAttribute("aria-expanded", "false");
+            if (restoreFocus) toggle.focus();
         };
-        instituteSelect.addEventListener("change", () => {
-            fillGroupOptions(instituteSelect.value);
-            this.updateReportDirtyState();
+        controls.forEach(control => {
+            control.dataset.enhanced = "true";
+            close(control);
+            const toggle = control.querySelector(".report-multi__toggle");
+            const panel = control.querySelector(".report-multi__panel");
+            const search = control.querySelector(".report-multi__search");
+            toggle.addEventListener("click", () => {
+                const open = panel.hidden;
+                controls.forEach(other => close(other));
+                panel.hidden = !open;
+                toggle.setAttribute("aria-expanded", String(open));
+                if (open) search.focus();
+            });
+            search.addEventListener("input", () => this.refreshReportMultiselects());
+            search.addEventListener("keydown", event => {
+                if (event.key === "Enter") event.preventDefault();
+            });
+            control.addEventListener("change", event => {
+                if (event.target.type === "checkbox") this.refreshReportMultiselects();
+            });
+            control.querySelector(".report-multi__all").addEventListener("click", () => {
+                control.querySelectorAll(".report-multi__option").forEach(option => {
+                    if (option.dataset.available !== "false") option.querySelector("input").checked = true;
+                });
+                this.refreshReportMultiselects();
+                this.updateReportDirtyState();
+            });
+            control.querySelector(".report-multi__clear").addEventListener("click", () => {
+                control.querySelectorAll("input[type=checkbox]").forEach(input => { input.checked = false; });
+                search.value = "";
+                this.refreshReportMultiselects();
+                this.updateReportDirtyState();
+            });
         });
-        // Восстановление из URL: сервер рендерит все группы, при выбранном
-        // институте сужаем сразу (выбранная группа сохраняется, если она в
-        // списке института).
-        if (instituteSelect.value) {
-            fillGroupOptions(instituteSelect.value);
-        }
+        document.addEventListener("click", event => {
+            controls.forEach(control => { if (!control.contains(event.target)) close(control); });
+        });
+        document.addEventListener("keydown", event => {
+            if (event.key !== "Escape") return;
+            controls.forEach(control => {
+                if (!control.querySelector(".report-multi__panel").hidden) {
+                    event.preventDefault();
+                    close(control, true);
+                }
+            });
+        });
+        const advanced = this.reportForm.querySelector(".report-filters__advanced");
+        advanced?.addEventListener("toggle", () => {
+            if (!advanced.open) controls.filter(control => advanced.contains(control)).forEach(control => close(control));
+        });
+        this.refreshReportMultiselects();
+    }
+
+    refreshReportMultiselects() {
+        const institutes = [...this.reportForm.querySelectorAll('[name="institute"]:checked')].map(input => input.value);
+        const groupControl = this.reportForm.querySelector('.report-multi[data-filter-key="group"]');
+        let groupsByInstitute = {};
+        try { groupsByInstitute = JSON.parse(groupControl?.dataset.groupsByInstitute || "{}"); }
+        catch (error) { /* Malformed optional narrowing must not discard selected values. */ }
+        const allowedGroups = new Set(institutes.flatMap(value => groupsByInstitute[value] || []));
+        this.reportForm.querySelectorAll(".report-multi").forEach(control => {
+            const checked = [...control.querySelectorAll("input[type=checkbox]:checked")];
+            const label = control.dataset.label;
+            const selectedLabel = checked.length === 1 ? checked[0].closest("label").querySelector(".report-multi__option-text > span").textContent.trim() : "";
+            const summary = !checked.length ? "Все" : checked.length === 1 && selectedLabel.length < 38 ? selectedLabel : `Выбрано: ${checked.length}`;
+            control.querySelector(".report-multi__value").textContent = summary;
+            const toggle = control.querySelector(".report-multi__toggle");
+            toggle.setAttribute("aria-label", `${label}: ${summary}`);
+            toggle.title = checked.map(input => input.closest("label").innerText.trim()).join(", ");
+            control.querySelector(".report-multi__count").textContent = `Выбрано: ${checked.length}`;
+            const query = control.querySelector(".report-multi__search").value.trim().toLocaleLowerCase("ru");
+            let shown = 0;
+            control.querySelectorAll(".report-multi__option").forEach(option => {
+                const input = option.querySelector("input");
+                const available = control !== groupControl || !institutes.length || allowedGroups.has(input.value);
+                option.dataset.available = String(available);
+                option.querySelector(".report-multi__outside").hidden = available || !input.checked;
+                const matches = option.querySelector(".report-multi__option-text > span").textContent.toLocaleLowerCase("ru").includes(query)
+                    || input.value.toLocaleLowerCase("ru").includes(query)
+                    || [...option.querySelectorAll("small:not(.report-multi__outside)")].some(item => item.textContent.toLocaleLowerCase("ru").includes(query));
+                option.hidden = (!available && !input.checked) || !matches;
+                if (!option.hidden) shown++;
+            });
+            const empty = control.querySelector(".report-multi__empty");
+            empty.hidden = shown > 0;
+            if (control.querySelector(".report-multi__option")) empty.textContent = query ? "Ничего не найдено" : "Нет доступных значений";
+        });
     }
 
     // Сериализация формы условий: пустые значения отбрасываются (пустое не
@@ -994,7 +1056,7 @@ class Main {
     }
 
     static reportEntriesKey(entries) {
-        return entries.map(([key, value]) => `${key}=${value}`).sort().join("&");
+        return JSON.stringify([...new Set(entries.map(entry => JSON.stringify(entry)))].sort());
     }
 
     // Канонизация записей для сравнения с применённым запросом:
@@ -1023,6 +1085,13 @@ class Main {
     updateReportDirtyState() {
         if (!this.reportForm) {
             return;
+        }
+        const advanced = this.reportForm.querySelector(".report-filters__advanced");
+        if (advanced) {
+            const count = [...advanced.querySelectorAll("input[name], select[name]")].filter(input => input.type === "checkbox" ? input.checked : Boolean(input.value)).length;
+            const badge = advanced.querySelector(".report-filters__advanced-count");
+            badge.textContent = count;
+            badge.hidden = !count;
         }
         const dirty = this.reportFormIsDirty();
         const warning = document.querySelector(".report-dirty-warning");
@@ -3676,12 +3745,15 @@ class ParticipantsPage {
 
     changeResultFilter(target) {
         if (this.editingRow || this.addDirty) {
-            const base = `/calendar/${this.root.dataset.eventPage}`;
-            this.root.querySelector("#event-result-filter").value = base + (this.root.dataset.resultFilter ? `?result=${this.root.dataset.resultFilter}` : "");
+            const filter = this.root.querySelector("#event-result-filter");
+            const appliedOption = [...filter.options].find(option => option.defaultSelected);
+            if (appliedOption) filter.value = appliedOption.value;
             notify({type: "error", text: "Сохраните или отмените текущий ввод перед сменой фильтра места."});
             return;
         }
         const url = new URL(target, location.origin);
+        const returnContext = new URL(location.href).searchParams.get("return");
+        if (returnContext) url.searchParams.set("return", returnContext);
         if (this.search.value) url.searchParams.set("q", this.search.value);
         this.storeView();
         window.location.href = url;
@@ -4145,6 +4217,8 @@ class ParticipantsPage {
             return;
         }
         const url = new URL(`/calendar/${eventId}`, location.origin);
+        const returnContext = new URL(location.href).searchParams.get("return");
+        if (returnContext) url.searchParams.set("return", returnContext);
         const resultFilter = new URLSearchParams(location.search).get("result");
         if (resultFilter) url.searchParams.set("result", resultFilter);
         if (this.search?.value) url.searchParams.set("q", this.search.value);
@@ -4253,7 +4327,7 @@ class StudentProfilePage {
             root.querySelector('#person-edit-details').open = true;
             root.querySelector('#person-full-name').focus();
         });
-        root.querySelectorAll('form').forEach(form => {
+        root.querySelectorAll('form[method="post"]').forEach(form => {
             form.addEventListener('input', () => this.dirty.add(form));
             form.addEventListener('change', () => this.dirty.add(form));
             if (form.querySelector('input:not([type=hidden]), select')) {
@@ -4351,6 +4425,10 @@ class StudentProfilePage {
             if (!response.ok) throw new Error(`Не удалось сохранить данные (HTTP ${response.status}). Повторите попытку.`);
             this.dirty.delete(form); this.busy = false;
             if (target.pathname === location.pathname) {
+                const currentParams = new URL(location.href).searchParams;
+                ['period', 'date_from', 'date_to', 'offset'].forEach(key => {
+                    if (currentParams.has(key)) target.searchParams.set(key, currentParams.get(key));
+                });
                 target.searchParams.set('tab', this.activeTab);
                 if (this.search.value) target.searchParams.set('history_q', this.search.value);
                 target.searchParams.set('return', this.returnURL);

@@ -278,9 +278,11 @@ def client() -> SanicTestClient:
     fake_storage.get_report_course_options.return_value = []
     fake_storage.get_report_admission_year_options.return_value = ([], False)
     fake_storage.get_report_period_year_options.return_value = []
+    fake_storage.get_calendar_period_year_options.return_value = []
+    fake_storage.get_linked_record_period_year_options.return_value = []
     fake_storage.get_grouped_report.return_value = []
     app.ctx.storage = fake_storage
-    return SanicTestClient(app)
+    return app.test_client
 
 
 def test_healthcheck(client: SanicTestClient):
@@ -904,14 +906,15 @@ def test_export_report_applies_report_filters(client: SanicTestClient):
         'date_from': '01.02.2024',
         'date_to': '',
         'position': '<4',
-        'level': '',
+        'level': [],
         'name': 'Иван',
-        'institute': '',
-        'group': '',
-        'sport': '',
+        'institute': [],
+        'group': [],
+        'sport': [],
         'course': '',
         'admission_year': '',
         'custom_filters': [],
+        'event_id': [],
     }
 
 
@@ -8856,7 +8859,7 @@ def test_calendar_filters_pass_sport_to_storage(client: SanicTestClient):
     headers = get_auth_headers('viewer')
     _, response = client.get('/calendar?status=past&sport=Бег', headers=headers)
     assert response.status == 200
-    app.ctx.storage.list_calendar_events.assert_called_with(sport='Бег')
+    app.ctx.storage.list_calendar_events.assert_called_with(sport='Бег', date_from='', date_to='')
 
 
 def test_calendar_page_renders_months_and_cards_newest_first(client: SanicTestClient):
@@ -12257,7 +12260,7 @@ def test_person_card_shows_linked_data(reconcile_client: SanicTestClient):
     ids = [row['id'] for row in storage.connection.execute('SELECT id FROM competitions WHERE student_ref_id IS NULL')]
     storage.link_competitions(ids, student_id)
     _, response = reconcile_client.get(f'/admin/people/{student_id}', headers=get_auth_headers())
-    assert 'Показаны последние 50 из 53 участий.' in response.text
+    assert 'Показано 1–50 из 53' in response.text
     assert response.text.count('data-history-record=') == 50
 
 
@@ -23198,7 +23201,7 @@ def test_student_profile_p2_tabs_history_and_roles(people_client: SanicTestClien
     assert 'Историческое Имя Образец' in body
     assert 'Сведения о записи' in body
     assert 'Поиск среди показанных записей' in body
-    assert 'Последние 1 из 1' in body
+    assert 'Показано 1–1 из 1' in body
     assert ('name="full_name"' in body) == (role == 'admin')
     assert ('/reconcile/relink' in body) == (role == 'admin')
     assert (f'action="/admin/people/{student_id}/gto"' in body) == (role != 'viewer')

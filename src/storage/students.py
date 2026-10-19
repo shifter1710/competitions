@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime
 from typing import Sequence
 
+from src.periods import academic_years_for_ranges
+from src.settings import settings
 from src.storage.helpers import STUDENT_SEX_VALUES
 from src.storage.helpers import STUDENT_SORT_COLUMNS
 
@@ -644,28 +646,50 @@ class StudentsMixin:
             self.connection.commit()
             return row['student_ref_id'], None
 
-    def linked_records_count(self, student_id: int) -> int:
+    @staticmethod
+    def _linked_record_period_where(student_id: int, date_from: str, date_to: str) -> tuple[str, list]:
+        filters = ['student_ref_id = ?']
+        params: list[object] = [int(student_id)]
+        if date_from:
+            filters.append("substr(COALESCE(NULLIF(date_to, ''), date), 1, 10) >= ?")
+            params.append(datetime.strptime(date_from, settings.date_format).date().isoformat())
+        if date_to:
+            filters.append('substr(date, 1, 10) <= ?')
+            params.append(datetime.strptime(date_to, settings.date_format).date().isoformat())
+        return ' AND '.join(filters), params
+
+    def get_linked_record_period_year_options(self, student_id: int) -> list[int]:
+        with self._lock:
+            rows = self.connection.execute(
+                'SELECT date, date_to FROM competitions WHERE student_ref_id = ?', (int(student_id),)
+            ).fetchall()
+            return academic_years_for_ranges([dict(row) for row in rows])
+
+    def linked_records_count(self, student_id: int, date_from: str = '', date_to: str = '') -> int:
+        where, params = self._linked_record_period_where(student_id, date_from, date_to)
         with self._lock:
             row = self.connection.execute(
-                'SELECT COUNT(*) AS total FROM competitions WHERE student_ref_id = ?',
-                (int(student_id),),
+                f'SELECT COUNT(*) AS total FROM competitions WHERE {where}',
+                params,
             ).fetchone()
             return row['total']
 
-    def list_linked_records(self, student_id: int, limit: int = 50) -> list[dict]:
-        """Записи, привязанные к карточке (свежие сверху). student_name —
-        снимок из самой записи, а не актуальное ФИО карточки."""
+    def list_linked_records(
+        self, student_id: int, limit: int = 50, *, date_from: str = '', date_to: str = '', offset: int = 0
+    ) -> list[dict]:
+        """Filter linked history before paging; names and dates remain historical snapshots."""
+        where, params = self._linked_record_period_where(student_id, date_from, date_to)
         with self._lock:
             rows = self.connection.execute(
-                '''
+                f'''
                 SELECT id, student_name, sport, date, date_to, name,
                        discipline, position, result, calendar_event_id, extra_data
                 FROM competitions
-                WHERE student_ref_id = ?
+                WHERE {where}
                 ORDER BY date DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 ''',
-                (int(student_id), int(limit)),
+                [*params, int(limit), max(0, int(offset))],
             ).fetchall()
             return [dict(row) for row in rows]
 

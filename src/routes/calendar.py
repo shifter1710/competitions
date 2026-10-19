@@ -3,6 +3,7 @@
 src/main.py без изменения поведения (Architecture v1)."""
 import asyncio
 import logging
+import re
 import secrets
 import shutil
 import time
@@ -12,7 +13,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Sequence
 from urllib.parse import parse_qs
+from urllib.parse import parse_qsl
+from urllib.parse import unquote
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 import pandas as pd
 from pandas import isna
@@ -40,6 +45,9 @@ from src.files import event_document_source_path
 from src.files import regulation_source_path
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
+from src.periods import period_filter_context
+from src.periods import resolve_report_period
+from src.periods import validate_report_period
 from src.records import build_competition
 from src.records import build_link_diff_rows
 from src.records import collides_with_fixed_columns
@@ -2069,6 +2077,34 @@ def build_link_confirm_text(record_id: int, event_name: str, cleared_fields: Seq
 # C901 (осознанное подавление): mccabe суммирует сложность вложенных
 # verbatim-хендлеров, перенесённых из main.py без изменений; разбиение
 # register() — Architecture v2, не pre-merge gate.
+def safe_calendar_return(value: str | None) -> str | None:
+    """Keep only exact calendar or student-card viewing destinations."""
+    if not value or not value.startswith('/') or value.startswith('//'):
+        return None
+    decoded = value
+    for _ in range(4):
+        if any(ord(char) < 32 or ord(char) == 127 or char == '\\' for char in decoded):
+            return None
+        new_value = unquote(decoded)
+        if new_value == decoded:
+            break
+        decoded = new_value
+    try:
+        url = urlsplit(value)
+        if url.scheme or url.netloc or not re.fullmatch(r'/calendar|/admin/people/[0-9]+', url.path):
+            return None
+        query = urlencode(
+            [
+                (key, val)
+                for key, val in parse_qsl(url.query, keep_blank_values=True)
+                if key not in ('admin_message', 'admin_error')
+            ]
+        )
+        return urlunsplit(('', '', url.path, query, url.fragment))
+    except ValueError:
+        return None
+
+
 def register(app: Sanic) -> None:  # noqa: C901
     @app.get('/calendar')
     async def calendar_page(request: Request):
@@ -2084,8 +2120,31 @@ def register(app: Sanic) -> None:  # noqa: C901
             raw_status = ''
         sport_filter = (get_param(args, 'sport') or '').strip()
 
+        period_error = validate_report_period(args)
+        period_context = period_filter_context(args, storage.get_calendar_period_year_options())
+        date_from, date_to = ('', '') if period_error else resolve_report_period(args)
+        calendar_query = [
+            (key, value)
+            for key, value in (
+                ('status', raw_status),
+                ('sport', sport_filter),
+                *((key, get_param(args, key) or '') for key in ('period', 'date_from', 'date_to')),
+            )
+            if value
+        ]
+        calendar_return_url = '/calendar' + ('?' + urlencode(calendar_query) if calendar_query else '')
+        period_reset_query = [
+            (key, value) for key, value in calendar_query if key not in ('period', 'date_from', 'date_to')
+        ]
         today = datetime.now().date()
-        events = [decorate_calendar_event(event, today) for event in storage.list_calendar_events(sport=sport_filter)]
+        events = (
+            []
+            if period_error
+            else [
+                decorate_calendar_event(event, today)
+                for event in storage.list_calendar_events(sport=sport_filter, date_from=date_from, date_to=date_to)
+            ]
+        )
         if raw_status:
             events = [event for event in events if event['status'] == raw_status]
 
@@ -2094,6 +2153,10 @@ def register(app: Sanic) -> None:  # noqa: C901
             context={
                 'request': request,
                 'month_groups': group_calendar_events_by_month(events),
+                **period_context,
+                'period_error': period_error,
+                'period_reset_url': '/calendar' + ('?' + urlencode(period_reset_query) if period_reset_query else ''),
+                'calendar_event_query': urlencode({'return': calendar_return_url}),
                 'events_count': len(events),
                 'planned_count': sum(1 for event in events if event['status'] == CALENDAR_STATUS_PLANNED),
                 'past_count': sum(1 for event in events if event['status'] == CALENDAR_STATUS_PAST),
@@ -2105,6 +2168,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'level_options': storage.get_level_names(),
                 **get_flash_args(request),
             },
+            status=400 if period_error else 200,
         )
 
     @app.post('/calendar/new')
@@ -2432,6 +2496,10 @@ def register(app: Sanic) -> None:  # noqa: C901
             context={
                 'request': request,
                 'event': decorated_event,
+                'calendar_return_url': safe_calendar_return(request.args.get('return')) or '/calendar',
+                'calendar_return_query': urlencode({'return': safe_calendar_return(request.args.get('return'))})
+                if safe_calendar_return(request.args.get('return'))
+                else '',
                 'participant_groups': participant_groups,
                 'participants_count': len(all_groups),
                 'participations_count': participations_count,

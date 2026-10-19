@@ -1,4 +1,5 @@
 {% extends "layout/base.html" %}
+{% from "macros/report_multiselect.html" import report_multiselect %}
 
 {% block content %}
 
@@ -27,8 +28,9 @@
         <div class="text-muted mb-3">Фильтры — какие записи попадают в расчёт; разрез — как они сведены в таблице.</div>
         {# data-applied-query — применённый запрос для клиентского
            dirty-детекта (предупреждение о неприменённых изменениях). #}
-        <form class="report-form row g-3 align-items-end" method="get" action="/reports"{% if report_applied %} data-applied-query="{{ applied_query }}"{% endif %}>
-            <div class="col-6 col-md-3">
+        <form class="report-form" method="get" action="/reports"{% if report_applied %} data-applied-query="{{ applied_query }}"{% endif %}>
+            <div class="report-filters__primary">
+            <div class="report-filters__period">
                 <label class="form-label" for="report-filter-period">Период</label>
                 <select class="form-select report__period" id="report-filter-period" name="period">
                     {% for option in period_options %}
@@ -36,7 +38,7 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-12 col-md-5 report__dates{% if report_form.period != 'custom' %} d-none{% endif %}">
+            <div class="report-filters__dates report__dates{% if report_form.period != 'custom' %} d-none{% endif %}">
                 <div class="datetime">
                     <div>
                         <label class="form-label" for="report-filter-date-from">Дата (от)</label>
@@ -52,26 +54,30 @@
                     </div>
                 </div>
             </div>
-            <div class="col-12 col-md-4">
-                <label class="form-label" for="report-filter-institute">Институт</label>
-                <select class="form-select report__institute" id="report-filter-institute" name="institute">
-                    <option value="">Все</option>
-                    {% for value in institute_options %}
-                    <option value="{{ value }}"{% if value == report_form.institute %} selected{% endif %}>{{ value }}</option>
+            <div class="report-filters__events">
+                {{ report_multiselect('event_id', 'Соревнования', event_options, report_form.event_id, 'Поиск соревнования') }}
+                <div class="form-text">Выбор сохраняется при смене периода. Учитываются участия только за указанный период.</div>
+            </div>
+            <div class="report-filters__slice">
+                <label class="form-label" for="report-filter-group-by">Разрез</label>
+                <select class="form-select report__group-by" id="report-filter-group-by" name="group_by">
+                    {% for option in report_slice_options %}
+                    <option value="{{ option.key }}"{% if option.key == report_form.group_by %} selected{% endif %}>{{ option.label }}</option>
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-12 col-md-4">
-                <label class="form-label" for="report-filter-group">Группа</label>
-                <select class="form-select report__group" id="report-filter-group" name="group"
-                        data-all-groups='{{ group_options | tojson }}'
-                        data-groups-by-institute='{{ groups_by_institute | tojson }}'>
-                    <option value="">Все</option>
-                    {% for value in group_options %}
-                    <option value="{{ value }}"{% if value == report_form.group %} selected{% endif %}>{{ value }}</option>
-                    {% endfor %}
-                </select>
             </div>
+            <div class="report-filters__categories">
+                {{ report_multiselect('institute', 'Институт', institute_options, report_form.institute, 'Поиск института') }}
+                {{ report_multiselect('group', 'Группа', group_options, report_form.group, 'Поиск группы', groups_by_institute) }}
+                {{ report_multiselect('sport', 'Вид спорта', sport_options, report_form.sport, 'Поиск вида спорта') }}
+            </div>
+            <details class="report-filters__advanced"{% if report_advanced_count or report_error %} open{% endif %}>
+                <summary>Дополнительные фильтры <span class="report-filters__advanced-count"{% if not report_advanced_count %} hidden{% endif %}>{{ report_advanced_count }}</span></summary>
+                <div class="row g-3 align-items-end report-filters__advanced-body">
+                    <div class="col-12 col-md-4">
+                        {{ report_multiselect('level', 'Уровень соревнований', levels, report_form.level, 'Поиск уровня') }}
+                    </div>
             <div class="col-6 col-md-2">
                 <label class="form-label" for="report-filter-course">Курс</label>
                 <select class="form-select" id="report-filter-course" name="course">
@@ -94,31 +100,13 @@
                 </select>
             </div>
             <div class="col-12 col-md-4">
-                <label class="form-label" for="report-filter-sport">Вид спорта</label>
-                <select class="form-select" id="report-filter-sport" name="sport">
-                    <option value="">Все</option>
-                    {% for value in sport_options %}
-                    <option value="{{ value }}"{% if value == report_form.sport %} selected{% endif %}>{{ value }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-12 col-md-4">
-                <label class="form-label" for="report-filter-level">Уровень соревнований</label>
-                <select class="form-select filter__level" id="report-filter-level" name="level">
-                    <option data-display="Все" value="">Все</option>
-                    {% for level in levels %}
-                    <option value="{{ level }}"{% if level == report_form.level %} selected{% endif %}>{{ level }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-12 col-md-4">
                 <label class="form-label" for="report-filter-name">ФИО</label>
                 <input class="form-control filter__name" id="report-filter-name" name="name" type="text"
                        autocomplete="off" value="{{ report_form.name }}">
             </div>
             <div class="col-6 col-md-3">
                 <label class="form-label" for="report-filter-position">Место</label>
-                <select class="filter__position select" id="report-filter-position" name="position">
+                <select class="form-select" id="report-filter-position" name="position">
                     <option data-display="Все" value="">Все</option>
                     <option value="<2"{% if report_form.position == '<2' %} selected{% endif %}>Победа</option>
                     <option value="<4"{% if report_form.position == '<4' %} selected{% endif %}>Призовое место</option>
@@ -140,17 +128,11 @@
                 >
             </div>
             {% endfor %}
-            <div class="col-12 col-md-3">
-                <label class="form-label" for="report-filter-group-by">Разрез</label>
-                <select class="form-select report__group-by" id="report-filter-group-by" name="group_by">
-                    {% for option in report_slice_options %}
-                    <option value="{{ option.key }}"{% if option.key == report_form.group_by %} selected{% endif %}>{{ option.label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-12 col-md-4 d-flex gap-2">
+                </div>
+            </details>
+            <div class="report-filters__footer">
                 <button class="btn btn-primary report-form__submit" type="submit">Сформировать отчёт</button>
-                <a class="btn btn-outline-secondary" href="/reports">Сбросить</a>
+                <a class="btn btn-outline-secondary" href="/reports">Сбросить всё</a>
             </div>
         </form>
     </div>

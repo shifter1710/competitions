@@ -1,6 +1,8 @@
 {% extends "layout/base.html" %}
 
 {% block content %}
+{% from "shared/period_filter.html" import period_filter %}
+<script defer src="/static/scripts/period-filters.js"></script>
 
 {# Иконка календаря для полей периода (единый всплывающий пикер) #}
 {% macro calendar_icon() %}
@@ -77,10 +79,10 @@
     {% endif %}
 </div>
 
-{% if can_manage %}
 <section class="card shadow-sm mb-4">
     <div class="card-body">
-        <form class="row g-3 filter-form" method="get" action="/calendar">
+        <form class="row g-3 filter-form" method="get" action="/calendar" data-view-period-form>
+            {{ period_filter('calendar', period_options, period_value, period_date_from, period_date_to, period_error) }}
             <div class="col-md-3">
                 <span class="label">Статус</span>
                 <select class="form-select" name="status">
@@ -100,12 +102,14 @@
             </div>
             <div class="col-md-3 d-flex align-items-end gap-2">
                 <button class="btn btn-primary" type="submit">Применить</button>
-                <a class="btn btn-outline-secondary" href="/calendar">Сбросить</a>
+                <a class="btn btn-outline-secondary" href="{{ period_reset_url }}">Сбросить период</a>
+                <a class="btn btn-link" href="/calendar">Сбросить всё</a>
             </div>
         </form>
     </div>
 </section>
 
+{% if can_manage %}
 <section class="card shadow-sm mb-4 collapse" id="calendar-new-form">
     <div class="card-body">
         <h3 class="title mb-1">Запланировать соревнование</h3>
@@ -163,7 +167,7 @@
 {% endif %}
 
 <div class="table-meta">
-    <span>Соревнований: <strong>{{ events_count }}</strong> · запланировано <strong>{{ planned_count }}</strong> ·
+    <span>{% if period_active %}{{ period_label }} · {% endif %}Соревнований: <strong>{{ events_count }}</strong> · запланировано <strong>{{ planned_count }}</strong> ·
         прошло <strong>{{ past_count }}</strong></span>
     <span>Сортировка: по датам, сначала новые</span>
 </div>
@@ -178,7 +182,7 @@
         <div class="calendar-comp-row__main">
             {# Волна B (прототип 16): карточка ведёт внутрь соревнования —
                на страницу участников. #}
-            <a class="calendar-comp-row__name" href="/calendar/{{ event.id }}">{{ event.name }}</a>
+            <a class="calendar-comp-row__name" href="/calendar/{{ event.id }}?{{ calendar_event_query }}">{{ event.name }}</a>
             <div class="calendar-comp-row__meta">{{ event.level }}{% if event.level and event.sport %} · {% endif %}{{ event.sport }}</div>
             {% if can_manage %}
             <div class="collapse mt-2" id="calendar-edit-{{ event.id }}">
@@ -265,7 +269,7 @@
 </div>
 {% endfor %}
 {% else %}
-<div class="empty-content">В календаре пока нет соревнований</div>
+{% if period_error %}<div class="empty-content">Исправьте период, чтобы показать соревнования.</div>{% elif period_active %}<div class="empty-content">За выбранный период соревнований нет. <a href="{{ period_reset_url }}">Сбросить период</a></div>{% else %}<div class="empty-content">В календаре пока нет соревнований</div>{% endif %}
 {% endif %}
 
 <div class="calendar-note mt-4">

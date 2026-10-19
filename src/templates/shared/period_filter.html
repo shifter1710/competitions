@@ -1,0 +1,18 @@
+{% macro period_filter(prefix, options, value, date_from, date_to, error='') %}
+<div class="col-12 col-md-4" data-period-filter>
+    <label class="form-label" for="{{ prefix }}-period">Период</label>
+    <select class="form-select" id="{{ prefix }}-period" name="period" data-period-choice aria-controls="{{ prefix }}-dates"{% if error %} aria-describedby="{{ prefix }}-period-error"{% endif %}>
+        {% for option in options %}
+        <option value="{{ option.value }}"{% if option.value == value %} selected{% endif %}>{{ option.label }}</option>
+        {% endfor %}
+    </select>
+    {% if error %}<div class="text-danger mt-2" id="{{ prefix }}-period-error" role="alert">{{ error }}</div>{% endif %}
+</div>
+<div class="col-12 col-md-5" id="{{ prefix }}-dates" data-period-dates{% if value != 'custom' %} hidden{% endif %}>
+    <div class="row g-2">
+        <div class="col-6"><label class="form-label" for="{{ prefix }}-from">С</label><input class="form-control" id="{{ prefix }}-from" name="date_from" type="text" inputmode="numeric" placeholder="дд.мм.гггг" value="{{ date_from }}"{% if value != 'custom' %} disabled{% endif %} aria-describedby="{{ prefix }}-date-help"></div>
+        <div class="col-6"><label class="form-label" for="{{ prefix }}-to">По</label><input class="form-control" id="{{ prefix }}-to" name="date_to" type="text" inputmode="numeric" placeholder="дд.мм.гггг" value="{{ date_to }}"{% if value != 'custom' %} disabled{% endif %} aria-describedby="{{ prefix }}-date-help"></div>
+    </div>
+    <div class="form-text" id="{{ prefix }}-date-help">Обе даты включительно, формат дд.мм.гггг.</div>
+</div>
+{% endmacro %}

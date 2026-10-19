@@ -9,7 +9,6 @@ identity-правилом уникальных, период-учебный го
 расширено Reports v2."""
 import asyncio
 import re
-from datetime import date
 from datetime import datetime
 from io import BytesIO
 from typing import Sequence
@@ -23,10 +22,15 @@ from sanic.response import raw
 from sanic_ext import render
 
 from src.auth import user_is_athlete
-from src.education import academic_year_start
 from src.models.custom_field import CustomField
+from src.periods import build_report_period_options
+from src.periods import current_report_period_value
+from src.periods import REPORT_PERIOD_ALL
+from src.periods import REPORT_PERIOD_CUSTOM
+from src.periods import report_period_label
+from src.periods import resolve_report_period
+from src.periods import validate_report_period
 from src.records import sanitize_spreadsheet_value
-from src.settings import settings
 from src.web import forbidden
 from src.web import get_param
 from src.web import get_storage
@@ -109,58 +113,13 @@ def parse_report_slice(args: dict) -> str:
     return value if value else DEFAULT_REPORT_SLICE
 
 
-# --- Период (Reports v2): учебный год / всё время / произвольный. ---
-
-REPORT_PERIOD_ALL = 'all'
-REPORT_PERIOD_CUSTOM = 'custom'
-REPORT_PERIOD_YEAR_RE = re.compile(r'(\d{4})-(\d{4})')
-
-
-def current_report_period_value() -> str:
-    """Текущий учебный год как значение селекта периода (форма по умолчанию)."""
-    start = academic_year_start(date.today())
-    return f'{start}-{start + 1}'
-
-
-def build_report_period_options(data_years: Sequence[int]) -> list[dict[str, str]]:
-    """Опции селекта периода: годы из данных по убыванию (текущий учебный
-    год всегда есть — он дефолт формы), затем «Всё время» и «Произвольный
-    диапазон…»."""
-    current_start = academic_year_start(date.today())
-    years = sorted({*data_years, current_start}, reverse=True)
-    options = [{'value': f'{year}-{year + 1}', 'label': f'{year}/{year + 1} (учебный год)'} for year in years]
-    options.append({'value': REPORT_PERIOD_ALL, 'label': 'Всё время'})
-    options.append({'value': REPORT_PERIOD_CUSTOM, 'label': 'Произвольный диапазон…'})
-    return options
-
-
-def validate_report_period(args: dict) -> str | None:
-    """Валидация периода и дат фильтра: формат учебного года, dd.mm.yyyy,
-    обе даты обязательны для произвольного диапазона."""
-    period = (get_param(args, 'period') or '').strip()
-    if period and period not in (REPORT_PERIOD_ALL, REPORT_PERIOD_CUSTOM):
-        match = REPORT_PERIOD_YEAR_RE.fullmatch(period)
-        if match is None or int(match.group(2)) != int(match.group(1)) + 1:
-            return f'Некорректный период: {period} (формат ГГГГ-ГГГГ, например 2026-2027)'
-
-    for key in ('date_from', 'date_to'):
-        value = get_param(args, key)
-        if value:
-            try:
-                datetime.strptime(value, settings.date_format)
-            except ValueError:
-                return f'Некорректная дата в фильтре ({key}): {value}'
-
-    if period == REPORT_PERIOD_CUSTOM:
-        if not (get_param(args, 'date_from') or '').strip() or not (get_param(args, 'date_to') or '').strip():
-            return 'Для произвольного периода укажите обе даты: от и до'
-    return None
-
-
 def validate_report_filters(args: dict) -> str | None:
     error = validate_report_period(args)
     if error:
         return error
+
+    if any(not re.fullmatch(r'[1-9]\d*', value) for value in report_filter_values(args, 'event_id')):
+        return 'Некорректный ID соревнования'
 
     position = get_param(args, 'position')
     # Reports v2: голое 0 — класс «Без результата» (position = 0).
@@ -172,53 +131,6 @@ def validate_report_filters(args: dict) -> str | None:
         return f'Неизвестный срез отчёта: {group_by}'
 
     return None
-
-
-def resolve_report_period(args: dict) -> tuple[str, str]:
-    """Эффективные границы периода из GET-параметров.
-
-    period=ГГГГ-ГГГГ разворачивается в 01.09.ГГГГ – 31.08.следующего года
-    (учебный год начинается 1 сентября, src/education.py); all — без
-    фильтра дат (прямые даты игнорируются); custom — из date_from/date_to.
-    Без period прямые даты работают как раньше (легаси-ссылки). Валидация
-    значений уже выполнена validate_report_filters.
-    """
-    period = (get_param(args, 'period') or '').strip()
-    date_from = (get_param(args, 'date_from') or '').strip()
-    date_to = (get_param(args, 'date_to') or '').strip()
-    if period == REPORT_PERIOD_ALL:
-        return '', ''
-    if period == REPORT_PERIOD_CUSTOM:
-        return date_from, date_to
-    if period:
-        match = REPORT_PERIOD_YEAR_RE.fullmatch(period)
-        return f'01.09.{match.group(1)}', f'31.08.{match.group(2)}'
-    return date_from, date_to
-
-
-def report_period_label(args: dict) -> str:
-    """Человекочитаемая метка периода для чипа и шапки XLSX.
-
-    args — плоский словарь «параметр → значение» (например, dict(entries)
-    применённого запроса).
-    """
-    period = (args.get('period') or '').strip()
-    date_from = (args.get('date_from') or '').strip()
-    date_to = (args.get('date_to') or '').strip()
-    if period == REPORT_PERIOD_ALL:
-        return 'Всё время'
-    if period == REPORT_PERIOD_CUSTOM:
-        return f'{date_from} – {date_to}'
-    if period:
-        match = REPORT_PERIOD_YEAR_RE.fullmatch(period)
-        return f'Учебный год {match.group(1)}/{match.group(2)}'
-    if date_from and date_to:
-        return f'{date_from} – {date_to}'
-    if date_from:
-        return f'с {date_from}'
-    if date_to:
-        return f'по {date_to}'
-    return 'Все даты'
 
 
 def collect_custom_filters(request: Request) -> tuple[list[tuple[str, str, str]], str | None]:
@@ -251,10 +163,21 @@ REPORT_FILTER_KEYS: tuple[str, ...] = (
     'institute',
     'group',
     'sport',
+    'event_id',
     'course',
     'admission_year',
     'group_by',
 )
+
+
+REPORT_MULTI_KEYS = frozenset({'institute', 'group', 'sport', 'level', 'event_id'})
+
+
+def report_filter_values(args: dict, key: str) -> list[str]:
+    """Repeated GET values, with scalar helper compatibility and no empty restriction."""
+    raw = args.get(key, [])
+    values = [raw] if isinstance(raw, str) else raw
+    return sorted({str(value).strip() for value in values if str(value).strip()})
 
 
 def collect_report_period_entries(args: dict) -> list[tuple[str, str]]:
@@ -293,6 +216,9 @@ def collect_applied_report_query(args: dict, custom_fields: Sequence[CustomField
     """
     entries: list[tuple[str, str]] = collect_report_period_entries(args)
     for key in REPORT_FILTER_KEYS:
+        if key in REPORT_MULTI_KEYS:
+            entries.extend((key, value) for value in report_filter_values(args, key))
+            continue
         value = (get_param(args, key) or '').strip()
         if not value:
             continue
@@ -319,14 +245,15 @@ def build_report_filter_kwargs(request: Request) -> tuple[dict, str | None]:
         date_from=date_from,
         date_to=date_to,
         position=(get_param(args, 'position') or '').strip(),
-        level=(get_param(args, 'level') or '').strip(),
+        level=report_filter_values(args, 'level'),
         name=(get_param(args, 'name') or '').strip(),
-        institute=(get_param(args, 'institute') or '').strip(),
-        group=(get_param(args, 'group') or '').strip(),
-        sport=(get_param(args, 'sport') or '').strip(),
+        institute=report_filter_values(args, 'institute'),
+        group=report_filter_values(args, 'group'),
+        sport=report_filter_values(args, 'sport'),
         course=(get_param(args, 'course') or '').strip(),
         admission_year=(get_param(args, 'admission_year') or '').strip(),
         custom_filters=collect_custom_filters(request)[0],
+        event_id=report_filter_values(args, 'event_id'),
     )
     return filter_kwargs, None
 
@@ -359,6 +286,7 @@ REPORT_CHIP_LABELS: dict[str, str] = {
     'institute': 'Институт',
     'group': 'Группа',
     'sport': 'Вид спорта',
+    'event_id': 'Соревнование',
     'course': 'Курс',
     'admission_year': 'Год поступления',
 }
@@ -370,9 +298,22 @@ def report_url_without(entries: Sequence[tuple[str, str]], removed_keys: set[str
     return '/reports' + (f'?{kept}' if kept else '')
 
 
+def report_chip_value(key: str, value: str, event_labels: dict[str, str]) -> str:
+    if key == 'group_by':
+        return next((item['label'] for item in REPORT_SLICES if item['key'] == value), value)
+    if key == 'position':
+        return REPORT_POSITION_CHIP_LABELS.get(value, value)
+    if key == 'admission_year' and value == 'none':
+        return REPORT_EMPTY_SLICE_LABEL
+    if key == 'event_id':
+        return event_labels.get(value, f'№{value} (недоступно)')
+    return value
+
+
 def build_report_chips(
     entries: Sequence[tuple[str, str]],
     custom_fields: Sequence[CustomField],
+    event_labels: dict[str, str] | None = None,
 ) -> list[dict]:
     """Чипы применённых условий отчёта (порядок: период → разрез → фильтры
     → кастомные). Крестик чипа — обычная ссылка на /reports без его
@@ -390,18 +331,13 @@ def build_report_chips(
             }
         )
 
-    slice_labels = {item['key']: item['label'] for item in REPORT_SLICES}
     for key, label in REPORT_CHIP_LABELS.items():
-        raw_value = args.get(key, '')
-        if not raw_value:
-            continue
-        if key == 'group_by':
-            raw_value = slice_labels.get(raw_value, raw_value)
-        elif key == 'position':
-            raw_value = REPORT_POSITION_CHIP_LABELS.get(raw_value, raw_value)
-        elif key == 'admission_year' and raw_value == 'none':
-            raw_value = REPORT_EMPTY_SLICE_LABEL
-        chips.append({'label': label, 'value': raw_value, 'remove_url': report_url_without(entries, {key})})
+        for entry_key, raw_value in entries:
+            if entry_key != key or not raw_value:
+                continue
+            display = report_chip_value(key, raw_value, event_labels or {})
+            kept = [(k, v) for k, v in entries if (k, v) != (key, raw_value)]
+            chips.append({'label': label, 'value': display, 'remove_url': '/reports?' + urlencode(kept)})
 
     field_labels = {f'custom__{field.key}': field.label for field in custom_fields}
     for key, value in entries:
@@ -574,7 +510,7 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
         'report_slice_column': REPORT_SLICE_COLUMNS[slice_key][0],
         'report_slice_sort_type': 'number' if slice_key in REPORT_SLICE_NUMERIC_KEYS else 'text',
         'report_slice_is_student': slice_key == DEFAULT_REPORT_SLICE,
-        'report_chips': build_report_chips(entries, custom_fields),
+        'report_chips': build_report_chips(entries, custom_fields, report_event_labels(storage, args)),
         'report_summary': summary,
         'rows_count': rows_count,
         'rows_count_label': ru_plural(rows_count, 'строка', 'строки', 'строк'),
@@ -610,16 +546,50 @@ def build_report_form_values(args: dict, custom_fields: Sequence[CustomField], *
         'date_to': date_to,
         'name': (get_param(args, 'name') or '').strip(),
         'position': (get_param(args, 'position') or '').strip(),
-        'level': (get_param(args, 'level') or '').strip(),
-        'institute': (get_param(args, 'institute') or '').strip(),
-        'group': (get_param(args, 'group') or '').strip(),
-        'sport': (get_param(args, 'sport') or '').strip(),
+        'level': report_filter_values(args, 'level'),
+        'institute': report_filter_values(args, 'institute'),
+        'group': report_filter_values(args, 'group'),
+        'sport': report_filter_values(args, 'sport'),
         'course': (get_param(args, 'course') or '').strip(),
         'admission_year': (get_param(args, 'admission_year') or '').strip(),
+        'event_id': report_filter_values(args, 'event_id'),
         'group_by': parse_report_slice(args),
         'custom': {field.key: (get_param(args, f'custom__{field.key}') or '').strip() for field in custom_fields},
     }
     return values
+
+
+def build_report_event_options(storage, selected: Sequence[str] = ()) -> list[dict]:
+    """Events keep their stable ID even when titles repeat or period changes."""
+    options = []
+    for event in storage.list_calendar_events():
+        start = str(event['date'])[:10]
+        end = str(event.get('date_to') or '')[:10]
+        detail = ' · '.join(
+            str(value)
+            for value in (
+                start + (f' – {end}' if end and end != start else ''),
+                event.get('sport'),
+                event.get('level'),
+                f"№{event['id']}",
+            )
+            if value
+        )
+        options.append({'value': str(event['id']), 'label': event['name'], 'detail': detail})
+    known = {option['value'] for option in options}
+    options.extend(
+        {'value': value, 'label': f'Соревнование №{value} (недоступно)', 'detail': 'Условие сохранено'}
+        for value in selected
+        if value not in known
+    )
+    return options
+
+
+def report_event_labels(storage, args: dict) -> dict[str, str]:
+    return {
+        option['value']: f"{option['label']} · {option['detail']}"
+        for option in build_report_event_options(storage, report_filter_values(args, 'event_id'))
+    }
 
 
 async def reports_page_handler(request: Request):
@@ -639,8 +609,14 @@ async def reports_page_handler(request: Request):
 
     groups_by_institute = storage.get_group_options_by_institute()
     admission_years, admission_has_none = storage.get_report_admission_year_options()
+    form_values = build_report_form_values(args, custom_fields, applied=applied)
     context = {
         'request': request,
+        'event_options': build_report_event_options(storage, form_values['event_id']),
+        'report_advanced_count': sum(
+            bool(form_values[key]) for key in ('level', 'course', 'admission_year', 'name', 'position')
+        )
+        + sum(bool(value) for value in form_values['custom'].values()),
         'custom_fields': custom_fields,
         'levels': storage.get_level_names(),
         'report_slice_options': REPORT_SLICES,
@@ -652,11 +628,18 @@ async def reports_page_handler(request: Request):
         'admission_year_options': admission_years,
         'admission_has_none': admission_has_none,
         'period_options': build_report_period_options(storage.get_report_period_year_options()),
-        'report_form': build_report_form_values(args, custom_fields, applied=applied),
+        'report_form': form_values,
         'report_error': error,
         'report_applied': applied,
         'applied_query': urlencode(entries),
     }
+    for key, options_key in (
+        ('institute', 'institute_options'),
+        ('group', 'group_options'),
+        ('sport', 'sport_options'),
+        ('level', 'levels'),
+    ):
+        context[options_key] = sorted(set(context[options_key]) | set(form_values[key]))
     if applied:
         context.update(build_report_result_context(request, filter_kwargs))
     return await render(
@@ -700,7 +683,7 @@ async def export_report_handler(request: Request):
     summary = storage.get_report_summary(**filter_kwargs)
     custom_fields = storage.get_custom_fields()
     entries = collect_applied_report_query(args, custom_fields)
-    chips = build_report_chips(entries, custom_fields)
+    chips = build_report_chips(entries, custom_fields, report_event_labels(storage, args))
     slice_label = next(item['label'] for item in REPORT_SLICES if item['key'] == slice_key)
     buffer = await asyncio.to_thread(
         build_report_workbook,
