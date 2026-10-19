@@ -568,6 +568,8 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     rows_count = len(report_rows)
     return {
         'report_rows': report_rows,
+        # Пустой /report — всё время; /reports без условий не показывает результат.
+        'report_return_url': '/reports?' + urlencode(entries or [('period', REPORT_PERIOD_ALL)]),
         'report_slice': slice_key,
         'report_slice_column': REPORT_SLICE_COLUMNS[slice_key][0],
         'report_slice_sort_type': 'number' if slice_key in REPORT_SLICE_NUMERIC_KEYS else 'text',

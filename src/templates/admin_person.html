@@ -1,7 +1,7 @@
 {% extends "layout/base.html" %}
 {% block content %}
 <div class="person-page" data-person-page="{{ student.id }}">
-<a class="person-back" href="/admin/people" data-person-back>← К студентам</a>
+<a class="person-back" href="{{ person_return_url }}" data-person-back>← {% if person_return_url.split('?')[0].split('#')[0] == '/reports' %}К отчёту{% elif person_return_url.startswith('/calendar/') %}К соревнованию{% else %}К студентам{% endif %}</a>
 <header class="person-header">
 <div class="person-heading"><h1>{{ student.full_name }}</h1><span class="badge {% if student.active %}text-bg-success{% else %}text-bg-secondary{% endif %}">{% if student.active %}активен{% else %}неактивен{% endif %}</span></div>
 <p class="person-summary">{{ student.institute or 'Институт не указан' }} · {{ student.group_name or 'Группа не указана' }} · Курс в карточке: {{ student.course or 'не указан' }}{% if education and education.course %} · Расчётный курс: {{ education.course }}{% endif %}</p>

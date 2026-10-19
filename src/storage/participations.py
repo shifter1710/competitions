@@ -361,6 +361,7 @@ class ParticipationsMixin:
         return [
             StudentInfo(
                 student_id=row['student_id'],
+                student_ref_id=row['student_ref_id'],
                 student_name=row['student_name'],
                 student_sex=row['student_sex'],
                 institute=row['institute'],
@@ -718,7 +719,15 @@ class ParticipationsMixin:
                 custom_filters=custom_filters,
             )
             if group_by == DEFAULT_REPORT_GROUPING:
-                select_columns = ',\n'.join([f'{group_columns[0]} AS student_id', *group_columns[1:]])
+                select_columns = ',\n'.join(
+                    [
+                        f'{group_columns[0]} AS student_id',
+                        *group_columns[1:],
+                        'MAX(CASE WHEN EXISTS (SELECT 1 FROM students '
+                        'WHERE students.id = competitions.student_ref_id) '
+                        'THEN competitions.student_ref_id END) AS student_ref_id',
+                    ]
+                )
                 # Последний ключ (student_id = identity) — детерминированный
                 # порядок записей с одинаковыми ФИО и снимком (Reports v2:
                 # это разные строки; без тай-брейка порядок был бы не указан).

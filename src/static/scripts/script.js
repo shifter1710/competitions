@@ -4220,8 +4220,10 @@ class StudentProfilePage {
         this.dirty = new Set();
         this.busy = false;
         const params = new URL(location.href).searchParams;
-        this.returnURL = this.safeReturn(params.get('return')) || this.safeReturn(document.referrer) || '/admin/people';
-        root.querySelector('[data-person-back]').href = this.returnURL;
+        this.returnURL = this.safeReturn(params.get('return')) || this.safeReturn(document.referrer, true) || '/admin/people';
+        const backLink = root.querySelector('[data-person-back]');
+        backLink.href = this.returnURL;
+        backLink.textContent = this.returnURL.split(/[?#]/)[0] === '/reports' ? '← К отчёту' : this.returnURL.startsWith('/calendar/') ? '← К соревнованию' : '← К студентам';
         root.classList.add('person-enhanced');
         root.querySelector('.person-tabs').setAttribute('role', 'tablist');
         this.tabs.forEach((tab, index) => {
@@ -4288,11 +4290,22 @@ class StudentProfilePage {
             });
         } catch (error) { /* Optional viewport context; never form values. */ }
     }
-    safeReturn(value) {
+    safeReturn(value, allowAbsolute = false) {
         if (!value) return null;
         try {
+            let decoded = value;
+            for (let i = 0; i < 4; i++) {
+                if (/[\\\x00-\x1f\x7f]/.test(decoded)) return null;
+                let next;
+                try { next = decodeURIComponent(decoded); } catch (error) { break; }
+                if (next === decoded) break;
+                decoded = next;
+            }
+            if (!value.startsWith('/') && !allowAbsolute) return null;
+            if (value.startsWith('//')) return null;
             const url = new URL(value, location.origin);
-            if (url.origin !== location.origin || !(/^\/admin\/people$/.test(url.pathname) || /^\/calendar\/\d+$/.test(url.pathname))) return null;
+            const rawPath = value.startsWith('/') ? value.split(/[?#]/)[0] : url.pathname;
+            if (url.origin !== location.origin || !(/^\/admin\/people$/.test(rawPath) || /^\/calendar\/[0-9]+$/.test(rawPath) || rawPath === '/reports')) return null;
             url.searchParams.delete('admin_message'); url.searchParams.delete('admin_error');
             return url.pathname + url.search + url.hash;
         } catch (error) { return null; }

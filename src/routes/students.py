@@ -4,13 +4,18 @@
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 from datetime import date
 from datetime import datetime
 from io import BytesIO
 from typing import Sequence
+from urllib.parse import parse_qsl
+from urllib.parse import unquote
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 import pandas as pd
 from sanic import redirect
@@ -61,6 +66,34 @@ from src.web import get_param
 from src.web import get_storage
 from src.web import jinja_env
 from src.web import parse_reconcile_int
+
+
+def safe_student_return(value: str | None) -> str | None:
+    """Only local allowlisted destinations; never normalize a disguised path."""
+    if not value or not value.startswith('/') or value.startswith('//'):
+        return None
+    decoded = value
+    for _ in range(4):
+        if any(ord(char) < 32 or ord(char) == 127 or char == '\\' for char in decoded):
+            return None
+        next_value = unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    try:
+        url = urlsplit(value)
+        if url.scheme or url.netloc or not re.fullmatch(r'/admin/people|/calendar/[0-9]+|/reports', url.path):
+            return None
+        query = urlencode(
+            [
+                (key, val)
+                for key, val in parse_qsl(url.query, keep_blank_values=True)
+                if key not in ('admin_message', 'admin_error')
+            ]
+        )
+        return urlunsplit(('', '', url.path, query, url.fragment))
+    except ValueError:
+        return None
 
 
 # Импорт студентов из Excel (Student Identity v1, Phase 2.5): колонки файла
@@ -1778,6 +1811,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             context={
                 'request': request,
                 'student': student,
+                'person_return_url': safe_student_return(request.args.get('return')) or '/admin/people',
                 'aliases': storage.list_student_aliases(numeric_id),
                 'education': education,
                 'linked_records_count': storage.linked_records_count(numeric_id),
