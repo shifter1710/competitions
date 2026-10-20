@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Competitions operational health every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=competitions-health.service
+
+[Install]
+WantedBy=timers.target

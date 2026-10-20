@@ -1,0 +1,26 @@
+{% extends "layout/admin.html" %}
+{% block admin_title %}Состояние системы{% endblock admin_title %}
+{% block admin_description %}Резервные копии, проверки восстановления и уведомления. Проверки выполняются отдельно от страницы.{% endblock admin_description %}
+{% block admin_content %}
+{% set colors = {'OK':'success', 'WARNING':'warning', 'CRITICAL':'danger', 'UNKNOWN':'secondary'} %}
+<div class="card shadow-sm mb-3"><div class="card-body">
+    <h2 class="h5">Общее состояние <span class="badge text-bg-{{ colors[health.overall] }}">{{ health.label }}</span></h2>
+    <p class="text-muted mb-0">Отчёт открыт: {{ health.rendered_at }}. Время проверки указано отдельно для каждого компонента.</p>
+</div></div>
+{% if health.issues %}
+<div class="alert alert-secondary" role="status"><h2 class="h6">Требуют внимания</h2><ul class="mb-0">
+{% for card in health.issues %}<li><strong>{{ card.title }}</strong>: {{ card.message }}</li>{% endfor %}
+</ul></div>
+{% endif %}
+<div class="row g-3">
+{% for card in health.cards %}
+<div class="col-12 col-md-6 col-xl-4"><section class="card shadow-sm h-100" aria-labelledby="health-{{ card.key }}">
+<div class="card-body text-break"><h2 class="h5" id="health-{{ card.key }}">{{ card.title }}</h2>
+<p><span class="badge text-bg-{{ colors[card.status] }}">{{ card.label }}</span></p>
+<p>{{ card.message }}</p>
+<dl class="mb-0">{% for label, value in card.rows %}<dt class="small text-muted">{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}</dl>
+</div></section></div>
+{% endfor %}
+</div>
+<p class="text-muted small mt-3">Потеря VPS целиком не обнаруживается локальной проверкой. Успешная проверка архивов не заменяет полный тест восстановления приложения.</p>
+{% endblock admin_content %}

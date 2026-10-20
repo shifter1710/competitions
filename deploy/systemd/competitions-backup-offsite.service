@@ -1,0 +1,12 @@
+[Unit]
+Description=Upload verified Competitions backup sets through existing crypt remote
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/root/chatgpt/competitions
+EnvironmentFile=/etc/competitions/operations.env
+ExecStart=/usr/bin/python3 /root/chatgpt/competitions/scripts/backup_offsite.py --root /root/chatgpt/competitions/data/backups --remote ${BACKUP_CRYPT_REMOTE} --config ${RCLONE_CONFIG} --state-dir /root/chatgpt/competitions/data/ops
+TimeoutStartSec=3600

@@ -35,7 +35,9 @@ from src.auth import user_is_admin
 from src.auth import user_is_moderator
 from src.auth import USER_ROLES
 from src.auth import username_error
+from src.backup import BackupError
 from src.backup import run_backup
+from src.backup import verify_set
 from src.education import academic_year_label
 from src.education import derive_course
 from src.education import effective_duration_years
@@ -52,7 +54,9 @@ from src.files import file_size
 from src.files import files_dir
 from src.files import remove_attachment_files
 from src.files import remove_attachment_record_dirs
+from src.health import health_view
 from src.models.custom_field import CustomField
+from src.ops_state import read_json
 from src.periods import today_in_timezone
 from src.records import ALWAYS_REQUIRED_BASE_FIELDS
 from src.records import BASE_FIELD_LABELS
@@ -423,6 +427,49 @@ def format_timestamp(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M')
 
 
+def latest_backup_summary(root):
+    candidates = []
+    for item in root.rglob('*'):
+        if not item.is_file() or any(part.startswith('.staging-') for part in item.parts):
+            continue
+        if 'sets' not in item.parts:
+            if item.name.endswith('.sqlite3.gz') or item.name.startswith('pre-wipe-'):
+                stat = item.stat()
+                candidates.append(
+                    (
+                        stat.st_mtime,
+                        {
+                            'name': item.name,
+                            'subdir': '',
+                            'time': format_timestamp(stat.st_mtime),
+                            'size_label': format_size(stat.st_size),
+                        },
+                    )
+                )
+        elif item.name == 'manifest.json':
+            manifest = read_json(item)
+            if manifest.get('status') != 'Verified' or manifest.get('mode') != 'complete':
+                continue
+            try:
+                stamp = datetime.fromisoformat(manifest['created_at']).timestamp()
+                size = sum((item.parent / name).stat().st_size for name in ('database.sqlite3.gz', 'files.zip'))
+            except (KeyError, TypeError, ValueError, OSError):
+                continue
+            candidates.append(
+                (
+                    stamp,
+                    {
+                        'name': 'Комплект ' + item.parent.name,
+                        'subdir': '',
+                        'time': format_timestamp(stamp),
+                        'size_label': format_size(size),
+                        'set_id': item.parent.name,
+                    },
+                )
+            )
+    return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
+
+
 def collect_maintenance_stats() -> dict:
     """Панель состояния обслуживания (замечания №10 и №16б из FEEDBACK.md).
 
@@ -451,16 +498,7 @@ def collect_maintenance_stats() -> dict:
     pre_wipe_archives = []
     root = data_root / 'backups'
     if root.is_dir():
-        backup_files = [item for item in root.rglob('*') if item.is_file()]
-        if backup_files:
-            latest = max(backup_files, key=lambda item: item.stat().st_mtime)
-            stat = latest.stat()
-            last_backup = {
-                'name': latest.name,
-                'subdir': str(latest.parent.relative_to(root)) if latest.parent != root else '',
-                'time': format_timestamp(stat.st_mtime),
-                'size_label': format_size(stat.st_size),
-            }
+        last_backup = latest_backup_summary(root)
         pre_wipe_files = sorted(
             (item for item in root.iterdir() if item.is_file() and item.name.startswith('pre-wipe-')),
             key=lambda item: item.stat().st_mtime,
@@ -1821,6 +1859,16 @@ def register(app: Sanic) -> None:  # noqa: C901
     # меняет ТОЛЬКО актуальные «профильные» данные, исторические записи не
     # перезаписываются.
 
+    @app.get('/admin/health')
+    async def admin_health_page(request: Request):
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        return await render(
+            template_name=jinja_env.get_template('admin_health.html'),
+            context={'request': request, 'health': health_view(Path(settings.data_folder) / 'ops')},
+        )
+
     @app.get('/admin/maintenance')
     async def admin_maintenance_page(request: Request):
         auth_error = require_admin(request)
@@ -1978,13 +2026,18 @@ def register(app: Sanic) -> None:  # noqa: C901
         if auth_error is not None:
             return auth_error
 
-        result = await asyncio.to_thread(
-            run_backup,
-            Path(settings.database_path),
-            backups_dir(),
-            14,
-            files_dir(),
-        )
+        try:
+            result = await asyncio.to_thread(
+                run_backup,
+                Path(settings.database_path),
+                backups_dir(),
+                14,
+                files_dir(),
+            )
+        except BackupError:
+            return build_redirect_with_message(
+                message='Резервная копия не прошла проверку. См. состояние системы.', url='/admin/maintenance'
+            )
         log_audit_event(
             request,
             'backup_created',
@@ -1999,6 +2052,39 @@ def register(app: Sanic) -> None:  # noqa: C901
         if result['files_archive'] is not None:
             message += f', вложения: {result["files_archive"].name}'
         return build_redirect_with_message(message=message, url='/admin/maintenance')
+
+    @app.get('/admin/maintenance/backup-sets/<set_id>/<filename>')
+    async def download_backup_set(request: Request, set_id: str, filename: str):
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        if not re.fullmatch(r'[0-9]{8}-[0-9]{6}-[a-f0-9]{32}', set_id):
+            return text('Not Found', status=404)
+        if filename not in {'database.sqlite3.gz', 'files.zip', 'manifest.json'}:
+            return text('Not Found', status=404)
+        root = backups_dir().resolve()
+        matches = [
+            path
+            for path in root.glob(f'**/sets/{set_id}')
+            if path.is_dir() and not path.is_symlink() and root in path.resolve().parents
+        ]
+        if len(matches) != 1:
+            return text('Not Found', status=404)
+        directory = matches[0]
+        try:
+            await asyncio.to_thread(verify_set, directory)
+        except Exception:
+            return text('Backup verification failed', status=409)
+        target = directory / filename
+        if target.is_symlink() or root not in target.resolve().parents:
+            return text('Not Found', status=404)
+        return raw(
+            await asyncio.to_thread(target.read_bytes),
+            headers={
+                'content-type': 'application/octet-stream',
+                'content-disposition': f'attachment; filename="{set_id}-{filename}"',
+            },
+        )
 
     @app.get('/admin/maintenance/backups/<filename>')
     async def download_backup(request: Request, filename: str):

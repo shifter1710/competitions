@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Competitions health and deliver problem alerts independently of Sanic
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/root/chatgpt/competitions
+EnvironmentFile=/etc/competitions/operations.env
+ExecStart=/usr/bin/python3 /root/chatgpt/competitions/scripts/health_check.py --db-path /root/chatgpt/competitions/data/competitions.sqlite3 --data-dir /root/chatgpt/competitions/data --state-dir /root/chatgpt/competitions/data/ops --check-systemd
+TimeoutStartSec=1200

@@ -30,6 +30,13 @@
                     {% if stats.last_backup %}
                         <div class="text-break"><strong>{{ stats.last_backup.name }}</strong></div>
                         <div class="text-muted">{{ stats.last_backup.time }} · {{ stats.last_backup.size_label }}</div>
+                        {% if stats.last_backup.set_id %}
+                        <div class="mt-2 d-flex flex-wrap gap-2">
+                            <a href="/admin/maintenance/backup-sets/{{ stats.last_backup.set_id }}/database.sqlite3.gz">База SQLite</a>
+                            <a href="/admin/maintenance/backup-sets/{{ stats.last_backup.set_id }}/files.zip">Вложения</a>
+                            <a href="/admin/maintenance/backup-sets/{{ stats.last_backup.set_id }}/manifest.json">Манифест</a>
+                        </div>
+                        {% endif %}
                     {% else %}
                         <div class="text-muted">Бэкапов пока нет</div>
                     {% endif %}

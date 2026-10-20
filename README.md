@@ -373,9 +373,18 @@ JS минифицируется на этапе сборки образа (multi
 - [deploy/systemd/competitions-compose.service](deploy/systemd/competitions-compose.service)
 - [deploy/nginx/competitions.conf](deploy/nginx/competitions.conf)
 
-Бэкапы SQLite: `scripts/backup_sqlite.py` + `deploy/systemd/competitions-backup.{service,timer}`
-(ежедневно, gzip-архивы с проверкой целостности и ротацией, вложения —
-отдельным zip).
+Резервные копии: `scripts/backup_sqlite.py` создаёт полный проверенный комплект
+SQLite gzip + ZIP вложений + manifest в `data/backups/.../sets/<id>/`.
+Offsite через существующий rclone crypt принимает только свежие `Verified`
+комплекты и проверяет отправку через `cryptcheck`. Автоматическое удаление
+отключено; `--keep` сохранён только для совместимости.
+
+Страница `/admin/health` доступна только admin и читает сохранённые результаты;
+проверки и необязательные Telegram-оповещения выполняет отдельный systemd job,
+независимо от Sanic. Telegram без настроенного бота отключён; наличие страницы
+не подтверждает настоящую доставку или успешный restore-тест.
+Расписание, безопасное подключение units, секреты и изолированное восстановление:
+[docs/backup-reliability.md](docs/backup-reliability.md).
 
 Разовая миграция данных из MongoDB: `scripts/migrate_mongo_to_sqlite.py`
 (нужен `pymongo`, в рантайм-контейнер не входит).

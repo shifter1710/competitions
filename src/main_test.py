@@ -5927,16 +5927,26 @@ def test_manual_backup_creates_archive_and_audit_event(client: SanicTestClient, 
     assert response.status == 302
     assert response.headers['location'].startswith('/admin/maintenance?')
     backups = tmp_path / 'backups'
-    db_archives = list(backups.glob('competitions-*.sqlite3.gz'))
+    db_archives = list(backups.glob('sets/*/database.sqlite3.gz'))
     assert len(db_archives) == 1
     assert db_archives[0].stat().st_size > 0
-    files_archives = list(backups.glob('competitions-*-files.zip'))
+    files_archives = list(backups.glob('sets/*/files.zip'))
     assert len(files_archives) == 1  # вложения заархивированы тем же кодом, что и скриптом
     events = [details for action, details in audit_calls() if action == 'backup_created']
     assert len(events) == 1
     assert events[0]['source'] == 'manual'
     assert events[0]['archive'] == db_archives[0].name
     assert events[0]['files_archive'] == files_archives[0].name
+    set_id = db_archives[0].parent.name
+    _, download = client.get(f'/admin/maintenance/backup-sets/{set_id}/database.sqlite3.gz', headers=headers)
+    assert download.status == 200
+    assert download.body == db_archives[0].read_bytes()
+    _, forbidden = client.get(
+        f'/admin/maintenance/backup-sets/{set_id}/files.zip', headers=get_auth_headers(role='editor')
+    )
+    assert forbidden.status == 403
+    _, denied = client.get(f'/admin/maintenance/backup-sets/{set_id}/unlisted.txt', headers=headers)
+    assert denied.status == 404
 
 
 def test_manual_backup_forbidden_for_editor(client: SanicTestClient):
@@ -23500,3 +23510,46 @@ def test_student_card_renders_safe_return_without_javascript(people_client, dest
     back = html.unescape(re.search(r'href="([^\"]+)" data-person-back', response.text).group(1))
     assert back == safe_student_return(destination)
     assert f'data-person-back>← {label}' in response.text
+
+
+@pytest.mark.parametrize('role,status', [('admin', 200), ('editor', 403), ('viewer', 403), ('athlete', 403)])
+def test_admin_health_cached_rbac(client, tmp_path, monkeypatch, role, status):
+    from src import main as main_module
+    from src.ops_state import atomic_json
+    from src.ops_state import utcnow
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+    monkeypatch.setattr(main_module.settings, 'auth_viewer_username', 'synthetic-viewer')
+    monkeypatch.setattr(main_module.settings, 'auth_viewer_password', 'synthetic-viewer-password')
+    atomic_json(
+        tmp_path / 'ops' / 'health.json',
+        {'application': {'status': 'CRITICAL', 'checked_at': utcnow(), 'code': '<script>secret-token</script>'}},
+    )
+    headers = athlete_headers() if role == 'athlete' else get_auth_headers(role=role)
+    _, response = client.get('/admin/health', headers=headers)
+    assert response.status == status
+    assert 'secret-token' not in response.text
+    if role == 'admin':
+        assert 'Состояние системы' in response.text
+        assert 'Нет данных' in response.text
+        assert 'МСК' in response.text
+        assert 'NEVER TESTED' in response.text
+
+
+def test_admin_health_read_only_no_checks(client, tmp_path, monkeypatch):
+    from src import main as main_module
+    from src import backup as backup_module
+    from src import backup_offsite as offsite_module
+
+    monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
+
+    def fail(*args, **kwargs):
+        raise AssertionError('GET must never perform checks')
+
+    monkeypatch.setattr(backup_module, 'check_sqlite', fail)
+    monkeypatch.setattr(offsite_module, 'rclone', fail)
+    _, response = client.get('/admin/health', headers=get_auth_headers())
+    assert response.status == 200
+    assert not (tmp_path / 'ops').exists()
+    _, post = client.post('/admin/health', headers=get_auth_headers(), data=csrf_for(get_auth_headers()))
+    assert post.status in {403, 404, 405}
