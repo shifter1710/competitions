@@ -10,6 +10,7 @@ from datetime import datetime
 from src.models.custom_field import CustomField
 from src.storage.helpers import CATALOG_CATEGORIES
 from src.storage.helpers import RENAME_CATEGORIES
+from src.storage.helpers import team_participation_write
 
 
 class CatalogsMixin:
@@ -101,6 +102,7 @@ class CatalogsMixin:
             )
             self.connection.commit()
 
+    @team_participation_write
     def update_custom_field(
         self,
         field_id: int,
@@ -143,15 +145,14 @@ class CatalogsMixin:
                     field_id,
                 ),
             )
-            self.connection.commit()
 
+    @team_participation_write
     def disable_custom_field(self, field_id: int) -> None:
         with self._lock:
             self.connection.execute(
                 'UPDATE custom_fields SET active = 0 WHERE id = ?',
                 (field_id,),
             )
-            self.connection.commit()
 
     def get_level_names(self, include_inactive: bool = False) -> list[str]:
         with self._lock:

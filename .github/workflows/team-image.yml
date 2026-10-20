@@ -1,0 +1,48 @@
+name: TEAM exact image
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - '.github/workflows/team-image.yml'
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Build exact revision
+        env:
+          REVISION: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          docker build --label "org.opencontainers.image.revision=$REVISION" -t competitions-team:qa .
+          docker image inspect competitions-team:qa --format '{{.Id}} {{json .Config.Labels}}'
+      - name: Test image and ordinary repeated startup
+        env:
+          AUTH_SECRET_KEY: ci-synthetic-team-secret
+          AUTH_ADMIN_PASSWORD: ci-synthetic-team-admin-password
+          AUTH_EDITOR_PASSWORD: ci-synthetic-team-editor-password
+          AUTH_VIEWER_USERNAME: viewer
+          AUTH_VIEWER_PASSWORD: ci-synthetic-team-viewer-password
+        run: |
+          docker volume create team-synthetic-data
+          docker run --rm -e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD competitions-team:qa python -m pytest src/teams_test.py -q
+          for attempt in 1 2; do
+            docker run -d --name team-startup -p 127.0.0.1:18081:8080 -v team-synthetic-data:/code/data -e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD competitions-team:qa
+            for retry in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:18081/healthcheck; then break; fi
+              sleep 1
+            done
+            curl --fail http://127.0.0.1:18081/healthcheck
+            curl --fail http://127.0.0.1:18081/login
+            curl --fail http://127.0.0.1:18081/static/scripts/teams.js
+            docker logs team-startup
+            docker stop team-startup
+            docker rm team-startup
+          done
+      - name: Diagnostic container logs
+        if: failure()
+        run: docker logs team-startup || true

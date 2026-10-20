@@ -45,6 +45,7 @@ from src.storage.helpers import STUDENT_SORT_COLUMNS  # noqa: F401
 from src.storage.misc import MiscMixin
 from src.storage.participations import ParticipationsMixin
 from src.storage.students import StudentsMixin
+from src.storage.teams import TeamsMixin
 from src.storage.users import UsersMixin
 
 # Переэкспорт из helpers для совместимости `from src.storage.sqlite import ...`
@@ -71,6 +72,7 @@ logger = logging.getLogger(__name__)
 # только через self. Тесты патчат методы на самом SQLiteAdapter — патч
 # ложится раньше примесей в MRO и перехватывает вызовы через self.
 class SQLiteAdapter(
+    TeamsMixin,
     MiscMixin,
     CatalogsMixin,
     UsersMixin,
@@ -550,6 +552,7 @@ class SQLiteAdapter(
             self.connection.execute(
                 'CREATE INDEX IF NOT EXISTS idx_competitions_student_ref_id ON competitions (student_ref_id)'
             )
+            self._migrate_teams()
             self._backfill_competition_calendar_links()
             self.connection.commit()
 

@@ -279,6 +279,7 @@ def client(http_client) -> SanicTestClient:
     fake_storage.delete_calendar_event.return_value = None
     fake_storage.count_calendar_event_participants.return_value = 0
     fake_storage.list_calendar_event_participants.return_value = []
+    fake_storage.list_event_teams.return_value = []
     # Event Documents: по умолчанию документов у события нет — Mock без
     # явного return_value неитерируем и ронял calendar_event_page в 500.
     fake_storage.list_calendar_event_documents.return_value = []

@@ -33,6 +33,7 @@ from src.storage.helpers import REPORT_COURSE_SQL
 from src.storage.helpers import REPORT_GROUPINGS
 from src.storage.helpers import REPORT_IDENTITY_SQL
 from src.storage.helpers import REPORT_METRIC_SELECTS
+from src.storage.helpers import team_participation_write
 
 
 class ParticipationsMixin:
@@ -1067,6 +1068,7 @@ class ParticipationsMixin:
         self._populate_catalog_values()
         self._populate_catalog_hierarchy_pairs()
 
+    @team_participation_write
     def update_competition(self, record_id: str, competition: Competition):
         # Wave 1 P1: discipline/result правятся общим update. calendar_event_id
         # в SET НЕ входит: ссылка на событие — управляемое поле будущих
@@ -1114,13 +1116,13 @@ class ParticipationsMixin:
                     int(record_id),
                 ),
             )
-            self.connection.commit()
 
+    @team_participation_write
     def delete_competition(self, record_id: str):
         with self._lock:
             self.connection.execute('DELETE FROM competitions WHERE id = ?', (int(record_id),))
-            self.connection.commit()
 
+    @team_participation_write
     def delete_competition_with_attachments(self, record_id: int) -> int:
         """Удалить запись вместе с её вложениями (удаление записи админом).
 
@@ -1131,13 +1133,12 @@ class ParticipationsMixin:
             cursor = self.connection.execute('DELETE FROM attachments WHERE record_id = ?', (int(record_id),))
             deleted_attachments = cursor.rowcount
             self.connection.execute('DELETE FROM competitions WHERE id = ?', (int(record_id),))
-            self.connection.commit()
             return deleted_attachments
 
+    @team_participation_write
     def clean_db(self):
         with self._lock:
             self.connection.execute('DELETE FROM competitions')
-            self.connection.commit()
 
     def count_competitions(self, date_before: datetime | None = None) -> int:
         """Число записей; с date_before — только записи с датой соревнования ДО неё."""
@@ -1177,18 +1178,18 @@ class ParticipationsMixin:
             ).fetchall()
             return [self._row_to_competition(row) for row in rows]
 
+    @team_participation_write
     def delete_competitions_before(self, date_before: datetime) -> int:
         """Очистка по дате соревнования (docs/data-model-decisions.md). Возвращает число удалённых."""
         with self._lock:
             cursor = self.connection.execute('DELETE FROM competitions WHERE date < ?', (date_before.isoformat(),))
-            self.connection.commit()
             return cursor.rowcount
 
+    @team_participation_write
     def delete_all_competitions(self) -> int:
         """Wipe all competition records (admin maintenance action). Returns deleted row count."""
         with self._lock:
             cursor = self.connection.execute('DELETE FROM competitions')
-            self.connection.commit()
             return cursor.rowcount
 
     def get_sport_names(self) -> list[str]:

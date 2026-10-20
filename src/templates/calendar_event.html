@@ -2,6 +2,15 @@
 {% extends "layout/base.html" %}
 
 {% block content %}
+{% macro result_team_select(selected, form='') %}
+{% set selected = selected|string %}
+<select class="form-select" name="team_id" {% if form %}form="{{ form }}"{% endif %} aria-label="Команда результата">
+<option value="">Без команды</option>
+{% if selected and selected not in teams|map(attribute='id')|map('string')|list %}<option value="{{ selected }}" selected>Недоступная команда №{{ selected }} — выберите команду этого события</option>{% endif %}
+{% for team in teams %}<option value="{{ team.id }}" {% if selected == team.id|string %}selected{% endif %}>{{ team.name }}</option>{% endfor %}
+</select>
+{% endmacro %}
+
 
 {# Страница соревнования — участники (волна B, прототип 16). Участники —
    обычные записи реестра по пресету события (name + date + date_to);
@@ -81,7 +90,7 @@
 </div>
 {% endmacro %}
 
-<div class="event-page" data-event-page="{{ event.id }}" data-result-filter="{{ result_filter }}" data-initial-tab="{{ 'documents' if edit_document_data or edit_protocol_data else ('teams' if edit_team_result else 'participants') }}" data-add-open="{{ 'true' if can_add_for or participant_form_values else 'false' }}">
+<div class="event-page" data-event-page="{{ event.id }}" data-result-filter="{{ result_filter }}" data-initial-tab="{{ 'documents' if edit_document_data or edit_protocol_data else ('teams' if edit_team_result or 'team_result_label' in request.args else 'participants') }}" data-add-open="{{ 'true' if can_add_for or participant_form_values else 'false' }}">
 <div class="page-head d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
     <div>
         <a class="backlink" href="{{ calendar_return_url }}">← {% if calendar_return_url.startswith('/admin/people/') %}К студенту{% else %}В календарь{% endif %}</a>
@@ -112,11 +121,12 @@
 
 <nav class="event-tabs" aria-label="Разделы соревнования">
 <a href="#event-participants" data-event-tab="participants">Участники <span>{{ participants_count }}</span></a>
-<a href="#event-teams" data-event-tab="teams">Командные результаты</a>
+<a href="#event-teams" data-event-tab="teams">Команды и результаты</a>
 <a href="#event-documents" data-event-tab="documents">Документы</a>
 <a href="#event-about" data-event-tab="about">О событии</a>
 </nav>
 <section id="event-participants" class="event-tab-panel event-participants-panel" data-event-panel="participants">
+{% if can_manage %}<p class="small text-muted">При смене дисциплины участие исключается из всех команд с записью в историю. Повторное включение — вручную; правка места и результата состав не меняет.</p>{% endif %}
 <div class="event-toolbar">
     <label class="event-search"><span class="visually-hidden">Поиск по ФИО или группе</span><input type="search" class="form-control" id="event-participant-search" maxlength="2000" placeholder="Поиск по ФИО или группе" autocomplete="off"></label>
     <label><span class="visually-hidden">Наличие места</span><select id="event-result-filter" class="form-select form-select-sm" onchange="if (!this.closest('.event-page').classList.contains('event-enhanced')) window.location = this.value">
@@ -508,6 +518,13 @@
     <input type="hidden" name="result" value="{{ result_filter }}">
 </form>
 {% endif %}
+<section class="card card-body mb-3" id="event-team-list">
+<h2 class="h5">Команды соревнования</h2>
+<div class="d-flex flex-wrap gap-2 mb-3">{% for team in teams %}<a class="btn btn-outline-primary" href="/calendar/{{ event.id }}/teams/{{ team.id }}">{{ team.name }} · {{ team.member_count }} участий</a>{% else %}<span class="text-muted">Команд пока нет.</span>{% endfor %}</div>
+<a href="/calendar/{{ event.id }}/teams">История всех команд</a>
+{% if can_manage %}<form class="d-flex flex-wrap gap-2 mt-3" method="post" action="/calendar/{{ event.id }}/teams">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><label for="new-team-name" class="visually-hidden">Название команды</label><input id="new-team-name" class="form-control" name="name" placeholder="Название команды" maxlength="200" required><button class="btn btn-primary">Создать команду</button></form>{% endif %}
+</section>
 {% if event.team_results or can_manage %}
 <section class="card shadow-sm mb-4" id="team-results">
     <div class="card-body">
@@ -534,11 +551,12 @@
                 <tr>
                     <td>
                         <input class="form-control form-control-sm" form="team-result-edit-form" type="text"
-                            name="label" value="{{ row.label }}" maxlength="200" required aria-label="Категория">
+                            name="label" value="{{ request.args.get('team_result_label', row.label) }}" maxlength="200" required aria-label="Категория">
+                        {{ result_team_select(request.args.get('team_result_team_id', row.team_id or ''), 'team-result-edit-form') }}
                     </td>
                     <td>
                         <input class="form-control form-control-sm input-num" form="team-result-edit-form"
-                            type="number" name="place" value="{{ row.place }}" min="1" max="9999" step="1" required
+                            type="number" name="place" value="{{ request.args.get('team_result_place', row.place) }}" min="1" max="9999" step="1" required
                             aria-label="Место команды">
                     </td>
                     <td>
@@ -552,7 +570,7 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td class="text-break">{{ row.label }}</td>
+                    <td class="text-break">{{ row.label }}{% for team in teams if team.id == row.team_id %}<div class="text-muted small">{{ team.name }}</div>{% endfor %}</td>
                     <td class="text-center text-nowrap">{{ row.place }}</td>
                     {% if can_manage %}
                     <td>
@@ -581,12 +599,13 @@
             </tbody>
         </table>
         {% if can_manage %}
-        <details class="event-disclosure" ><summary>Добавить командный результат</summary><form class="d-flex flex-wrap gap-2 align-items-center mt-3" method="post"
+        <details class="event-disclosure" {% if 'team_result_label' in request.args and not edit_team_result %}open{% endif %}><summary>Добавить командный результат</summary><form class="d-flex flex-wrap gap-2 align-items-center mt-3" method="post"
               action="/calendar/{{ event.id }}/team-results">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input class="form-control" style="flex: 1 1 240px;" type="text" name="label"
-                placeholder="Категория (например: Общий зачёт)" aria-label="Категория" maxlength="200" required>
-            <input class="form-control input-num" style="flex: 0 1 120px;" type="number" name="place" placeholder="1"
+                value="{{ request.args.get('team_result_label', '') if not edit_team_result else '' }}" placeholder="Категория (например: Общий зачёт)" aria-label="Категория" maxlength="200" required>
+            {{ result_team_select(request.args.get('team_result_team_id', '')) }}
+            <input class="form-control input-num" style="flex: 0 1 120px;" type="number" name="place" value="{{ request.args.get('team_result_place', '') if not edit_team_result else '' }}" placeholder="1"
                 aria-label="Место команды" min="1" max="9999" step="1" required>
             <button class="btn btn-sm btn-success" type="submit">Добавить</button>
             <span class="form-text ui-hint">Например: Общий зачёт, Мужчины, Женщины. До 50 строк.</span>
@@ -678,7 +697,7 @@
                         <div class="d-flex gap-1">
                             <a class="btn btn-sm btn-outline-primary"
                                 href="/calendar/{{ event.id }}/documents/{{ p.id }}/download">Скачать</a>
-                            {% if can_manage %}
+                            {% if can_manage and p.get('team_id') is none and p.access_mode in ['all_participants', 'selected_students'] %}
                             <a class="btn btn-sm btn-outline-secondary"
                                 href="/calendar/{{ event.id }}?edit_protocol={{ p.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">Изменить</a>
                             <form action="/calendar/{{ event.id }}/protocols/{{ p.id }}/delete" method="post"
@@ -780,7 +799,8 @@
                         <div class="small text-muted">{{ doc.type_label }} · {{ doc.size_label }}</div>
                     </td>
                     <td>
-                        {% if doc.access_mode == 'all_participants' %}
+                        {% if doc.get('team_id') is not none or doc.access_mode not in ['all_participants', 'selected_students'] %}<span class="badge text-bg-secondary">Командный / неподдерживаемый доступ · только просмотр</span>
+                        {% elif doc.access_mode == 'all_participants' %}
                         <span class="badge text-bg-secondary">Все участники</span>
                         {% else %}
                         <span class="badge text-bg-primary"{% if can_manage %} title="{{ doc.students_names | join(', ') }}"{% endif %}>Выбранные студенты: {{ doc.students_count }}</span>
@@ -790,7 +810,7 @@
                         <div class="d-flex gap-1">
                             <a class="btn btn-sm btn-outline-primary"
                                 href="/calendar/{{ event.id }}/documents/{{ doc.id }}/download">Скачать</a>
-                            {% if can_manage %}
+                            {% if can_manage and doc.get('team_id') is none and doc.access_mode in ['all_participants', 'selected_students'] %}
                             <a class="btn btn-sm btn-outline-secondary"
                                 href="/calendar/{{ event.id }}?edit_document={{ doc.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">Изменить</a>
                             <form action="/calendar/{{ event.id }}/documents/{{ doc.id }}/delete" method="post"
