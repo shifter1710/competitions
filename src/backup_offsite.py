@@ -88,14 +88,25 @@ def upload_set(directory, remote, *, config=None):
     if Path(directory).name != identifier or '/' in identifier or '..' in identifier:
         raise BackupError('invalid_set_id')
     destination = remote.rstrip('/') + '/sets/' + identifier
-    # --immutable refuses replacement of conflicting existing objects. Retry resumes
-    # a partial set. cryptcheck requires a crypt remote and verifies decrypted hashes.
+    # Temporary copies have fresh mtimes; crypt exposes no normal comparison hash.
+    # Transfer decisions use size to resume without modifying existing objects.
+    # --immutable still rejects size conflicts; mandatory cryptcheck below verifies
+    # content (explicit --size-only=false), including same-size remote corruption.
     with tempfile.TemporaryDirectory() as temporary:
         for name in manifest['artifacts']:
             shutil.copyfile(Path(directory) / name, Path(temporary) / name)
-        rclone(['copy', temporary, destination, '--immutable'], config)
+        rclone(['copy', temporary, destination, '--immutable', '--size-only'], config)
         cryptcheck(temporary, destination, 2, config)
-    rclone(['copyto', str(Path(directory) / 'manifest.json'), destination + '/manifest.json', '--immutable'], config)
+    rclone(
+        [
+            'copyto',
+            str(Path(directory) / 'manifest.json'),
+            destination + '/manifest.json',
+            '--immutable',
+            '--size-only',
+        ],
+        config,
+    )
     cryptcheck(directory, destination, 3, config)
     return manifest
 
