@@ -402,3 +402,15 @@ BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
 # unmatched); счётчики при этом полные — страницы-группы показывают первые
 # CALENDAR_LINK_PREVIEW_CAP строк, остальное владелец разбирает поиском/фильтром.
 CALENDAR_LINK_PREVIEW_CAP = 200
+
+
+def team_participation_write(method):
+    """Existing participation write entrance with atomic team lifecycle."""
+    from functools import wraps
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._team_participation_write():
+            return method(self, *args, **kwargs)
+
+    return wrapped

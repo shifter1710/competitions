@@ -1,0 +1,45 @@
+{% extends "layout/base.html" %}
+{% block content %}
+<a class="backlink" href="/calendar/{{ event.id }}#event-teams">← {{ event.name }}</a>
+<h1 class="page-title mt-3">{{ team.name if team else 'Команды и история состава' }}</h1>
+{% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+{% if can_manage %}
+<form class="card card-body mb-3" method="post" action="/calendar/{{ event.id }}/teams{% if team %}/{{ team.id }}/rename{% endif %}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <label for="team-name">Название команды</label>
+    <input id="team-name" class="form-control mb-2" name="name" maxlength="200" required value="{{ values.name if 'name' in values else (team.name if team else '') }}">
+    <button class="btn btn-primary align-self-start">{{ 'Переименовать' if team else 'Создать команду' }}</button>
+</form>
+{% endif %}
+{% if team %}
+<p>Состав: {{ members|length }} участий. Каждая дисциплина выбирается отдельно. Одно участие может входить в несколько команд.</p>
+<div class="alert alert-warning">Участие без связанной карточки можно добавить в команду, но оно не даёт доступа к документам через личный кабинет.</div>
+{% for mode, heading, button in [('remove', 'Текущий состав', 'Исключить выбранные'), ('add', 'Добавить участия соревнования', 'Добавить выбранные')] %}
+<section class="card card-body mb-3" data-team-roster>
+<h2 class="h5">{{ heading }}</h2>
+<label class="form-label" for="search-{{ mode }}">Поиск по ФИО, группе, дисциплине или номеру участия</label>
+<input id="search-{{ mode }}" class="form-control mb-2" type="search" name="search" form="team-form-{{ mode }}" value="{{ values.search if values.action == mode else '' }}" data-team-search>
+<p class="text-muted small">Поиск скрывает строки, сохраняя выбор. Показаны участия всего соревнования, независимо от фильтра мест.</p>
+<form id="team-form-{{ mode }}" method="post" action="/calendar/{{ event.id }}/teams/{{ team.id }}/{{ mode }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Выбор</th><th>Участие</th><th>Дисциплина</th><th>Карточка</th></tr></thead><tbody>
+{% for p in participants if (p.record_id in members) == (mode == 'remove') %}
+<tr data-team-row><td>{% if can_manage %}<input class="form-check-input" type="checkbox" name="competition_id" value="{{ p.record_id }}" aria-label="Участие №{{ p.record_id }}: {{ p.student_name }}, {{ p.effective_discipline or 'без дисциплины' }}" {% if values.action == mode and p.record_id|string in values.selected %}checked{% endif %}>{% endif %}</td>
+<td>{{ p.student_name }} <span class="text-muted">№{{ p.record_id }} · {{ p.group_name or '—' }}</span></td><td>{{ p.effective_discipline or '—' }}</td><td>{% if p.student_ref_id %}№{{ p.student_ref_id }}{% else %}<span class="badge text-bg-warning">Нет доступа через кабинет</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="4" class="text-muted">{{ 'Состав пуст' if mode == 'remove' else 'Все участия уже в этой команде' }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% if can_manage %}<button class="btn {{ 'btn-outline-danger' if mode == 'remove' else 'btn-primary' }}">{{ button }}</button><span class="ms-2" data-team-selected aria-live="polite"></span>{% endif %}
+</form></section>
+{% endfor %}
+<p class="text-muted">Исключение не удаляет участие. При содержательной смене дисциплины участие автоматически исключается из всех команд; повторное включение выполняется явно.</p>
+{% if can_manage %}<form method="post" action="/calendar/{{ event.id }}/teams/{{ team.id }}/delete" class="mb-4">
+<input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}"><button class="btn btn-outline-danger">Удалить пустую команду</button><span class="form-text">Удаление возможно только без участников, документов и результатов. История сохраняется.</span>
+</form>{% endif %}
+{% endif %}
+<section class="card card-body"><h2 class="h5">История состава{% if not team %} всех команд события{% endif %}</h2>
+<div class="table-responsive"><table class="table"><thead><tr><th>Время (UTC)</th><th>Команда</th><th>Действие</th><th>Участие на момент действия</th><th>Инициатор / причина</th></tr></thead><tbody>
+{% for item in history %}<tr><td>{{ item.created_at }}</td><td>{{ item.team_name }} №{{ item.team_id }}</td><td>{{ history_actions.get(item.action, item.action) }}</td><td>{% if item.competition_id %}№{{ item.competition_id }} {{ item.student_name or '' }} · {{ item.discipline or 'Без дисциплины' }} · карточка {{ item.student_ref_id or 'не связана' }}{% else %}—{% endif %}</td><td>{{ item.actor_name or 'Неизвестен' }}{% if item.reason %} / {{ history_reasons.get(item.reason, item.reason) }}{% endif %}</td></tr>
+{% else %}<tr><td colspan="5">История пока пуста. Прошлые составы автоматически не восстанавливаются.</td></tr>{% endfor %}
+</tbody></table></div></section>
+<script src="/static/scripts/teams.js" defer></script>
+{% endblock %}

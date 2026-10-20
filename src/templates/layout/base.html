@@ -114,6 +114,9 @@
     </nav>
 
     <div style="margin: 20px 20px">
+        {% if request.args.get('team_removed', '')|int > 0 %}
+        <div class="alert alert-warning" role="status" data-team-removal-notice>Из-за смены дисциплины удалены членства в командах: {{ request.args.get('team_removed')|int }}. История сохранена. Повторно добавьте нужные участия в состав явно.</div>
+        {% endif %}
         {% if admin_message %}
         <div class="alert alert-success alert-dismissible" role="alert" data-flash-autohide>
             {{ admin_message }}

@@ -4,6 +4,11 @@ main.py — оболочка: создание и настройка Sanic-пр�
 глобальные middleware и подключение доменных модулей маршрутов через
 register(app). Вся логика живёт в src/web.py, src/auth.py, src/records.py,
 src/files.py и src/routes/* (перенесено из main.py без изменения поведения)."""
+from urllib.parse import parse_qsl
+from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
+
 from sanic import redirect
 from sanic import Request
 from sanic import Sanic
@@ -24,8 +29,11 @@ from src.routes import calendar
 from src.routes import registry
 from src.routes import reports
 from src.routes import students
+from src.routes import teams
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
+from src.storage.teams import team_actor
+from src.storage.teams import team_removed
 from src.web import get_auth_user
 from src.web import request_csrf_is_valid
 from src.web import unauthorized
@@ -154,6 +162,20 @@ async def static_no_cache(request: Request, response: HTTPResponse):
     """Статика без версионирования в URL: заставляем браузер
     перепроверять файл по Last-Modified, иначе после деплоя дни висит
     старый CSS/JS (симптом: «поломанная тёмная тема»)."""
+    count = team_removed.get()
+    if count and response.status in (301, 302, 303, 307, 308) and response.headers.get('location'):
+        target = urlsplit(response.headers['location'])
+        query = [
+            (key, value) for key, value in parse_qsl(target.query, keep_blank_values=True) if key != 'team_removed'
+        ]
+        query.append(('team_removed', str(count)))
+        response.headers['location'] = urlunsplit(target._replace(query=urlencode(query)))
+    removal_token = getattr(request.ctx, 'team_removed_token', None)
+    if removal_token is not None:
+        team_removed.reset(removal_token)
+    token = getattr(request.ctx, 'team_actor_token', None)
+    if token is not None:
+        team_actor.reset(token)
     if request.path.startswith('/static'):
         response.headers['Cache-Control'] = 'no-cache'
 
@@ -161,6 +183,8 @@ async def static_no_cache(request: Request, response: HTTPResponse):
 @app.on_request
 async def authorize_request(request: Request):
     request.ctx.auth_user = parse_auth_cookie(request)
+    request.ctx.team_actor_token = team_actor.set(request.ctx.auth_user)
+    request.ctx.team_removed_token = team_removed.set(0)
 
     if request.path.startswith('/static'):
         return None
@@ -197,6 +221,7 @@ def healthcheck(request: Request):
 auth.register(app)
 registry.register(app)
 calendar.register(app)
+teams.register(app)
 students.register(app)
 reports.register(app)
 admin.register(app)

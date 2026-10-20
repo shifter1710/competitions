@@ -278,6 +278,13 @@ MAX_TEAM_RESULT_PLACE = 9999
 MAX_EVENT_TEAM_RESULTS = 50
 
 
+def team_result_error_url(request, base):
+    target = urlsplit(base)
+    query = parse_qsl(target.query, keep_blank_values=True)
+    query.extend((f'team_result_{key}', get_form_value(request, key)) for key in ('label', 'place', 'team_id'))
+    return urlunsplit(target._replace(query=urlencode(query), fragment=''))
+
+
 def parse_team_result_form(request: Request) -> tuple[str | None, int | None, str | None]:
     """Разобрать поля формы командного результата: (label, place, ошибка).
 
@@ -451,6 +458,7 @@ EVENT_DOCUMENT_STORAGE_ERRORS = {
     'student_inactive': 'Карточка студента неактивна',
     'student_not_participant': 'Выбранный студент не участвует в соревновании',
     'invalid_access_mode': 'Недопустимый режим доступа документа',
+    'unsupported_scope': 'Этот режим документа не поддерживает изменение в данной версии.',
     'invalid_document_type': 'Недопустимый тип документа',
 }
 
@@ -745,9 +753,13 @@ def athlete_can_download_event_document(
     student_ref_id = record.get('student_ref_id') if record else None
     if student_ref_id is None:
         return False
+    if document.get('team_id') is not None:
+        return False
     if document.get('access_mode') == 'all_participants':
         return storage.student_participates_in_event(event_id, student_ref_id)
-    return student_ref_id in storage.calendar_event_document_students(document['id'])
+    if document.get('access_mode') == 'selected_students':
+        return student_ref_id in storage.calendar_event_document_students(document['id'])
+    return False
 
 
 # Связывание cardless-участия события с карточкой студента со страницы
@@ -2555,6 +2567,18 @@ def register(app: Sanic) -> None:  # noqa: C901
                         None,
                     )
 
+        if edit_document_data and (
+            edit_document_data.get('team_id') is not None
+            or edit_document_data.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES
+        ):
+            edit_document_data = None
+            edit_document = None
+        if edit_protocol_data and (
+            edit_protocol_data.get('team_id') is not None
+            or edit_protocol_data.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES
+        ):
+            edit_protocol_data = None
+            edit_protocol = None
         return await render(
             template_name=jinja_env.get_template('calendar_event.html'),
             context={
@@ -2584,6 +2608,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'can_manage': can_manage,
                 # Team Results: строка в режиме правки (dict) или None.
                 'edit_team_result': edit_team_result,
+                'teams': storage.list_event_teams(event['id']),
                 # Event Documents: документы события (каждый со students_ids/
                 # students_names выбранного доступа и size_label), chooser
                 # участников доступа (cardless — отдельно), id документа в
@@ -2757,9 +2782,10 @@ def register(app: Sanic) -> None:  # noqa: C901
             return error
 
         back_url = f'/calendar/{event["id"]}'
+        error_url = team_result_error_url(request, back_url)
         label, place, form_error = parse_team_result_form(request)
         if form_error is not None:
-            return build_redirect_with_message(error=form_error, url=back_url)
+            return build_redirect_with_message(error=form_error, url=error_url)
 
         # Кап строк (прецедент MAX_EVENT_LINKS): считаем по событию из того
         # же чтения; предел мягкий — окно между чтением и INSERT двух
@@ -2767,14 +2793,22 @@ def register(app: Sanic) -> None:  # noqa: C901
         if len(event.get('team_results') or []) >= MAX_EVENT_TEAM_RESULTS:
             return build_redirect_with_message(
                 error=f'Достигнут предел — не более {MAX_EVENT_TEAM_RESULTS} командных результатов на соревнование',
-                url=back_url,
+                url=error_url,
             )
 
-        result_id, add_error = get_storage(request.app).add_calendar_event_team_result(event['id'], label, place)
+        raw_team_id = get_form_value(request, 'team_id').strip()
+        if raw_team_id and not raw_team_id.isdigit():
+            return build_redirect_with_message(error='Некорректная команда', url=error_url)
+        team_id = int(raw_team_id) if raw_team_id else None
+        result_id, add_error = get_storage(request.app).add_calendar_event_team_result(
+            event['id'], label, place, team_id=team_id
+        )
+        if add_error == 'invalid_team':
+            return build_redirect_with_message(error='Команда не найдена в этом соревновании', url=error_url)
         if add_error == 'duplicate_label':
             return build_redirect_with_message(
                 error=f'Категория «{label}» уже есть в командных результатах',
-                url=back_url,
+                url=error_url,
             )
         log_audit_event(
             request,
@@ -2812,13 +2846,20 @@ def register(app: Sanic) -> None:  # noqa: C901
             edit_url = f"/calendar/{event['id']}?edit_team_result={numeric_result_id}"
         back_url = f'/calendar/{event["id"]}'
 
+        edit_url = team_result_error_url(request, edit_url)
         label, place, form_error = parse_team_result_form(request)
         if form_error is not None:
             return build_redirect_with_message(error=form_error, url=edit_url)
 
+        raw_team_id = get_form_value(request, 'team_id').strip()
+        if raw_team_id and not raw_team_id.isdigit():
+            return build_redirect_with_message(error='Некорректная команда', url=edit_url)
+        team_id = int(raw_team_id) if raw_team_id else None
         updated, update_error = get_storage(request.app).update_calendar_event_team_result(
-            event['id'], numeric_result_id, label, place
+            event['id'], numeric_result_id, label, place, team_id=team_id
         )
+        if update_error == 'invalid_team':
+            return build_redirect_with_message(error='Команда не найдена в этом соревновании', url=edit_url)
         if update_error == 'not_found':
             return build_redirect_with_message(error='Командный результат не найден', url=back_url)
         if update_error == 'duplicate_label':
@@ -3082,7 +3123,10 @@ def register(app: Sanic) -> None:  # noqa: C901
                 url='/calendar',
             )
 
-        storage.delete_calendar_event(numeric_id)
+        try:
+            storage.delete_calendar_event(numeric_id)
+        except ValueError as exc:
+            return build_redirect_with_message(error=str(exc), url=f'/calendar/{numeric_id}')
         # Файл положения живёт вне БД: каталог события удаляется вместе с ним
         # (best-effort — как каталоги вложений записей).
         shutil.rmtree(calendar_regulation_dir(numeric_id), ignore_errors=True)
@@ -3307,6 +3351,8 @@ def register(app: Sanic) -> None:  # noqa: C901
         document = storage.get_calendar_event_document(event['id'], numeric_document_id)
         if document is None:
             return build_redirect_with_message(error='Документ не найден', url=back_url)
+        if document.get('team_id') is not None or document.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES:
+            return build_redirect_with_message(error=EVENT_DOCUMENT_STORAGE_ERRORS['unsupported_scope'], url=back_url)
 
         title, access_mode, student_ids, form_error = parse_event_document_fields(request)
         if form_error is not None:
@@ -3530,6 +3576,8 @@ def register(app: Sanic) -> None:  # noqa: C901
         document = storage.get_calendar_event_document(event['id'], numeric_document_id)
         if document is None or document.get('document_type') != 'protocol':
             return build_redirect_with_message(error='Протокол не найден', url=back_url)
+        if document.get('team_id') is not None or document.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES:
+            return build_redirect_with_message(error=EVENT_DOCUMENT_STORAGE_ERRORS['unsupported_scope'], url=back_url)
 
         title, form_error = parse_event_protocol_fields(request)
         if form_error is not None:

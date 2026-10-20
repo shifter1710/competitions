@@ -15,6 +15,7 @@ from src.periods import academic_years_for_ranges
 from src.settings import settings
 from src.storage.helpers import STUDENT_SEX_VALUES
 from src.storage.helpers import STUDENT_SORT_COLUMNS
+from src.storage.helpers import team_participation_write
 
 
 class StudentsMixin:
@@ -468,6 +469,7 @@ class StudentsMixin:
         )
         return candidates[: int(limit)]
 
+    @team_participation_write
     def link_competitions(self, record_ids: Sequence[int], student_id: int) -> tuple[int, str | None]:
         """Атомарно привязать записи к карточке: либо все, либо ничего.
 
@@ -507,9 +509,9 @@ class StudentsMixin:
                 f'WHERE id IN ({placeholders}) AND student_ref_id IS NULL',
                 [int(student_id), *ids],
             )
-            self.connection.commit()
             return cursor.rowcount, None
 
+    @team_participation_write
     def create_student_and_link_participation(
         self,
         *,
@@ -601,12 +603,12 @@ class StudentsMixin:
                 if linked.rowcount == 0:
                     self.connection.rollback()
                     return None, 'already_linked'
-                self.connection.commit()
                 return student_id, None
             except BaseException:
                 self.connection.rollback()
                 raise
 
+    @team_participation_write
     def unlink_competition(self, record_id: int) -> int | None:
         """Снять связь записи с карточкой; прежний student_ref_id (или None,
         если записи нет либо связи и так не было)."""
@@ -621,9 +623,9 @@ class StudentsMixin:
                 'UPDATE competitions SET student_ref_id = NULL WHERE id = ?',
                 (int(record_id),),
             )
-            self.connection.commit()
             return row['student_ref_id']
 
+    @team_participation_write
     def relink_competition(self, record_id: int, student_id: int) -> tuple[int | None, str | None]:
         """Перепривязать запись на другую карточку (можно и с NULL — тогда
         это привязка). Возвращает (прежний ref или None, ошибка или None)."""
@@ -646,7 +648,6 @@ class StudentsMixin:
                 'UPDATE competitions SET student_ref_id = ? WHERE id = ?',
                 (int(student_id), int(record_id)),
             )
-            self.connection.commit()
             return row['student_ref_id'], None
 
     @staticmethod

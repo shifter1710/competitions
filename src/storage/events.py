@@ -18,6 +18,7 @@ from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
 from src.storage.helpers import CalendarEventDuplicateError
 from src.storage.helpers import dedup_text
 from src.storage.helpers import event_identity_key
+from src.storage.helpers import team_participation_write
 
 
 # Режимы доступа к документу события (Event Documents): всем участникам
@@ -124,13 +125,15 @@ class EventsMixin:
         """Командные результаты события по (sort_order, id) — детерминированный
         порядок добавления (вызывается под _lock)."""
         rows = self.connection.execute(
-            'SELECT id, label, place, sort_order FROM calendar_event_team_results'
+            'SELECT id, label, place, sort_order, team_id FROM calendar_event_team_results'
             ' WHERE calendar_event_id = ? ORDER BY sort_order ASC, id ASC',
             (event_id,),
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def add_calendar_event_team_result(self, event_id: int, label: str, place: int) -> tuple[int | None, str | None]:
+    def add_calendar_event_team_result(
+        self, event_id: int, label: str, place: int, team_id: int | None = None
+    ) -> tuple[int | None, str | None]:
         """Добавить строку командного результата: (result_id, None) или
         (None, 'duplicate_label').
 
@@ -139,22 +142,31 @@ class EventsMixin:
         есть у ЭТОГО события → дубль, записи не было. Существование события
         проверяет роут. sort_order = COALESCE(MAX, -1)+1 — новая строка в
         конец; timestamps — datetime.utcnow().isoformat()."""
-        with self._lock:
+        with self._team_transaction():
+            if team_id is not None and not self.get_event_team(event_id, team_id):
+                return None, 'invalid_team'
             for row in self._calendar_event_team_results(event_id):
-                if dedup_text(row['label']) == dedup_text(label):
+                if row['team_id'] == team_id and dedup_text(row['label']) == dedup_text(label):
                     return None, 'duplicate_label'
             cursor = self.connection.execute(
                 'INSERT INTO calendar_event_team_results'
-                ' (calendar_event_id, label, place, sort_order, created_at, updated_at)'
+                ' (calendar_event_id, label, place, sort_order, created_at, updated_at, team_id)'
                 ' VALUES (?, ?, ?, COALESCE((SELECT MAX(sort_order)'
-                '     FROM calendar_event_team_results WHERE calendar_event_id = ?), -1) + 1, ?, ?)',
-                (event_id, label, int(place), event_id, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+                '     FROM calendar_event_team_results WHERE calendar_event_id = ?), -1) + 1, ?, ?, ?)',
+                (
+                    event_id,
+                    label,
+                    int(place),
+                    event_id,
+                    datetime.utcnow().isoformat(),
+                    datetime.utcnow().isoformat(),
+                    team_id,
+                ),
             )
-            self.connection.commit()
             return cursor.lastrowid, None
 
     def update_calendar_event_team_result(
-        self, event_id: int, result_id: int, label: str, place: int
+        self, event_id: int, result_id: int, label: str, place: int, team_id: int | None = None
     ) -> tuple[bool, str | None]:
         """Правка строки командного результата: (True, None),
         (False, 'not_found') или (False, 'duplicate_label').
@@ -163,20 +175,21 @@ class EventsMixin:
         переименование в то же значение легально). Ownership — в WHERE
         UPDATE (id AND calendar_event_id, прецедент update_event_participation_
         result): чужой result_id/другое событие → 0 строк → not_found."""
-        with self._lock:
+        with self._team_transaction():
+            if team_id is not None and not self.get_event_team(event_id, team_id):
+                return None, 'invalid_team'
             rows = self._calendar_event_team_results(event_id)
             if not any(row['id'] == int(result_id) for row in rows):
                 return False, 'not_found'
             new_label = dedup_text(label)
             for row in rows:
-                if row['id'] != int(result_id) and dedup_text(row['label']) == new_label:
+                if row['id'] != int(result_id) and row['team_id'] == team_id and dedup_text(row['label']) == new_label:
                     return False, 'duplicate_label'
             cursor = self.connection.execute(
                 'UPDATE calendar_event_team_results'
-                ' SET label = ?, place = ?, updated_at = ? WHERE id = ? AND calendar_event_id = ?',
-                (label, int(place), datetime.utcnow().isoformat(), int(result_id), int(event_id)),
+                ' SET label = ?, place = ?, updated_at = ?, team_id = ? WHERE id = ? AND calendar_event_id = ?',
+                (label, int(place), datetime.utcnow().isoformat(), team_id, int(result_id), int(event_id)),
             )
-            self.connection.commit()
             return cursor.rowcount > 0, None
 
     def delete_calendar_event_team_result(self, event_id: int, result_id: int) -> bool:
@@ -364,6 +377,16 @@ class EventsMixin:
                 self.connection.rollback()
                 raise
 
+    def _event_document_recipient_ids(self, event_id, access_mode, student_ids):
+        if access_mode != 'selected_students':
+            return [], None
+        error = self._check_event_document_students(event_id, student_ids)
+        return sorted({int(student_id) for student_id in student_ids}), error
+
+    @staticmethod
+    def _unsupported_event_document_scope(document):
+        return document['team_id'] is not None or document['access_mode'] not in EVENT_DOCUMENT_ACCESS_MODES
+
     def update_calendar_event_document(
         self,
         event_id: int,
@@ -393,23 +416,22 @@ class EventsMixin:
         трогаем); старый файл на диске чистит роут."""
         if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
             return False, 'invalid_access_mode'
-        with self._lock:
+        with self._team_transaction():
             stored = self.connection.execute(
-                'SELECT document_type FROM calendar_event_documents' ' WHERE id = ? AND calendar_event_id = ?',
+                'SELECT document_type, access_mode, team_id FROM calendar_event_documents'
+                ' WHERE id = ? AND calendar_event_id = ?',
                 (int(document_id), int(event_id)),
             ).fetchone()
             if stored is None:
                 return False, 'not_found'
+            if self._unsupported_event_document_scope(stored):
+                return False, 'unsupported_scope'
             if stored['document_type'] == 'protocol':
                 access_mode = 'all_participants'
                 student_ids = []
-            if access_mode == 'selected_students':
-                error = self._check_event_document_students(event_id, student_ids)
-                if error is not None:
-                    return False, error
-                ids = sorted({int(student_id) for student_id in student_ids})
-            else:
-                ids = []
+            ids, error = self._event_document_recipient_ids(event_id, access_mode, student_ids)
+            if error is not None:
+                return False, error
             try:
                 set_clause = 'title = ?, access_mode = ?, updated_at = ?'
                 set_params: list = [title, access_mode, datetime.utcnow().isoformat()]
@@ -431,7 +453,6 @@ class EventsMixin:
                     (int(document_id),),
                 )
                 self._insert_document_students(int(document_id), ids)
-                self.connection.commit()
                 return True, None
             except BaseException:
                 self.connection.rollback()
@@ -442,7 +463,12 @@ class EventsMixin:
         False — не найден/чужой. Маппинги чистятся в той же транзакции и
         только при найденном документе (чужой документ с тем же id своих
         маппингов не теряет). Файл на диске чистит роут."""
-        with self._lock:
+        with self._team_transaction():
+            document = self.get_calendar_event_document(event_id, document_id)
+            if document and (
+                document.get('team_id') is not None or document['access_mode'] not in EVENT_DOCUMENT_ACCESS_MODES
+            ):
+                return False
             cursor = self.connection.execute(
                 'DELETE FROM calendar_event_documents WHERE id = ? AND calendar_event_id = ?',
                 (int(document_id), int(event_id)),
@@ -453,7 +479,6 @@ class EventsMixin:
                     'DELETE FROM calendar_event_document_students WHERE calendar_event_document_id = ?',
                     (int(document_id),),
                 )
-            self.connection.commit()
             return deleted
 
     def list_documents_for_student(self, student_id: int) -> list[dict]:
@@ -482,7 +507,7 @@ class EventsMixin:
                     e.date_to AS event_date_to
                 FROM calendar_event_documents d
                 JOIN calendar_events e ON e.id = d.calendar_event_id
-                WHERE
+                WHERE d.team_id IS NULL AND (
                     (d.access_mode = 'all_participants' AND EXISTS (
                         SELECT 1 FROM competitions c
                         WHERE c.calendar_event_id = d.calendar_event_id
@@ -490,7 +515,7 @@ class EventsMixin:
                     OR (d.access_mode = 'selected_students' AND EXISTS (
                         SELECT 1 FROM calendar_event_document_students m
                         WHERE m.calendar_event_document_id = d.id
-                          AND m.student_id = ?))
+                          AND m.student_id = ?)))
                 ORDER BY e.date DESC, d.sort_order ASC, d.id ASC
                 ''',
                 (int(student_id), int(student_id)),
@@ -677,7 +702,16 @@ class EventsMixin:
         результатов и документов (маппинги + строки, один commit). Guard
         участников живёт в роуте и не меняется; файлы документов на диске
         чистит роут."""
-        with self._lock:
+        with self._team_transaction():
+            if (
+                self.list_event_teams(event_id)
+                or self.connection.execute(
+                    'SELECT 1 FROM calendar_event_documents WHERE calendar_event_id=? '
+                    "AND (team_id IS NOT NULL OR access_mode NOT IN ('all_participants','selected_students'))",
+                    (event_id,),
+                ).fetchone()
+            ):
+                raise ValueError('Сначала удалите команды и неподдерживаемые документы соревнования.')
             self.connection.execute('DELETE FROM calendar_event_links WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute('DELETE FROM calendar_event_team_results WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute(
@@ -687,7 +721,6 @@ class EventsMixin:
             )
             self.connection.execute('DELETE FROM calendar_event_documents WHERE calendar_event_id = ?', (event_id,))
             self.connection.execute('DELETE FROM calendar_events WHERE id = ?', (event_id,))
-            self.connection.commit()
 
     def get_calendar_period_year_options(self) -> list[int]:
         with self._lock:
@@ -831,6 +864,7 @@ class EventsMixin:
     # кто-то другой, не перезаписывается (already_linked), существующая
     # ссылка не меняется.
 
+    @team_participation_write
     def link_participation_to_event(self, record_id: int, event_id: int) -> tuple[dict | None, str | None]:
         """Связать запись со существующим событием + синхронизация полей.
 
@@ -874,12 +908,12 @@ class EventsMixin:
                     # транзакции) и отказываем без перезаписи.
                     self.connection.rollback()
                     return None, 'already_linked'
-                self.connection.commit()
                 return dict(event), None
             except BaseException:
                 self.connection.rollback()
                 raise
 
+    @team_participation_write
     def create_calendar_event_and_link(
         self,
         *,
@@ -938,7 +972,6 @@ class EventsMixin:
                 if linked.rowcount == 0:
                     self.connection.rollback()
                     return None, 'already_linked'
-                self.connection.commit()
                 return event_id, None
             except BaseException:
                 self.connection.rollback()
@@ -1046,6 +1079,7 @@ class EventsMixin:
                 'unmatched': unmatched,
             }
 
+    @team_participation_write
     def apply_calendar_link_backfill(self) -> tuple[dict[str, int], list[dict]]:
         """Массовое связывание matched-записей (одна транзакция).
 
@@ -1108,7 +1142,6 @@ class EventsMixin:
                             'event_name': pair['event_name'],
                         }
                     )
-                self.connection.commit()
             except BaseException:
                 self.connection.rollback()
                 raise

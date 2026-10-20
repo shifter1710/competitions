@@ -3891,6 +3891,7 @@ def test_event_documents_schema_created_on_fresh_db(adapter):
         'created_at',
         'updated_at',
         'document_type',
+        'team_id',
     ]
     mapping_columns = [
         row['name'] for row in adapter.connection.execute('PRAGMA table_info(calendar_event_document_students)')
@@ -4006,6 +4007,7 @@ def test_event_documents_document_type_column_migrated(tmp_path):
         'created_at',
         'updated_at',
         'document_type',
+        'team_id',
     ]
     rows = adapter.list_calendar_event_documents(1)
     assert [(row['title'], row['document_type']) for row in rows] == [('Легаси документ', 'generic')]
@@ -7047,8 +7049,10 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     from src.storage.participations import ParticipationsMixin
     from src.storage.students import StudentsMixin
     from src.storage.users import UsersMixin
+    from src.storage.teams import TeamsMixin
 
     documented = [
+        TeamsMixin,
         MiscMixin,
         CatalogsMixin,
         UsersMixin,
@@ -7075,7 +7079,19 @@ def test_v21_adapter_composition_and_api_surface(adapter):
         for name in dir(adapter)
         if not name.startswith('_') and isinstance(getattr(adapter, name), types.MethodType)
     )
-    assert surface == V21_PUBLIC_API
+    assert surface == sorted(
+        V21_PUBLIC_API
+        + [
+            'list_event_teams',
+            'get_event_team',
+            'create_event_team',
+            'rename_event_team',
+            'delete_event_team',
+            'change_event_team_members',
+            'event_team_member_ids',
+            'event_team_history',
+        ]
+    )
 
 
 def test_v21_sqlite_module_reexports_helpers():

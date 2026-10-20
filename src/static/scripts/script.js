@@ -3007,6 +3007,8 @@ class Main {
             })
             .then((body) => {
                 this.setLoading(false);
+                const teamNotice = new DOMParser().parseFromString(body, "text/html").querySelector("[data-team-removal-notice]");
+                if (teamNotice) notify({type: "warning", text: teamNotice.textContent.trim()});
                 onSuccess(body);
             })
             .catch((error) => {
@@ -4019,7 +4021,11 @@ class ParticipantsPage {
                 }
                 return response.text();
             })
-            .then(onSuccess)
+            .then((html) => {
+                const teamNotice = new DOMParser().parseFromString(html, "text/html").querySelector("[data-team-removal-notice]");
+                this.teamRemovalMessage = teamNotice ? teamNotice.textContent.trim() : "";
+                onSuccess(html);
+            })
             .catch((error) => onError(error.message));
     }
 
@@ -4384,7 +4390,7 @@ class ParticipantsPage {
                 const disappeared = this.root.dataset.resultFilter === "without" && Number(position) !== 0
                     || this.root.dataset.resultFilter === "with" && Number(position) === 0;
                 this.cancelEdit();
-                this.navigateToEventWithMessage(disappeared ? "Участие обновлено. Строка скрыта текущим фильтром места." : "Участие обновлено");
+                this.navigateToEventWithMessage((disappeared ? "Участие обновлено. Строка скрыта текущим фильтром места." : "Участие обновлено") + (this.teamRemovalMessage ? " " + this.teamRemovalMessage : ""));
             },
             onError: (message) => {
                 this.participantSaving = false;
