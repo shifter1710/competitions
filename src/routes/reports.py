@@ -122,7 +122,7 @@ def validate_report_filters(args: dict) -> str | None:
         return 'Некорректный ID соревнования'
 
     position = get_param(args, 'position')
-    # Reports v2: голое 0 — класс «Без результата» (position = 0).
+    # REP-05: 0 is the saved URL value for the shared DNF/unknown category.
     if position and not re.fullmatch(r'(?:[<>]\d+|0)', position):
         return f'Некорректное значение места: {position}'
 
@@ -306,7 +306,7 @@ def report_chip_value(key: str, value: str, event_labels: dict[str, str]) -> str
     if key == 'admission_year' and value == 'none':
         return REPORT_EMPTY_SLICE_LABEL
     if key == 'event_id':
-        return event_labels.get(value, f'№{value} (недоступно)')
+        return event_labels.get(value, 'Соревнование недоступно')
     return value
 
 
@@ -653,7 +653,6 @@ def build_report_event_options(storage, selected: Sequence[str] = ()) -> list[di
                 start + (f' – {end}' if end and end != start else ''),
                 event.get('sport'),
                 event.get('level'),
-                f"№{event['id']}",
             )
             if value
         )
@@ -668,7 +667,7 @@ def build_report_event_options(storage, selected: Sequence[str] = ()) -> list[di
         )
     known = {option['value'] for option in options}
     options.extend(
-        {'value': value, 'label': f'Соревнование №{value} (недоступно)', 'detail': 'Условие сохранено'}
+        {'value': value, 'label': 'Соревнование недоступно', 'detail': 'Условие сохранено'}
         for value in selected
         if value not in known
     )

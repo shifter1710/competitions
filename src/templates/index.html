@@ -357,7 +357,7 @@
                             {{ bound_cell(competition.name, link_bindings.get('name'), competition.extra_data) }}
                         {%- endif -%}
                         </td>
-                        <td data-column-key="position">{{ competition.position }}</td>
+                        <td data-column-key="position">{{ competition.position or '—' }}</td>
                         {# Курс вычисляется по собственной исторической группе и дате начала;
                            прежние сохранённые курс/год не используются. #}
                         <td data-column-key="course">{% set course_cell = course_cells.get(competition.record_id) %}{% if course_cell %}{% if course_cell.title %}<span title="{{ course_cell.title }}">{{ course_cell.value }}</span>{% else %}{{ course_cell.value }}{% endif %}{% else %}{{ competition.course or '—' }}{% endif %}</td>

@@ -18,6 +18,7 @@ from urllib.parse import unquote
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from pandas import isna
@@ -130,7 +131,7 @@ CALENDAR_STATUS_FILTERS: Sequence[tuple[str, str]] = (
 def calendar_event_status(event: dict, today=None) -> str:
     end_raw = event.get('date_to') or event['date']
     end = datetime.fromisoformat(end_raw).date() if isinstance(end_raw, str) else end_raw
-    current = today if today is not None else datetime.now().date()
+    current = today if today is not None else today_in_timezone(settings.app_timezone)
     return CALENDAR_STATUS_PLANNED if end >= current else CALENDAR_STATUS_PAST
 
 
@@ -143,6 +144,12 @@ def decorate_calendar_event(event: dict, today=None) -> dict:
     decorated['date_to_obj'] = date_to
     decorated['date_label'] = format_date_range(date_from, date_to)
     decorated['status'] = calendar_event_status(event, today)
+    confirmed_at = event.get('results_confirmed_at')
+    decorated['confirmation_date_label'] = (
+        datetime.fromisoformat(confirmed_at).astimezone(ZoneInfo(settings.app_timezone)).strftime('%d.%m.%Y %H:%M')
+        if confirmed_at
+        else ''
+    )
     # Multiple Event Links: links читается через .get — фикстуры-моки
     # присылают сокращённые словари без ключа (прецедент date_to выше).
     decorated['links'] = list(event.get('links') or [])
@@ -2393,6 +2400,43 @@ def register(app: Sanic) -> None:  # noqa: C901
         if next_url.startswith('/calendar/'):
             return build_redirect_with_message(message='Соревнование обновлено', url=next_url)
         return build_redirect_with_message(message='Соревнование обновлено', url='/calendar')
+
+    @app.post('/calendar/<event_id>/results-confirmation')
+    async def calendar_event_results_confirmation(request: Request, event_id: str):
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        event, error = get_calendar_event_or_error(request, event_id)
+        if error is not None:
+            return error
+        value = get_form_value(request, 'confirmed')
+        if value not in ('0', '1'):
+            return text('Некорректное состояние подтверждения', status=400)
+        confirmed = value == '1'
+        user = get_auth_user(request)
+        error = get_storage(request.app).set_calendar_event_results_confirmation(event['id'], confirmed, user.get('id'))
+        back_params = {}
+        result_filter = participant_form_result_filter(request)
+        return_url = safe_calendar_return(get_form_value(request, 'return'))
+        if result_filter:
+            back_params['result'] = result_filter
+        if return_url:
+            back_params['return'] = return_url
+        back_url = f'/calendar/{event["id"]}' + ('?' + urlencode(back_params) if back_params else '')
+        if error == 'not_finished':
+            return build_redirect_with_message(
+                error='Подтвердить результаты можно со следующего дня после окончания соревнования.', url=back_url
+            )
+        if error:
+            return text('Соревнование не найдено', status=404)
+        log_audit_event(
+            request,
+            'calendar_results_confirmed' if confirmed else 'calendar_results_unconfirmed',
+            {'event_id': event['id']},
+        )
+        return build_redirect_with_message(
+            message='Результаты подтверждены' if confirmed else 'Подтверждение результатов снято', url=back_url
+        )
 
     @app.get('/calendar/<event_id>')
     async def calendar_event_page(request: Request, event_id: str):

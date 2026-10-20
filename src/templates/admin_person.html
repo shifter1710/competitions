@@ -49,7 +49,7 @@
                             <span class="person-record-meta">{{ record.sport }}{% if record.student_name != student.full_name %} · ФИО отличается от карточки{% endif %}</span>
                             <details class="person-record-info"><summary>Сведения о записи</summary><p>№{{ record.id }} · ФИО в записи: {{ record.student_name }}</p></details>
                         </td>
-                        <td data-label="Место">{% if record.position %}{{ record.position }}{% else %}<span class="person-missing">Без места</span>{% endif %}</td>
+                        <td data-label="Место">{% if record.position %}{{ record.position }}{% else %}<span class="person-missing">—</span>{% endif %}</td>
                         <td data-label="Результат">{{ record.result or 'Не указан' }}</td>
                         {% if is_admin %}
                         <td data-label="Связь записи">

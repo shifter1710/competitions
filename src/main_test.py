@@ -2167,12 +2167,15 @@ def test_index_sort_position_and_course(index_client: SanicTestClient):
         variety.append(record)
     storage.save_competitions(variety)
 
-    _, response = index_client.get('/?per_page=100&sort=position&order=asc', headers=get_auth_headers())
-    positions = [int(value) for value in index_column_texts(response.text, 'position')]
-    assert positions == sorted(positions)
-    _, response = index_client.get('/?per_page=100&sort=position&order=desc', headers=get_auth_headers())
-    positions = [int(value) for value in index_column_texts(response.text, 'position')]
-    assert positions == sorted(positions, reverse=True)
+    expected_positions = [record.position for record in storage.get_competitions()]
+    for order, reverse in (('asc', False), ('desc', True)):
+        _, response = index_client.get(f'/?per_page=100&sort=position&order={order}', headers=get_auth_headers())
+        assert response.status == 200
+        visible_positions = index_column_texts(response.text, 'position')
+        assert visible_positions.count('—') == expected_positions.count(0) > 0
+        assert '0' not in visible_positions
+        positions = [0 if value == '—' else int(value) for value in visible_positions]
+        assert positions == sorted(expected_positions, reverse=reverse)
 
     # Курс: числа по возрастанию, текстовые («Выпускник…») — после чисел;
     # пустые (нет значения) — раньше чисел.
@@ -23306,7 +23309,7 @@ def test_student_profile_p2_history_legacy_and_base_values(people_client: SanicT
         for record_id, row in re.findall(r'<tr data-history-record="(\d+)"[^>]*>(.*?)</tr>', body, re.S)
     }
     assert 'Легаси дисциплина QA' in rows[first] and 'Легаси результат QA' in rows[first]
-    assert 'Без места' in rows[first]
+    assert '<span class="person-missing">—</span>' in rows[first]
     assert 'Базовая дисциплина QA' in rows[second] and 'Базовый результат QA' in rows[second]
     assert 'Легаси результат QA' not in rows[second]
     assert body.index(f'data-history-record="{second}"') < body.index(f'data-history-record="{first}"')

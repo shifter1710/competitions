@@ -516,6 +516,19 @@ def apply_template_date_format(buffer: BytesIO, columns: Sequence[str]) -> None:
     buffer.seek(0)
 
 
+def write_index_workbook(df: pd.DataFrame, buffer: BytesIO) -> None:
+    """Display the blank-place sentinel as a dash without changing import values."""
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
+        place_column = list(df.columns).index('Место') + 1
+        sheet = writer.sheets['Sheet1']
+        for row in sheet.iter_rows(min_row=2, min_col=place_column, max_col=place_column):
+            # Excel sections: positive; negative; zero; text. The numeric zero
+            # stays numeric for roundtrip, and textual DNF keeps its spelling.
+            row[0].number_format = '0;-0;"—";@'
+    buffer.seek(0)
+
+
 def import_record_value_is_empty(value) -> bool:
     """Пустая ячейка импорта: None/NaN или пробельная строка."""
     try:
@@ -1295,7 +1308,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')
         filename = f'Отчет_{now_str}.xlsx'
         buffer = BytesIO()
-        await asyncio.to_thread(df.to_excel, buffer, index=False)
+        await asyncio.to_thread(write_index_workbook, df, buffer)
         buffer.seek(0)
 
         return raw(

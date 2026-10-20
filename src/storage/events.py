@@ -7,10 +7,12 @@
 self."""
 import json
 from datetime import datetime
+from datetime import timezone
 from typing import Sequence
 
 from src.levels import resolve_competition_level
 from src.periods import academic_years_for_ranges
+from src.periods import today_in_timezone
 from src.settings import settings
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
 from src.storage.helpers import CalendarEventDuplicateError
@@ -557,7 +559,8 @@ class EventsMixin:
         with self._lock:
             row = self.connection.execute(
                 'SELECT id, name, date, date_to, level, sport, url, created_at, '
-                'regulation_filename, regulation_stored_name FROM calendar_events WHERE id = ?',
+                'regulation_filename, regulation_stored_name, results_confirmed, '
+                'results_confirmed_at, results_confirmed_by FROM calendar_events WHERE id = ?',
                 (event_id,),
             ).fetchone()
             if row is None:
@@ -568,6 +571,37 @@ class EventsMixin:
             # чтение через ключ — фикстуры-моки не присылают его.
             event['team_results'] = self._calendar_event_team_results(event_id)
             return event
+
+    def set_calendar_event_results_confirmation(
+        self, event_id: int, confirmed: bool, actor_id: int | None
+    ) -> str | None:
+        """Admin route owns authorization; date check and write share the lock.
+
+        Idempotent confirmation preserves the original timestamp and actor.
+        Unconfirmation clears metadata, without touching participation review.
+        """
+        with self._lock:
+            event = self.get_calendar_event(event_id)
+            if event is None:
+                return 'not_found'
+            if confirmed:
+                end = datetime.fromisoformat(event.get('date_to') or event['date']).date()
+                if end >= today_in_timezone(settings.app_timezone):
+                    return 'not_finished'
+            if bool(event['results_confirmed']) == confirmed:
+                return None
+            self.connection.execute(
+                'UPDATE calendar_events SET results_confirmed = ?, results_confirmed_at = ?, '
+                'results_confirmed_by = ? WHERE id = ?',
+                (
+                    int(confirmed),
+                    datetime.now(timezone.utc).isoformat() if confirmed else None,
+                    actor_id if confirmed else None,
+                    event_id,
+                ),
+            )
+            self.connection.commit()
+            return None
 
     def set_calendar_regulation(self, event_id: int, filename: str, stored_name: str) -> None:
         """Прикрепить/заменить файл положения события (колонки + имя файла)."""
@@ -728,6 +762,9 @@ class EventsMixin:
                     e.sport,
                     e.url,
                     e.created_at,
+                    e.results_confirmed,
+                    e.results_confirmed_at,
+                    e.results_confirmed_by,
                     COUNT(DISTINCT c.student_ref_id) + COALESCE(
                         SUM(CASE WHEN c.id IS NOT NULL AND c.student_ref_id IS NULL THEN 1 ELSE 0 END), 0
                     ) AS participant_count,
@@ -751,6 +788,9 @@ class EventsMixin:
                     'sport': row['sport'],
                     'url': row['url'],
                     'created_at': row['created_at'],
+                    'results_confirmed': row['results_confirmed'],
+                    'results_confirmed_at': row['results_confirmed_at'],
+                    'results_confirmed_by': row['results_confirmed_by'],
                     'participant_count': row['participant_count'] or 0,
                     'participation_count': row['participation_count'] or 0,
                     'no_result_count': row['no_result_count'] or 0,
@@ -950,8 +990,9 @@ class EventsMixin:
     def calendar_link_backfill_preview(self) -> dict:
         """Read-only предпросмотр массового связывания NULL-записей.
 
-        Предикат — ровно семантика стартового P0-backfill
+        Предикат точного совпадения пресета
         (_calendar_preset_match_sql: name + date + COALESCE(date_to, '')).
+        Чтение не связывает записи; запись выполняет только явный admin apply.
         Группы: matched (ровно один кандидат-событие), ambiguous (больше
         одного — вручную, автоматики не будет), unmatched (ноль).
         Списки capped (CALENDAR_LINK_PREVIEW_CAP) — счётчики при этом
