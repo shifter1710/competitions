@@ -2371,3 +2371,24 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
     outline: 2px solid var(--accent);
     outline-offset: -3px;
 }
+
+/* REP-04: ordinary GET links with the same keyboard affordance in both themes. */
+.report-metric-link {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+.report-metric-link:hover {
+    color: var(--accent);
+    text-decoration-thickness: 2px;
+}
+.report-metric-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 2px;
+}
+.report-drilldown-context .filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}

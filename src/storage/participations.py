@@ -306,6 +306,81 @@ class ParticipationsMixin:
         end = offset + limit
         return [self._row_to_competition(row) for row in rows[offset:end]]
 
+    def get_report_drilldown(
+        self,
+        *,
+        metric: str,
+        slice_key: str = '',
+        anchor_id: int | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        sort_key: Callable[[sqlite3.Row], object] | None = None,
+        sort_reverse: bool = False,
+        **report_filters,
+    ) -> tuple[int, list[Competition], tuple]:
+        """Registry selection using the authoritative Reports predicate.
+
+        Resolve the anchor before the metric: an aggregate's first member need
+        not be a winner. Compare every GROUP BY expression with null-safe IS,
+        including historical identity and education. Missing anchors stay empty.
+        """
+        metric_clauses = {
+            'participations': '1 = 1',
+            'wins': 'position = 1',
+            'prizes': 'position >= 1 AND position <= 3',
+        }
+        if metric not in metric_clauses:
+            raise ValueError('Неизвестный показатель отчёта')
+        if bool(slice_key) != (anchor_id is not None) or (slice_key and slice_key not in REPORT_GROUPINGS):
+            raise ValueError('Некорректный срез отчёта')
+        defaults = dict(
+            date_from='',
+            date_to='',
+            position='',
+            level='',
+            name='',
+            institute='',
+            group='',
+            sport='',
+            course='',
+            admission_year='',
+            custom_filters=(),
+            event_id=(),
+        )
+        defaults.update(report_filters)
+        with self._lock:
+            where, params = self._report_filter_where(**defaults)
+            values: tuple = ()
+            if slice_key:
+                expressions = REPORT_GROUPINGS[slice_key]
+                anchor = self.connection.execute(
+                    f'SELECT {", ".join(expressions)} FROM competitions {where} AND id = ?',
+                    [*params, anchor_id],
+                ).fetchone()
+                if anchor is None:
+                    return 0, [], ()
+                values = tuple(anchor)
+                where += ' AND ' + ' AND '.join(f'({expression}) IS ?' for expression in expressions)
+                params.extend(values)
+            where += f' AND ({metric_clauses[metric]})'
+            total = self.connection.execute(f'SELECT COUNT(*) FROM competitions {where}', params).fetchone()[0]
+            if limit == 0:
+                return total, [], values
+            query = f'{COMPETITION_SELECT_SQL}{where} ORDER BY created_at ASC, id ASC'
+            if sort_key is None and limit is not None:
+                # Natural order can page in SQL. Other sorts deliberately reuse
+                # the ordinary registry's Python callable before slicing.
+                query += ' LIMIT ? OFFSET ?'
+                params.extend([limit, offset])
+            rows = self.connection.execute(query, params).fetchall()
+            if sort_key is not None:
+                rows = sorted(rows, key=sort_key, reverse=sort_reverse)
+                end = None if limit is None else offset + limit
+                rows = rows[offset:end]
+            elif limit is None:
+                rows = rows[offset:]
+            return total, [self._row_to_competition(row) for row in rows], values
+
     @staticmethod
     def _build_custom_filter_clauses(
         custom_filters: Iterable[tuple[str, str, str]],
@@ -365,6 +440,7 @@ class ParticipationsMixin:
         return [
             StudentInfo(
                 student_id=row['student_id'],
+                drilldown_record_id=row['drilldown_record_id'],
                 student_ref_id=row['student_ref_id'],
                 student_name=row['student_name'],
                 student_sex=row['student_sex'],
@@ -424,6 +500,7 @@ class ParticipationsMixin:
         )
         return [
             ReportSliceRow(
+                drilldown_record_id=row['drilldown_record_id'],
                 # Пустое значение среза (NULL или '') — группа «Не указан».
                 slice_value=None if row['slice_value'] in (None, '') else row['slice_value'],
                 count_participation=row['count_participation'],
@@ -740,6 +817,7 @@ class ParticipationsMixin:
                 f'''
                 SELECT
                     {select_columns},
+                    MIN(id) AS drilldown_record_id,
                     {', '.join(REPORT_METRIC_SELECTS)}
                 FROM competitions
                 {where_clause}

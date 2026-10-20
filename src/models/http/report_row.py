@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from pydantic import Field
 
 
 class ReportSliceRow(BaseModel):
@@ -15,6 +16,7 @@ class ReportSliceRow(BaseModel):
     identity-выражению (student_ref_id ?? id записи).
     """
 
+    drilldown_record_id: int | None = Field(default=None, exclude=True)
     slice_value: str | int | None
     count_participation: int
     count_wins: int

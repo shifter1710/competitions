@@ -1,3 +1,6 @@
+{% macro drilldown_metric(value, metric, anchor=none) -%}
+{% if value > 0 and (anchor is none or anchor) %}<a class="report-metric-link" href="{{ report_drilldown_url(metric, anchor) }}" aria-label="{{ {'participations': 'Участия', 'wins': 'Победы', 'prizes': 'Призовые'}[metric] }}: {{ value }} — открыть записи в реестре">{{ value }}</a>{% else %}{{ value }}{% endif %}
+{%- endmacro %}
 {# Зона результата отчёта (Reports v2): общий фрагмент для канонической
    страницы /reports (внутри content-wrapper) и легаси-фрагмента /report.
    Рендерится ТОЛЬКО по применённым параметрам URL; порядок блоков —
@@ -32,15 +35,15 @@
 <div class="report-stats">
     <div class="report-stat">
         <span class="report-stat__label">Участий</span>
-        <span class="report-stat__value">{{ report_summary.count_participation }}</span>
+        <span class="report-stat__value">{{ drilldown_metric(report_summary.count_participation, 'participations') }}</span>
     </div>
     <div class="report-stat">
         <span class="report-stat__label">Побед</span>
-        <span class="report-stat__value">{{ report_summary.count_wins }}</span>
+        <span class="report-stat__value">{{ drilldown_metric(report_summary.count_wins, 'wins') }}</span>
     </div>
     <div class="report-stat">
         <span class="report-stat__label">Призовых</span>
-        <span class="report-stat__value">{{ report_summary.count_prizes }}</span>
+        <span class="report-stat__value">{{ drilldown_metric(report_summary.count_prizes, 'prizes') }}</span>
     </div>
     <div class="report-stat">
         <span class="report-stat__label">Уникальных участников</span>
@@ -101,9 +104,9 @@
                     {% else %}
                     <td headers="report-col-slice_value{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="slice_value"{% if row.slice_value is none %} class="text-muted" data-sort-value="-1"{% endif %}>{{ 'Не указано' if row.slice_value is none else row.slice_value }}</td>
                     {% endif %}
-                    <td headers="report-col-count_participation{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_participation">{{ row.count_participation }}</td>
-                    <td headers="report-col-count_wins{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_wins">{{ row.count_wins }}</td>
-                    <td headers="report-col-count_prizes{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_prizes">{{ row.count_prizes }}</td>
+                    <td headers="report-col-count_participation{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_participation" data-sort-value="{{ row.count_participation }}">{{ drilldown_metric(row.count_participation, 'participations', row.drilldown_record_id) if row.drilldown_record_id else row.count_participation }}</td>
+                    <td headers="report-col-count_wins{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_wins" data-sort-value="{{ row.count_wins }}">{{ drilldown_metric(row.count_wins, 'wins', row.drilldown_record_id) if row.drilldown_record_id else row.count_wins }}</td>
+                    <td headers="report-col-count_prizes{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_prizes" data-sort-value="{{ row.count_prizes }}">{{ drilldown_metric(row.count_prizes, 'prizes', row.drilldown_record_id) if row.drilldown_record_id else row.count_prizes }}</td>
                     {% if not report_slice_is_student %}
                     <td headers="report-col-count_unique_participants{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_unique_participants">{{ row.count_unique_participants }}</td>
                     <td headers="report-col-count_unique_prizers{% if report_slice_is_student %} report-student-{{ block_index }}{% endif %}" data-column-key="count_unique_prizers">{{ row.count_unique_prizers }}</td>
@@ -127,9 +130,9 @@
                     {% else %}
                     <td data-column-key="slice_value">Итого</td>
                     {% endif %}
-                    <td data-column-key="count_participation">{{ report_summary.count_participation }}</td>
-                    <td data-column-key="count_wins">{{ report_summary.count_wins }}</td>
-                    <td data-column-key="count_prizes">{{ report_summary.count_prizes }}</td>
+                    <td data-column-key="count_participation">{{ drilldown_metric(report_summary.count_participation, 'participations') }}</td>
+                    <td data-column-key="count_wins">{{ drilldown_metric(report_summary.count_wins, 'wins') }}</td>
+                    <td data-column-key="count_prizes">{{ drilldown_metric(report_summary.count_prizes, 'prizes') }}</td>
                     {% if not report_slice_is_student %}
                     <td data-column-key="count_unique_participants">{{ report_summary.count_unique_participants }}</td>
                     <td data-column-key="count_unique_prizers">{{ report_summary.count_unique_prizers }}</td>
