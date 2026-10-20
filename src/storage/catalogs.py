@@ -179,9 +179,11 @@ class CatalogsMixin:
             self.connection.commit()
 
     def hard_delete_level(self, level_id: int) -> None:
-        """Физическое удаление уровня (№20): допустимо только для уровня
-        без записей — проверка на стороне роута."""
+        """Delete only unused levels; recheck participations and events under lock."""
         with self._lock:
+            level = next((item for item in self.list_levels() if item['id'] == level_id), None)
+            if level and self.count_records_using('level', level['name']):
+                raise ValueError('Уровень используется в записях или событиях календаря; его можно скрыть.')
             self.connection.execute('DELETE FROM levels WHERE id = ?', (level_id,))
             self.connection.commit()
 
@@ -464,7 +466,9 @@ class CatalogsMixin:
         Уровень меняется в levels, остальные категории — в catalog_values;
         группа — по паре институт+группа (parent_value — её институт),
         одноимённые группы других институтов не затрагиваются. Возвращает
-        число обновлённых записей (0 при update_records=False). Конфликт
+        число обновлённых участий. Для уровня всегда обновляются также
+        события календаря (явное решение владельца LEVEL-01); для остальных
+        категорий update_records=False сохраняет прежние записи. Конфликт
         нового имени с существующим значением категории (для группы — в том
         же институте) или отсутствие старого — ValueError без изменений.
         """
@@ -478,10 +482,15 @@ class CatalogsMixin:
         if old_value == new_value:
             raise ValueError('Новое имя совпадает со старым')
 
+        if category == 'level':
+            update_records = True
         with self._lock:
             try:
                 if category == 'level':
                     self._rename_level_row(old_value, new_value)
+                    self.connection.execute(
+                        'UPDATE calendar_events SET level = ? WHERE level = ?', (new_value, old_value)
+                    )
                 else:
                     self._rename_catalog_row(category, old_value, new_value, parent_value)
                 updated = 0
@@ -572,7 +581,12 @@ class CatalogsMixin:
                     f'SELECT COUNT(*) AS total FROM competitions WHERE {column} = ?',
                     (value,),
                 ).fetchone()
-            return row['total']
+            total = row['total']
+            if category == 'level':
+                total += self.connection.execute(
+                    'SELECT COUNT(*) AS total FROM calendar_events WHERE level = ?', (value,)
+                ).fetchone()['total']
+            return total
 
     def count_child_groups(self, institute_row_id: int) -> int:
         """Сколько групп справочника прикреплено к институту (включая скрытые)."""

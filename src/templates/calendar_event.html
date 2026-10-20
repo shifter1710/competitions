@@ -1,3 +1,4 @@
+{% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -127,11 +128,7 @@
 <div class="event-summary"><span>Участников: <strong>{{ participants_count }}</strong> · Участий: <strong>{{ participations_count }}</strong> <span class="event-summary-divider">/</span> Места указаны {{ participations_count - no_result_count }} из {{ participations_count }}</span><a class="event-missing-chip" href="/calendar/{{ event.id }}?{{ '' if result_filter == 'without' else 'result=without&' }}{{ calendar_return_query }}" data-event-result-link aria-pressed="{{ 'true' if result_filter == 'without' else 'false' }}">Без места · {{ no_result_count }}</a></div>
 <div class="event-filter-help"><span>Место не указано; текст результата учитывается отдельно.</span><span id="event-search-count" aria-live="polite"></span><a href="/calendar/{{ event.id }}{% if calendar_return_query %}?{{ calendar_return_query }}{% endif %}" data-event-clear-search>Сбросить фильтры</a></div>
 <div class="event-search-empty" hidden><h3>Ничего не найдено</h3><p>Измените поиск или снимите фильтр мест.</p><button class="btn btn-outline-primary" type="button" data-event-clear-search>Сбросить фильтры</button></div>
-<datalist id="calendar-levels">
-    {% for value in level_options %}
-    <option value="{{ value }}">
-    {% endfor %}
-</datalist>
+
 <datalist id="calendar-sports">
     {% for value in sport_options %}
     <option value="{{ value }}">
@@ -959,8 +956,7 @@
             </div>
             <div class="col-md-3">
                 <label class="label" for="event-edit-level">Уровень</label>
-                <input class="form-control" id="event-edit-level" name="level" type="text" value="{{ event.level }}"
-                    list="calendar-levels" autocomplete="off">
+                {{ level_select(level_options, event.level, id="event-edit-level", legacy=true) }}
             </div>
             <div class="col-md-3">
                 <label class="label" for="event-edit-sport">Вид спорта</label>

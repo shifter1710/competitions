@@ -1,3 +1,4 @@
+{% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -132,13 +133,7 @@
             </div>
             <div class="col-md-3">
                 <label class="label" for="calendar-new-level">Уровень</label>
-                <input class="form-control" id="calendar-new-level" name="level" type="text" list="calendar-levels"
-                    autocomplete="off">
-                <datalist id="calendar-levels">
-                    {% for value in level_options %}
-                    <option value="{{ value }}">
-                    {% endfor %}
-                </datalist>
+                {{ level_select(level_options, id="calendar-new-level") }}
             </div>
             <div class="col-md-3">
                 <label class="label" for="calendar-new-sport">Вид спорта</label>
@@ -205,8 +200,7 @@
                     </div>
                     <div class="col-md-3">
                         <label class="label">Уровень</label>
-                        <input class="form-control form-control-sm" name="level" type="text" value="{{ event.level }}"
-                            list="calendar-levels" autocomplete="off">
+                        {{ level_select(level_options, event.level, small=true, legacy=true) }}
                     </div>
                     <div class="col-md-3">
                         <label class="label">Вид спорта</label>

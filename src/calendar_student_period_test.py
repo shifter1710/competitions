@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.auth import create_auth_cookie_value
+from src.conftest import seed_fixture_levels
 from src.main import app
 from src.models.competition import Competition
 from src.periods import academic_years_for_ranges
@@ -24,6 +25,7 @@ from src.storage.sqlite import SQLiteAdapter
 @pytest.fixture
 def store(tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'synthetic.sqlite3'))
+    seed_fixture_levels(storage, 'Учебный уровень')
     yield storage
     storage.connection.close()
 

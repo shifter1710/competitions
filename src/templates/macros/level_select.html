@@ -1,0 +1,16 @@
+{% macro level_select(values, current='', id='', small=false, legacy=false) -%}
+<select class="form-select{% if small %} form-select-sm{% endif %}" name="level"{% if id %} id="{{ id }}"{% endif %} data-strict-level>
+    <option value=""{% if not current %} selected{% endif %}>Не указан</option>
+    {% if current and current not in values %}
+    {% if legacy %}
+    <option value="{{ current }}" selected>{{ current }} (текущее историческое значение)</option>
+    {% else %}
+    <option value="{{ current }}" selected data-level-unavailable>{{ current }} — выберите доступный уровень</option>
+    {% endif %}
+    {% endif %}
+    {% for value in values %}
+    <option value="{{ value }}"{% if current == value %} selected{% endif %}>{{ value }}</option>
+    {% endfor %}
+</select>
+{% if not values %}<div class="form-text">Нет доступных уровней. Обратитесь к администратору для добавления в справочник.</div>{% endif %}
+{%- endmacro %}

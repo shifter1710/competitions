@@ -103,9 +103,8 @@ AUDIT_PAGE_SIZE = 50
 PRE_WIPE_ARCHIVES_SHOWN = 20
 
 
-# Управляемые справочники значений: записи остаются свободным текстом,
-# справочник — только подсказки (docs/data-model-decisions.md,
-# «Справочники значений»). Уровни живут в своей таблице на той же странице.
+# Спорт/институт/группа — подсказки для свободного текста. Уровни —
+# строгий справочник LEVEL-01 в отдельной существующей таблице.
 # Группы — иерархическая категория: существуют только с parent_id на
 # институт, поэтому в одиночное создание не входят.
 CATALOG_CATEGORIES: Sequence[str] = ('sport', 'institute')
@@ -1146,7 +1145,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 }
             )
 
-        update_records = checkbox_to_bool(get_form_value(request, 'update_records'))
+        update_records = category == 'level' or checkbox_to_bool(get_form_value(request, 'update_records'))
         try:
             records_updated = storage.rename_catalog_value(
                 category,
@@ -1170,7 +1169,10 @@ def register(app: Sanic) -> None:  # noqa: C901
         log_audit_event(request, 'catalog_value_renamed', audit_details)
 
         message = f'«{row["value"]}» → «{new_name}»'
-        message += f': обновлено записей — {records_updated}' if update_records else ' (записи не тронуты)'
+        if category == 'level':
+            message += ': уровень обновлён в справочнике, использующих его участиях и событиях календаря'
+        else:
+            message += f': обновлено записей — {records_updated}' if update_records else ' (записи не тронуты)'
         return build_redirect_with_message(message=message, url='/admin/catalogs')
 
     @app.get('/admin/catalogs/group/<value_id>/move')
@@ -1767,7 +1769,10 @@ def register(app: Sanic) -> None:  # noqa: C901
                 error='У уровня есть записи — скройте или переименуйте', url='/admin/catalogs'
             )
 
-        storage.hard_delete_level(numeric_level_id)
+        try:
+            storage.hard_delete_level(numeric_level_id)
+        except ValueError as exc:
+            return build_redirect_with_message(error=str(exc), url='/admin/catalogs')
         log_audit_event(
             request,
             'catalog_value_deleted',

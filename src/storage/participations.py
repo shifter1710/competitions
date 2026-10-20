@@ -13,6 +13,7 @@ from typing import Collection
 from typing import Iterable
 from typing import Sequence
 
+from src.levels import resolve_competition_level
 from src.models.competition import Competition
 from src.models.http.report_row import ReportSliceRow
 from src.models.http.report_row import ReportSummary
@@ -836,6 +837,9 @@ class ParticipationsMixin:
         owner_id: int | None = None,
     ):
         with self._lock:
+            competitions = list(competitions)
+            for competition in competitions:
+                competition.level = resolve_competition_level(self, competition.level)
             records = competition_insert_records(
                 self._fill_admission_year_snapshots(list(competitions)),
                 review_status,
@@ -853,7 +857,7 @@ class ParticipationsMixin:
     ) -> None:
         """Импорт одной транзакцией с одним COMMIT (находка QA №1).
 
-        Записи вставляются, затем справочники (уровни, виды спорта, институты,
+        Уровни проверяются до вставки; затем справочники (виды спорта, институты,
         пары институт→группа) пополняются значениями ИЗ ЗАПИСЕЙ — решение
         2026-09-13 (docs/data-model-decisions.md «Переименование значений
         справочников»): раньше справочник сеялся строками файла, включая
@@ -868,6 +872,8 @@ class ParticipationsMixin:
         """
         with self._lock:
             try:
+                for competition in new_competitions:
+                    competition.level = resolve_competition_level(self, competition.level)
                 if new_competitions:
                     # Снимок года поступления — ДО синхронизации справочников:
                     # пары институт+группа из этого же импорта ещё не существуют
@@ -1007,6 +1013,8 @@ class ParticipationsMixin:
         транзакцией."""
         with self._lock:
             try:
+                for competition in inserts:
+                    competition.level = resolve_competition_level(self, competition.level)
                 live_identities, live_contents, collision_custom_keys = self._event_participation_recheck_context(
                     event_id
                 )
@@ -1047,7 +1055,7 @@ class ParticipationsMixin:
         return competitions
 
     def _sync_catalogs_from_records(self) -> None:
-        """Довести справочники до значений, реально присутствующих в записях.
+        """Пополнить спорт/институт/группу из записей; уровни не пополняются.
 
         Тот же populate, что при инициализации БД: значения сеются SELECT'ом
         из competitions, а не из строк импортируемого файла. Поэтому после
@@ -1058,16 +1066,16 @@ class ParticipationsMixin:
         """
         self._populate_catalog_values()
         self._populate_catalog_hierarchy_pairs()
-        self.connection.execute(
-            'INSERT OR IGNORE INTO levels (name, sort_order) '
-            "SELECT DISTINCT level, 0 FROM competitions WHERE TRIM(level) != ''"
-        )
 
     def update_competition(self, record_id: str, competition: Competition):
         # Wave 1 P1: discipline/result правятся общим update. calendar_event_id
         # в SET НЕ входит: ссылка на событие — управляемое поле будущих
         # link/unlink (P2), общий update записи её сохраняет.
         with self._lock:
+            existing = self.get_competition_by_id(int(record_id))
+            competition.level = resolve_competition_level(
+                self, competition.level, existing=existing.level if existing is not None else None
+            )
             self.connection.execute(
                 '''
                 UPDATE competitions

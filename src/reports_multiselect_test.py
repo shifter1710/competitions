@@ -10,6 +10,7 @@ import pytest
 
 from src import main_test as helpers
 from src.conftest import make_report_record
+from src.conftest import seed_fixture_levels
 from src.main import app
 from src.main_test import fake_get_user
 from src.main_test import get_auth_headers
@@ -28,6 +29,7 @@ client = helpers.client
 @pytest.fixture
 def multi_reports(client, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'synthetic-reports.sqlite3'))
+    seed_fixture_levels(storage, 'Уровень А', 'Уровень Б')
     event_ids = [
         storage.create_calendar_event('Тестовый кубок', f'2025-10-{day:02}T00:00:00', None, 'Уровень А', sport, [])
         for day, sport in ((1, 'Бег'), (2, 'Шахматы'), (3, 'Плавание'))

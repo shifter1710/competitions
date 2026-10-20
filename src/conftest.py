@@ -246,3 +246,12 @@ def make_report_identity_fixture() -> list[Competition]:
             'Легасиев Ларион', 'М', 'ИПТ', 'Гр-222', 2, 'Шахматы', datetime(2025, 8, 1), 'внутривузовские', 0
         ),
     ]
+
+
+def seed_fixture_levels(storage, *names):
+    """Explicit administrative catalog for synthetic write fixtures."""
+    existing = storage.get_level_names(include_inactive=True)
+    for name in names or ('внутривузовские', 'межвузовские'):
+        if name not in existing:
+            storage.create_level(name)
+            existing.append(name)
