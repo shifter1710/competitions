@@ -30,9 +30,13 @@ from src.storage.helpers import IDENTITY_MODE_DEFAULT
 from src.storage.helpers import participation_content_key
 from src.storage.helpers import REPORT_ADMISSION_YEAR_SQL
 from src.storage.helpers import REPORT_COURSE_SQL
+from src.storage.helpers import REPORT_DNF_SQL
+from src.storage.helpers import REPORT_ELIGIBLE_SQL
 from src.storage.helpers import REPORT_GROUPINGS
 from src.storage.helpers import REPORT_IDENTITY_SQL
 from src.storage.helpers import REPORT_METRIC_SELECTS
+from src.storage.helpers import REPORT_NO_RESULT_SQL
+from src.storage.helpers import REPORT_NONPRIZE_SQL
 
 
 class ParticipationsMixin:
@@ -660,7 +664,7 @@ class ParticipationsMixin:
         фильтрами, затем student_name IN (...) в общий WHERE. Пустой список
         совпадений — WHERE 1 = 0 (отчёт пуст, но запросы валидны).
         """
-        filters = ["review_status = 'approved'"]
+        filters = [REPORT_ELIGIBLE_SQL]
         params: list[object] = []
 
         date_clauses, date_params = self._date_range_clauses(date_from, date_to)
@@ -706,21 +710,23 @@ class ParticipationsMixin:
 
     @staticmethod
     def _report_position_clause(position: str, filters: list[str], params: list[object]) -> None:
-        """Условие места: <N / >N и класс «Без результата» position = 0.
+        """REP-05 categories share one predicate across every Reports reader.
 
-        Нижняя граница «<N» — место >= 1: ноль («Без результата») и любые
-        внепрограммные значения не попадают в классы «Победа»/«Призовое»
-        (семантика пяти метрик: победы = место 1, призовые = места 1–3)."""
+        Keep legacy numeric filters; >3 includes completed linked blanks/zeros,
+        0 means DNF/unknown, with unchanged zero semantics for unlinked history.
+        """
         if not position:
             return
         if position == '0':
-            # Класс «Без результата» (Reports v2): место ещё не вписано.
-            filters.append('position = 0')
+            # Explicit DNF or unknown blank; completed linked zero is nonprize.
+            filters.append(REPORT_NO_RESULT_SQL)
             return
         sign = position[0]
         value = int(position[1:])
-        if sign == '>':
-            filters.append('position > ?')
+        if sign == '>' and value == 3:
+            filters.append(REPORT_NONPRIZE_SQL)
+        elif sign == '>':
+            filters.append(f'position > ? AND NOT ({REPORT_DNF_SQL})')
             params.append(value)
         elif sign == '<':
             filters.append('position >= 1 AND position < ?')

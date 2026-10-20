@@ -58,7 +58,7 @@
                         <tr><th>Дата</th><td><span class="text-nowrap">{{ format_date_range(entry.matched.date, entry.matched.date_to) }}</span></td></tr>
                         <tr><th>Уровень соревнований</th><td>{{ entry.matched.level }}</td></tr>
                         <tr><th>Название соревнований</th><td>{{ entry.matched.name }}</td></tr>
-                        <tr><th>Место</th><td>{{ entry.matched.position }}</td></tr>
+                        <tr><th>Место</th><td>{{ entry.matched.position or '—' }}</td></tr>
                         <tr><th>Дисциплина</th><td>{{ entry.matched.discipline or '' }}</td></tr>
                     </tbody>
                 </table>

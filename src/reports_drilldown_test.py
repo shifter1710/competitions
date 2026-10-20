@@ -30,6 +30,8 @@ def seed_drilldown_history(storage):
     events = [
         storage.create_calendar_event('Тестовый кубок', f'2025-10-0{day}', None, 'Учебный', 'Бег', []) for day in (1, 2)
     ]
+    for event_id in events:
+        assert storage.set_calendar_event_results_confirmation(event_id, True, 1) is None
     states = [
         (first, 'СИН-24', 'Институт А', 'Бег', 2025, 4, events[0]),
         (first, 'СИН-24', 'Институт А', 'Бег', 2025, 1, events[0]),

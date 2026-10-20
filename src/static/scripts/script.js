@@ -2341,7 +2341,10 @@ class Main {
             input = document.createElement("input");
             const isCustom = Object.prototype.hasOwnProperty.call(fieldTypes, key);
             const fieldType = isCustom ? fieldTypes[key] : null;
-            if (key === "position" || key === "course" || fieldType === "number") {
+            if (key === "position") {
+                input.type = "text";
+                input.placeholder = "Место или DNF";
+            } else if (key === "course" || fieldType === "number") {
                 input.type = "number";
                 input.step = "1";
             } else if (fieldType === "url") {
@@ -4215,7 +4218,8 @@ class ParticipantsPage {
 
         let fieldSettings = {};
         try { fieldSettings = JSON.parse(this.table.dataset.baseFieldSettings || "{}"); } catch (error) { /* Legacy fallback. */ }
-        const positionInput = this.buildTextInput("position", dataset.position, fieldSettings.position?.value_type === "text" ? "text" : "number");
+        const positionInput = this.buildTextInput("position", dataset.position, "text");
+        positionInput.placeholder = "Место или DNF";
         const instituteInput = this.buildTextInput("institute", dataset.institute);
         const groupInput = this.buildTextInput("group", dataset.group);
         const disciplineInput = this.buildTextInput("discipline", dataset.discipline);
