@@ -2374,16 +2374,16 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
 
 /* REP-04: ordinary GET links with the same keyboard affordance in both themes. */
 .report-metric-link {
-    color: var(--accent);
+    color: var(--accent-fg);
     text-decoration: underline;
     text-underline-offset: 3px;
 }
 .report-metric-link:hover {
-    color: var(--accent);
+    color: var(--accent-fg);
     text-decoration-thickness: 2px;
 }
 .report-metric-link:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--accent-fg);
     outline-offset: 3px;
     border-radius: 2px;
 }
@@ -2391,4 +2391,11 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
+    min-width: 0;
+}
+.report-drilldown-context .filter-chip {
+    max-width: 100%;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
