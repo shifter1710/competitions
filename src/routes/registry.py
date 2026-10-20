@@ -1093,6 +1093,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             context={
                 'request': request,
                 'queue_entries': entries,
+                'level_options': storage.get_level_names(),
                 **get_flash_args(request),
             },
         )
@@ -1173,7 +1174,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             return text(body='Matched record not found', status=404)
 
         competition = Competition.model_validate(entry['payload'])
-        ensure_catalog_values(storage, [competition])
+        ensure_catalog_values(storage, [competition], existing=existing)
         changes = queue_field_changes(existing, competition)
         storage.update_competition(int(entry['matched_record_id']), competition)
         storage.set_import_queue_status(entry['id'], 'replaced')
@@ -1494,7 +1495,9 @@ def register(app: Sanic) -> None:  # noqa: C901
         record = competition_update_record(request, existing, custom_fields)
 
         try:
-            competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
+            competition = build_competition(
+                record, custom_fields=custom_fields, manual_input=True, storage=storage, existing=existing
+            )
         except (TypeError, ValueError) as exc:
             return text(body=f'Invalid row data: {exc}', status=400)
 

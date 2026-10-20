@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from typing import Sequence
 
+from src.levels import resolve_competition_level
 from src.periods import academic_years_for_ranges
 from src.settings import settings
 from src.storage.helpers import CALENDAR_LINK_PREVIEW_CAP
@@ -513,6 +514,7 @@ class EventsMixin:
         через raw SQL guard не трогает — блокируются только новые INSERT
         через этот метод. Legacy-колонка url не пишется (DEFAULT '')."""
         with self._lock:
+            level = resolve_competition_level(self, level)
             duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level)
             if duplicate is not None:
                 raise CalendarEventDuplicateError(duplicate)
@@ -590,6 +592,9 @@ class EventsMixin:
         """
         with self._lock:
             try:
+                existing = self.get_calendar_event(event_id)
+                level = resolve_competition_level(self, level, existing=existing['level'] if existing else None)
+                level_changed = existing is None or level != existing['level']
                 duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level, exclude_id=event_id)
                 if duplicate is not None:
                     raise CalendarEventDuplicateError(duplicate)
@@ -603,9 +608,10 @@ class EventsMixin:
                 self._insert_event_links(event_id, links)
                 cursor = self.connection.execute(
                     'UPDATE competitions'
-                    ' SET name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' SET name = ?, date = ?, date_to = ?, sport = ?,'
+                    ' level = CASE WHEN ? THEN ? ELSE level END'
                     ' WHERE calendar_event_id = ?',
-                    (name, date, date_to, sport, level, event_id),
+                    (name, date, date_to, sport, level_changed, level, event_id),
                 )
                 synced = cursor.rowcount
                 self.connection.commit()
@@ -796,7 +802,7 @@ class EventsMixin:
         with self._lock:
             try:
                 record = self.connection.execute(
-                    'SELECT id, calendar_event_id FROM competitions WHERE id = ?',
+                    'SELECT id, calendar_event_id, level FROM competitions WHERE id = ?',
                     (record_id,),
                 ).fetchone()
                 if record is None:
@@ -807,6 +813,7 @@ class EventsMixin:
                 ).fetchone()
                 if event is None:
                     return None, 'event_not_found'
+                level = resolve_competition_level(self, event['level'], existing=record['level'])
                 cursor = self.connection.execute(
                     'UPDATE competitions'
                     ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
@@ -817,7 +824,7 @@ class EventsMixin:
                         event['date'],
                         event['date_to'],
                         event['sport'],
-                        event['level'],
+                        level,
                         record_id,
                     ),
                 )
@@ -864,13 +871,14 @@ class EventsMixin:
         with self._lock:
             try:
                 record = self.connection.execute(
-                    'SELECT id, calendar_event_id FROM competitions WHERE id = ?',
+                    'SELECT id, calendar_event_id, level FROM competitions WHERE id = ?',
                     (record_id,),
                 ).fetchone()
                 if record is None:
                     return None, 'record_not_found'
                 if record['calendar_event_id'] is not None:
                     return None, 'already_linked'
+                level = resolve_competition_level(self, level)
                 duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level)
                 if duplicate is not None:
                     return int(duplicate['id']), 'duplicate_event'
@@ -1030,6 +1038,8 @@ class EventsMixin:
                         'SELECT name, date, date_to, sport, level FROM calendar_events WHERE id = ?',
                         (pair['event_id'],),
                     ).fetchone()
+                    record = self.get_competition_by_id(pair['record_id'])
+                    level = resolve_competition_level(self, event['level'], existing=record.level)
                     cursor = self.connection.execute(
                         'UPDATE competitions'
                         ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
@@ -1040,7 +1050,7 @@ class EventsMixin:
                             event['date'],
                             event['date_to'],
                             event['sport'],
-                            event['level'],
+                            level,
                             pair['record_id'],
                         ),
                     )

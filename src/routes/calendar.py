@@ -197,7 +197,7 @@ def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
         'name': name,
         'date': date_from,
         'date_to': date_to,
-        'level': clean_str(get_form_value(request, 'level')),
+        'level': get_form_value(request, 'level'),
         'sport': clean_str(get_form_value(request, 'sport')),
     }, None
 
@@ -1155,6 +1155,7 @@ def build_event_participant_competition(
     storage: SQLiteAdapter,
     *,
     result: str = '',
+    existing: Competition | None = None,
 ) -> tuple[Competition | None, str | None]:
     """Финальная валидация строки тем же механизмом, что ручной ввод
     (build_competition: field_settings, required custom-поля, число места).
@@ -1165,7 +1166,9 @@ def build_event_participant_competition(
     значение присваивается здесь, сразу после build — все пути этого
     workflow (предпросмотр/правка/вставка) получают одинаковую запись."""
     try:
-        competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
+        competition = build_competition(
+            record, custom_fields=custom_fields, manual_input=True, storage=storage, existing=existing
+        )
     except (TypeError, ValueError) as exc:
         return None, str(exc)
     competition.result = str(result or '').strip() or None
@@ -1389,8 +1392,13 @@ def event_import_pending_states(
         candidates = storage.find_student_candidates(row['full_name'])
         student = event_import_effective_student(storage, row, candidates)
         record, autofilled, hints = event_import_row_record(storage, row, preset, student, custom_fields, file_groups)
+        initial = classify_event_import_row(existing_participants, row, student, None, all_custom_fields)
+        matched = initial['match'] if initial['status'] in ('update-candidate', 'already') else None
+        existing = storage.get_competition_by_id(matched['record_id']) if matched else None
+        if existing is not None:
+            record['Уровень соревнований'] = existing.level
         competition, validation_error = build_event_participant_competition(
-            record, custom_fields, storage, result=row.get('result', '')
+            record, custom_fields, storage, result=row.get('result', ''), existing=existing
         )
         classification = classify_event_import_row(existing_participants, row, student, competition, all_custom_fields)
         states[row['row_number']] = {
@@ -1818,8 +1826,15 @@ def event_import_update_candidate_classification(
         custom_fields,
         student_file_group_institutes(session['rows']),
     )
+    initial = classify_event_import_row(
+        storage.list_calendar_event_participants(event['id']), row, student, None, storage.get_custom_fields()
+    )
+    matched = initial['match'] if initial['status'] in ('update-candidate', 'already') else None
+    existing = storage.get_competition_by_id(matched['record_id']) if matched else None
+    if existing is not None:
+        record['Уровень соревнований'] = existing.level
     competition, validation_error = build_event_participant_competition(
-        record, custom_fields, storage, result=row.get('result', '')
+        record, custom_fields, storage, result=row.get('result', ''), existing=existing
     )
     if validation_error is not None:
         return None, None, validation_error

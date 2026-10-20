@@ -4,6 +4,7 @@ from datetime import datetime
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 
+from src.levels import resolve_competition_level
 from src.models.competition import Competition
 from src.storage.sqlite import SQLiteAdapter
 
@@ -26,8 +27,6 @@ def main():
     collection = client[args.mongo_db][args.mongo_collection]
 
     sqlite = SQLiteAdapter(args.sqlite_path)
-    if args.drop_sqlite_data:
-        sqlite.clean_db()
 
     records = []
     for record in collection.find({}).sort('created_at', 1):
@@ -51,6 +50,10 @@ def main():
         )
         records.append(competition)
 
+    for competition in records:
+        competition.level = resolve_competition_level(sqlite, competition.level)
+    if args.drop_sqlite_data:
+        sqlite.clean_db()
     sqlite.save_competitions(records)
     print(f'migrated {len(records)} records to {args.sqlite_path}')
 

@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 
 from src import main_test as helpers
 from src.conftest import make_report_record
+from src.conftest import seed_fixture_levels
 from src.main import app
 from src.main_test import fake_get_user
 from src.main_test import get_auth_headers
@@ -72,6 +73,7 @@ def seed_metrics_history(storage):
 @pytest.fixture
 def metrics_history(client, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'synthetic-metrics.sqlite3'))
+    seed_fixture_levels(storage, 'Тестовый уровень')
     first, twin, events = seed_metrics_history(storage)
     previous = app.ctx.storage
     storage.get_user = fake_get_user

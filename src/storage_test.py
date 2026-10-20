@@ -11,6 +11,7 @@ from src.conftest import make_report_identity_fixture
 from src.conftest import make_report_position_fixture
 from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
+from src.conftest import seed_fixture_levels
 from src.models.competition import Competition
 from src.storage.sqlite import SQLiteAdapter
 from src.students import suggest_login
@@ -64,7 +65,9 @@ def insert_calendar_event_raw(adapter, **values) -> int:
 
 @pytest.fixture
 def adapter(tmp_path):
-    return SQLiteAdapter(str(tmp_path / 'test.sqlite3'))
+    storage = SQLiteAdapter(str(tmp_path / 'test.sqlite3'))
+    seed_fixture_levels(storage)
+    return storage
 
 
 def test_migration_adds_review_columns_to_existing_db(tmp_path):
@@ -175,11 +178,13 @@ def test_hard_delete_level(adapter):
     adapter.hard_delete_level(empty_id)
     assert 'пустой уровень' not in adapter.get_level_names(include_inactive=True)
 
-    # Уровень с записями: счётчик > 0 — отказ решает роут; hard_delete_level
-    # сам по себе просто удаляет строку таблицы levels.
+    # Used-level deletion is checked in the route and under the storage lock.
     adapter.save_competitions([make_competition('Студент', datetime(2026, 1, 1))])
     used_level = DEFAULT_LEVELS[0]
     assert adapter.count_records_using('level', used_level) > 0
+    used_id = next(item['id'] for item in adapter.list_levels() if item['name'] == used_level)
+    with pytest.raises(ValueError, match='используется'):
+        adapter.hard_delete_level(used_id)
 
 
 def test_report_filters_by_custom_text_field(adapter):
@@ -1026,6 +1031,7 @@ def test_catalog_migration_populates_from_existing_records(tmp_path):
 def test_catalog_populate_is_idempotent_and_keeps_hidden(tmp_path):
     db_path = str(tmp_path / 'reopened.sqlite3')
     adapter = SQLiteAdapter(db_path)
+    seed_fixture_levels(adapter)
     skier = make_competition('Лыжников', datetime(2026, 1, 1))
     skier.sport = 'Лыжи'
     adapter.save_competitions([skier, make_competition('Бегунов', datetime(2026, 2, 1))])
@@ -1274,12 +1280,13 @@ def test_count_child_groups_for_institute_delete_guard(adapter):
 
 
 def test_rename_level_updates_table_and_records(adapter):
+    seed_fixture_levels(adapter, 'региональные', 'городские')
     regional = make_competition('Регионов Регион', datetime(2026, 1, 1))
     regional.level = 'региональные'
     urban = make_competition('Городов Город', datetime(2026, 2, 1))
     urban.level = 'городские'
     adapter.save_competitions([regional, urban, make_competition('Базов Базовый', datetime(2026, 3, 1))])
-    adapter.create_level('региональные')
+    seed_fixture_levels(adapter, 'региональные')
 
     updated = adapter.rename_catalog_value('level', 'региональные', 'областные')
 
@@ -1332,7 +1339,7 @@ def test_rename_rejects_conflicts_and_missing_values(adapter):
     adapter.ensure_catalog_pair('ИСИ', 'ПГС-101')
     adapter.ensure_catalog_pair('ИСИ', 'ПГС-102')
     adapter.create_level('городские')
-    adapter.create_level('региональные')
+    seed_fixture_levels(adapter, 'региональные')
 
     # конфликт с существующим значением той же категории
     with pytest.raises(ValueError, match='уже есть'):
@@ -1373,11 +1380,11 @@ def test_rename_rejects_conflicts_and_missing_values(adapter):
 def test_import_after_rename_with_update_does_not_resurrect_old_value(adapter):
     """Инцидент 2026-09-13: импорт возвращал переименованный уровень.
 
-    Справочники сеются из записей: после переименования с обновлением в
-    записях старого значения нет, поэтому повторный импорт того же файла
-    (все строки — дубли, вставки нет) его не возвращает. Файл с реально
-    новыми строками и старым уровнем — вернёт: значение снова есть в записях.
+    LEVEL-01: уровень больше не пополняется из записей. Импорт без новых
+    строк не возвращает прежнее значение; новые строки со старым уровнем
+    отклоняются, пока администратор явно не добавит его в справочник.
     """
+    seed_fixture_levels(adapter, 'региональные')
     rows = [make_import_row('Регионов Регион Регионович', 0, level='региональные')]
     adapter.import_competitions(rows)
     assert 'региональные' in adapter.get_level_names(include_inactive=True)
@@ -1390,8 +1397,10 @@ def test_import_after_rename_with_update_does_not_resurrect_old_value(adapter):
     assert 'областные' in names
 
     fresh = [make_import_row('Новенький Новый Новичкович', 4, level='региональные')]
-    adapter.import_competitions(fresh)
-    assert 'региональные' in adapter.get_level_names(include_inactive=True)
+    with pytest.raises(ValueError, match='действующем справочнике'):
+        adapter.import_competitions(fresh)
+    assert 'региональные' not in adapter.get_level_names(include_inactive=True)
+    assert adapter.count_competitions() == 1
 
 
 # --- Перенос группы в другой институт (решение 2026-09-22) ---
@@ -1967,6 +1976,7 @@ def test_vacuum_shrinks_database_file_after_mass_delete(tmp_path):
 
     db_path = str(tmp_path / 'vacuum.sqlite3')
     adapter = SQLiteAdapter(db_path)
+    seed_fixture_levels(adapter)
 
     def file_size():
         adapter.connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
@@ -2069,7 +2079,7 @@ def test_import_competitions_is_atomic_on_failure(adapter, monkeypatch):
     assert adapter.count_competitions() == 0
     assert 'Спорт-0' not in adapter.list_catalog('sport')
     assert 'ИПК-0' not in adapter.list_catalog('institute')
-    assert 'внутривузовские' not in adapter.get_level_names(include_inactive=True)
+    assert set(adapter.get_level_names(include_inactive=True)) == {'внутривузовские', 'межвузовские'}
 
     # Адаптер жив: следующий импорт проходит целиком.
     adapter.import_competitions(rows)
@@ -2411,10 +2421,10 @@ def test_find_catalog_canonical_group_scoped_to_institute(adapter):
 
 
 def test_find_level_canonical_case_insensitive(adapter):
-    adapter.create_level('внутривузовские')
+    seed_fixture_levels(adapter, 'внутривузовские')
 
     assert adapter.find_level_canonical('Внутривузовские') == 'внутривузовские'
-    assert adapter.find_level_canonical('межвузовские') is None
+    assert adapter.find_level_canonical('несуществующий') is None
 
 
 def test_add_catalog_value_still_ignores_exact_duplicate(adapter):
@@ -2754,6 +2764,7 @@ def make_calendar_record(
 
 
 def test_calendar_event_crud(adapter):
+    seed_fixture_levels(adapter, 'региональные')
     event_id = adapter.create_calendar_event(
         name='Осенний кросс СибАДИ',
         date='2026-09-12',
@@ -3004,6 +3015,7 @@ def test_update_calendar_event_syncs_linked_records(adapter):
     """Правка события синхронизирует 5 event-owned полей ТОЛЬКО связанных
     записей и возвращает их число; NULL-сосед с тем же старым пресетом
     не трогается."""
+    seed_fixture_levels(adapter, 'региональные')
     event_id = adapter.create_calendar_event(
         name='Кросс',
         date='2026-09-12T00:00:00',
@@ -3070,6 +3082,7 @@ def test_update_calendar_event_syncs_linked_records(adapter):
 def test_update_calendar_event_rollback_on_failure(adapter):
     """Сбой синхронизации откатывает и правку самого события (одна
     транзакция): остаётся прежнее состояние — событие и записи неизменны."""
+    seed_fixture_levels(adapter, 'региональные')
     event_id = adapter.create_calendar_event(
         name='Кросс',
         date='2026-09-12T00:00:00',
@@ -3175,6 +3188,7 @@ def test_create_calendar_event_duplicate_normalizes_name_and_date_format(adapter
 def test_create_calendar_event_differs_by_single_key_component(adapter):
     """Отличие хотя бы одной компоненты ключа (sport/level/date_to) — НЕ
     дубль: создаются оба, ни один путь создания не блокируется."""
+    seed_fixture_levels(adapter, 'региональные')
     adapter.create_calendar_event(
         name='Кубок', date='2026-06-25T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
@@ -3491,6 +3505,7 @@ def test_update_calendar_event_replaces_links_full_replace(adapter):
 def test_update_calendar_event_links_failure_rolls_back_all(adapter):
     """Сбой вставки ссылок откатывает всю правку (одна транзакция):
     событие, его прежние ссылки и связанные записи не изменились."""
+    seed_fixture_levels(adapter, 'региональные')
     event_id = adapter.create_calendar_event(
         name='Кросс',
         date='2026-04-01T00:00:00',
@@ -4558,6 +4573,7 @@ def test_update_calendar_event_with_links_keeps_sync_of_five_fields(adapter):
     """Регрессия event-owned sync: правка со сменой ссылок по-прежнему
     синхронизирует 5 полей связанных записей (url в sync не входит и не
     входил) и не пишет legacy-колонку url события."""
+    seed_fixture_levels(adapter, 'региональные')
     event_id = adapter.create_calendar_event(
         name='Кросс',
         date='2026-04-01T00:00:00',
@@ -5026,6 +5042,7 @@ def test_manual_entry_still_works_on_db_with_students(tmp_path):
     """Регрессия: ручной ввод/импорт работают в базе с таблицей студентов —
     nullable-колонка student_ref_id остаётся незадействованной."""
     adapter = SQLiteAdapter(str(tmp_path / 'with-students.sqlite3'))
+    seed_fixture_levels(adapter)
     adapter.create_student('Иванов Иван Иванович', 'М', 'ИСИ', 'ПГС-101', '2')
 
     adapter.save_competitions([make_competition('Иванов Иван Иванович', datetime(2026, 3, 1))])
@@ -6271,6 +6288,7 @@ def test_wave1_legacy_rows_new_fields_null(tmp_path):
 def test_wave1_reinit_idempotent(tmp_path):
     db_path = str(tmp_path / 'wave1-reinit.sqlite3')
     adapter = SQLiteAdapter(db_path)
+    seed_fixture_levels(adapter)
     event_id = adapter.create_calendar_event(
         name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
@@ -6337,6 +6355,7 @@ def test_wave1_backfill_ambiguous_preset_skipped(adapter):
 def test_wave1_backfill_does_not_touch_linked_rows(tmp_path):
     db_path = str(tmp_path / 'wave1-linked.sqlite3')
     adapter = SQLiteAdapter(db_path)
+    seed_fixture_levels(adapter)
     adapter.create_calendar_event(
         name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
@@ -6588,6 +6607,7 @@ def test_link_participation_to_event_error_codes(adapter):
 def test_link_participation_race_returns_already_linked(adapter):
     """Guarded UPDATE: повторное связывание уже связанной записи не
     перезаписывает ни ссылку, ни поля."""
+    seed_fixture_levels(adapter, 'А', 'Б')
     first_id = adapter.create_calendar_event(
         name='Первый кросс', date='2026-09-12T00:00:00', date_to=None, level='А', sport='Бег', links=[]
     )
@@ -6736,6 +6756,7 @@ def test_calendar_link_backfill_preview_groups_and_cap(adapter):
 def test_apply_calendar_link_backfill_links_only_matched(adapter):
     """Apply: линкуются ТОЛЬКО однозначные matched с синхронизацией 5 полей;
     ambiguous/unmatched/уже связанные не трогаются."""
+    seed_fixture_levels(adapter, 'региональные')
     event_id = adapter.create_calendar_event(
         name='Кубок',
         date='2026-01-10T00:00:00',

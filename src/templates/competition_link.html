@@ -1,3 +1,4 @@
+{% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -163,13 +164,8 @@
             </div>
             <div class="col-md-3">
                 <label class="label" for="link-new-level">Уровень</label>
-                <input class="form-control" id="link-new-level" name="level" type="text" value="{{ record.level }}"
-                    list="calendar-levels" autocomplete="off">
-                <datalist id="calendar-levels">
-                    {% for value in level_options %}
-                    <option value="{{ value }}">
-                    {% endfor %}
-                </datalist>
+                {{ level_select(level_options, record.level, id="link-new-level") }}
+                {% if record.level and record.level not in level_options %}<div class="form-text">В записи: {{ record.level }}. Для нового события выберите действующий уровень.</div>{% endif %}
             </div>
             <div class="col-md-3">
                 <label class="label" for="link-new-sport">Вид спорта</label>

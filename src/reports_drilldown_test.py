@@ -10,6 +10,7 @@ import pytest
 
 from src import main_test as helpers
 from src.conftest import make_report_record
+from src.conftest import seed_fixture_levels
 from src.main import app
 from src.main_test import get_auth_headers
 from src.routes.reports import get_report_rows
@@ -84,6 +85,7 @@ def drilldown_history(client, monkeypatch):
     monkeypatch.setattr(settings, 'auth_viewer_username', 'synthetic-viewer')
     monkeypatch.setattr(settings, 'auth_viewer_password', 'synthetic-viewer-only')
     storage = SQLiteAdapter(':memory:')
+    seed_fixture_levels(storage, 'Учебный')
     seed_drilldown_history(storage)
     original = app.ctx.storage
 

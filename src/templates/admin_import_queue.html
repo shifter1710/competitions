@@ -1,3 +1,4 @@
+{% from "macros/level_select.html" import level_select %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Очередь подтверждения импорта{% endblock admin_title %}
@@ -109,8 +110,7 @@
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="edit-{{ entry.id }}-level">Уровень соревнований</label>
-                            <input class="form-control" id="edit-{{ entry.id }}-level" name="level"
-                                   value="{{ entry.edit_values.level }}">
+                            {{ level_select(level_options, entry.edit_values.level, id="edit-" ~ entry.id ~ "-level") }}
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="edit-{{ entry.id }}-name">Название соревнований</label>

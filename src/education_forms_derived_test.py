@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from src.auth import create_auth_cookie_value
+from src.conftest import seed_fixture_levels
 from src.main import app
 from src.models.competition import Competition
 from src.routes.admin import parse_base_field_settings_form
@@ -34,6 +35,7 @@ from src.students import parse_student_form
 @pytest.fixture
 def store(tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'fictional-education.sqlite3'))
+    seed_fixture_levels(storage, 'Демо уровень')
     yield storage
     storage.connection.close()
 

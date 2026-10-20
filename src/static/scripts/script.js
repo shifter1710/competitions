@@ -2326,10 +2326,14 @@ class Main {
             const options = key === "student_sex"
                 ? ["М", "Ж"]
                 : this.getTableLevels();
+            if (key === "level") {
+                options.unshift("");
+                if (value && !options.includes(value)) options.push(value);
+            }
             options.forEach((optionValue) => {
                 const option = document.createElement("option");
                 option.value = optionValue;
-                option.textContent = optionValue;
+                option.textContent = optionValue || "Не указан";
                 input.append(option);
             });
             input.value = value;
@@ -2363,6 +2367,11 @@ class Main {
         }
         input.dataset.editKey = key;
         input.className = "form-control form-control-sm";
+        if (key === "level" && !readOnly) {
+            const strict = enhanceLevelSelect(input);
+            this.activeComboBoxes.push(strict.combo);
+            return strict.wrapper;
+        }
         // Комбобокс (№4): поле + кнопка-стрелка + выпадающий список с
         // фильтрацией по подстроке; свободный ввод не ограничен.
         if (input.type === "text" && (key === "institute" || key === "group")) {
@@ -4628,3 +4637,114 @@ class StudentProfilePage {
         }
     }
 }
+
+
+// Keep the native select as the submitted value. The input only searches;
+// arbitrary search text never becomes a level. Existing portalled dropdown
+// remains visible outside responsive tables, in both themes.
+function enhanceLevelSelect(select) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "input-group inline-combobox-group";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = select.className.replace(/form-select/g, "form-control");
+    input.autocomplete = "off";
+    input.value = select.value;
+    input.placeholder = "Выберите уровень";
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "btn btn-outline-secondary combobox-toggle";
+    toggle.textContent = "▾";
+    toggle.setAttribute("aria-label", "Показать уровни");
+    if (select.id) {
+        input.id = select.id;
+        select.removeAttribute("id");
+    }
+    const combo = new InlineComboBox(input, toggle, () => Array.from(select.options).filter(option => !option.hasAttribute("data-level-unavailable")).map(option => option.value));
+    const validateSelection = () => input.setCustomValidity(
+        input.value !== select.value || select.selectedOptions[0]?.hasAttribute("data-level-unavailable")
+            ? "Выберите уровень из списка" : ""
+    );
+    validateSelection();
+    combo.dropdown.classList.add("combobox-dropdown--strict-level");
+    combo.dropdown.setAttribute("role", "listbox");
+    combo.dropdown.id = `level-options-${Math.random().toString(36).slice(2)}`;
+    input.setAttribute("aria-controls", combo.dropdown.id);
+    combo.positionDropdown = () => {
+        if (!combo.open) return;
+        const rect = input.getBoundingClientRect();
+        const below = window.innerHeight - rect.bottom - 8;
+        const above = rect.top - 8;
+        const upwards = below < 180 && above > below;
+        const available = Math.max(40, upwards ? above : below);
+        combo.dropdown.style.maxHeight = `${Math.min(260, available)}px`;
+        combo.dropdown.style.minWidth = "0";
+        combo.dropdown.style.width = `${Math.min(rect.width + toggle.offsetWidth, window.innerWidth - 16)}px`;
+        combo.dropdown.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - combo.dropdown.offsetWidth - 8))}px`;
+        combo.dropdown.style.top = `${upwards ? rect.top - combo.dropdown.offsetHeight - 2 : rect.bottom + 2}px`;
+    };
+    combo.select = value => {
+        select.value = value;
+        input.value = value;
+        input.setCustomValidity("");
+        combo.close();
+        select.dispatchEvent(new Event("change", {bubbles: true}));
+    };
+    const renderOptions = combo.renderOptions.bind(combo);
+    combo.renderOptions = () => {
+        renderOptions();
+        combo.dropdown.querySelectorAll(".combobox-empty").forEach(item => {
+            item.textContent = "Нет совпадений. Добавить уровень можно в административном справочнике.";
+        });
+        combo.dropdown.querySelectorAll('.combobox-option[data-value=""]').forEach(item => { item.textContent = "Не указан"; });
+    };
+    const openDropdown = combo.openDropdown.bind(combo);
+    combo.openDropdown = () => { openDropdown(); input.setAttribute("aria-expanded", "true"); };
+    const close = combo.close.bind(combo);
+    combo.close = () => { close(); input.setAttribute("aria-expanded", "false"); };
+    input.addEventListener("input", () => {
+        validateSelection();
+    });
+    input.addEventListener("blur", () => {
+        setTimeout(() => { input.value = select.value; validateSelection(); }, 150);
+    });
+    select.classList.add("d-none");
+    select.tabIndex = -1;
+    wrapper.append(input, toggle, select);
+    return {wrapper, combo};
+}
+
+function initializeLevelSelects() {
+    document.querySelectorAll("select[data-strict-level]").forEach(select => {
+        const parent = select.parentNode;
+        const next = select.nextSibling;
+        const strict = enhanceLevelSelect(select);
+        parent.insertBefore(strict.wrapper, next);
+        const form = select.form;
+        if (form && !form.dataset.levelPreserve) {
+            form.dataset.levelPreserve = "1";
+            form.addEventListener("submit", async event => {
+                if (event.defaultPrevented) return;
+                event.preventDefault();
+                if (form.dataset.levelSubmitting) return;
+                form.dataset.levelSubmitting = "1";
+                try {
+                    const response = await fetch(form.action, {method: "POST", body: new FormData(form)});
+                    if (!response.ok) {
+                        notify({type: "error", text: await response.text()});
+                        return;
+                    }
+                    window.location.assign(response.url);
+                } catch (_) {
+                    notify({type: "error", text: "Не удалось сохранить. Введённые данные сохранены в форме."});
+                } finally {
+                    delete form.dataset.levelSubmitting;
+                }
+            });
+        }
+    });
+}
+window.addEventListener("DOMContentLoaded", initializeLevelSelects);

@@ -17,6 +17,7 @@ from src.auth import parse_auth_cookie
 from src.auth import touch_user_seen
 from src.auth import username_error
 from src.auth import VIEWER_ROLE
+from src.levels import InvalidCompetitionLevelError
 from src.routes import admin
 from src.routes import auth
 from src.routes import calendar
@@ -50,6 +51,11 @@ app.static(
 )
 
 app.ctx.storage = None
+
+
+@app.exception(InvalidCompetitionLevelError)
+async def invalid_competition_level(request, exception):
+    return text(str(exception), status=400)
 
 
 AUTH_ALLOWED_PATHS = {'/healthcheck', '/login'}

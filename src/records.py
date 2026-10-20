@@ -16,6 +16,7 @@ from sanic import Request
 
 from src.education import group_course
 from src.education import parse_group_admission_year
+from src.levels import resolve_competition_level
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.settings import settings
@@ -266,6 +267,7 @@ def build_competition(
     custom_fields: Sequence[CustomField],
     manual_input: bool = False,
     storage: SQLiteAdapter | None = None,
+    existing: Competition | None = None,
 ) -> Competition:
     field_settings = get_base_field_settings(storage)
     student_name = clean_str(record['ФИО'])
@@ -276,11 +278,20 @@ def build_competition(
 
     # required=1 у текстового базового поля — пустое значение = отказ
     # (как ФИО/дата сейчас). Числовые Место/Курс — в parse_base_number_field.
-    level = parse_base_text_field(
-        record['Уровень соревнований'],
-        label=BASE_FIELD_LABELS['level'],
-        setting=field_settings['level'],
-    ).lower()
+    unchanged_level = existing is not None and record['Уровень соревнований'] == existing.level
+    level = (
+        existing.level
+        if unchanged_level
+        else parse_base_text_field(
+            record['Уровень соревнований'],
+            label=BASE_FIELD_LABELS['level'],
+            setting=field_settings['level'],
+        ).lower()
+    )
+    if storage is not None:
+        level = resolve_competition_level(
+            storage, record['Уровень соревнований'], existing=existing.level if existing is not None else None
+        )
 
     competition = Competition(
         student_id=hashlib.sha256(student_name.encode()).hexdigest(),
@@ -329,18 +340,13 @@ def apply_catalog_canonical_values(storage: SQLiteAdapter, competition: Competit
     Если значение записи отличается от значения справочника ТОЛЬКО регистром,
     в запись подставляется каноническое написание из справочника. Исторические
     записи не трогаются — замена происходит только на пути создания записи
-    (ручной ввод, импорт). Уровень по-прежнему нормализуется в lower
-    (build_competition), а затем каноническое написание из levels имеет
-    приоритет — так записи согласованы со справочником.
+    (ручной ввод, импорт). Уровень отдельно проверяется строгим resolver:
+    активное каноническое значение или неизменённый исторический снимок.
 
     Группа ищется внутри института: уникальность группы — по паре
     (институт, группа), поэтому каноническое подставляется только когда
     канонический институт найден в иерархии.
     """
-    if competition.level:
-        canonical = storage.find_level_canonical(competition.level)
-        if canonical:
-            competition.level = canonical
     for category in ('sport', 'institute'):
         value = getattr(competition, category)
         if value:
@@ -604,17 +610,22 @@ def competition_duplicate_key(competition: Competition) -> tuple:
     )
 
 
-def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competition]):
+def ensure_catalog_values(storage: SQLiteAdapter, competitions: Iterable[Competition], *, existing=None):
     """Новое значение вида спорта/института из записи или импорта попадает в справочник.
 
-    Как с уровнями: справочник только собирает подсказки и ничего не
-    перезаписывает в записях (docs/data-model-decisions.md). Дубликаты
+    Справочники спорта/института/группы собирают подсказки и ничего не
+    перезаписывают в записях. Уровень проверяется до любых записей. Дубликаты
     игнорируются на стороне storage. Пара институт→группа попадает в иерархию:
     группа кладётся под свой институт (уникальность (parent, value)).
 
     Для одиночных записей (ручной ввод). Массовый импорт пишет справочники
     батчем той же семантикой — SQLiteAdapter._ensure_import_catalogs.
     """
+    competitions = list(competitions)
+    for competition in competitions:
+        competition.level = resolve_competition_level(
+            storage, competition.level, existing=existing.level if existing is not None else None
+        )
     for competition in competitions:
         for category, value in (('sport', competition.sport), ('institute', competition.institute)):
             if value:

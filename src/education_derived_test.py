@@ -9,6 +9,7 @@ from time import perf_counter
 
 import pytest
 
+from src.conftest import seed_fixture_levels
 from src.education import group_course
 from src.education import parse_group_admission_year
 from src.models.competition import Competition
@@ -22,6 +23,7 @@ from src.storage.sqlite import SQLiteAdapter
 @pytest.fixture
 def storage(tmp_path):
     adapter = SQLiteAdapter(str(tmp_path / 'synthetic-education.sqlite3'))
+    seed_fixture_levels(adapter, 'тестовый уровень')
     yield adapter
     adapter.connection.close()
 

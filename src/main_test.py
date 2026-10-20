@@ -32,6 +32,7 @@ from src.conftest import make_report_fixture
 from src.conftest import make_report_position_fixture
 from src.conftest import make_report_record
 from src.conftest import make_report_unapproved_fixture
+from src.conftest import seed_fixture_levels
 from src.education import academic_year_start
 from src.main import app
 from src.models.competition import Competition
@@ -1395,6 +1396,7 @@ def test_report_routes_available_for_all_non_athlete_roles(client: SanicTestClie
 @pytest.fixture
 def reports_client(client: SanicTestClient, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'reports.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.save_competitions(make_report_fixture())
     for review_status, record in make_report_unapproved_fixture():
         storage.save_competitions([record], review_status=review_status, owner_id=9)
@@ -1412,6 +1414,7 @@ def position_reports_client(client: SanicTestClient, tmp_path):
     # Фикстура мест 0–5 (make_report_position_fixture): классы фильтра
     # «Победа»/«Призовое»/«Не призовое»/«Без результата» и комбинации.
     storage = SQLiteAdapter(str(tmp_path / 'report-positions.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.save_competitions(make_report_position_fixture())
     previous = getattr(app.ctx, 'storage', None)
     app.ctx.storage = storage
@@ -1700,6 +1703,7 @@ def seed_index_records(storage: SQLiteAdapter) -> None:
 @pytest.fixture
 def index_client(client: SanicTestClient, tmp_path) -> SanicTestClient:
     storage = SQLiteAdapter(str(tmp_path / 'index.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     seed_index_records(storage)
     previous = getattr(app.ctx, 'storage', None)
     app.ctx.storage = storage
@@ -2629,6 +2633,7 @@ def test_index_athlete_multi_filter_applies_to_own_records(athlete_index_client:
 def blank_index_client(client: SanicTestClient, tmp_path) -> SanicTestClient:
     """Реестр без единой записи (admin/editor/viewer сеются стартом приложения)."""
     storage = SQLiteAdapter(str(tmp_path / 'index-blank.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     previous = getattr(app.ctx, 'storage', None)
     app.ctx.storage = storage
     try:
@@ -3677,10 +3682,8 @@ def test_template_date_column_is_typed(client: SanicTestClient):
     assert sheet.cell(row=1, column=date_column).number_format == 'DD.MM.YYYY'
 
 
-def test_import_auto_adds_unknown_level(client: SanicTestClient):
-    # Само автопополнение уровней — внутри одной транзакции импорта, значения
-    # сеются из записей (storage_test: autofills levels and catalogs); здесь —
-    # что роут отдаёт импорту вставляемые строки с новым уровнем как есть.
+def test_import_rejects_unknown_level(client: SanicTestClient):
+    # LEVEL-01: a new value rejects the whole file before any import call.
     app.ctx.storage.import_competitions.reset_mock()
     df = pd.DataFrame(
         [
@@ -3716,9 +3719,10 @@ def test_import_auto_adds_unknown_level(client: SanicTestClient):
         },
     )
 
-    assert response.status == 200
-    inserted_rows = app.ctx.storage.import_competitions.call_args[0][0]
-    assert [row.level for row in inserted_rows] == ['всероссийские']
+    assert response.status == 400
+    assert 'всероссийские' in response.text
+    assert 'администратор' in response.text
+    app.ctx.storage.import_competitions.assert_not_called()
 
 
 def test_admin_can_create_level(client: SanicTestClient):
@@ -4019,7 +4023,7 @@ def test_catalog_rename_level_uses_levels_table(client: SanicTestClient):
     assert response.status == 302
     assert 'admin_error' not in response.headers['location']
     app.ctx.storage.rename_catalog_value.assert_called_once_with(
-        'level', 'городские', 'муниципальные', parent_value=None, update_records=False
+        'level', 'городские', 'муниципальные', parent_value=None, update_records=True
     )
 
     reset_rename_mocks()
@@ -6650,6 +6654,9 @@ class FakeSettingsStorage:
     def get_field_settings(self):
         return self._field_settings
 
+    def get_level_names(self, include_inactive=False):
+        return ['внутривузовские', 'межвузовские']
+
     def find_catalog_row(self, *args, **kwargs):
         return None
 
@@ -7561,6 +7568,7 @@ def test_import_queue_replace_without_matched_record_rejected(client: SanicTestC
 
 
 def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTestClient):
+    app.ctx.storage.get_level_names.return_value = ['внутривузовские', 'межвузовские', 'городские']
     app.ctx.storage.get_field_settings.return_value = {}
     entry_payload = {
         'student_id': 'hash-e',
@@ -7641,6 +7649,7 @@ def test_import_queue_edit_accepts_with_edited_values_and_audits(client: SanicTe
 
 
 def test_import_queue_edit_uses_payload_date_range_from_payload(client: SanicTestClient):
+    app.ctx.storage.get_level_names.return_value = ['внутривузовские', 'межвузовские', 'городские']
     """№27в: диапазон дат кандидата сохраняется из payload, форма дату не меняет."""
     app.ctx.storage.get_field_settings.return_value = {}
     entry_payload = {
@@ -9071,6 +9080,7 @@ def calendar_client(client: SanicTestClient, tmp_path, monkeypatch):
 
     monkeypatch.setattr(main_module.settings, 'data_folder', str(tmp_path))
     storage = SQLiteAdapter(str(tmp_path / 'calendar.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.create_user(settings.auth_admin_username, 'hash', 'admin')
     storage.create_user(settings.auth_editor_username, 'hash', 'editor')
     if settings.auth_viewer_username:
@@ -9876,7 +9886,9 @@ def test_build_redirect_with_message_joins_existing_query():
 
 def test_participant_add_form_renders_hidden_result(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     storage.save_competitions([make_no_result_participant(event_id)])
 
     for query in ('?result=without', ''):
@@ -9889,7 +9901,9 @@ def test_participant_add_form_renders_hidden_result(calendar_client: SanicTestCl
 
 def test_participant_add_keeps_result_filter_on_success(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     storage.save_competitions([make_no_result_participant(event_id)])
 
     editor = get_auth_headers('editor')
@@ -9922,7 +9936,9 @@ def test_participant_add_keeps_result_filter_on_success(calendar_client: SanicTe
 
 def test_participant_add_validation_error_refills_and_keeps_filter(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     storage.save_competitions([make_no_result_participant(event_id)])
 
     editor = get_auth_headers('editor')
@@ -9970,7 +9986,9 @@ def test_participant_add_validation_error_refills_and_keeps_filter(calendar_clie
 
 def test_participant_add_empty_name_error_keeps_other_input(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
 
     editor = get_auth_headers('editor')
     _, response = calendar_client.post(
@@ -9998,7 +10016,9 @@ def test_participant_add_empty_name_error_keeps_other_input(calendar_client: San
 
 def test_participant_add_invalid_student_ref_not_refilled(calendar_client: SanicTestClient):
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
 
     editor = get_auth_headers('editor')
     _, response = calendar_client.post(
@@ -10028,7 +10048,9 @@ def test_participant_add_prefill_error_restores_prefill_mode(calendar_client: Sa
     (?add_participation=<ref>), и введённые дисциплину/место/результат —
     модератор не вылетает из строки второго участия."""
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     student_id = storage.create_student('Многодисциплинарный Марк', 'М', 'ИСИ', 'ПГС-101', '2')
     storage.save_competitions(
         [
@@ -10097,7 +10119,9 @@ def test_participant_add_error_refill_keeps_valid_student_ref(calendar_client: S
     hidden #participant-student-ref, повторный сабмит (браузер шлёт ровно то,
     что в форме) создаёт участие СО связью с карточкой."""
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     student_id = storage.create_student('Нулевич Николай', 'М', 'ИСИ', 'ПГС-101', '2')
     storage.save_competitions(
         [
@@ -10192,7 +10216,9 @@ def test_participant_add_refill_ignores_bogus_student_ref(calendar_client: Sanic
     мусор. Верхняя граница диапазона (2^63-1) — валидный int, просто
     несуществующий id."""
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     student_id = storage.create_student('Активов Актив', 'М', 'ИСИ', 'ПГС-101', '2')
     inactive_id = storage.create_student('Спячев Спяч', 'М', 'ИСИ', 'ПГС-101', '2')
     storage.set_student_active(inactive_id, False)
@@ -10235,7 +10261,9 @@ def test_participant_add_post_roles_unchanged(calendar_client: SanicTestClient):
     расширяются: viewer POST добавления участника — 403, атлет страницу
     события (и форму) не видит — 403, как раньше."""
     storage = app.ctx.storage
-    event_id = storage.create_calendar_event('Кросс', '2026-06-25', None, 'Бег', 'внутривузовские', links=[])
+    event_id = storage.create_calendar_event(
+        'Кросс', '2026-06-25', None, level='внутривузовские', sport='Бег', links=[]
+    )
     student_id = storage.create_student('Нулевич Николай', 'М', 'ИСИ', 'ПГС-101', '2')
 
     viewer = get_auth_headers('viewer')
@@ -10521,6 +10549,7 @@ def test_calendar_event_edit_redirects_back_to_event_page(client: SanicTestClien
 @pytest.fixture
 def people_client(client: SanicTestClient, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'people.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.create_user(settings.auth_admin_username, 'hash', 'admin')
     previous = getattr(app.ctx, 'storage', None)
     app.ctx.storage = storage
@@ -11594,6 +11623,7 @@ def test_cabinet_gto_card_for_linked_athlete(people_client: SanicTestClient):
 @pytest.fixture
 def reconcile_client(client: SanicTestClient, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'reconcile.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.create_user(settings.auth_admin_username, 'hash', 'admin')
     # Атлет для проверок кабинета (athlete_headers использует логин sportik).
     storage.create_user('sportik', 'hash', 'athlete')
@@ -12921,6 +12951,7 @@ def test_identity_endpoints_require_admin_and_csrf(reconcile_client: SanicTestCl
 @pytest.fixture
 def student_import_client(client: SanicTestClient, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'student_import.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.create_user(settings.auth_admin_username, 'hash', 'admin')
     storage.create_user('sportik', 'hash', 'athlete')
     previous = getattr(app.ctx, 'storage', None)
@@ -14024,6 +14055,7 @@ def test_student_import_isolation_and_reconcile_compat(student_import_client: Sa
 @pytest.fixture
 def event_import_client(client: SanicTestClient, tmp_path):
     storage = SQLiteAdapter(str(tmp_path / 'event_import.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.create_user(settings.auth_admin_username, 'hash', 'admin')
     storage.create_user(settings.auth_editor_username, 'hash', 'editor')
     storage.create_user(settings.auth_viewer_username or 'viewer', 'hash', 'viewer')
@@ -20230,6 +20262,7 @@ def test_education_admin_endpoints_reject_anonymous(client: SanicTestClient):
 @pytest.fixture
 def education_client(client: SanicTestClient, tmp_path) -> SanicTestClient:
     storage = SQLiteAdapter(str(tmp_path / 'education.sqlite3'))
+    seed_fixture_levels(storage, 'внутривузовские', 'межвузовские', 'региональные')
     storage.create_user(settings.auth_admin_username, 'hash', 'admin')
     previous = getattr(app.ctx, 'storage', None)
     app.ctx.storage = storage
@@ -23339,6 +23372,7 @@ def test_attachment_after_actual_wipe_preserving_files(reconcile_client, tmp_pat
 @pytest.mark.parametrize('role', ['admin', 'editor', 'viewer'])
 def test_report_links_use_explicit_cards_and_preserve_filtered_return(people_client, role):
     storage = app.ctx.storage
+    seed_fixture_levels(storage, 'Тестовый уровень')
     ensure_staff_users(storage)
     first = storage.create_student('Синтетиков Новое Имя', 'М', '', '', '')
     second = storage.create_student('Синтетиков Тёзка Образец', 'М', '', '', '')
