@@ -577,3 +577,141 @@ def test_rechecking_same_remote_point_refreshes_confirmation_without_changing_so
     state = read_json(synthetic_source[3] / 'health.json')['s3']
     assert state['created_at'] == manifest['created_at']
     assert state['uploaded_at'] > old_upload
+
+
+class SyntheticCryptTransfer:
+    """In-memory crypt remote: no normal hashes for transfer decisions, real byte checks.
+
+    Mirrors rclone 1.60's size/mtime comparison and immutable refusal. This tests
+    observable resume/content safety rather than only checking an argv constant.
+    """
+
+    def __init__(self):
+        self.objects = {}
+        self.writes = []
+        self.commands = []
+        self.fail_after = None
+        self.content_checks = 0
+
+    def transfer(self, source, name, args):
+        body = source.read_bytes()
+        mtime = source.stat().st_mtime_ns
+        existing = self.objects.get(name)
+        if existing is not None:
+            equal_size = len(existing['body']) == len(body)
+            size_only = '--size-only' in args
+            equal = equal_size and (size_only or existing['mtime'] == mtime)
+            if equal:
+                return
+            if '--immutable' in args:
+                raise backup.BackupError('s3_upload_failed')
+            pytest.fail('Uploader attempted to overwrite an existing synthetic remote object')
+        self.objects[name] = {'body': body, 'mtime': mtime}
+        self.writes.append(name)
+        if self.fail_after is not None and len(self.writes) >= self.fail_after:
+            raise backup.BackupError('s3_upload_failed')
+
+    def __call__(self, args, config=None):
+        self.commands.append(args)
+        if args[0] == 'copy':
+            for path in sorted(Path(args[1]).iterdir()):
+                self.transfer(path, path.name, args)
+            return b''
+        if args[0] == 'copyto':
+            source = Path(args[1])
+            self.transfer(source, source.name, args)
+            return b''
+        assert args[0] == 'cryptcheck'
+        self.content_checks += 1
+        names = sorted(path.name for path in Path(args[1]).iterdir() if path.is_file())
+        for name in names:
+            local = (Path(args[1]) / name).read_bytes()
+            remote = self.objects.get(name, {}).get('body')
+            # Model inherited size-only configuration unless the integrity command
+            # explicitly forces real content verification.
+            if '--size-only=false' in args:
+                equal = local == remote
+            else:
+                equal = remote is not None and len(local) == len(remote)
+            if not equal:
+                raise backup.BackupError('s3_upload_failed')
+        Path(args[args.index('--combined') + 1]).write_text(''.join('= ' + name + '\n' for name in names))
+        return f'0 differences found\n{len(names)} matching files'.encode()
+
+    def shift_remote_mtimes(self):
+        # Existing remote metadata can legitimately differ after temp copy/recovery.
+        for item in self.objects.values():
+            item['mtime'] = 1
+
+
+def test_repeat_completed_upload_with_different_mtimes_does_not_rewrite_objects(synthetic_source, monkeypatch):
+    directory = make_set(synthetic_source)
+    model = SyntheticCryptTransfer()
+    monkeypatch.setattr(backup_offsite, 'rclone', model)
+    first = backup_offsite.upload_fresh([], 'synthetic-crypt:backups', synthetic_source[3], set_dir=directory)
+    before = {name: item['body'] for name, item in model.objects.items()}
+    model.shift_remote_mtimes()
+    second = backup_offsite.upload_fresh([], 'synthetic-crypt:backups', synthetic_source[3], set_dir=directory)
+    assert first['id'] == second['id']
+    assert model.writes == ['database.sqlite3.gz', 'files.zip', 'manifest.json']
+    assert {name: item['body'] for name, item in model.objects.items()} == before
+    assert model.content_checks == 4
+    assert read_json(synthetic_source[3] / 'health.json')['s3']['status'] == 'OK'
+    assert len(list(synthetic_source[2].glob('sets/*'))) == 1
+
+
+def test_partial_upload_resumes_existing_bytes_without_another_backup(synthetic_source, monkeypatch):
+    directory = make_set(synthetic_source)
+    model = SyntheticCryptTransfer()
+    model.fail_after = 1
+    monkeypatch.setattr(backup_offsite, 'rclone', model)
+    with pytest.raises(backup.BackupError, match='s3_upload_failed'):
+        backup_offsite.upload_fresh([], 'synthetic-crypt:backups', synthetic_source[3], set_dir=directory)
+    assert len(model.objects) == 1 and 'manifest.json' not in model.objects
+    assert not read_json(synthetic_source[3] / 'offsite-receipts.json')
+    assert read_json(synthetic_source[3] / 'health.json')['s3']['status'] == 'CRITICAL'
+    model.fail_after = None
+    model.shift_remote_mtimes()
+    backup_offsite.upload_fresh([], 'synthetic-crypt:backups', synthetic_source[3], set_dir=directory)
+    assert model.writes == ['database.sqlite3.gz', 'files.zip', 'manifest.json']
+    assert model.content_checks == 2
+    assert len(list(synthetic_source[2].glob('sets/*'))) == 1
+    assert read_json(synthetic_source[3] / 'health.json')['s3']['status'] == 'OK'
+
+
+@pytest.mark.parametrize('same_size', [False, True])
+def test_existing_corruption_is_never_overwritten_or_confirmed(synthetic_source, monkeypatch, same_size):
+    directory = make_set(synthetic_source)
+    model = SyntheticCryptTransfer()
+    original = (directory / 'database.sqlite3.gz').read_bytes()
+    damaged = bytes([original[0] ^ 1]) + original[1:] if same_size else original + b'corrupt-size'
+    model.objects['database.sqlite3.gz'] = {'body': damaged, 'mtime': 1}
+    monkeypatch.setattr(backup_offsite, 'rclone', model)
+    with pytest.raises(backup.BackupError, match='s3_upload_failed'):
+        backup_offsite.upload_fresh([], 'synthetic-crypt:backups', synthetic_source[3], set_dir=directory)
+    assert model.objects['database.sqlite3.gz']['body'] == damaged
+    assert 'database.sqlite3.gz' not in model.writes
+    assert 'manifest.json' not in model.objects
+    assert model.content_checks == (1 if same_size else 0)
+    assert read_json(synthetic_source[3] / 'health.json')['s3']['status'] == 'CRITICAL'
+    assert not read_json(synthetic_source[3] / 'offsite-receipts.json')
+    backup.verify_set(directory)  # Local verified recovery point remains intact.
+
+
+def test_already_committed_same_size_manifest_conflict_fails_final_content_check(synthetic_source, monkeypatch):
+    directory = make_set(synthetic_source)
+    model = SyntheticCryptTransfer()
+    monkeypatch.setattr(backup_offsite, 'rclone', model)
+    for name in ('database.sqlite3.gz', 'files.zip', 'manifest.json'):
+        body = (directory / name).read_bytes()
+        if name == 'manifest.json':
+            body = bytes([body[0] ^ 1]) + body[1:]
+        model.objects[name] = {'body': body, 'mtime': 1}
+    before = {name: item['body'] for name, item in model.objects.items()}
+    with pytest.raises(backup.BackupError, match='s3_upload_failed'):
+        backup_offsite.upload_fresh([], 'synthetic-crypt:backups', synthetic_source[3], set_dir=directory)
+    assert not model.writes
+    assert {name: item['body'] for name, item in model.objects.items()} == before
+    assert model.content_checks == 2
+    assert not read_json(synthetic_source[3] / 'offsite-receipts.json')
+    assert read_json(synthetic_source[3] / 'health.json')['s3']['status'] == 'CRITICAL'
