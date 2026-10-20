@@ -12317,7 +12317,8 @@ def test_reconcile_link_extends_athlete_cabinet_by_ref(reconcile_client: SanicTe
     _, report_unlinked = reconcile_client.get('/report?slice=student', headers=get_auth_headers())
 
     def report_stat_values(html: str) -> list[str]:
-        return re.findall(r'report-stat__value">\s*(\d+)', html)
+        cells = re.findall(r'<span class="report-stat__value">(.*?)</span>', html, re.S)
+        return [re.sub(r'<[^>]+>', '', cell).strip() for cell in cells]
 
     assert '2 строки · 2 участия' in report_linked.text
     assert '2 строки · 2 участия' in report_unlinked.text
