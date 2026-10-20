@@ -1,0 +1,10 @@
+[Unit]
+Description=Upload Competitions backup daily (04:15 Moscow)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 Europe/Moscow
+Persistent=true
+Unit=competitions-backup-offsite.service
+
+[Install]
+WantedBy=timers.target

@@ -106,30 +106,45 @@ systemctl daemon-reload
 systemctl enable --now competitions-compose
 ```
 
-### 5. Включить бэкап-таймер
+### 5. Подключить backup и независимые проверки
 
-Бэкапы: [scripts/backup_sqlite.py](../scripts/backup_sqlite.py) делает
-gzip-архив базы через sqlite3 backup API (корректный снимок живой базы),
-проверяет его целостность (`PRAGMA quick_check`) и отдельным zip
-архивирует файлы из `data/files` — вложения записей, положения и
-документы событий (`--files-dir`). Ротация — хранить последние N копий.
+[scripts/backup_sqlite.py](../scripts/backup_sqlite.py) использует SQLite backup
+API (включая WAL), создаёт gzip, ZIP всех вложений и manifest. Комплект публикуется
+в `data/backups/sqlite/sets/<id>/` только после проверки gzip, SQLite
+`quick_check`, ZIP CRC, SHA256 и наличия файлов, на которые ссылается снимок БД.
+Повторная проверка изменений снижает риск несогласованности, но не является
+атомарным снимком БД и файловой системы.
 
-Юниты: `deploy/systemd/competitions-backup.service` и
-`competitions-backup.timer` (ежедневно в 03:15, `Persistent=true` —
-догоняет пропущенное после простоя). В service-юните поправьте пути
-(`WorkingDirectory`, `--db-path`, `--output-dir`, `--files-dir`) под свой
-каталог репозитория, затем:
+Ротация в этом пакете **не выполняется**; `--keep 14` не удаляет копии.
+Старые архивы остаются на месте. Планирование retention — отдельная задача.
 
-```bash
-cp deploy/systemd/competitions-backup.service deploy/systemd/competitions-backup.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now competitions-backup.timer
-```
+Подключайте daily и offsite units согласованно: прежний скрипт, отправляющий
+только файлы из корня каталога, не увидит новый формат `sets/<id>/`.
+Шаблоны `competitions-backup.*`, `competitions-backup-offsite.*` и
+`competitions-health.*` находятся в `deploy/systemd/`. Проверьте пути, пользователя,
+владельца каталога `data/ops` и защищённый EnvironmentFile до установки.
+Для rollback сохраните прежний app image и проверенный pinned NO-DELETE operations
+bundle по [runbook](backup-reliability.md#rollback-без-удаления-резервных-копий).
+Не возвращайте старые удаляющие backup-скрипты/units: app image откатывается отдельно
+с read-only bridge backup.py/ops_state.py из bundle. На существующем VPS не
+переустанавливайте шаблоны вслепую и не запускайте одновременно старую и новую
+отправку.
 
-Проверка: `systemctl list-timers competitions-backup.timer`, а после
-первого срабатывания — наличие
-`data/backups/sqlite/competitions-<дата>.sqlite3.gz` и
-`competitions-<дата>-files.zip`.
+Целевое расписание сохраняет существующие 03:15 МСК для local backup и
+04:15 МСК для offsite; проверьте фактические следующие срабатывания через
+`systemctl list-timers` и timezone хоста. Независимая проверка health работает
+каждые 15 минут. `Persistent=true` позволяет догнать пропущенный запуск.
+
+Offsite отправляет свежие `Verified` комплекты в существующий crypt remote,
+без удаления объектов. Подтверждение отправки включает `rclone cryptcheck`.
+`/admin/health` доступна только admin, показывает сохранённые результаты и
+отличает неизвестные/просроченные проверки от успеха. Без бота Telegram остаётся
+отключённым; это не считается подтверждением доставки.
+
+Подробная процедура подключения, параметры и изолированный restore drill:
+[backup-reliability.md](backup-reliability.md). Защищённые копии crypt-конфигурации
+и паролей вне VPS обязательны для восстановления после потери сервера;
+репозиторий не является местом хранения этих секретов.
 
 ### 6. Первый вход
 
@@ -153,8 +168,9 @@ systemctl enable --now competitions-backup.timer
        --keep 14
    ```
 
-   Убедитесь, что архив прошёл проверку (скрипт сам валидирует его и
-   печатает путь) и что вы можете его скачать.
+   Убедитесь, что создан полный `Verified` комплект в `sets/<id>/`
+   (БД, вложения, manifest), а не только один архив. Результат проверки
+   архивов не заменяет изолированный запуск восстановленного приложения.
 
 2. **Остановить старый инстанс** (чтобы база не менялась во время копирования):
 
@@ -187,7 +203,8 @@ systemctl enable --now competitions-backup.timer
   адресе страницы); «Экспорт» — скачивается xlsx.
 - Вложение: прикрепить к записи PDF/PNG до 5 МБ — скачивается. Это заодно
   проверяет `client_max_body_size` в nginx.
-- Бэкап: таймер активен, архив появился в `data/backups/sqlite/`.
+- Бэкап: таймеры активны, свежий `Verified` комплект появился в
+  `data/backups/sqlite/sets/`, offsite подтверждён и статусы не просрочены.
 
 ## Границы
 

@@ -16,11 +16,13 @@ from src.backup import write_backup_audit_event  # noqa: E402
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Create compressed SQLite backups with retention.')
+    parser = argparse.ArgumentParser(description='Create verified SQLite and attachment backup sets (no deletion).')
     parser.add_argument('--db-path', required=True)
     parser.add_argument('--output-dir', required=True)
     parser.add_argument('--files-dir', default=None, help='attachment directory to archive alongside the database')
-    parser.add_argument('--keep', type=int, default=14)
+    parser.add_argument('--keep', type=int, default=14, help='compatibility option; no deletion')
+    parser.add_argument('--source', choices=['daily', 'manual', 'release'], default='daily')
+    parser.add_argument('--state-dir')
     parser.add_argument(
         '--no-audit',
         action='store_true',
@@ -36,6 +38,8 @@ def main():
         db_path,
         Path(args.output_dir),
         keep=args.keep,
+        source=args.source,
+        state_dir=args.state_dir,
         files_dir=Path(args.files_dir) if args.files_dir else None,
     )
     print(result['archive'])
@@ -57,4 +61,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception:
+        print('Backup failed; see private operational status.', file=sys.stderr)
+        sys.exit(1)
