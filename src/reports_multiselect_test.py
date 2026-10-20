@@ -34,6 +34,8 @@ def multi_reports(client, tmp_path):
         storage.create_calendar_event('Тестовый кубок', f'2025-10-{day:02}T00:00:00', None, 'Уровень А', sport, [])
         for day, sport in ((1, 'Бег'), (2, 'Шахматы'), (3, 'Плавание'))
     ]
+    for event_id in event_ids:
+        assert storage.set_calendar_event_results_confirmation(event_id, True, 1) is None
     data = [
         ('Альфа', 'Институт А', 'А-1', 'Бег', 'Уровень А', event_ids[0], 1),
         ('Бета', 'Институт Б', 'Б-1', 'Шахматы', 'Уровень Б', event_ids[1], 3),
@@ -118,7 +120,7 @@ def test_html_and_xlsx_same_repeated_selection(multi_reports, slice_key):
     metric_count = 3 if slice_key == 'student' else 5
     assert get_report_footer(screen.text)[-metric_count:] == [str(value) for value in xlsx[-1][-metric_count:]]
     assert screen.text.count(f'<input type="hidden" name="event_id" value="{ids[0]}">') == 1
-    assert f'№{ids[0]}' in screen.text and f'№{ids[1]}' in screen.text
+    assert f'№{ids[0]}' not in screen.text and f'№{ids[1]}' not in screen.text
 
 
 def test_chips_remove_only_one_value_and_repeat_roundtrip():

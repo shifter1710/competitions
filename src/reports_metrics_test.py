@@ -33,6 +33,8 @@ def seed_metrics_history(storage):
         storage.create_calendar_event('Тестовый кубок', f'2026-10-0{day}T00:00:00', None, 'Тестовый уровень', 'Бег', [])
         for day in (1, 2)
     ]
+    for event_id in events:
+        assert storage.set_calendar_event_results_confirmation(event_id, True, 1) is None
     states = [
         (first, 'Тестовый Исторический', 'Институт А', 'А-1', 1, 3),
         (first, 'Тестовый Исторический', 'Институт А', 'А-2', 1, 2),
@@ -71,7 +73,11 @@ def seed_metrics_history(storage):
 
 
 @pytest.fixture
-def metrics_history(client, tmp_path):
+def metrics_history(client, tmp_path, monkeypatch):
+    from src.settings import settings
+
+    monkeypatch.setattr(settings, 'auth_viewer_username', 'synthetic-viewer')
+    monkeypatch.setattr(settings, 'auth_viewer_password', 'synthetic-viewer-password')
     storage = SQLiteAdapter(str(tmp_path / 'synthetic-metrics.sqlite3'))
     seed_fixture_levels(storage, 'Тестовый уровень')
     first, twin, events = seed_metrics_history(storage)
@@ -121,7 +127,7 @@ def test_metrics_and_safe_visual_blocks_preserve_raw_history(metrics_history):
         ({'name': 'ДРУГОЕ'}, (0, 1, 1)),
         ({'date_from': '01.01.2027'}, (0, 0, 0)),
         ({'date_to': '30.09.2026'}, (0, 0, 0)),
-        ({'position': '0'}, (2, 1, 4)),
+        ({'position': '0'}, (0, 1, 1)),
         ({'custom_filters': [('test_category', 'text', 'B')]}, (0, 0, 0)),
     ],
 )

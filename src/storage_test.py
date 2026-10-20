@@ -6313,6 +6313,7 @@ def test_wave1_reinit_idempotent(tmp_path):
 
 
 def test_wave1_backfill_links_unique_preset(adapter):
+    """Legacy helper still works when explicitly called; startup never calls it."""
     event_id = adapter.create_calendar_event(
         name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
     )
@@ -6998,6 +6999,7 @@ V21_PUBLIC_API = [
     'search_athletes',
     'search_student_candidates',
     'search_student_suggestions',
+    'set_calendar_event_results_confirmation',
     'set_calendar_regulation',
     'set_competition_review',
     'set_education_level_active',

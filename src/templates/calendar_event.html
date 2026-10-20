@@ -108,6 +108,25 @@
             <span class="badge text-bg-secondary"><span class="badge__dot"></span>прошло</span>
             {% endif %}
         </div>
+        <div class="d-flex flex-wrap align-items-center gap-2 mt-2 small" data-results-confirmation>
+            {% if event.results_confirmed %}
+            <span class="badge text-bg-success">Результаты подтверждены</span>
+            {% if event.confirmation_date_label %}<span class="text-muted">{{ event.confirmation_date_label }}</span>{% endif %}
+            {% else %}
+            <span class="badge text-bg-secondary">Результаты ожидают подтверждения</span>
+            {% endif %}
+            {% if is_admin %}
+            {% if event.results_confirmed or event.status == 'past' %}
+            <form method="post" action="/calendar/{{ event.id }}/results-confirmation">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <input type="hidden" name="confirmed" value="{{ '0' if event.results_confirmed else '1' }}">
+                <input type="hidden" name="result_filter" value="{{ result_filter }}">
+                <input type="hidden" name="return" value="{{ calendar_return_url }}">
+                <button type="submit" class="btn btn-sm btn-outline-secondary">{{ 'Снять подтверждение' if event.results_confirmed else 'Подтвердить результаты' }}</button>
+            </form>
+            {% else %}<span class="text-muted">Подтверждение доступно после окончания соревнования</span>{% endif %}
+            {% endif %}
+        </div>
 
     </div>
     {% if can_write %}
@@ -226,9 +245,8 @@
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form"
-                        {% if fs.position.value_type == 'number' %}type="number" min="0" step="1"
-                        {% else %}type="text"{% endif %} id="participant-position" name="position"
-                        aria-label="Место" placeholder="—"
+                        type="text" id="participant-position" name="position"
+                        aria-label="Место или DNF" placeholder="Место или DNF"
                         value="{{ participant_form_values.get('position', '') }}"
                         {% if not fs.position.required %}title="Место можно дописать позже"{% endif %}
                         {% if fs.position.required %}required{% endif %}>
@@ -271,9 +289,8 @@
                 </td>
                 <td>
                     <input class="form-control form-control-sm" form="participant-add-form"
-                        {% if base_field_settings.position.value_type == 'number' %}type="number" min="0" step="1"
-                        {% else %}type="text"{% endif %} id="participant-position" name="position"
-                        aria-label="Место" placeholder="—" title="Место можно дописать позже"
+                        type="text" id="participant-position" name="position"
+                        aria-label="Место или DNF" placeholder="Место или DNF" title="Место можно дописать позже"
                         value="{{ participant_form_values.get('position', '') }}">
                 </td>
                 <td>

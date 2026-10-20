@@ -9,6 +9,8 @@ from src.education import group_course
 from src.education import parse_group_admission_year
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
+from src.periods import today_in_timezone
+from src.settings import settings
 from src.storage.catalogs import CatalogsMixin
 from src.storage.education import EducationMixin
 from src.storage.events import EventsMixin
@@ -95,9 +97,33 @@ class SQLiteAdapter(
         )
         self.connection.create_function('education_admission_year', 1, parse_group_admission_year, deterministic=True)
         self.connection.create_function('education_course', 2, group_course, deterministic=True)
+        self.connection.create_function('app_today', 0, lambda: today_in_timezone(settings.app_timezone).isoformat())
         self.connection.row_factory = sqlite3.Row
         self.connection.execute('PRAGMA journal_mode=WAL')
         self._create_schema()
+
+    def _migrate_event_results(self, columns: set[str]) -> None:
+        """Atomic one-time legacy confirmation; new rows keep DEFAULT 0.
+
+        Column existence is the migration marker. SAVEPOINT covers every DDL
+        and the backfill, so interruption cannot leave a partially applied flag.
+        Legacy confirmation has no invented timestamp or actor.
+        """
+        if 'results_confirmed' in columns:
+            return
+        self.connection.execute('SAVEPOINT rep05_results')
+        try:
+            self.connection.execute(
+                'ALTER TABLE calendar_events ADD COLUMN results_confirmed INTEGER NOT NULL DEFAULT 0'
+            )
+            self.connection.execute('ALTER TABLE calendar_events ADD COLUMN results_confirmed_at TEXT')
+            self.connection.execute('ALTER TABLE calendar_events ADD COLUMN results_confirmed_by INTEGER')
+            self.connection.execute('UPDATE calendar_events SET results_confirmed = 1')
+            self.connection.execute('RELEASE SAVEPOINT rep05_results')
+        except Exception:
+            self.connection.execute('ROLLBACK TO SAVEPOINT rep05_results')
+            self.connection.execute('RELEASE SAVEPOINT rep05_results')
+            raise
 
     def _create_schema(self):
         with self._lock:
@@ -240,7 +266,10 @@ class SQLiteAdapter(
                     url TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     regulation_filename TEXT,
-                    regulation_stored_name TEXT
+                    regulation_stored_name TEXT,
+                    results_confirmed INTEGER NOT NULL DEFAULT 0,
+                    results_confirmed_at TEXT,
+                    results_confirmed_by INTEGER
                 )
                 '''
             )
@@ -249,6 +278,7 @@ class SQLiteAdapter(
             calendar_columns = {
                 row['name'] for row in self.connection.execute('PRAGMA table_info(calendar_events)').fetchall()
             }
+            self._migrate_event_results(calendar_columns)
             if 'regulation_filename' not in calendar_columns:
                 self.connection.execute('ALTER TABLE calendar_events ADD COLUMN regulation_filename TEXT')
             if 'regulation_stored_name' not in calendar_columns:
@@ -553,7 +583,8 @@ class SQLiteAdapter(
                 'CREATE INDEX IF NOT EXISTS idx_competitions_student_ref_id ON competitions (student_ref_id)'
             )
             self._migrate_teams()
-            self._backfill_competition_calendar_links()
+            # REP-05: startup must preserve explicit links and unlinked history.
+            # Matching names/dates are suggestions for manual admin linking only.
             self.connection.commit()
 
     def _migrate_event_documents_document_type(self) -> None:
@@ -782,8 +813,9 @@ class SQLiteAdapter(
     def _backfill_competition_calendar_links(self) -> dict[str, int]:
         """Проставить calendar_event_id записям с однозначным пресетом.
 
-        Event Model, Wave 1 P0: единственная автоматическая связь
-        «запись → событие». Предикат — ровно семантика
+        Legacy P0 utility for an explicit caller; never invoked at startup.
+        Production manual linking uses apply_calendar_link_backfill instead.
+        Предикат — ровно семантика
         _calendar_preset_match_sql (name + date + COALESCE(date_to, '')):
         в UPDATE колонки записи пишутся полными именами
         (competitions.<col>), алиас записи — имя таблицы.
@@ -792,8 +824,7 @@ class SQLiteAdapter(
         у которых пресет совпадает ровно с одним событием (unique-only,
         no-guess); уже связанные строки не трогаются. Один UPDATE
         коррелированными подзапросами (без UPDATE...FROM), выполняется
-        внутри транзакции вызывающей стороны (вызов из _create_schema
-        до commit).
+        внутри транзакции явного вызывающего кода; сам commit не выполняет.
 
         Возвращает счётчики: considered (NULL-строки до UPDATE), matched
         (rowcount), unmatched (остаток = NULL без единственного события),
@@ -852,8 +883,7 @@ class SQLiteAdapter(
             'ambiguous': ambiguous,
             'already_linked': already_linked,
         }
-        # Молчание на свежей БД и повторных стартах (considered = 0):
-        # INFO-строка только когда было что линковать.
+        # INFO-строка только при наличии NULL-строк для рассмотрения.
         if considered > 0:
             logger.info(
                 'calendar backfill: matched=%s unmatched=%s ambiguous=%s already_linked=%s',
