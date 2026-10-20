@@ -59,6 +59,13 @@ from src.records import IMPORT_DISCIPLINE_COLUMN
 from src.records import REQUIRED_IMPORT_COLUMNS
 from src.records import select_export_custom_fields
 from src.records import select_template_custom_fields
+from src.routes.reports import build_report_chips
+from src.routes.reports import build_report_filter_kwargs
+from src.routes.reports import collect_applied_report_query
+from src.routes.reports import parse_report_drilldown
+from src.routes.reports import REPORT_DRILLDOWN_METRICS
+from src.routes.reports import report_drilldown_row_labels
+from src.routes.reports import report_event_labels
 from src.settings import settings
 from src.storage.sqlite import dedup_discipline
 from src.storage.sqlite import SQLiteAdapter
@@ -824,6 +831,9 @@ def build_my_document_groups(documents: Sequence[dict]) -> list[dict]:
 def register(app: Sanic) -> None:  # noqa: C901
     @app.get('/')
     async def index(request: Request):
+        analytic = any(key in request.args for key in ('report_metric', 'report_slice', 'report_anchor'))
+        if analytic and user_is_athlete(request):
+            return forbidden(request)
         storage = get_storage(request.app)
         custom_fields = storage.get_custom_fields()
         # P3 Runtime Identity: scope кабинета атлета — один helper (owner,
@@ -853,10 +863,11 @@ def register(app: Sanic) -> None:  # noqa: C901
 
         # Серверная фильтрация реестра (прототип 02): GET-параметры рендерит,
         # фильтры живут в URL — ссылки шарятся. Некорректная дата — явная ошибка.
-        index_filters, filter_error = parse_index_filters(args)
+        # Analytics uses Reports date/period semantics, not the ordinary registry parser.
+        index_filters, filter_error = parse_index_filters({} if analytic else args)
         if filter_error is not None:
             return text(body=filter_error, status=400)
-        if user_is_moderator(request):
+        if not analytic and user_is_moderator(request):
             raw_status = (get_param(args, 'status') or '').strip()
             if raw_status in INDEX_STATUS_KEYS:
                 index_filters['status'] = raw_status
@@ -881,20 +892,64 @@ def register(app: Sanic) -> None:  # noqa: C901
             date_from=index_filters['date_from'],
             date_to=index_filters['date_to'],
         )
-        total_count = storage.count_competitions_filtered(**filter_kwargs)
+        report_context = None
+        analytic_entries = []
+        if analytic:
+            selector, selector_error = parse_report_drilldown(args)
+            report_filters, report_error = build_report_filter_kwargs(request)
+            if selector_error or report_error:
+                return text(body=selector_error or report_error, status=400)
+            total_count, _, row_values = storage.get_report_drilldown(
+                **selector,
+                **report_filters,
+                limit=0,
+            )
+            applied = collect_applied_report_query(args, custom_fields) or [('period', 'all')]
+            analytic_entries = [*applied, ('report_metric', selector['metric'])]
+            if selector['slice_key']:
+                analytic_entries.extend(
+                    [('report_slice', selector['slice_key']), ('report_anchor', str(selector['anchor_id']))]
+                )
+            report_context = {
+                'metric': REPORT_DRILLDOWN_METRICS[selector['metric']],
+                'return_url': '/reports?' + urlencode(applied),
+                'chips': build_report_chips(applied, custom_fields, report_event_labels(storage, args)),
+                'row_labels': report_drilldown_row_labels(selector['slice_key'], row_values),
+            }
+        else:
+            total_count = storage.count_competitions_filtered(**filter_kwargs)
         page_count = max(1, -(-total_count // per_page))
-        # Страница вне диапазона зажимается на последнюю (как в журнале аудита).
         page = min(parse_index_page(args), page_count)
-        competitions = storage.get_competitions_page(
-            limit=per_page,
-            offset=(page - 1) * per_page,
-            sort_key=sort_key,
-            sort_reverse=(sort_order == 'desc'),
-            **filter_kwargs,
-        )
+        if analytic:
+            _, competitions, _ = storage.get_report_drilldown(
+                **selector,
+                **report_filters,
+                limit=per_page,
+                offset=(page - 1) * per_page,
+                sort_key=sort_key,
+                sort_reverse=(sort_order == 'desc'),
+            )
+        else:
+            competitions = storage.get_competitions_page(
+                limit=per_page,
+                offset=(page - 1) * per_page,
+                sort_key=sort_key,
+                sort_reverse=(sort_order == 'desc'),
+                **filter_kwargs,
+            )
+
+        def navigation_query(page_size: int) -> str:
+            if not analytic:
+                return build_index_query(index_filters, page_size, sort_column, sort_order)
+            entries = list(analytic_entries)
+            if page_size != INDEX_DEFAULT_PER_PAGE:
+                entries.append(('per_page', str(page_size)))
+            if sort_column:
+                entries.extend([('sort', sort_column), ('order', sort_order)])
+            return urlencode(entries)
 
         def page_url(page_number: int) -> str:
-            query = build_index_query(index_filters, per_page, sort_column, sort_order)
+            query = navigation_query(per_page)
             separator = '&' if query else ''
             return f'/?{query}{separator}page={page_number}'
 
@@ -925,6 +980,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             template_name=jinja_env.get_template('index.html'),
             context={
                 'request': request,
+                'report_context': report_context,
                 'competitions': competitions,
                 'custom_fields': custom_fields,
                 # №24: карта «целевая колонка → ключ link-поля» для рендера.
@@ -978,8 +1034,8 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'status_filter_options': INDEX_STATUS_FILTERS,
                 # Селект «Показывать по» держит фильтры и сортировку (per_page
                 # ставит сам, page сбрасывает).
-                'index_filter_query': build_index_query(index_filters, INDEX_DEFAULT_PER_PAGE, sort_column, sort_order),
-                'index_is_filtered': any(index_filters.values()),
+                'index_filter_query': navigation_query(INDEX_DEFAULT_PER_PAGE),
+                'index_is_filtered': analytic or any(index_filters.values()),
                 # Серверная сортировка: индикатор на th и клик-навигация (JS).
                 'index_sort_column': sort_column,
                 'index_sort_order': sort_order,

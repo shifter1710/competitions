@@ -6924,6 +6924,7 @@ V21_PUBLIC_API = [
     # Reports v2: опции фильтров и сводный агрегат по выборке.
     'get_report_admission_year_options',
     'get_report_course_options',
+    'get_report_drilldown',
     'get_report_period_year_options',
     'get_report_summary',
     'get_sport_names',

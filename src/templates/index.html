@@ -149,6 +149,19 @@
 </div>
 {%- endmacro %}
 
+{% if report_context %}
+<div class="card shadow-sm mb-4 report-drilldown-context" aria-label="Условия аналитического перехода">
+    <div class="card-body">
+        <h2 class="h5">Из отчёта: {{ report_context.metric }} · Найдено записей: {{ total_count }}</h2>
+        <div class="filter-chips mb-2">
+            {% for chip in report_context.chips %}<span class="filter-chip">{{ chip.label }}: {{ chip.value }}</span>{% endfor %}
+            {% for chip in report_context.row_labels %}<span class="filter-chip">{{ chip.label }}: {{ chip.value }}</span>{% endfor %}
+            <span class="filter-chip">Только подтверждённые</span>
+        </div>
+        <a class="btn btn-outline-primary btn-sm" href="{{ report_context.return_url }}">Вернуться к отчёту</a>
+    </div>
+</div>
+{% else %}
 <div class="card shadow-sm mb-4 index-filter-card">
     <div class="card-body">
         <form class="row g-3 align-items-end" method="get" action="/">
@@ -205,6 +218,8 @@
         </form>
     </div>
 </div>
+
+{% endif %}
 
 <div class="buttons">
     {% if can_write %}
@@ -315,7 +330,7 @@
                 </thead>
                 <tbody>
                     {% for competition in competitions %}
-                    <tr>
+                    <tr{% if report_context %} data-record-id="{{ competition.record_id }}"{% endif %}>
                         <td data-column-key="index">{{ loop.index }}</td>
                         <td data-column-key="student_name">{{ bound_cell(competition.student_name, link_bindings.get('student_name'), competition.extra_data) }}</td>
                         <td data-column-key="student_sex">{{ competition.student_sex }}</td>

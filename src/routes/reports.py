@@ -511,6 +511,58 @@ def build_report_display_groups(report_rows: Sequence, slice_key: str) -> list[l
     return list(groups.values())
 
 
+REPORT_DRILLDOWN_METRICS = {
+    'participations': 'Участия',
+    'wins': 'Победы',
+    'prizes': 'Призовые',
+}
+
+
+def report_drilldown_url(entries: Sequence[tuple[str, str]], metric: str, slice_key: str = '', anchor=None) -> str:
+    params = [*entries, ('report_metric', metric)]
+    if slice_key and anchor is not None:
+        params.extend([('report_slice', slice_key), ('report_anchor', str(anchor))])
+    return '/?' + urlencode(params)
+
+
+def parse_report_drilldown(args: dict) -> tuple[dict, str | None]:
+    metric = get_param(args, 'report_metric') or ''
+    slice_key = get_param(args, 'report_slice') or ''
+    anchor = get_param(args, 'report_anchor') or ''
+    if metric not in REPORT_DRILLDOWN_METRICS:
+        return {}, 'Неизвестный показатель отчёта'
+    if bool(slice_key) != bool(anchor) or (slice_key and slice_key not in REPORT_SLICE_KEYS):
+        return {}, 'Некорректный срез отчёта'
+    if anchor and (not re.fullmatch(r'[1-9]\d{0,18}', anchor) or int(anchor) > 9223372036854775807):
+        return {}, 'Некорректная запись среза'
+    return dict(metric=metric, slice_key=slice_key, anchor_id=int(anchor) if anchor else None), None
+
+
+def report_drilldown_row_labels(slice_key: str, values: tuple) -> list[dict]:
+    if not slice_key:
+        return []
+    if not values:
+        return [{'label': 'Строка отчёта', 'value': 'Больше не доступна в выбранных условиях'}]
+    if slice_key == DEFAULT_REPORT_SLICE:
+        identity, *historical = values
+        linked = str(identity).startswith('r')
+        values = (str(identity)[1:], *historical)
+        labels = (
+            'ID студента (в записи)' if linked else 'ID участия без карточки',
+            'ФИО',
+            'Пол',
+            'Институт',
+            'Группа',
+            'Курс',
+        )
+    else:
+        labels = REPORT_SLICE_COLUMNS[slice_key]
+    return [
+        {'label': label, 'value': 'Не указано' if value in (None, '') else str(value)}
+        for label, value in zip(labels, values)
+    ]
+
+
 def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     """Контекст зоны результата отчёта (общий для /reports и /report).
 
@@ -529,6 +581,9 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     display_groups = build_report_display_groups(report_rows, slice_key)
     return {
         'report_rows': report_rows,
+        'report_drilldown_url': lambda metric, anchor=None: report_drilldown_url(
+            entries or [('period', REPORT_PERIOD_ALL)], metric, slice_key if anchor is not None else '', anchor
+        ),
         'report_display_groups': display_groups,
         'visual_groups_count': len(display_groups),
         # Пустой /report — всё время; /reports без условий не показывает результат.
