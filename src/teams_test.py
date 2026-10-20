@@ -235,12 +235,16 @@ def reserve_document(storage, event, team, student):
     return document
 
 
-def test_a_is_fail_closed_on_future_document_and_restart(tmp_path):
+def test_unknown_document_scope_stays_fail_closed_after_restart(tmp_path):
     path = str(tmp_path / 'rollback.sqlite3')
     storage = SQLiteAdapter(path)
     event, team, student, ids = seed_team(storage)
     storage.change_event_team_members(event, team, ids[:2], 'add')
     document = reserve_document(storage, event, team, student)
+    storage.connection.execute(
+        "UPDATE calendar_event_documents SET access_mode='future_unsupported' WHERE id=?", (document,)
+    )
+    storage.connection.commit()
     before = storage.get_calendar_event_document(event, document)
     history = storage.event_team_history(event)
     storage.connection.close()

@@ -1337,13 +1337,16 @@ class Main {
             return;
         }
         const studentsBlock = form.querySelector("[data-documents-students]");
+        const teamBlock = form.querySelector("[data-documents-team]");
+        const refreshScope = () => {
+            const mode = form.querySelector('input[name="access_mode"]:checked')?.value;
+            studentsBlock?.classList.toggle("d-none", mode !== "selected_students");
+            teamBlock?.classList.toggle("d-none", mode !== "team_members");
+        };
         form.querySelectorAll('input[name="access_mode"]').forEach((radio) => {
-            radio.addEventListener("change", () => {
-                if (studentsBlock) {
-                    studentsBlock.classList.toggle("d-none", radio.value !== "selected_students");
-                }
-            });
+            radio.addEventListener("change", refreshScope);
         });
+        refreshScope();
     }
 
     // Карточка фильтров главной (прототип 02): применение и сброс —

@@ -23,7 +23,8 @@ from src.storage.helpers import team_participation_write
 
 # Режимы доступа к документу события (Event Documents): всем участникам
 # события (по факту участия Student-карточки) или явно выбранным карточкам.
-EVENT_DOCUMENT_ACCESS_MODES = ('all_participants', 'selected_students')
+EVENT_DOCUMENT_ACCESS_MODES = ('all_participants', 'selected_students', 'team_members')
+DOCUMENT_TEAM_UNSET = object()
 
 # Типы документов события: 'generic' — материалы с настраиваемым доступом,
 # 'protocol' — официальные протоколы соревнования, доступ всегда
@@ -225,6 +226,8 @@ class EventsMixin:
             rows = self.connection.execute(
                 '''
                 SELECT d.*,
+                       (SELECT t.name FROM calendar_event_teams t WHERE t.id=d.team_id
+                        AND t.calendar_event_id=d.calendar_event_id) AS team_name,
                        (SELECT COUNT(*) FROM calendar_event_document_students m
                         WHERE m.calendar_event_document_id = d.id) AS students_count
                 FROM calendar_event_documents d
@@ -304,6 +307,23 @@ class EventsMixin:
                 (document_id, int(student_id), created_at),
             )
 
+    def _document_scope(self, event_id, document_type, access_mode, student_ids, team_id):
+        """Validate a complete proposed scope inside the caller's write transaction."""
+        if document_type == 'protocol':
+            return 'all_participants', [], None, None
+        if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
+            return access_mode, [], team_id, 'invalid_access_mode'
+        if access_mode == 'team_members':
+            if team_id is None or not self.get_event_team(event_id, team_id):
+                return access_mode, [], team_id, 'invalid_team'
+            return access_mode, [], int(team_id), None
+        if team_id is not None:
+            return access_mode, [], team_id, 'invalid_team'
+        if access_mode == 'selected_students':
+            error = self._check_event_document_students(event_id, student_ids)
+            return access_mode, sorted({int(value) for value in student_ids}), None, error
+        return access_mode, [], None, None
+
     def create_calendar_event_document(
         self,
         event_id: int,
@@ -317,75 +337,59 @@ class EventsMixin:
         student_ids: Sequence[int],
         uploaded_by: int | None = None,
         document_type: str = 'generic',
+        team_id: int | None = None,
     ) -> tuple[int | None, str | None]:
-        """Создать документ события: (document_id, None) или (None, код
-        ошибки).
-
-        Валидация ДО вставки (invalid_document_type / invalid_access_mode /
-        no_students / student_not_found / student_inactive /
-        student_not_participant) — отказ не оставляет строк. Протокол
-        (document_type='protocol') — доступ всегда all_participants и без
-        маппингов, независимо от поданных access_mode/student_ids. Одна
-        транзакция: INSERT документа (sort_order = COALESCE(MAX, 0)+1 — новый
-        документ в конец, timestamps — datetime.utcnow().isoformat()) +
-        маппинги для selected_students (all_participants маппингов не пишет).
-        Существование события и файла проверяет роут."""
+        """One existing document row/file, optionally scoped to one event team."""
         if document_type not in EVENT_DOCUMENT_TYPES:
             return None, 'invalid_document_type'
-        if document_type == 'protocol':
-            access_mode = 'all_participants'
-            student_ids = []
-        if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
-            return None, 'invalid_access_mode'
-        with self._lock:
-            if access_mode == 'selected_students':
-                error = self._check_event_document_students(event_id, student_ids)
-                if error is not None:
-                    return None, error
-                ids = sorted({int(student_id) for student_id in student_ids})
-            else:
-                ids = []
+        with self._team_transaction():
+            if self.connection.execute('SELECT 1 FROM calendar_events WHERE id=?', (event_id,)).fetchone() is None:
+                return None, 'event_not_found'
+            mode, ids, team_id, error = self._document_scope(event_id, document_type, access_mode, student_ids, team_id)
+            if error:
+                return None, error
             now = datetime.utcnow().isoformat()
-            try:
-                cursor = self.connection.execute(
-                    'INSERT INTO calendar_event_documents'
-                    ' (calendar_event_id, title, filename, stored_name, content_type, size,'
-                    ' access_mode, uploaded_by, sort_order, created_at, updated_at, document_type)'
-                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?,'
-                    ' COALESCE((SELECT MAX(sort_order) FROM calendar_event_documents'
-                    '     WHERE calendar_event_id = ?), 0) + 1, ?, ?, ?)',
-                    (
-                        int(event_id),
-                        title,
-                        filename,
-                        stored_name,
-                        content_type,
-                        int(size),
-                        access_mode,
-                        uploaded_by,
-                        int(event_id),
-                        now,
-                        now,
-                        document_type,
-                    ),
-                )
-                document_id = cursor.lastrowid
-                self._insert_document_students(document_id, ids)
-                self.connection.commit()
-                return document_id, None
-            except BaseException:
-                self.connection.rollback()
-                raise
-
-    def _event_document_recipient_ids(self, event_id, access_mode, student_ids):
-        if access_mode != 'selected_students':
-            return [], None
-        error = self._check_event_document_students(event_id, student_ids)
-        return sorted({int(student_id) for student_id in student_ids}), error
+            cursor = self.connection.execute(
+                'INSERT INTO calendar_event_documents '
+                '(calendar_event_id,title,filename,stored_name,content_type,size,access_mode,uploaded_by,'
+                'sort_order,created_at,updated_at,document_type,team_id) '
+                'VALUES (?,?,?,?,?,?,?,?,COALESCE((SELECT MAX(sort_order) FROM calendar_event_documents '
+                'WHERE calendar_event_id=?),0)+1,?,?,?,?)',
+                (
+                    int(event_id),
+                    title,
+                    filename,
+                    stored_name,
+                    content_type,
+                    int(size),
+                    mode,
+                    uploaded_by,
+                    int(event_id),
+                    now,
+                    now,
+                    document_type,
+                    team_id,
+                ),
+            )
+            document_id = cursor.lastrowid
+            self._insert_document_students(document_id, ids)
+            return document_id, None
 
     @staticmethod
     def _unsupported_event_document_scope(document):
-        return document['team_id'] is not None or document['access_mode'] not in EVENT_DOCUMENT_ACCESS_MODES
+        if document['access_mode'] not in EVENT_DOCUMENT_ACCESS_MODES:
+            return True
+        if document['document_type'] == 'protocol':
+            return document['team_id'] is not None or document['access_mode'] != 'all_participants'
+        return (document['access_mode'] == 'team_members') != (document['team_id'] is not None)
+
+    def _document_update_scope(self, event_id, stored, access_mode, student_ids, team_id):
+        mode = stored['access_mode'] if access_mode is None else access_mode
+        if team_id is DOCUMENT_TEAM_UNSET:
+            team_id = stored['team_id'] if mode == stored['access_mode'] else None
+        if student_ids is None:
+            student_ids = self.calendar_event_document_students(stored['id'])
+        return self._document_scope(event_id, stored['document_type'], mode, student_ids, team_id)
 
     def update_calendar_event_document(
         self,
@@ -393,134 +397,117 @@ class EventsMixin:
         document_id: int,
         *,
         title: str,
-        access_mode: str,
-        student_ids: Sequence[int],
+        access_mode: str | None = None,
+        student_ids: Sequence[int] | None = None,
         filename: str | None = None,
         stored_name: str | None = None,
         content_type: str | None = None,
         size: int | None = None,
+        team_id=DOCUMENT_TEAM_UNSET,
     ) -> tuple[bool, str | None]:
-        """Правка метаданных документа: (True, None), (False, 'not_found')
-        или (False, код валидации).
-
-        Валидация та же, что у create; отказ ДО записи не меняет ничего
-        (включая title). Протокол (document_type='protocol' в строке БД):
-        доступ всегда all_participants и без маппингов — поданные
-        access_mode/student_ids игнорируются; сам document_type неизменяем
-        (в UPDATE не входит). Одна транзакция: UPDATE метаданных (updated_at)
-        + full-replace маппингов — DELETE всех + INSERT OR IGNORE новых
-        (паттерн _insert_event_links); при all_participants маппинги
-        просто стираются. Опциональные файловые поля (filename/stored_name/
-        content_type/size) передаёт только роут при замене файла: поданные
-        не-None значения обновляются в том же commit (None — поле не
-        трогаем); старый файл на диске чистит роут."""
-        if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
+        """Omitted scope fields preserve their current values; edits never infer recipients."""
+        if access_mode is not None and access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
             return False, 'invalid_access_mode'
         with self._team_transaction():
-            stored = self.connection.execute(
-                'SELECT document_type, access_mode, team_id FROM calendar_event_documents'
-                ' WHERE id = ? AND calendar_event_id = ?',
-                (int(document_id), int(event_id)),
-            ).fetchone()
+            stored = self.get_calendar_event_document(event_id, document_id)
             if stored is None:
                 return False, 'not_found'
             if self._unsupported_event_document_scope(stored):
                 return False, 'unsupported_scope'
-            if stored['document_type'] == 'protocol':
-                access_mode = 'all_participants'
-                student_ids = []
-            ids, error = self._event_document_recipient_ids(event_id, access_mode, student_ids)
-            if error is not None:
+            mode, ids, team_id, error = self._document_update_scope(event_id, stored, access_mode, student_ids, team_id)
+            if error:
                 return False, error
-            try:
-                set_clause = 'title = ?, access_mode = ?, updated_at = ?'
-                set_params: list = [title, access_mode, datetime.utcnow().isoformat()]
-                for column, value in (
-                    ('filename', filename),
-                    ('stored_name', stored_name),
-                    ('content_type', content_type),
-                    ('size', int(size) if size is not None else None),
-                ):
-                    if value is not None:
-                        set_clause += f', {column} = ?'
-                        set_params.append(value)
-                self.connection.execute(
-                    f'UPDATE calendar_event_documents SET {set_clause}' ' WHERE id = ? AND calendar_event_id = ?',
-                    (*set_params, int(document_id), int(event_id)),
-                )
-                self.connection.execute(
-                    'DELETE FROM calendar_event_document_students WHERE calendar_event_document_id = ?',
-                    (int(document_id),),
-                )
-                self._insert_document_students(int(document_id), ids)
-                return True, None
-            except BaseException:
-                self.connection.rollback()
-                raise
+            set_clause = 'title=?, access_mode=?, team_id=?, updated_at=?'
+            params = [title, mode, team_id, datetime.utcnow().isoformat()]
+            for column, value in (
+                ('filename', filename),
+                ('stored_name', stored_name),
+                ('content_type', content_type),
+                ('size', size),
+            ):
+                if value is not None:
+                    set_clause += f', {column}=?'
+                    params.append(value)
+            self.connection.execute(
+                f'UPDATE calendar_event_documents SET {set_clause} ' 'WHERE id=? AND calendar_event_id=?',
+                (*params, document_id, event_id),
+            )
+            self.connection.execute(
+                'DELETE FROM calendar_event_document_students ' 'WHERE calendar_event_document_id=?', (document_id,)
+            )
+            self._insert_document_students(document_id, ids)
+            return True, None
 
     def delete_calendar_event_document(self, event_id: int, document_id: int) -> bool:
-        """Удалить документ события (ownership — в WHERE): True — удалён,
-        False — не найден/чужой. Маппинги чистятся в той же транзакции и
-        только при найденном документе (чужой документ с тем же id своих
-        маппингов не теряет). Файл на диске чистит роут."""
         with self._team_transaction():
             document = self.get_calendar_event_document(event_id, document_id)
-            if document and (
-                document.get('team_id') is not None or document['access_mode'] not in EVENT_DOCUMENT_ACCESS_MODES
-            ):
+            if document and self._unsupported_event_document_scope(document):
                 return False
             cursor = self.connection.execute(
-                'DELETE FROM calendar_event_documents WHERE id = ? AND calendar_event_id = ?',
-                (int(document_id), int(event_id)),
+                'DELETE FROM calendar_event_documents ' 'WHERE id=? AND calendar_event_id=?', (document_id, event_id)
             )
-            deleted = cursor.rowcount > 0
-            if deleted:
+            if cursor.rowcount:
                 self.connection.execute(
-                    'DELETE FROM calendar_event_document_students WHERE calendar_event_document_id = ?',
-                    (int(document_id),),
+                    'DELETE FROM calendar_event_document_students ' 'WHERE calendar_event_document_id=?', (document_id,)
                 )
-            return deleted
+            return cursor.rowcount > 0
 
-    def list_documents_for_student(self, student_id: int) -> list[dict]:
-        """Документы, доступные Student-карточке (личный кабинет атлета):
-        all_participants — при любом участии карточки в событии,
-        selected_students — при явном маппинге документ↔карточка.
+    @staticmethod
+    def _event_document_acl_sql(student_expression):
+        """Single predicate shared by cabinet listing and direct download.
 
-        JOIN с calendar_events несёт название и сырые даты события
-        (форматирование — за роутом). EXISTS-предикаты не дублируют документ
-        при нескольких участиях одной карточки в одном событии. Порядок —
-        дата события DESC (свежие сверху), затем (sort_order, id) документа."""
+        Legacy modes keep their existing participation/explicit-assignment rules.
+        Team mode additionally requires every current identity/ownership link.
+        No name/hash/owner, student-active, review or confirmed-result conditions.
+        """
+        return f"""(
+            (d.team_id IS NULL AND d.access_mode='all_participants' AND EXISTS (
+                SELECT 1 FROM competitions c WHERE c.calendar_event_id=d.calendar_event_id
+                    AND c.student_ref_id={student_expression}))
+            OR (d.team_id IS NULL AND d.access_mode='selected_students' AND EXISTS (
+                SELECT 1 FROM calendar_event_document_students m
+                WHERE m.calendar_event_document_id=d.id AND m.student_id={student_expression}))
+            OR (d.document_type='generic' AND d.access_mode='team_members' AND EXISTS (
+                SELECT 1 FROM calendar_event_teams t
+                JOIN calendar_event_team_members m ON m.team_id=t.id
+                JOIN competitions c ON c.id=m.competition_id AND c.calendar_event_id=t.calendar_event_id
+                JOIN students s ON s.id=c.student_ref_id
+                WHERE t.id=d.team_id AND t.calendar_event_id=d.calendar_event_id
+                    AND s.id={student_expression}))
+        )"""
+
+    def list_documents_for_student(self, student_id: int, *, user_id: int | None = None) -> list[dict]:
+        """Compatibility API; HTTP supplies user_id to resolve the CURRENT account ref in SQL."""
         with self._lock:
+            principal_join = '' if user_id is None else 'JOIN users u ON u.id=:user_id'
+            principal_where = '' if user_id is None else "u.active=1 AND u.role='athlete' AND "
+            predicate = self._event_document_acl_sql(':student_id' if user_id is None else 'u.student_ref_id')
             rows = self.connection.execute(
-                '''
-                SELECT
-                    d.id,
-                    d.calendar_event_id,
-                    d.title,
-                    d.filename,
-                    d.content_type,
-                    d.size,
-                    d.access_mode,
-                    d.document_type,
-                    e.name AS event_name,
-                    e.date AS event_date,
-                    e.date_to AS event_date_to
-                FROM calendar_event_documents d
-                JOIN calendar_events e ON e.id = d.calendar_event_id
-                WHERE d.team_id IS NULL AND (
-                    (d.access_mode = 'all_participants' AND EXISTS (
-                        SELECT 1 FROM competitions c
-                        WHERE c.calendar_event_id = d.calendar_event_id
-                          AND c.student_ref_id = ?))
-                    OR (d.access_mode = 'selected_students' AND EXISTS (
-                        SELECT 1 FROM calendar_event_document_students m
-                        WHERE m.calendar_event_document_id = d.id
-                          AND m.student_id = ?)))
-                ORDER BY e.date DESC, d.sort_order ASC, d.id ASC
-                ''',
-                (int(student_id), int(student_id)),
+                f"""SELECT d.*, t.name AS team_name, e.name AS event_name,
+                          e.date AS event_date, e.date_to AS event_date_to
+                   FROM calendar_event_documents d
+                   JOIN calendar_events e ON e.id=d.calendar_event_id
+                   LEFT JOIN calendar_event_teams t ON t.id=d.team_id AND t.calendar_event_id=d.calendar_event_id
+                   {principal_join}
+                   WHERE {principal_where}{predicate}
+                   ORDER BY e.date DESC, d.sort_order, d.id""",
+                {'student_id': int(student_id), 'user_id': user_id},
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_event_document_for_user(self, event_id: int, document_id: int, user_id: int) -> dict | None:
+        """Fresh principal and document in one statement; staff access stays intact."""
+        with self._lock:
+            predicate = self._event_document_acl_sql('u.student_ref_id')
+            row = self.connection.execute(
+                f"""SELECT d.* FROM calendar_event_documents d
+                   JOIN calendar_events e ON e.id=d.calendar_event_id
+                   JOIN users u ON u.id=:user_id AND u.active=1
+                   WHERE d.id=:document_id AND d.calendar_event_id=:event_id
+                     AND (u.role IN ('admin','editor','viewer') OR (u.role='athlete' AND {predicate}))""",
+                {'user_id': user_id, 'event_id': event_id, 'document_id': document_id},
+            ).fetchone()
+            return dict(row) if row else None
 
     def create_calendar_event(
         self,

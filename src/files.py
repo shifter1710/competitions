@@ -116,3 +116,34 @@ def attachment_source_path(attachment: dict) -> Path:
 def attachments_files_bytes(attachments: Sequence[dict]) -> int:
     """Сумма размеров файлов вложений на диске (что реально освободится, №18)."""
     return sum(file_size(attachment_source_path(attachment)) for attachment in attachments)
+
+
+def event_document_file_identity(path: Path) -> tuple:
+    """An on-disk version, excluding symlinks and non-regular files."""
+    import stat
+
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('Not a regular document file')
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def read_event_document_version(path: Path) -> tuple[bytes, tuple]:
+    """Read one bounded regular file without following a replacement symlink."""
+    import os
+    import stat
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > ATTACHMENT_MAX_SIZE:
+            raise ValueError('Invalid document file')
+        body = source.read(ATTACHMENT_MAX_SIZE + 1)
+        after = os.fstat(source.fileno())
+
+    def identity(info):
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    if len(body) > ATTACHMENT_MAX_SIZE or identity(before) != identity(after):
+        raise ValueError('Document changed while reading')
+    return body, identity(after)

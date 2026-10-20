@@ -12,6 +12,7 @@
 </form>
 {% endif %}
 {% if team %}
+{% if can_manage %}<a class="btn btn-outline-primary mb-3" href="/calendar/{{ event.id }}?document_team={{ team.id }}#event-documents">Загрузить документ команды</a>{% endif %}
 <p>Состав: {{ members|length }} участий. Каждая дисциплина выбирается отдельно. Одно участие может входить в несколько команд.</p>
 <div class="alert alert-warning">Участие без связанной карточки можно добавить в команду, но оно не даёт доступа к документам через личный кабинет.</div>
 {% for mode, heading, button in [('remove', 'Текущий состав', 'Исключить выбранные'), ('add', 'Добавить участия соревнования', 'Добавить выбранные')] %}
