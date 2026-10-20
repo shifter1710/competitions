@@ -132,12 +132,12 @@ def test_student_period_is_before_limit_and_identity_safe(store):
 
 
 @pytest.fixture
-def client(store):
+def client(store, http_client):
     previous = app.ctx.storage
     app.ctx.storage = store
     for role in ('admin', 'editor', 'viewer', 'athlete'):
         store.create_user('synthetic_' + role, 'unused-hash', role)
-    yield app.test_client
+    yield http_client
     app.ctx.storage = previous
 
 

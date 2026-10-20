@@ -8,6 +8,7 @@ import sqlite3
 import time
 from datetime import date
 from datetime import datetime
+from functools import lru_cache
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -24,6 +25,7 @@ import pandas as pd
 import pytest
 from sanic_testing.testing import SanicTestClient
 
+from src import auth as auth_module
 from src.auth import create_auth_cookie_value
 from src.auth import hash_password
 from src.auth import verify_password
@@ -126,6 +128,16 @@ def csrf_for(headers: dict[str, str]) -> dict[str, str]:
     return {'csrf_token': token}
 
 
+@lru_cache(maxsize=32)
+def prepared_password_hash(password, parameters, hash_function, scrypt_function):
+    """Reuse synthetic fixture preparation, respecting patched crypto inputs.
+
+    Parameters and callable identities are cache keys only. Production hashing,
+    verification, login and password changes still call their real functions.
+    """
+    return hash_function(password)
+
+
 def fake_get_user(username: str) -> dict | None:
     if username == 'sportik':
         return {
@@ -146,7 +158,12 @@ def fake_get_user(username: str) -> dict | None:
             return {
                 'id': 1,
                 'username': account_username,
-                'password_hash': hash_password(password),
+                'password_hash': prepared_password_hash(
+                    password,
+                    (auth_module.SCRYPT_N, auth_module.SCRYPT_R, auth_module.SCRYPT_P, auth_module.SCRYPT_DKLEN),
+                    hash_password,
+                    auth_module.hashlib.scrypt,
+                ),
                 'role': role,
                 'active': 1,
                 'pwd_ver': 0,
@@ -154,8 +171,8 @@ def fake_get_user(username: str) -> dict | None:
     return None
 
 
-@pytest.fixture(scope='module')
-def client() -> SanicTestClient:
+@pytest.fixture
+def client(http_client) -> SanicTestClient:
     fake_storage = Mock()
     fake_storage.get_competitions.return_value = []
     # Серверные фильтры/пагинация главной (прототип 02)
@@ -283,7 +300,7 @@ def client() -> SanicTestClient:
     fake_storage.get_linked_record_period_year_options.return_value = []
     fake_storage.get_grouped_report.return_value = []
     app.ctx.storage = fake_storage
-    return app.test_client
+    return http_client
 
 
 def test_healthcheck(client: SanicTestClient):
