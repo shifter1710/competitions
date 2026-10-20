@@ -5,19 +5,44 @@
 Козлов выступал за два института — историчность: срезы группируют по данным
 записи, а не по профилю.
 """
-import sys
 from datetime import datetime
 
+import pytest
+
+from src.http_scenarios import fresh_application
+from src.http_scenarios import ScenarioClient
 from src.models.competition import Competition
 
-# Каждый запрос SanicTestClient выполняет app.run → повторная финализация
-# signal-роутера Sanic, и таблица сигналов прирастает дублем (взаимодействие
-# sanic-testing/sanic-ext, на проде не проявляется — там один старт).
-# Сгенерированное дерево диспетчера глубжеет с каждым дублем, и на большом
-# наборе HTTP-тестов ast.fix_missing_locations упирается в дефолтный лимит
-# рекурсии. Тестовый процесс — единственное место, где запросов тысячи,
-# поэтому лимит поднимаем здесь, а не в приложении.
-sys.setrecursionlimit(10000)
+
+@pytest.fixture
+def http_client(request, monkeypatch):
+    """Fresh app/state per scenario; defer startup until storage fixtures finish."""
+    from src import auth
+    from src import main
+    from src import main_test
+    from src.routes.auth import login_failures
+    from src.routes.calendar import event_import_sessions
+    from src.routes.students import student_import_sessions
+
+    mutable_state = (login_failures, event_import_sessions, student_import_sessions, auth._last_seen_touch)
+    previous_state = [dict(state) for state in mutable_state]
+    for state in mutable_state:
+        state.clear()
+    try:
+        with fresh_application() as application, monkeypatch.context() as aliases:
+            aliases.setattr(main, 'app', application)
+            aliases.setattr(main_test, 'app', application)
+            if hasattr(request.module, 'app'):
+                aliases.setattr(request.module, 'app', application)
+            client = ScenarioClient(application)
+            try:
+                yield client
+            finally:
+                client.close()
+    finally:
+        for state, previous in zip(mutable_state, previous_state):
+            state.clear()
+            state.update(previous)
 
 
 class FailingStudentsDeleteConnection:
