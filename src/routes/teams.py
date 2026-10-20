@@ -110,13 +110,14 @@ def register(app):  # noqa: C901 - route registration, matching other route modu
         if team is None:
             return text('Team not found', status=404)
         values = {
-            'name': get_form_value(request, 'name'),
+            'search': get_form_value(request, 'search'),
             'selected': request.form.getlist('competition_id'),
             'action': action,
         }
         actor = get_auth_user(request)
         try:
             if action == 'rename':
+                values['name'] = get_form_value(request, 'name')
                 storage.rename_event_team(event['id'], team_id, values['name'], actor)
             elif action == 'delete':
                 storage.delete_event_team(event['id'], team_id, actor)

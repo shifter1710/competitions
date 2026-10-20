@@ -426,3 +426,27 @@ def test_result_error_preserves_team_label_place(team_http, team_db):
     assert f'value="{team}" selected' in response.text
     assert 'name="place" value="0"' in response.text
     assert not team_db.get_calendar_event(event)['team_results']
+
+
+@pytest.mark.parametrize('role', ['admin', 'editor'])
+@pytest.mark.parametrize('action', ['add', 'remove', 'delete', 'rename'])
+def test_team_error_preserves_action_fields_and_existing_name(team_http, team_db, role, action):
+    import re
+
+    event, team, _, ids = seed_team(team_db)
+    team_db.change_event_team_members(event, team, [ids[0]], 'add')
+    headers = get_auth_headers(role)
+    data = {**csrf_for(headers), 'search': '200', 'name': ''}
+    _, response = team_http.post(f'/calendar/{event}/teams/{team}/{action}', headers=headers, data=data)
+    assert response.status == 400
+    name_input = re.search(r'<input id="team-name"[^>]+>', response.text).group()
+    expected_name = '' if action == 'rename' else 'Синтетическая команда A'
+    assert f'value="{expected_name}"' in name_input
+    for mode in ('add', 'remove'):
+        search = re.search(r'<input id="search-' + mode + r'"[^>]+>', response.text).group()
+        expected_search = '200' if action == mode else ''
+        assert f'value="{expected_search}"' in search
+        assert f'form="team-form-{mode}"' in search
+        assert 'name="search"' in search
+    assert team_db.get_event_team(event, team)['name'] == 'Синтетическая команда A'
+    assert team_db.event_team_member_ids(event, team) == {ids[0]}

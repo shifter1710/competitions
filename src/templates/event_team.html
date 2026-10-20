@@ -18,9 +18,9 @@
 <section class="card card-body mb-3" data-team-roster>
 <h2 class="h5">{{ heading }}</h2>
 <label class="form-label" for="search-{{ mode }}">Поиск по ФИО, группе, дисциплине или номеру участия</label>
-<input id="search-{{ mode }}" class="form-control mb-2" type="search" data-team-search>
+<input id="search-{{ mode }}" class="form-control mb-2" type="search" name="search" form="team-form-{{ mode }}" value="{{ values.search if values.action == mode else '' }}" data-team-search>
 <p class="text-muted small">Поиск скрывает строки, сохраняя выбор. Показаны участия всего соревнования, независимо от фильтра мест.</p>
-<form method="post" action="/calendar/{{ event.id }}/teams/{{ team.id }}/{{ mode }}">
+<form id="team-form-{{ mode }}" method="post" action="/calendar/{{ event.id }}/teams/{{ team.id }}/{{ mode }}">
 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
 <div class="table-responsive"><table class="table align-middle"><thead><tr><th>Выбор</th><th>Участие</th><th>Дисциплина</th><th>Карточка</th></tr></thead><tbody>
 {% for p in participants if (p.record_id in members) == (mode == 'remove') %}

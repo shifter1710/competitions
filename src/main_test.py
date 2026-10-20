@@ -10327,7 +10327,13 @@ def test_team_result_edit_error_url_single_question_mark(calendar_client: SanicT
     )
     location = response.headers['location']
     assert location.count('?') == 1
-    assert f'result=with&edit_team_result={result_id}&admin_error=' in location
+    query = parse_qs(urlsplit(location).query, keep_blank_values=True)
+    assert query['result'] == ['with']
+    assert query['edit_team_result'] == [str(result_id)]
+    assert query['admin_error'] == ['Место команды должно быть целым числом от 1 до 9999']
+    assert query['team_result_label'] == ['Общий зачёт']
+    assert query['team_result_place'] == ['abc']
+    assert query['team_result_team_id'] == ['']
     # Flash реально доезжает: на странице ошибки видно сообщение.
     _, back = calendar_client.get(location, headers=editor)
     assert 'Место команды должно быть целым числом' in back.text
