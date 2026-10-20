@@ -317,9 +317,16 @@ def test_document_form_errors_keep_input_and_nojs_team_selector(document_case, t
     event, team, student, _, _ = document_case
     headers = get_auth_headers('editor')
     _, response = team_http.post(
-        f'/calendar/{event}/documents', headers=headers,
-        data={**csrf_for(headers), 'title': 'Синтетическое введённое имя', 'access_mode': 'team_members',
-              'team_id': str(team), 'student_id': [str(student)]}, allow_redirects=False,
+        f'/calendar/{event}/documents',
+        headers=headers,
+        data={
+            **csrf_for(headers),
+            'title': 'Синтетическое введённое имя',
+            'access_mode': 'team_members',
+            'team_id': str(team),
+            'student_id': [str(student)],
+        },
+        allow_redirects=False,
     )
     assert response.status == 302
     _, response = team_http.get(response.headers['location'], headers=headers)
