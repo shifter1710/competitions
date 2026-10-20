@@ -97,6 +97,31 @@ STUDENT_SORT_COLUMNS: dict[str, str] = {
     'group': 'group_name',
 }
 
+# REP-05: shared selection for HTML/XLSX, summary, grouped rows and REP-04.
+# Unlinked history keeps its approval-only eligibility. No inferred event link.
+REPORT_ELIGIBLE_SQL = """review_status = 'approved' AND (
+    calendar_event_id IS NULL OR EXISTS (
+        SELECT 1 FROM calendar_events report_event
+        WHERE report_event.id = competitions.calendar_event_id AND report_event.results_confirmed = 1
+    )
+)"""
+REPORT_DNF_SQL = "UPPER(TRIM(COALESCE(CAST(position AS TEXT), ''))) = 'DNF'"
+REPORT_BLANK_SQL = "(position IS NULL OR TRIM(CAST(position AS TEXT)) IN ('', '0'))"
+REPORT_EVENT_ENDED_SQL = """EXISTS (
+    SELECT 1 FROM calendar_events report_event WHERE report_event.id = competitions.calendar_event_id
+    AND substr(COALESCE(NULLIF(report_event.date_to, ''), report_event.date), 1, 10) < app_today()
+)"""
+REPORT_NONPRIZE_SQL = f"""(NOT ({REPORT_DNF_SQL}) AND (
+    (calendar_event_id IS NULL AND position > 3)
+    OR (calendar_event_id IS NOT NULL AND (
+        (typeof(position) IN ('integer', 'real') AND position > 3)
+        OR ({REPORT_BLANK_SQL} AND {REPORT_EVENT_ENDED_SQL})
+    ))
+))"""
+REPORT_NO_RESULT_SQL = f"""({REPORT_DNF_SQL}
+    OR (calendar_event_id IS NULL AND position = 0)
+    OR (calendar_event_id IS NOT NULL AND {REPORT_BLANK_SQL} AND NOT {REPORT_EVENT_ENDED_SQL}))"""
+
 # Reports v2, identity-правило уникальных метрик и ключа среза «студент»:
 # при наличии стабильной связи student_ref_id используется она, при
 # отсутствии — сама запись (id). Разных людей по ФИО НЕ объединяем;

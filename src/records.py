@@ -190,6 +190,19 @@ def parse_base_number_field(raw, *, label: str, setting: dict, empty_error: str,
         raise ValueError(f'Поле "{label}" должно быть числом') from None
 
 
+def parse_position(raw, *, setting: dict):
+    """The place cell accepts an integer or explicit DNF, including numeric config.
+
+    Keep legacy zero for blank optional cells: SQLite's NOT NULL column and
+    existing exports remain compatible; classification interprets it at read time.
+    """
+    if clean_str(raw).casefold() == 'dnf':
+        return 'DNF'
+    return parse_base_number_field(
+        raw, label=BASE_FIELD_LABELS['position'], setting=setting, empty_error='Поле "Место" обязательно'
+    )
+
+
 def parse_base_text_field(raw, *, label: str, setting: dict):
     """text-поле базового реестра: строка без требования числа
     (кейс «Курс: Выпускник 2025/26», замечания №2/№7)."""
@@ -314,12 +327,7 @@ def build_competition(
         name=parse_base_text_field(
             record['Название соревнований'], label=BASE_FIELD_LABELS['name'], setting=field_settings['name']
         ),
-        position=parse_base_number_field(
-            record['Место'],
-            label=BASE_FIELD_LABELS['position'],
-            setting=field_settings['position'],
-            empty_error='Поле "Место" обязательно',
-        ),
+        position=parse_position(record['Место'], setting=field_settings['position']),
         # Event Model, P5a: опциональная колонка «Дисциплина» импорта/форм —
         # в базовую колонку записи, пустая ячейка → None. Если активен кастом
         # с тем же label, значение попадает и в extra_data (ниже) — двойная
