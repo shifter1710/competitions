@@ -90,7 +90,7 @@
 </div>
 {% endmacro %}
 
-<div class="event-page" data-event-page="{{ event.id }}" data-result-filter="{{ result_filter }}" data-initial-tab="{{ 'documents' if edit_document_data or edit_protocol_data else ('teams' if edit_team_result or 'team_result_label' in request.args else 'participants') }}" data-add-open="{{ 'true' if can_add_for or participant_form_values else 'false' }}">
+<div class="event-page" data-event-page="{{ event.id }}" data-result-filter="{{ result_filter }}" data-initial-tab="{{ 'documents' if edit_document_data or edit_protocol_data or 'document_form_title' in request.args or 'document_team' in request.args else ('teams' if edit_team_result or 'team_result_label' in request.args else 'participants') }}" data-add-open="{{ 'true' if can_add_for or participant_form_values else 'false' }}">
 <div class="page-head d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
     <div>
         <a class="backlink" href="{{ calendar_return_url }}">← {% if calendar_return_url.startswith('/admin/people/') %}К студенту{% else %}В календарь{% endif %}</a>
@@ -799,7 +799,8 @@
                         <div class="small text-muted">{{ doc.type_label }} · {{ doc.size_label }}</div>
                     </td>
                     <td>
-                        {% if doc.get('team_id') is not none or doc.access_mode not in ['all_participants', 'selected_students'] %}<span class="badge text-bg-secondary">Командный / неподдерживаемый доступ · только просмотр</span>
+                        {% if doc.access_mode == 'team_members' and doc.team_id is not none %}<span class="badge text-bg-primary">Команда: {{ doc.team_name or ('№' ~ doc.team_id) }}</span>
+                        {% elif doc.team_id is not none or doc.access_mode not in ['all_participants', 'selected_students'] %}<span class="badge text-bg-secondary">Командный / неподдерживаемый доступ · только просмотр</span>
                         {% elif doc.access_mode == 'all_participants' %}
                         <span class="badge text-bg-secondary">Все участники</span>
                         {% else %}
@@ -810,7 +811,7 @@
                         <div class="d-flex gap-1">
                             <a class="btn btn-sm btn-outline-primary"
                                 href="/calendar/{{ event.id }}/documents/{{ doc.id }}/download">Скачать</a>
-                            {% if can_manage and doc.get('team_id') is none and doc.access_mode in ['all_participants', 'selected_students'] %}
+                            {% if can_manage and ((doc.access_mode == 'team_members' and doc.team_id is not none) or (doc.access_mode in ['all_participants', 'selected_students'] and doc.team_id is none)) %}
                             <a class="btn btn-sm btn-outline-secondary"
                                 href="/calendar/{{ event.id }}?edit_document={{ doc.id }}{% if result_filter %}&result={{ result_filter }}{% endif %}{% if calendar_return_query %}&amp;{{ calendar_return_query }}{% endif %}">Изменить</a>
                             <form action="/calendar/{{ event.id }}/documents/{{ doc.id }}/delete" method="post"
@@ -836,7 +837,7 @@
         {% if edit_document_data %}
         <div class="small fw-semibold mt-3 mb-2">Изменить документ</div>
         {% endif %}
-        <details class="event-disclosure" {% if edit_document_data %}open{% endif %}><summary>{{ "Изменить документ" if edit_document_data else "Добавить документ" }}</summary><form class="row g-3{% if not edit_document_data %} mt-3{% endif %}" enctype="multipart/form-data" method="post"
+        <details class="event-disclosure" {% if edit_document_data or 'document_form_title' in request.args or 'document_team' in request.args %}open{% endif %}><summary>{{ "Изменить документ" if edit_document_data else "Добавить документ" }}</summary><form class="row g-3{% if not edit_document_data %} mt-3{% endif %}" enctype="multipart/form-data" method="post"
               action="/calendar/{{ event.id }}/documents{% if edit_document_data %}/{{ edit_document_data.id }}/edit{% endif %}"
               data-documents-form>
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -845,7 +846,7 @@
                 <label class="label" for="document-title">Название<span class="req">*</span></label>
                 <input class="form-control" id="document-title" name="title" type="text" maxlength="200" required
                     placeholder="Например: Стартовый протокол"
-                    {% if edit_document_data %}value="{{ edit_document_data.title }}"{% endif %}>
+                    value="{{ document_form.title }}">
             </div>
             <div class="col-md-4">
                 <label class="label" for="document-file">Файл{% if not edit_document_data %}<span
@@ -867,20 +868,38 @@
                 <div class="form-check">
                     <input class="form-check-input" id="document-access-all" name="access_mode" type="radio"
                         value="all_participants"
-                        {% if not edit_document_data or edit_document_data.access_mode == 'all_participants' %}checked{% endif %}>
+                        {% if document_form.access_mode == 'all_participants' %}checked{% endif %}>
                     <label class="form-check-label" for="document-access-all">Все участники</label>
                     <div class="small text-muted">виден каждому участнику соревнования в личном кабинете</div>
                 </div>
                 <div class="form-check">
                     <input class="form-check-input" id="document-access-selected" name="access_mode" type="radio"
                         value="selected_students"
-                        {% if edit_document_data and edit_document_data.access_mode == 'selected_students' %}checked{% endif %}>
+                        {% if document_form.access_mode == 'selected_students' %}checked{% endif %}>
                     <label class="form-check-label" for="document-access-selected">Выбранные студенты</label>
                     <div class="small text-muted">виден только отмеченным участникам</div>
                 </div>
             </div>
-            <div class="col-12{% if not (edit_document_data and edit_document_data.access_mode == 'selected_students') %} d-none{% endif %}"
-                data-documents-students>
+            <div class="col-12">
+                <div class="form-check">
+                    <input class="form-check-input" id="document-access-team" name="access_mode" type="radio" value="team_members" {% if document_form.access_mode == 'team_members' %}checked{% endif %}>
+                    <label class="form-check-label" for="document-access-team">Текущий состав команды</label>
+                    <div class="small text-muted">Один файл для команды: новый член получает доступ, исключённый теряет его.</div>
+                </div>
+            </div>
+            <div class="col-12" data-documents-team>
+                <label class="label" for="document-team">Команда этого соревнования</label>
+                <select id="document-team" class="form-select" name="team_id">
+                    <option value="">Выберите команду</option>
+                    {% set selected_team = (document_form.team_id or '')|string %}
+                    {% if selected_team and selected_team not in teams|map(attribute='id')|map('string')|list %}<option value="{{ selected_team }}" selected>Недоступная команда №{{ selected_team }}</option>{% endif %}
+                    {% for team in teams %}<option value="{{ team.id }}" {% if selected_team == team.id|string %}selected{% endif %}>{{ team.name }} · {{ team.member_count }} участий</option>{% endfor %}
+                </select>
+                <p class="form-text">Выбор используется только в режиме «Текущий состав команды». Участия без карточки не дают доступа через кабинет.</p>
+            </div>
+            {% if 'document_form_title' in request.args %}<p class="text-warning">Введённые поля сохранены. Если прикладывали файл, выберите его заново.</p>{% endif %}
+            <input type="hidden" name="students_submitted" value="1">
+            <div class="col-12" data-documents-students>
                 <span class="label d-block">Кому доступен документ</span>
                 <div aria-label="Участники с доступом к документу" class="documents-students-list" role="group"
                     tabindex="0">
@@ -888,7 +907,7 @@
                     <label class="form-check">
                         <input class="form-check-input" name="student_id" type="checkbox"
                             value="{{ p.student_ref_id }}"
-                            {% if edit_document_data and p.student_ref_id in edit_document_data.students_ids %}checked{% endif %}>
+                            {% if p.student_ref_id in document_form.students_ids %}checked{% endif %}>
                         <span>{{ p.fio }}</span>
                         <small class="text-muted">· {{ p.institute }}{% if p.group_name %}, {{ p.group_name }}{% endif %}</small>
                     </label>

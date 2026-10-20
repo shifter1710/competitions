@@ -178,6 +178,9 @@ async def static_no_cache(request: Request, response: HTTPResponse):
         team_actor.reset(token)
     if request.path.startswith('/static'):
         response.headers['Cache-Control'] = 'no-cache'
+    if request.path == '/' or ('/documents/' in request.path and request.path.endswith('/download')):
+        response.headers['Cache-Control'] = 'private, no-store'
+        response.headers['Pragma'] = 'no-cache'
 
 
 @app.on_request

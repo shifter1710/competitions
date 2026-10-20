@@ -31,6 +31,7 @@ from sanic_ext import render
 
 from src.auth import get_current_user_id
 from src.auth import log_audit_event
+from src.auth import parse_auth_cookie
 from src.auth import require_admin
 from src.auth import require_moderator
 from src.auth import user_can_write
@@ -42,7 +43,9 @@ from src.files import ATTACHMENT_EXTENSIONS
 from src.files import ATTACHMENT_MAX_SIZE
 from src.files import calendar_regulation_dir
 from src.files import detect_attachment_type
+from src.files import event_document_file_identity
 from src.files import event_document_source_path
+from src.files import read_event_document_version
 from src.files import regulation_source_path
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
@@ -80,6 +83,7 @@ from src.students import STUDENT_SEX_OPTIONS
 from src.web import build_redirect_with_message
 from src.web import clean_str
 from src.web import forbidden
+from src.web import form_key_present
 from src.web import format_date_range
 from src.web import format_size
 from src.web import get_auth_user
@@ -451,6 +455,8 @@ EVENT_DOCUMENT_STORAGE_ERRORS = {
     'student_inactive': 'Карточка студента неактивна',
     'student_not_participant': 'Выбранный студент не участвует в соревновании',
     'invalid_access_mode': 'Недопустимый режим доступа документа',
+    'invalid_team': 'Выберите команду этого соревнования.',
+    'event_not_found': 'Соревнование не найдено.',
     'unsupported_scope': 'Этот режим документа не поддерживает изменение в данной версии.',
     'invalid_document_type': 'Недопустимый тип документа',
 }
@@ -516,24 +522,71 @@ def parse_document_student_ids(request: Request) -> list[int]:
     return student_ids
 
 
-def parse_event_document_fields(request: Request) -> tuple[str, str, list[int], str | None]:
-    """Общие поля формы документа: (title, access_mode, student_ids, ошибка).
-
-    Валидация до любых записей (паттерн форм события): пустой/длинный title,
-    мусорный access_mode, пустой список при selected_students — flash-ошибка,
-    форма никуда не пишется."""
+def parse_event_document_fields(request: Request, existing=None) -> tuple:
+    """Validate full form or preserve omitted access fields on a metadata-only edit."""
     title = clean_str(get_form_value(request, 'title'))
+    mode = get_form_value(request, 'access_mode').strip()
+    if existing and not form_key_present(request, 'access_mode'):
+        mode = existing['access_mode']
+    ids = parse_document_student_ids(request)
+    if existing and not form_key_present(request, 'student_id') and not form_key_present(request, 'students_submitted'):
+        ids = existing.get('students_ids', [])
+    error = None
     if not title:
-        return title, '', [], 'Укажите название документа'
-    if len(title) > 200:
-        return title, '', [], 'Название документа слишком длинное'
-    access_mode = (get_form_value(request, 'access_mode') or '').strip()
-    if access_mode not in EVENT_DOCUMENT_ACCESS_MODES:
-        return title, access_mode, [], EVENT_DOCUMENT_STORAGE_ERRORS['invalid_access_mode']
-    student_ids = parse_document_student_ids(request)
-    if access_mode == 'selected_students' and not student_ids:
-        return title, access_mode, student_ids, EVENT_DOCUMENT_STORAGE_ERRORS['no_students']
-    return title, access_mode, student_ids, None
+        error = 'Укажите название документа'
+    elif len(title) > 200:
+        error = 'Название документа слишком длинное'
+    elif mode not in EVENT_DOCUMENT_ACCESS_MODES:
+        error = EVENT_DOCUMENT_STORAGE_ERRORS['invalid_access_mode']
+    elif mode == 'selected_students' and not ids:
+        error = EVENT_DOCUMENT_STORAGE_ERRORS['no_students']
+    return title, mode, ids, error
+
+
+def event_document_team_id(request, mode, existing=None):
+    if mode != 'team_members':
+        return None, None
+    value = get_form_value(request, 'team_id').strip()
+    if existing and not form_key_present(request, 'team_id'):
+        value = str(existing.get('team_id') or '')
+    if not value.isdigit() or int(value) < 1:
+        return None, EVENT_DOCUMENT_STORAGE_ERRORS['invalid_team']
+    return int(value), None
+
+
+def event_document_error_url(request, base, existing=None):
+    title, mode, ids, _ = parse_event_document_fields(request, existing)
+    team_id, _ = event_document_team_id(request, mode, existing)
+    target = urlsplit(base)
+    query = parse_qsl(target.query, keep_blank_values=True)
+    query.extend(
+        [
+            ('document_form_title', title),
+            ('document_form_mode', mode),
+            ('document_form_team', str(team_id or get_form_value(request, 'team_id'))),
+        ]
+    )
+    query.extend(('document_form_student', str(value)) for value in ids)
+    return urlunsplit(target._replace(query=urlencode(query), fragment=''))
+
+
+def event_document_form_values(request, existing, teams):
+    values = {'title': '', 'access_mode': 'all_participants', 'team_id': None, 'students_ids': []}
+    if existing:
+        values.update({key: existing.get(key) for key in values})
+    requested_team = request.args.get('document_team', '')
+    if not existing and any(str(team['id']) == requested_team for team in teams):
+        values.update(access_mode='team_members', team_id=int(requested_team))
+    if 'document_form_title' in request.args:
+        values.update(
+            title=request.args.get('document_form_title', ''),
+            access_mode=request.args.get('document_form_mode', ''),
+            team_id=request.args.get('document_form_team', ''),
+        )
+        values['students_ids'] = [
+            int(value) for value in request.args.getlist('document_form_student') if value.isdigit()
+        ]
+    return values
 
 
 def parse_event_protocol_fields(request: Request) -> tuple[str, str | None]:
@@ -728,31 +781,13 @@ def sanitize_download_filename(value: str | None) -> str:
     return cleaned or 'document'
 
 
-def athlete_can_download_event_document(
-    storage: SQLiteAdapter,
-    request: Request,
-    event_id: int,
-    document: dict,
-) -> bool:
-    """Право атлета на документ события: стабильная связь аккаунта с
-    карточкой студента (users.student_ref_id) + режим доступа документа —
-    all_participants требует участия карточки в событии, selected_students —
-    маппинга документ↔карточка. Без карточки/без права — False (403).
-    Не-атлеты проходят эту проверку всегда (дальше — их роли)."""
+def athlete_can_download_event_document(storage, request, event_id, document):
+    """Compatibility helper, using the same authoritative predicate as the cabinet."""
     if not user_is_athlete(request):
         return True
     user = get_auth_user(request)
     record = storage.get_user(user['username']) if user else None
-    student_ref_id = record.get('student_ref_id') if record else None
-    if student_ref_id is None:
-        return False
-    if document.get('team_id') is not None:
-        return False
-    if document.get('access_mode') == 'all_participants':
-        return storage.student_participates_in_event(event_id, student_ref_id)
-    if document.get('access_mode') == 'selected_students':
-        return student_ref_id in storage.calendar_event_document_students(document['id'])
-    return False
+    return bool(record and storage.get_event_document_for_user(event_id, document['id'], record['id']))
 
 
 # Связывание cardless-участия события с карточкой студента со страницы
@@ -2523,10 +2558,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                         None,
                     )
 
-        if edit_document_data and (
-            edit_document_data.get('team_id') is not None
-            or edit_document_data.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES
-        ):
+        if edit_document_data and storage._unsupported_event_document_scope(edit_document_data):
             edit_document_data = None
             edit_document = None
         if edit_protocol_data and (
@@ -2535,6 +2567,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         ):
             edit_protocol_data = None
             edit_protocol = None
+        event_teams = storage.list_event_teams(event['id'])
         return await render(
             template_name=jinja_env.get_template('calendar_event.html'),
             context={
@@ -2564,7 +2597,8 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'can_manage': can_manage,
                 # Team Results: строка в режиме правки (dict) или None.
                 'edit_team_result': edit_team_result,
-                'teams': storage.list_event_teams(event['id']),
+                'teams': event_teams,
+                'document_form': event_document_form_values(request, edit_document_data, event_teams),
                 # Event Documents: документы события (каждый со students_ids/
                 # students_names выбранного доступа и size_label), chooser
                 # участников доступа (cardless — отдельно), id документа в
@@ -3234,13 +3268,16 @@ def register(app: Sanic) -> None:  # noqa: C901
             return error
 
         back_url, _ = event_document_back_urls(event, None, event_document_form_result_filter(request))
+        error_url = event_document_error_url(request, back_url)
         title, access_mode, student_ids, form_error = parse_event_document_fields(request)
+        team_id, team_error = event_document_team_id(request, access_mode)
+        form_error = form_error or team_error
         if form_error is not None:
-            return build_redirect_with_message(error=form_error, url=back_url)
+            return build_redirect_with_message(error=form_error, url=error_url)
 
         upload_file, file_error = read_event_document_upload(request, required=True)
         if file_error is not None:
-            return build_redirect_with_message(error=file_error, url=back_url)
+            return build_redirect_with_message(error=file_error, url=error_url)
 
         # Порядок как у положений: сначала файл на диск, затем БД; отказ
         # storage-валидации (карточки) — best-effort удаление нового файла.
@@ -3254,6 +3291,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 content_type=content_type,
                 size=size,
                 access_mode=access_mode,
+                team_id=team_id,
                 student_ids=student_ids,
                 uploaded_by=get_current_user_id(request),
             )
@@ -3262,12 +3300,12 @@ def register(app: Sanic) -> None:  # noqa: C901
             # не создали — не оставляем осиротевший файл в каталоге события.
             logger.exception('Unexpected storage failure creating event document of event %s', event['id'])
             remove_event_document_file(event['id'], stored_name)
-            return build_redirect_with_message(error='Не удалось сохранить документ', url=back_url)
+            return build_redirect_with_message(error='Не удалось сохранить документ', url=error_url)
         if document_id is None:
             remove_event_document_file(event['id'], stored_name)
             return build_redirect_with_message(
                 error=EVENT_DOCUMENT_STORAGE_ERRORS.get(create_error, 'Не удалось сохранить документ'),
-                url=back_url,
+                url=error_url,
             )
         log_audit_event(
             request,
@@ -3279,6 +3317,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'title': title,
                 'filename': filename,
                 'access_mode': access_mode,
+                **({'team_id': team_id} if team_id is not None else {}),
                 'students_count': len(set(student_ids)) if access_mode == 'selected_students' else 0,
             },
         )
@@ -3307,10 +3346,14 @@ def register(app: Sanic) -> None:  # noqa: C901
         document = storage.get_calendar_event_document(event['id'], numeric_document_id)
         if document is None:
             return build_redirect_with_message(error='Документ не найден', url=back_url)
-        if document.get('team_id') is not None or document.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES:
+        if storage._unsupported_event_document_scope(document):
             return build_redirect_with_message(error=EVENT_DOCUMENT_STORAGE_ERRORS['unsupported_scope'], url=back_url)
 
-        title, access_mode, student_ids, form_error = parse_event_document_fields(request)
+        document['students_ids'] = storage.calendar_event_document_students(document['id'])
+        edit_url = event_document_error_url(request, edit_url, document)
+        title, access_mode, student_ids, form_error = parse_event_document_fields(request, document)
+        team_id, team_error = event_document_team_id(request, access_mode, document)
+        form_error = form_error or team_error
         if form_error is not None:
             return build_redirect_with_message(error=form_error, url=edit_url)
 
@@ -3332,14 +3375,21 @@ def register(app: Sanic) -> None:  # noqa: C901
             }
             old_stored_name = document.get('stored_name') or ''
 
-        updated, update_error = storage.update_calendar_event_document(
-            event['id'],
-            numeric_document_id,
-            title=title,
-            access_mode=access_mode,
-            student_ids=student_ids,
-            **file_fields,
-        )
+        scope_fields = {}
+        if form_key_present(request, 'access_mode'):
+            scope_fields['access_mode'] = access_mode
+        if form_key_present(request, 'student_id') or form_key_present(request, 'students_submitted'):
+            scope_fields['student_ids'] = student_ids
+        if form_key_present(request, 'team_id'):
+            scope_fields['team_id'] = team_id
+        try:
+            updated, update_error = storage.update_calendar_event_document(
+                event['id'], numeric_document_id, title=title, **scope_fields, **file_fields
+            )
+        except Exception:
+            logger.exception('Failed updating document %s', numeric_document_id)
+            updated, update_error = False, 'storage_error'
+
         if not updated:
             if file_fields:
                 remove_event_document_file(event['id'], file_fields['stored_name'])
@@ -3360,6 +3410,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'document_id': numeric_document_id,
                 'title': title,
                 'access_mode': access_mode,
+                **({'team_id': team_id} if team_id is not None else {}),
                 'students_count': len(set(student_ids)) if access_mode == 'selected_students' else 0,
                 'replaced_file': bool(file_fields),
             },
@@ -3405,40 +3456,53 @@ def register(app: Sanic) -> None:  # noqa: C901
 
     @app.get('/calendar/<event_id>/documents/<document_id>/download')
     async def download_calendar_event_document(request: Request, event_id: str, document_id: str):
-        # Права — как у скачивания положения (аноним перенаправляется на вход
-        # middleware), плюс режим доступа для атлетов: карточка студента из
-        # аккаунта + участие/маппинг. admin/editor/viewer проходят всегда.
         event, error = get_calendar_event_or_error(request, event_id)
         if error is not None:
             return error
-
         try:
             numeric_document_id = int(document_id)
         except ValueError:
-            return text(body='Invalid document id', status=400)
-
+            return text('Invalid document id', status=400)
         storage = get_storage(request.app)
-        document = storage.get_calendar_event_document(event['id'], numeric_document_id)
+        if storage.get_calendar_event_document(event['id'], numeric_document_id) is None:
+            return text('Document not found', status=404)
+        principal = parse_auth_cookie(request)
+        document = (
+            storage.get_event_document_for_user(event['id'], numeric_document_id, principal['id'])
+            if principal
+            else None
+        )
         if document is None:
-            return text(body='Document not found', status=404)
-        if not athlete_can_download_event_document(storage, request, event['id'], document):
             return forbidden(request)
-
         try:
-            file_path = event_document_source_path(event['id'], document['stored_name'])
-        except ValueError:
-            return text(body='Not Found', status=404)
-        if not file_path.is_file():
-            return text(body='Not Found', status=404)
-
-        # Имя выдачи — sanitized title (фолбэк filename): пользовательское
-        # значение, сырую подстановку в заголовок не допускаем.
-        download_name = sanitize_download_filename(document.get('title') or document.get('filename'))
+            path = event_document_source_path(event['id'], document['stored_name'])
+            body, file_version = await asyncio.to_thread(read_event_document_version, path)
+        except (OSError, ValueError):
+            return text('Not Found', status=404)
+        # No authorization is cached over the await: re-read password version,
+        # active account, current role/ref, document and every membership link.
+        principal = parse_auth_cookie(request)
+        current = (
+            storage.get_event_document_for_user(event['id'], numeric_document_id, principal['id'])
+            if principal
+            else None
+        )
+        if current is None:
+            return forbidden(request)
+        if current != document:
+            return text('Document changed; retry download', status=409)
+        try:
+            if event_document_file_identity(path) != file_version:
+                return text('Document changed; retry download', status=409)
+        except (OSError, ValueError):
+            return text('Not Found', status=404)
+        download_name = sanitize_download_filename(current.get('title') or current.get('filename'))
         return raw(
-            await asyncio.to_thread(file_path.read_bytes),
+            body,
             headers={
-                'content-type': document.get('content_type') or 'application/octet-stream',
+                'content-type': current.get('content_type') or 'application/octet-stream',
                 'content-disposition': f'attachment; filename="{download_name}"',
+                'Cache-Control': 'private, no-store',
             },
         )
 
@@ -3532,7 +3596,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         document = storage.get_calendar_event_document(event['id'], numeric_document_id)
         if document is None or document.get('document_type') != 'protocol':
             return build_redirect_with_message(error='Протокол не найден', url=back_url)
-        if document.get('team_id') is not None or document.get('access_mode') not in EVENT_DOCUMENT_ACCESS_MODES:
+        if storage._unsupported_event_document_scope(document):
             return build_redirect_with_message(error=EVENT_DOCUMENT_STORAGE_ERRORS['unsupported_scope'], url=back_url)
 
         title, form_error = parse_event_protocol_fields(request)

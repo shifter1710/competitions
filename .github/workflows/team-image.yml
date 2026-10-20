@@ -29,7 +29,7 @@ jobs:
           AUTH_VIEWER_PASSWORD: ci-synthetic-team-viewer-password
         run: |
           docker volume create team-synthetic-data
-          docker run --rm -e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD competitions-team:qa python -m pytest src/teams_test.py -q
+          docker run --rm -e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD competitions-team:qa python -m pytest src/teams_test.py src/team_documents_test.py -q
           for attempt in 1 2; do
             docker run -d --name team-startup -p 127.0.0.1:18081:8080 -v team-synthetic-data:/code/data -e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD competitions-team:qa
             for retry in $(seq 1 30); do

@@ -7088,6 +7088,7 @@ def test_v21_adapter_composition_and_api_surface(adapter):
             'change_event_team_members',
             'event_team_member_ids',
             'event_team_history',
+            'get_event_document_for_user',
         ]
     )
 

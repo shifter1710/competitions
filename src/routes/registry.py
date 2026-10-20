@@ -820,6 +820,7 @@ def build_my_document_groups(documents: Sequence[dict]) -> list[dict]:
                 'calendar_event_id': event_id,
                 'title': document.get('title') or '',
                 'is_protocol': document.get('document_type') == 'protocol',
+                'team_name': document.get('team_name') or '',
             }
         )
     return groups
@@ -851,7 +852,9 @@ def register(app: Sanic) -> None:  # noqa: C901
         # лишних запросов нет.
         my_documents = None
         if student_ref_filter is not None:
-            my_documents = build_my_document_groups(storage.list_documents_for_student(student_ref_filter))
+            my_documents = build_my_document_groups(
+                storage.list_documents_for_student(student_ref_filter, user_id=owner_filter)
+            )
         # ГТО (личный кабинет атлета): ступени и результаты карточки студента,
         # read-only, без форм. Только атлет со стабильной связью (student_ref_id)
         # и только при непустом списке — паттерн my_documents: пустой список
