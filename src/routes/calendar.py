@@ -2188,48 +2188,140 @@ def register(app: Sanic) -> None:  # noqa: C901
         storage = get_storage(request.app)
         args = dict(request.args)
 
-        raw_status = (get_param(args, 'status') or '').strip()
-        if raw_status not in {key for key, _ in CALENDAR_STATUS_FILTERS}:
-            raw_status = ''
-        sport_filter = (get_param(args, 'sport') or '').strip()
+        from src.report_context import context_args, decode_report_context, encode_report_context
+        from src.routes.reports import build_report_chips, build_report_filter_kwargs, report_event_labels
 
+        source_entries = []
+        source_token = ''
+        source_error = None
+        raw_contexts = parse_qs(request.query_string, keep_blank_values=True).get('report_context', [])
+        if raw_contexts:
+            try:
+                if len(raw_contexts) != 1 or not raw_contexts[0]:
+                    raise ValueError('Некорректный контекст отчёта')
+                source_token = raw_contexts[0]
+                source_entries = decode_report_context(source_token)
+                source_args = context_args(source_entries)
+                source_filters, source_error = build_report_filter_kwargs(request, source_args)
+            except ValueError:
+                source_error = 'Ссылка отчёта повреждена или больше недоступна'
+        else:
+            source_filters = {}
+        raw_status = (get_param(args, 'status') or '').strip()
+        sport_filter = (get_param(args, 'sport') or '').strip()
+        level_filter = (get_param(args, 'level') or '').strip()
+        search_filter = (get_param(args, 'q') or '').strip()
+        confirmation_filter = (get_param(args, 'confirmed') or '').strip()
         period_error = validate_report_period(args)
+        if (
+            raw_status not in {key for key, _ in CALENDAR_STATUS_FILTERS}
+            or confirmation_filter not in ('', 'yes', 'no')
+            or len(search_filter) > 200
+        ):
+            period_error = 'Некорректные фильтры календаря'
+        period_error = source_error or period_error
         period_context = period_filter_context(args, storage.get_calendar_period_year_options())
         date_from, date_to = ('', '') if period_error else resolve_report_period(args)
         calendar_query = [
             (key, value)
             for key, value in (
+                ('report_context', source_token),
+                ('q', search_filter),
                 ('status', raw_status),
                 ('sport', sport_filter),
+                ('level', level_filter),
+                ('confirmed', confirmation_filter),
                 *((key, get_param(args, key) or '') for key in ('period', 'date_from', 'date_to')),
             )
             if value
         ]
-        calendar_return_url = '/calendar' + ('?' + urlencode(calendar_query) if calendar_query else '')
+
+        def calendar_url(entries):
+            return '/calendar' + ('?' + urlencode(entries) if entries else '')
+
+        calendar_return_url = calendar_url(calendar_query)
         period_reset_query = [
             (key, value) for key, value in calendar_query if key not in ('period', 'date_from', 'date_to')
         ]
-        today = datetime.now().date()
+        today = today_in_timezone(settings.app_timezone)
+        source_summary = None
+        source_ids = None
+        if source_token and not period_error:
+            source_ids = set(storage.get_report_event_ids(**source_filters))
+            source_summary = storage.get_report_summary(**source_filters)
+        # Source filters select historical PARTICIPATIONS. Never reapply their
+        # dates/levels/sports to current event metadata: those snapshots may differ.
         events = (
             []
             if period_error
             else [
                 decorate_calendar_event(event, today)
                 for event in storage.list_calendar_events(sport=sport_filter, date_from=date_from, date_to=date_to)
+                if source_ids is None or event['id'] in source_ids
             ]
         )
         if raw_status:
             events = [event for event in events if event['status'] == raw_status]
-
+        if level_filter:
+            events = [event for event in events if event['level'] == level_filter]
+        if search_filter:
+            events = [event for event in events if search_filter.casefold() in event['name'].casefold()]
+        if confirmation_filter:
+            events = [
+                event for event in events if bool(event.get('results_confirmed')) == (confirmation_filter == 'yes')
+            ]
+        source_chips = []
+        if source_token and not source_error:
+            custom_fields = storage.get_custom_fields()
+            source_chips = build_report_chips(
+                source_entries, custom_fields, report_event_labels(storage, context_args(source_entries))
+            )
+            for chip in source_chips:
+                # Rebuild removal URLs as encrypted contexts. Private names and
+                # custom values never enter calendar/event/backlink URLs.
+                removed_entries = parse_qsl(urlsplit(chip['remove_url']).query, keep_blank_values=True)
+                if removed_entries and removed_entries[0][0] == 'report_context':
+                    removed_entries = decode_report_context(removed_entries[0][1])
+                token = encode_report_context(removed_entries or [('period', 'all')])
+                chip['remove_url'] = calendar_url(
+                    [(k, v) for k, v in calendar_query if k != 'report_context'] + [('report_context', token)]
+                )
+            source_chips = [chip for chip in source_chips if chip['label'] != 'Разрез']
+        calendar_chips = []
+        labels = {
+            'q': 'Поиск',
+            'status': 'Статус',
+            'sport': 'Вид спорта',
+            'level': 'Уровень',
+            'confirmed': 'Результаты',
+        }
+        values = {'planned': 'Запланировано', 'past': 'Прошло', 'yes': 'Подтверждены', 'no': 'Не подтверждены'}
+        if period_context['period_active']:
+            calendar_chips.append(
+                {
+                    'label': 'Период календаря',
+                    'value': period_context['period_label'],
+                    'remove_url': calendar_url(period_reset_query),
+                }
+            )
+        for key, value in calendar_query:
+            if key in labels:
+                calendar_chips.append(
+                    {
+                        'label': labels[key],
+                        'value': values.get(value, value),
+                        'remove_url': calendar_url([(k, v) for k, v in calendar_query if k != key]),
+                    }
+                )
         return await render(
             template_name=jinja_env.get_template('calendar.html'),
             context={
                 'request': request,
                 'month_groups': group_calendar_events_by_month(events),
                 **period_context,
-                'period_today': today_in_timezone(settings.app_timezone).strftime(settings.date_format),
+                'period_today': today.strftime(settings.date_format),
                 'period_error': period_error,
-                'period_reset_url': '/calendar' + ('?' + urlencode(period_reset_query) if period_reset_query else ''),
+                'period_reset_url': calendar_url(period_reset_query),
                 'calendar_event_query': urlencode({'return': calendar_return_url}),
                 'events_count': len(events),
                 'planned_count': sum(1 for event in events if event['status'] == CALENDAR_STATUS_PLANNED),
@@ -2238,8 +2330,19 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'status_filter': raw_status,
                 'status_filter_options': CALENDAR_STATUS_FILTERS,
                 'sport_filter': sport_filter,
-                'sport_options': storage.list_catalog('sport'),
-                'level_options': storage.get_level_names(),
+                'level_filter': level_filter,
+                'search_filter': search_filter,
+                'confirmation_filter': confirmation_filter,
+                'calendar_advanced': bool(raw_status or sport_filter or level_filter or confirmation_filter),
+                'sport_options': sorted(
+                    set(storage.list_catalog('sport')) | ({sport_filter} if sport_filter else set())
+                ),
+                'level_options': sorted(set(storage.get_level_names()) | ({level_filter} if level_filter else set())),
+                'source_token': source_token,
+                'source_summary': source_summary,
+                'source_chips': source_chips,
+                'calendar_chips': calendar_chips,
+                'source_report_url': '/reports?' + urlencode({'report_context': source_token}),
                 **get_flash_args(request),
             },
             status=400 if period_error else 200,

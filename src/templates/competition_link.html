@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
 
@@ -41,7 +42,7 @@
                 <tr><th>Уровень</th><td>{{ record.level }}</td></tr>
             </tbody>
         </table>
-        <div class="form-text ui-hint mt-2 mb-0">
+        <div class="form-text mt-2 mb-0">
             После связывания «Название», «Вид спорта», «Дата» и «Уровень» запись берёт из соревнования —
             остальные поля записи не меняются.
         </div>
@@ -182,7 +183,7 @@
                data-links-remove в script.js; форма создания события пустая. #}
             <div class="col-12" data-links-field>
                 <span class="label d-block">Ссылки</span>
-                <div class="text-muted small mb-2">Необязательно: положение, фото, регламент — откроются со страницы соревнования</div>
+                {{ help('Ссылки соревнования', 'Необязательно: положение, фото, регламент — откроются со страницы соревнования') }}
                 <div class="d-flex flex-column gap-2" data-links-rows>
                     <div class="row g-2 align-items-center" data-links-row>
                         <div class="col-md-4">
@@ -219,7 +220,7 @@
             </div>
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Создать и связать</button>
-                <div class="form-text ui-hint">
+                <div class="form-text">
                     Соревнование создастся в календаре и сразу свяжется с этой записью.
                     Поля предзаполнены данными записи.
                 </div>

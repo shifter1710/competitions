@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Предпросмотр импорта студентов{% endblock admin_title %}
@@ -118,7 +119,7 @@
                         <label class="form-label" for="import-row-{{ row.row_number }}-full-name">ФИО</label>
                         <input class="form-control" id="import-row-{{ row.row_number }}-full-name"
                                name="full_name" required type="text" value="{{ row.full_name }}">
-                        <div class="form-text ui-hint">ФИО можно исправить — например, привести к написанию существующего студента.</div>
+                        {% call help('Редактирование импортируемой строки') %}ФИО можно исправить — например, привести к написанию существующего студента.{% endcall %}
                     </div>
                     <div class="col-md-6">
                         <label class="form-label" for="import-row-{{ row.row_number }}-sex">Пол</label>
@@ -138,7 +139,7 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-group"
                                name="group" type="text" value="{{ row.group }}">
                     </div>
-                    <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
+                    <div class="col-md-3 ui-hint">{% call help('Редактирование импортируемой строки') %}Год поступления и курс рассчитываются по группе после сохранения.{% endcall %}</div>
                     <div class="col-12">
                         <button class="btn btn-primary btn-sm" type="submit">Сохранить правку</button>
                     </div>
@@ -151,7 +152,7 @@
 {% endmacro %}
 
 {% block admin_content %}
-<p class="text-muted">Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.</p>
+{{ help('Как рассчитывается курс', 'Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.') }}
 
 <div class="text-muted mb-2">
     Всего строк: {{ total }} · новые: {{ new_count }} · требуют решения: {{ review_count }} · ошибочные: {{ error_count }}
@@ -193,7 +194,7 @@
     </form>
 </div>
 {% if pending %}
-<div class="form-text ui-hint mb-3">
+<div class="form-text mb-3">
     Кнопка «Завершить импорт» станет активной, когда все строки будут разобраны.
 </div>
 {% endif %}

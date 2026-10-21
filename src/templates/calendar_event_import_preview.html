@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 
 {# Предпросмотр импорта участников события. DOM скопирован с предпросмотра
@@ -348,7 +349,7 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-group"
                                name="group" type="text" value="{{ row.group }}">
                     </div>
-                    <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
+                    <div class="col-md-3 ui-hint">{% call help('Данные участника') %}Год поступления и курс рассчитываются по группе после сохранения.{% endcall %}</div>
                     <div class="col-md-3">
                         <label class="form-label" for="import-row-{{ row.row_number }}-position">Место</label>
                         <input class="form-control" id="import-row-{{ row.row_number }}-position"
@@ -411,10 +412,10 @@
                         <input class="form-control" id="import-row-{{ row.row_number }}-create-group"
                                name="group" type="text" value="{{ row.group }}">
                     </div>
-                    <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
+                    <div class="col-md-3 ui-hint">{% call help('Данные участника') %}Год поступления и курс рассчитываются по группе после сохранения.{% endcall %}</div>
                     <div class="col-12">
                         <button class="btn btn-success btn-sm" type="submit">Создать карточку и добавить участника</button>
-                        <span class="form-text ui-hint">Участие получит student_ref_id новой карточки.</span>
+                        {% call help('Данные участника') %}Участие получит student_ref_id новой карточки.{% endcall %}
                     </div>
                 </form>
             </div>
@@ -426,7 +427,7 @@
 {% endmacro %}
 
 {% block content %}
-<p class="text-muted">Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.</p>
+{% call help('Данные участника') %}Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.{% endcall %}
 
 <div class="page-head">
     <div>
@@ -445,9 +446,7 @@
     Решено: {{ resolved_line }}
 </div>
 {% endif %}
-<div class="form-text ui-hint mb-3">
-    Сопоставление с карточкой студента необязательно — участие можно добавить без карточки и связать его позже.
-</div>
+{% call help('Данные участника') %}Сопоставление с карточкой студента необязательно — участие можно добавить без карточки и связать его позже.{% endcall %}
 
 {% if unknown_columns %}
 <div class="alert alert-warning">
@@ -483,7 +482,7 @@
     </form>
 </div>
 {% if pending %}
-<div class="form-text ui-hint mb-3">
+<div class="form-text mb-3">
     Кнопка «Завершить импорт» станет активной, когда все строки будут разобраны.
 </div>
 {% endif %}

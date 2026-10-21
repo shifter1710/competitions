@@ -14,11 +14,11 @@ from openpyxl import load_workbook
 from src import main_test as helpers
 from src.conftest import make_report_record
 from src.conftest import seed_fixture_levels
-from src.main import app
 from src.main_test import fake_get_user
 from src.main_test import get_auth_headers
 from src.main_test import get_report_xlsx_rows
 from src.routes.reports import build_report_display_groups
+from src.routes.reports import build_report_presentation
 from src.storage.sqlite import SQLiteAdapter
 
 
@@ -81,13 +81,14 @@ def metrics_history(client, tmp_path, monkeypatch):
     storage = SQLiteAdapter(str(tmp_path / 'synthetic-metrics.sqlite3'))
     seed_fixture_levels(storage, 'Тестовый уровень')
     first, twin, events = seed_metrics_history(storage)
-    previous = app.ctx.storage
+    application = client.app
+    previous = application.ctx.storage
     storage.get_user = fake_get_user
-    app.ctx.storage = storage
+    application.ctx.storage = storage
     try:
         yield client, storage, first, twin, events
     finally:
-        app.ctx.storage = previous
+        application.ctx.storage = previous
         storage.connection.close()
 
 
@@ -170,7 +171,8 @@ def test_html_xlsx_grouping_metrics_and_safe_links(metrics_history, role):
             row.count_wins,
             row.count_prizes,
         )
-        for row in storage.get_filtered()
+        for block in build_report_presentation(storage.get_filtered(), 'student', {})
+        for row in block
     ]
     assert sum(row[-3] for row in xlsx[1:-1]) == 16
     sheet = list(load_workbook(BytesIO(export.content)).active.values)

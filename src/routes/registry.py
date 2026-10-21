@@ -62,10 +62,12 @@ from src.records import select_template_custom_fields
 from src.routes.reports import build_report_chips
 from src.routes.reports import build_report_filter_kwargs
 from src.routes.reports import collect_applied_report_query
+from src.routes.reports import effective_report_args
 from src.routes.reports import parse_report_drilldown
 from src.routes.reports import REPORT_DRILLDOWN_METRICS
 from src.routes.reports import report_drilldown_row_labels
 from src.routes.reports import report_event_labels
+from src.routes.reports import safe_report_url
 from src.settings import settings
 from src.storage.sqlite import dedup_discipline
 from src.storage.sqlite import SQLiteAdapter
@@ -912,7 +914,11 @@ def register(app: Sanic) -> None:  # noqa: C901
         analytic_entries = []
         if analytic:
             selector, selector_error = parse_report_drilldown(args)
-            report_filters, report_error = build_report_filter_kwargs(request)
+            try:
+                source_args = effective_report_args(request)
+                report_filters, report_error = build_report_filter_kwargs(request, source_args)
+            except ValueError:
+                return text('Ссылка отчёта повреждена или больше недоступна', status=400)
             if selector_error or report_error:
                 return text(body=selector_error or report_error, status=400)
             total_count, _, row_values = storage.get_report_drilldown(
@@ -920,16 +926,21 @@ def register(app: Sanic) -> None:  # noqa: C901
                 **report_filters,
                 limit=0,
             )
-            applied = collect_applied_report_query(args, custom_fields) or [('period', 'all')]
-            analytic_entries = [*applied, ('report_metric', selector['metric'])]
+            applied = collect_applied_report_query(source_args, custom_fields) or [('period', 'all')]
+            analytic_entries = (
+                [('report_context', get_param(args, 'report_context'))]
+                if get_param(args, 'report_context')
+                else [(k, v) for k, v in applied if k not in ('sort', 'order')]
+            )
+            analytic_entries.append(('report_metric', selector['metric']))
             if selector['slice_key']:
                 analytic_entries.extend(
                     [('report_slice', selector['slice_key']), ('report_anchor', str(selector['anchor_id']))]
                 )
             report_context = {
                 'metric': REPORT_DRILLDOWN_METRICS[selector['metric']],
-                'return_url': '/reports?' + urlencode(applied),
-                'chips': build_report_chips(applied, custom_fields, report_event_labels(storage, args)),
+                'return_url': safe_report_url(applied),
+                'chips': build_report_chips(applied, custom_fields, report_event_labels(storage, source_args)),
                 'row_labels': report_drilldown_row_labels(selector['slice_key'], row_values),
             }
         else:

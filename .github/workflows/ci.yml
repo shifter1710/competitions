@@ -32,3 +32,58 @@ jobs:
           AUTH_VIEWER_USERNAME: viewer
           AUTH_VIEWER_PASSWORD: ci-synthetic-viewer-pass-123456
         run: pytest src/
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build application image
+        run: docker build -t competitions-smoke .
+      - name: Start isolated synthetic application
+        run: |
+          docker run --detach --name competitions-smoke --publish 127.0.0.1:8099:8080 \
+            --tmpfs /code/data:rw \
+            --env AUTH_SECRET_KEY=ci-synthetic-docker-secret \
+            --env AUTH_ADMIN_PASSWORD=ci-synthetic-admin-pass-123456 \
+            --env AUTH_EDITOR_PASSWORD=ci-synthetic-editor-pass-123456 \
+            competitions-smoke
+      - name: Verify health, authenticated Reports, XLSX and calendar navigation
+        run: |
+          python3 - <<'PY'
+          import html
+          import http.cookiejar
+          import re
+          import time
+          import urllib.parse
+          import urllib.request
+          import zipfile
+          from io import BytesIO
+
+          base = 'http://127.0.0.1:8099'
+          for attempt in range(30):
+              try:
+                  assert urllib.request.urlopen(base + '/healthcheck', timeout=2).status == 200
+                  break
+              except Exception:
+                  if attempt == 29:
+                      raise
+                  time.sleep(1)
+          client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          login = urllib.parse.urlencode({'username': 'admin', 'password': 'ci-synthetic-admin-pass-123456'}).encode()
+          assert client.open(base + '/login', login, timeout=10).status == 200
+          report = client.open(base + '/reports?period=all', timeout=10).read().decode()
+          target = html.unescape(re.search(r'href="(/calendar\?report_context=[^"]+)"', report).group(1))
+          calendar = client.open(base + target, timeout=10)
+          assert calendar.status == 200 and 'Соревнования из отчёта' in calendar.read().decode()
+          xlsx = client.open(base + '/export/report?period=all', timeout=10).read()
+          with zipfile.ZipFile(BytesIO(xlsx)) as workbook:
+              sheet = workbook.read('xl/worksheets/sheet1.xml').decode()
+              assert '№' in sheet or '&#8470;' in sheet
+          assert client.open(base + '/static/scripts/contextual-help.js', timeout=10).status == 200
+          PY
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs competitions-smoke
+      - name: Remove synthetic container
+        if: always()
+        run: docker rm -f competitions-smoke || true
