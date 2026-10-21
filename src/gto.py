@@ -52,10 +52,15 @@ def build_gto_rows(records: Sequence[dict]) -> list[dict]:
     """Строки ГТО для шаблонов (карточка студента и кабинет атлета — один
     порядок и один рендер): {id, year, stage, stage_label, age_label,
     status, status_label} в порядке хранилища (год DESC, ступень ASC,
-    id ASC)."""
+    known award date ASC, unknown dates last, id ASC)."""
     return [
         {
             'id': record['id'],
+            'student_id': record.get('student_id'),
+            'awarded_on': record.get('awarded_on'),
+            'awarded_on_label': '.'.join(reversed(record['awarded_on'].split('-'))) if record.get('awarded_on') else '',
+            'is_award': record['status'] in ('bronze', 'silver', 'gold'),
+            'certificates': record.get('certificates', []),
             'year': record['year'],
             'stage': record['stage'],
             'stage_label': gto_stage_label(record['stage']),

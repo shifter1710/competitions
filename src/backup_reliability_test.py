@@ -1,5 +1,6 @@
 """Failure-injection checks using only temporary, fully synthetic backup data."""
 import gzip
+import hashlib
 import shutil
 import sqlite3
 import subprocess
@@ -49,6 +50,43 @@ def synthetic_source(tmp_path):
     return database, files, tmp_path / 'backups', tmp_path / 'ops', references
 
 
+@pytest.fixture
+def gto_source(synthetic_source):
+    database, files, _, _, references = synthetic_source
+    certificates = (
+        (91, 20, 'synthetic-bronze.pdf', 'a' * 32 + '.pdf'),
+        (92, 21, 'synthetic-silver.pdf', 'b' * 32 + '.pdf'),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'CREATE TABLE student_gto_certificates ('
+            'id INTEGER PRIMARY KEY, gto_record_id INTEGER NOT NULL, filename TEXT NOT NULL, '
+            'stored_name TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, '
+            'uploaded_by INTEGER, created_at TEXT NOT NULL)'
+        )
+        for identifier, record_id, filename, stored_name in certificates:
+            name = f'gto/{record_id}/{stored_name}'
+            content = f'%PDF-1.4\nSynthetic certificate {identifier}\n'.encode()
+            path = files / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            connection.execute(
+                'INSERT INTO student_gto_certificates VALUES (?,?,?,?,?,?,?,?)',
+                (
+                    identifier,
+                    record_id,
+                    filename,
+                    stored_name,
+                    'application/pdf',
+                    len(content),
+                    None,
+                    'synthetic-created',
+                ),
+            )
+            references.add(name)
+    return synthetic_source
+
+
 def make_set(fixture, **kwargs):
     database, files, output, state, _ = fixture
     return backup.run_backup(database, output, files_dir=files, state_dir=state, **kwargs)['manifest'].parent
@@ -88,6 +126,30 @@ def test_verified_set_preserves_wal_and_all_reference_types(synthetic_source):
         assert read_json(state / 'health.json')['local']['status'] == 'OK'
     finally:
         writer.close()
+
+
+def test_gto_complete_backup_and_isolated_restore_preserve_metadata_and_files(gto_source):
+    database, files, output, _, references = gto_source
+    directory = make_set(gto_source)
+    assert backup.verify_set(directory)['status'] == 'Verified'
+    destination = output.parent / 'isolated-gto-restore'
+    restore_backup.extract_set(directory, destination)
+    restored = destination / 'competitions.sqlite3'
+    assert backup.reference_names(restored) == references
+    with sqlite3.connect(database) as source, sqlite3.connect(restored) as target:
+        query = 'SELECT * FROM student_gto_certificates ORDER BY id'
+        assert target.execute(query).fetchall() == source.execute(query).fetchall()
+        assert target.execute('SELECT COUNT(*) FROM student_gto_certificates').fetchone()[0] == 2
+        assert target.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+    for name in references:
+        original = files / name
+        copied = destination / 'files' / name
+        assert hashlib.sha256(copied.read_bytes()).hexdigest() == hashlib.sha256(original.read_bytes()).hexdigest()
+
+
+def test_legacy_database_without_gto_table_keeps_reference_compatibility(synthetic_source):
+    assert backup.reference_names(synthetic_source[0]) == synthetic_source[4]
+    assert backup.verify_set(make_set(synthetic_source))['status'] == 'Verified'
 
 
 @pytest.mark.parametrize('payload', [b'not-gzip', gzip.compress(b'not-a-sqlite-database'), gzip.compress(b'x')[:-3]])
@@ -144,6 +206,68 @@ def test_missing_referenced_file_fails_without_removing_previous_set(synthetic_s
     assert read_json(failures[0])['status'] == 'Failed'
     assert len(list((synthetic_source[2] / 'sets').iterdir())) == 1
     assert read_json(synthetic_source[3] / 'health.json')['local']['status'] == 'CRITICAL'
+
+
+def test_missing_gto_certificate_with_metadata_fails_complete_backup(gto_source):
+    good = make_set(gto_source)
+    before = snapshot_tree(good)
+    missing = 'gto/20/' + 'a' * 32 + '.pdf'
+    (gto_source[1] / missing).unlink()
+    with pytest.raises(backup.BackupError, match='referenced_file_missing'):
+        make_set(gto_source)
+    assert snapshot_tree(good) == before
+    assert backup.verify_set(good)['status'] == 'Verified'
+
+
+def test_verified_set_rechecks_gto_certificate_zip_membership(gto_source):
+    directory = make_set(gto_source)
+    archive_path = directory / 'files.zip'
+    with zipfile.ZipFile(archive_path) as archive:
+        members = [(item.filename, archive.read(item)) for item in archive.infolist()]
+    with zipfile.ZipFile(archive_path, 'w') as archive:
+        for name, content in members:
+            if name != 'gto/20/' + 'a' * 32 + '.pdf':
+                archive.writestr(name, content)
+    manifest = read_json(directory / 'manifest.json')
+    manifest['artifacts']['files.zip'] = {'size': archive_path.stat().st_size, 'sha256': backup.sha256(archive_path)}
+    atomic_json(directory / 'manifest.json', manifest)
+    with pytest.raises(backup.BackupError, match='referenced_file_missing'):
+        backup.verify_set(directory)
+
+
+@pytest.mark.parametrize(
+    'record_id,stored_name',
+    [
+        (0, 'a' * 32 + '.pdf'),
+        (-1, 'a' * 32 + '.pdf'),
+        ('outside', 'a' * 32 + '.pdf'),
+        (20, '../outside.pdf'),
+        (20, 'nested/file.pdf'),
+        (20, 'a' * 32 + '.exe'),
+        (20, ''),
+    ],
+)
+def test_unsafe_gto_certificate_reference_fails_closed(gto_source, record_id, stored_name):
+    database = gto_source[0]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'UPDATE student_gto_certificates SET gto_record_id=?, stored_name=? WHERE id=91',
+            (record_id, stored_name),
+        )
+    with pytest.raises(backup.BackupError, match='unsafe_reference'):
+        backup.reference_names(database)
+    with pytest.raises(backup.BackupError, match='unsafe_reference'):
+        make_set(gto_source)
+
+
+def test_symlinked_gto_certificate_cannot_be_verified(gto_source):
+    path = gto_source[1] / 'gto' / '20' / ('a' * 32 + '.pdf')
+    outside = gto_source[1].parent / 'synthetic-outside.pdf'
+    outside.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(outside)
+    with pytest.raises(backup.BackupError, match='unsafe_file'):
+        make_set(gto_source)
 
 
 def test_successful_repeats_do_not_apply_retention(synthetic_source):

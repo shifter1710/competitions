@@ -10,6 +10,8 @@ import secrets
 from datetime import datetime
 from urllib.parse import parse_qs
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from jinja2 import Environment
 from jinja2 import PackageLoader
@@ -153,10 +155,11 @@ def build_redirect_with_message(*, message: str | None = None, error: str | None
     query = urlencode(params)
     if not query:
         return redirect(url)
-    # url может уже нести query (?result=… у возвратов страницы события):
-    # второй «?» ломал бы строку параметров — flash терялся, фильтр сбрасывался.
-    separator = '&' if '?' in url else '?'
-    return redirect(f'{url}{separator}{query}')
+    # Flash belongs in the query sent to the server, before any fragment.
+    # Keep existing query text (including repeated filters) and anchor intact.
+    target = urlsplit(url)
+    merged_query = f'{target.query}&{query}' if target.query else query
+    return redirect(urlunsplit((target.scheme, target.netloc, target.path, merged_query, target.fragment)))
 
 
 def get_flash_args(request: Request) -> dict[str, str | None]:

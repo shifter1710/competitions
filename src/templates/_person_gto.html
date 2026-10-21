@@ -1,0 +1,66 @@
+<section id="person-gto" data-person-panel="gto">
+<div class="card shadow-sm mb-4"><div class="card-body">
+    <h5 class="card-title">ГТО <span class="badge text-bg-secondary">{{ gto_count }}</span></h5>
+    <p class="text-muted">История участия и награждений по годам и ступеням. Новое награждение сохраняет предыдущие.</p>
+    <div class="mb-3">
+        <div>УИН участника ГТО: <strong style="overflow-wrap:anywhere">{{ student.gto_uin or 'Не указан' }}</strong></div>
+        <div class="form-text">Персональный УИН студента, общий для всех записей ГТО.</div>
+        {% if is_admin %}
+        <details class="mt-2"><summary class="btn btn-sm btn-outline-secondary">Изменить УИН</summary>
+            <form action="/admin/people/{{ student.id }}/gto/uin" method="post" class="mt-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                <label class="form-label" for="person-gto-uin">УИН участника ГТО (необязательно)</label>
+                <input class="form-control" type="text" name="gto_uin" id="person-gto-uin" autocomplete="off" value="{{ student.gto_uin or '' }}">
+                <button class="btn btn-primary mt-2" type="submit">Сохранить УИН</button>
+            </form>
+        </details>
+        {% endif %}
+    </div>
+    {% if gto_rows %}
+    <div class="table-responsive"><table class="table table-sm align-middle person-secondary-table gto-history-table">
+        <thead><tr><th scope="col">Год</th><th scope="col">Ступень</th><th scope="col">Запись / награждение</th><th scope="col">Дата награждения</th><th scope="col">Сертификат</th>{% if is_moderator %}<th scope="col">Действия</th>{% endif %}</tr></thead>
+        <tbody>{% for row in gto_rows %}
+        <tr data-gto-id="{{ row.id }}">
+            <td data-label="Год">{{ row.year }}</td>
+            <td data-label="Ступень">{{ row.stage_label }}</td>
+            <td data-label="Запись / награждение">{{ row.status_label }} <small class="text-muted">#{{ row.id }}</small></td>
+            <td data-label="Дата награждения">{% if row.is_award %}{{ row.awarded_on_label or 'Не указана' }}{% else %}—{% endif %}</td>
+            <td data-label="Сертификат">{% include '_gto_certificates.html' %}</td>
+            {% if is_moderator %}<td data-label="Действия">
+                <details><summary class="btn btn-sm btn-outline-secondary">Исправить запись</summary>
+                    <p class="form-text">Исправление меняет эту запись. Для следующей награды добавьте новую.</p>
+                    <form action="/admin/people/{{ student.id }}/gto/{{ row.id }}/edit" method="post" class="d-flex flex-column gap-2 mt-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                        <label for="gto-year-{{ row.id }}">Год</label><input id="gto-year-{{ row.id }}" class="form-control form-control-sm" name="year" type="number" required min="{{ gto_year_min }}" max="{{ gto_year_max }}" value="{{ row.year }}">
+                        <label for="gto-stage-{{ row.id }}">Ступень</label><select id="gto-stage-{{ row.id }}" class="form-select form-select-sm" name="stage" required>{% for option in gto_stage_options %}<option value="{{ option.value }}" {% if option.value == row.stage %}selected{% endif %}>{{ option.label }}</option>{% endfor %}</select>
+                        <label for="gto-status-{{ row.id }}">Участие / награда</label><select id="gto-status-{{ row.id }}" class="form-select form-select-sm" name="status" required>{% for option in gto_status_options %}<option value="{{ option.value }}" {% if option.value == row.status %}selected{% endif %}>{{ option.label }}</option>{% endfor %}</select>
+                        <label for="gto-date-{{ row.id }}">Дата награждения (необязательно)</label><input id="gto-date-{{ row.id }}" class="form-control form-control-sm" name="awarded_on" type="date" value="{{ row.awarded_on or '' }}">
+                        <button class="btn btn-sm btn-primary" type="submit">Сохранить исправление</button>
+                    </form>
+                </details>
+                <details class="mt-2"><summary class="btn btn-sm btn-outline-danger">Удалить запись</summary>
+                    <form action="/admin/people/{{ student.id }}/gto/{{ row.id }}/delete" method="post" class="mt-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+                        <label><input type="checkbox" name="confirm_delete" value="yes" required> Удалить запись #{{ row.id }} и её сертификаты безвозвратно</label>
+                        <button class="btn btn-sm btn-outline-danger mt-2" type="submit">Подтвердить удаление</button>
+                    </form>
+                </details>
+            </td>{% endif %}
+        </tr>{% endfor %}</tbody>
+    </table></div>
+    {% else %}<div class="text-muted mb-3">Записей ГТО пока нет.</div>{% endif %}
+    {% if is_moderator %}
+    <details id="person-gto-add"><summary class="btn btn-outline-primary">Добавить запись ГТО</summary>
+        <p class="form-text">Для нового награждения добавьте отдельную запись. Для исправления ошибки используйте действие у существующей записи.</p>
+        <form action="/admin/people/{{ student.id }}/gto" method="post" class="row g-2 align-items-end">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+            <div class="col-6 col-md-2"><label class="form-label" for="gto-add-year">Год</label><input class="form-control form-control-sm" id="gto-add-year" name="year" type="number" required min="{{ gto_year_min }}" max="{{ gto_year_max }}" value="{{ gto_year_max }}"></div>
+            <div class="col-12 col-md-3"><label class="form-label" for="gto-add-stage">Ступень</label><select class="form-select form-select-sm" id="gto-add-stage" name="stage" required>{% for option in gto_stage_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></div>
+            <div class="col-12 col-md-3"><label class="form-label" for="gto-add-status">Участие / награда</label><select class="form-select form-select-sm" id="gto-add-status" name="status" required>{% for option in gto_status_options %}<option value="{{ option.value }}">{{ option.label }}</option>{% endfor %}</select></div>
+            <div class="col-12 col-md-3"><label class="form-label" for="gto-add-date">Дата награждения (необязательно)</label><input class="form-control form-control-sm" id="gto-add-date" name="awarded_on" type="date"></div>
+            <div class="col-12"><button class="btn btn-sm btn-outline-primary" type="submit">Добавить запись ГТО</button></div>
+        </form>
+    </details>
+    {% endif %}
+</div></div>
+</section>

@@ -6230,7 +6230,8 @@ def insert_wave1_legacy_competition(db_path):
 
 
 def test_wave1_fresh_db_schema(adapter):
-    # Свежая БД: три новые колонки, app_settings с identity_mode='dual',
+    # Свежая БД: три новые колонки и точные значения штатных app_settings
+    # (identity-mode + проверенный маркер миграции ГТО),
     # оба индекса ссылок (обычные, не UNIQUE).
     columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(competitions)')}
     assert {'discipline', 'result', 'calendar_event_id'} <= columns
@@ -6238,8 +6239,11 @@ def test_wave1_fresh_db_schema(adapter):
     settings_row = adapter.connection.execute("SELECT value FROM app_settings WHERE key = 'identity_mode'").fetchone()
     assert settings_row is not None
     assert settings_row['value'] == 'dual'
-    total = adapter.connection.execute('SELECT COUNT(*) AS total FROM app_settings').fetchone()
-    assert total['total'] == 1
+    settings_inventory = {
+        row['key']: row['value']
+        for row in adapter.connection.execute('SELECT key, value FROM app_settings ORDER BY key')
+    }
+    assert settings_inventory == {'identity_mode': 'dual', 'gto_history_v1': '1'}
 
     indexes = {row['name'] for row in adapter.connection.execute('PRAGMA index_list(competitions)')}
     assert {
@@ -6290,6 +6294,11 @@ def test_wave1_legacy_rows_new_fields_null(tmp_path):
 def test_wave1_reinit_idempotent(tmp_path):
     db_path = str(tmp_path / 'wave1-reinit.sqlite3')
     adapter = SQLiteAdapter(db_path)
+    initial_settings = {
+        row['key']: row['value']
+        for row in adapter.connection.execute('SELECT key, value FROM app_settings ORDER BY key')
+    }
+    assert initial_settings == {'identity_mode': 'dual', 'gto_history_v1': '1'}
     seed_fixture_levels(adapter)
     event_id = adapter.create_calendar_event(
         name='Кубок', date='2026-01-10T00:00:00', date_to=None, level='', sport='Бег', links=[]
@@ -6306,8 +6315,11 @@ def test_wave1_reinit_idempotent(tmp_path):
     assert stored.result == '11.2'
     assert stored.calendar_event_id == event_id
 
-    total = adapter.connection.execute('SELECT COUNT(*) AS total FROM app_settings').fetchone()
-    assert total['total'] == 1
+    repeated_settings = {
+        row['key']: row['value']
+        for row in adapter.connection.execute('SELECT key, value FROM app_settings ORDER BY key')
+    }
+    assert repeated_settings == initial_settings == {'identity_mode': 'dual', 'gto_history_v1': '1'}
     mode = adapter.connection.execute("SELECT value FROM app_settings WHERE key = 'identity_mode'").fetchone()
     assert mode['value'] == 'dual'
 
@@ -7040,6 +7052,8 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     + Team Results: calendar_event_team_results
     + Event Documents: calendar_event_documents
     + ГТО: student_gto_records
+    + GTO-01/02: УИН и пять необходимых публичных операций сертификатов/истории
+    (выборка сертификатов — приватный helper GtoMixin)
     + Reports/Calendar UX: два read-only метода учебных лет календаря/истории
     + CAL-02: read-only get_report_event_ids для точной выборки сводки).
     Регрессионный pin состава."""
@@ -7093,6 +7107,12 @@ def test_v21_adapter_composition_and_api_surface(adapter):
             'event_team_member_ids',
             'event_team_history',
             'get_event_document_for_user',
+            # GTO-01/02: only operations called by application routes.
+            'set_student_gto_uin',
+            'create_gto_certificate',
+            'delete_gto_certificate',
+            'get_gto_certificate_for_user',
+            'delete_gto_record_with_certificates',
         ]
     )
 

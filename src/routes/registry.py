@@ -1027,6 +1027,9 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'my_documents': my_documents,
                 # ГТО: read-only карточка кабинета (тот же паттерн).
                 'my_gto': my_gto,
+                'my_gto_uin': (storage.get_student_by_id(student_ref_filter) or {}).get('gto_uin')
+                if student_ref_filter
+                else None,
                 'users': storage.list_users() if user_is_admin(request) else [],
                 'user_roles': USER_ROLES,
                 'levels': levels,
