@@ -1,6 +1,7 @@
 {% extends "layout/base.html" %}
 {% from "macros/report_multiselect.html" import report_multiselect %}
 
+{% from 'macros/context_help.html' import help %}
 {% block content %}
 
 {# Страница отчётов Reports v2: применённое состояние живёт в URL
@@ -8,9 +9,9 @@
    ниже — зона результата по применённым параметрам либо заглушка. #}
 <div class="page-head">
     <div>
-        <h1 class="page-title">Отчёты</h1>
+        <div class="d-flex align-items-center gap-2"><h1 class="page-title">Отчёты</h1>
+        {% call help('Как работают отчёты') %}<p>Готовые выборки по реестру: участия, победы и призовые места с фильтрами по периоду, студентам и соревнованиям. Сформированный отчёт живёт в адресе страницы — ссылкой можно поделиться, результат выгружается в Excel.</p>{% endcall %}</div>
         <a class="btn btn-outline-secondary mb-2" href="/reports/gto">Отчёт ГТО</a>
-        <p class="page-sub">Готовые выборки по реестру: участия, победы и призовые места с фильтрами по периоду, студентам и соревнованиям. Сформированный отчёт живёт в адресе страницы — ссылкой можно поделиться, результат выгружается в Excel.</p>
     </div>
 </div>
 
@@ -25,8 +26,7 @@
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h3 class="title mb-1">Условия отчёта</h3>
-        <div class="text-muted mb-3">Фильтры — какие записи попадают в расчёт; разрез — как они сведены в таблице.</div>
+        <div class="d-flex align-items-center gap-2 mb-3"><h3 class="title mb-0">Условия отчёта</h3>{{ help('Настройки отчёта', 'Фильтры — какие записи попадают в расчёт; разрез — как они сведены в таблице.') }}</div>
         {# data-applied-query — применённый запрос для клиентского
            dirty-детекта (предупреждение о неприменённых изменениях). #}
         <form class="report-form" method="get" action="/reports"{% if report_applied %} data-applied-query="{{ applied_query }}"{% endif %}>
@@ -39,25 +39,25 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="report-filters__dates report__dates{% if report_form.period != 'custom' %} d-none{% endif %}">
+            <div class="report-filters__dates report__dates">
                 <div class="datetime">
                     <div>
                         <label class="form-label" for="report-filter-date-from">Дата (от)</label>
                         <input class="form-control" id="report-filter-date-from" name="date_from" type="text"
-                               autocomplete="off"{% if report_form.period != 'custom' %} disabled{% endif %}
+                               autocomplete="off"
                                value="{{ report_form.date_from }}">
                     </div>
                     <div>
                         <label class="form-label" for="report-filter-date-to">Дата (до)</label>
                         <input class="form-control" id="report-filter-date-to" name="date_to" type="text"
-                               autocomplete="off"{% if report_form.period != 'custom' %} disabled{% endif %}
+                               autocomplete="off"
                                value="{{ report_form.date_to }}">
                     </div>
                 </div>
             </div>
             <div class="report-filters__events">
                 {{ report_multiselect('event_id', 'Соревнования', event_options, report_form.event_id, 'Поиск соревнования') }}
-                <div class="form-text">Список зависит от периода. Выбранные соревнования вне периода отмечены отдельно.</div>
+                {{ help('Список соревнований', 'Список зависит от периода. Выбранные соревнования вне периода отмечены отдельно.') }}
             </div>
             <div class="report-filters__slice">
                 <label class="form-label" for="report-filter-group-by">Разрез</label>

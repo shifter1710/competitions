@@ -1,3 +1,5 @@
+{% from 'macros/context_help.html' import help %}
+{% set admin_description_help = true %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Сопоставление данных{% endblock admin_title %}
@@ -66,10 +68,8 @@
                 <div class="small text-muted">
                     Сейчас видно атлету: {{ user.visible_now }} записей.
                 </div>
-                <div class="form-text ui-hint">
-                    Не переносятся: привязка не копирует псевдонимы аккаунта студенту —
-                    они остаются у аккаунта.
-                </div>
+                {% call help('Сопоставление аккаунтов') %}Не переносятся: привязка не копирует псевдонимы аккаунта студенту —
+                    они остаются у аккаунта.{% endcall %}
             </div>
             <div class="col-lg-7">
                 {% if user.candidates %}
@@ -109,7 +109,7 @@
                 <a class="btn btn-sm btn-outline-secondary mt-2"
                    href="/admin/people/reconcile/users/create?user_id={{ user.id }}&amp;back={{ back_url | urlencode }}">Создать студента из профиля</a>
                 {% if identity_mode == 'ref' %}
-                <div class="form-text ui-hint">
+                <div class="form-text">
                     Режим «только связи»: пока у аккаунта нет карточки студента, атлет видит
                     только собственные записи. Создание карточки с привязкой сразу расширит
                     кабинет атлета.

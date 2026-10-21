@@ -1,6 +1,7 @@
 {% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
 
+{% from 'macros/context_help.html' import help %}
 {% block content %}
 {% from "shared/period_filter.html" import period_filter %}
 <script defer src="/static/scripts/period-filters.js"></script>
@@ -22,7 +23,7 @@
 <div class="col-12" data-links-field>
     <span class="label d-block">Ссылки</span>
     {% if not compact %}
-    <div class="text-muted small mb-2">Необязательно: положение, фото, регламент — откроются со страницы соревнования</div>
+    {{ help('Ссылки соревнования', 'Необязательно: положение, фото, регламент — откроются со страницы соревнования') }}
     {% endif %}
     <div class="d-flex flex-column gap-2" data-links-rows>
         {% for link in links %}
@@ -72,7 +73,7 @@
 <div class="page-head">
     <div>
         <h1 class="page-title">Календарь соревнований</h1>
-        <p class="page-sub">План на учебный сезон: соревнования запланированы заранее, участники заполняются внутри — место и результат можно дописать позже.</p>
+        {{ help('Как работает календарь', 'План на учебный сезон: соревнования запланированы заранее, участники заполняются внутри — место и результат можно дописать позже.') }}
     </div>
     {% if can_manage %}
     <button class="btn btn-primary" type="button" data-bs-toggle="collapse" data-bs-target="#calendar-new-form"
@@ -80,41 +81,39 @@
     {% endif %}
 </div>
 
+{% if source_token %}
+<div class="alert alert-info" role="region" aria-label="Соревнования из отчёта">
+    <strong>Соревнования из отчёта</strong>
+    {% if source_summary %}<span>В показателе: {{ source_summary.count_events }} · Показано: {{ events_count }}</span>
+    <div>Участий без связи с календарём: {{ source_summary.count_unlinked_participations }} — исключены из показателя соревнований; календарные события для них не создаются.</div>{% endif %}
+    <a href="{{ source_report_url }}">Вернуться к отчёту / изменить условия</a>
+</div>
+{% endif %}
 <section class="card shadow-sm mb-4">
     <div class="card-body">
         <form class="row g-3 filter-form" method="get" action="/calendar" data-view-period-form data-period-today="{{ period_today }}">
+            {% if source_token %}<input type="hidden" name="report_context" value="{{ source_token }}">{% endif %}
+            <div class="col-12 col-md-4"><label class="form-label" for="calendar-search">Поиск соревнования</label><input class="form-control" type="search" id="calendar-search" name="q" value="{{ search_filter }}" maxlength="200"></div>
             {{ period_filter('calendar', period_options, period_value, period_date_from, period_date_to, period_error, autofill_today=true) }}
-            <div class="col-md-3">
-                <span class="label">Статус</span>
-                <select class="form-select" name="status">
-                    {% for key, label in status_filter_options %}
-                    <option value="{{ key }}"{% if key == status_filter %} selected{% endif %}>{{ label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-md-3">
-                <span class="label">Вид спорта</span>
-                <select class="form-select" name="sport">
-                    <option value="">Все</option>
-                    {% for value in sport_options %}
-                    <option value="{{ value }}"{% if value == sport_filter %} selected{% endif %}>{{ value }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-md-3 d-flex align-items-end gap-2">
-                <button class="btn btn-primary" type="submit">Применить</button>
-                <a class="btn btn-outline-secondary" href="{{ period_reset_url }}">Сбросить период</a>
-                <a class="btn btn-link" href="/calendar">Сбросить всё</a>
-            </div>
+            <div class="col-12 col-md-4 d-flex align-items-end gap-2"><button class="btn btn-primary" type="submit">Применить</button><a class="btn btn-link" href="/calendar">Сбросить всё</a></div>
+            <div class="col-12"><details{% if calendar_advanced %} open{% endif %} class="calendar-filters-details"><summary>Фильтры</summary><div class="row g-3 mt-1">
+                <div class="col-12 col-md-3"><label class="form-label" for="calendar-status">Статус</label><select class="form-select" name="status" id="calendar-status">{% for key, label in status_filter_options %}<option value="{{ key }}"{% if key == status_filter %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+                <div class="col-12 col-md-3"><label class="form-label" for="calendar-sport">Вид спорта</label><select class="form-select" name="sport" id="calendar-sport"><option value="">Все</option>{% for value in sport_options %}<option{% if value == sport_filter %} selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+                <div class="col-12 col-md-3"><label class="form-label" for="calendar-level">Уровень</label><select class="form-select" name="level" id="calendar-level"><option value="">Все</option>{% for value in level_options %}<option{% if value == level_filter %} selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+                <div class="col-12 col-md-3"><label class="form-label" for="calendar-confirmed">Результаты</label><select class="form-select" name="confirmed" id="calendar-confirmed"><option value="">Все</option><option value="yes"{% if confirmation_filter == 'yes' %} selected{% endif %}>Подтверждены</option><option value="no"{% if confirmation_filter == 'no' %} selected{% endif %}>Не подтверждены</option></select></div>
+            </div></details></div>
         </form>
+        {% if source_chips or calendar_chips %}<div class="report-chips-toolbar mt-3" aria-label="Активные фильтры">
+            {% for chip in source_chips %}<span class="filter-chip">Из отчёта · {{ chip.label }}: <strong>{{ chip.value }}</strong><a class="filter-chip__x" href="{{ chip.remove_url }}" aria-label="Убрать условие отчёта: {{ chip.label }}">×</a></span>{% endfor %}
+            {% for chip in calendar_chips %}<span class="filter-chip">{{ chip.label }}: <strong>{{ chip.value }}</strong><a class="filter-chip__x" href="{{ chip.remove_url }}" aria-label="Убрать {{ chip.label }}">×</a></span>{% endfor %}
+        </div>{% endif %}
     </div>
 </section>
 
 {% if can_manage %}
 <section class="card shadow-sm mb-4 collapse" id="calendar-new-form">
     <div class="card-body">
-        <h3 class="title mb-1">Запланировать соревнование</h3>
-        <div class="text-muted mb-3">План на год — не запись реестра. Период: два клика по календарю — начало и конец; повторный клик по той же дате — однодневное соревнование.</div>
+        <div class="d-flex align-items-center gap-2 mb-3"><h3 class="title mb-0">Запланировать соревнование</h3>{{ help('Планирование соревнования', 'План на год — не запись реестра. Период: два клика по календарю — начало и конец; повторный клик по той же дате — однодневное соревнование.') }}</div>
         <form class="row g-3" method="post" action="/calendar/new" enctype="multipart/form-data" data-period-form>
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="date" data-period-field>
@@ -150,7 +149,7 @@
                 <label class="label" for="calendar-new-regulation">Положение о соревновании</label>
                 <input class="form-control" id="calendar-new-regulation" name="regulation" type="file"
                     accept=".pdf,.png,.jpg,.jpeg">
-                <span class="form-text ui-hint">Необязательно. PDF, JPEG или PNG, до 5 МБ.</span>
+                {{ help('Положение о соревновании', 'Необязательно. PDF, JPEG или PNG, до 5 МБ.') }}
             </div>
             <div class="col-12 d-flex gap-2">
                 <button class="btn btn-primary" type="submit">Запланировать</button>
@@ -263,12 +262,10 @@
 </div>
 {% endfor %}
 {% else %}
-{% if period_error %}<div class="empty-content">Исправьте период, чтобы показать соревнования.</div>{% elif period_active %}<div class="empty-content">За выбранный период соревнований нет. <a href="{{ period_reset_url }}">Сбросить период</a></div>{% else %}<div class="empty-content">В календаре пока нет соревнований</div>{% endif %}
+{% if period_error %}<div class="empty-content">Исправьте период, чтобы показать соревнования.</div>{% elif period_active %}<div class="empty-content">За выбранный период соревнований нет. <a href="{{ period_reset_url }}">Сбросить период</a></div>{% else %}<div class="empty-content">По выбранным условиям соревнований нет</div>{% endif %}
 {% endif %}
 
-<div class="calendar-note mt-4">
-    <span>Календарь — план на год (не записи реестра): участники заполняются внутри соревнования, место и результат
-        можно дописать позже. Записи участников после соревнования становятся обычными записями реестра.</span>
-</div>
+{% call help('Календарь и реестр') %}<p>Календарь — план на год (не записи реестра): участники заполняются внутри соревнования, место и результат
+        можно дописать позже. Записи участников после соревнования становятся обычными записями реестра.</p>{% endcall %}
 
 {% endblock content %}

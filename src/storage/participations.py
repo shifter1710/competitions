@@ -574,6 +574,34 @@ class ParticipationsMixin:
             ).fetchone()
             return ReportSummary(**dict(row))
 
+    def get_report_event_ids(self, **filters) -> list[int]:
+        """Exact event membership of count_events; no metadata or history writes."""
+        defaults = dict(
+            date_from='',
+            date_to='',
+            position='',
+            level='',
+            name='',
+            institute='',
+            group='',
+            sport='',
+            course='',
+            admission_year='',
+            custom_filters=(),
+            event_id=(),
+        )
+        defaults.update(filters)
+        with self._lock:
+            where, params = self._report_filter_where(**defaults)
+            return [
+                row[0]
+                for row in self.connection.execute(
+                    f'SELECT DISTINCT calendar_event_id FROM competitions {where} '
+                    'AND calendar_event_id IS NOT NULL ORDER BY calendar_event_id',
+                    params,
+                )
+            ]
+
     def get_report_course_options(self) -> list[str]:
         """Distinct calculated positive courses; legacy text never becomes an option."""
         with self._lock:

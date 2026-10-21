@@ -1,3 +1,5 @@
+{% from 'macros/context_help.html' import help %}
+{% set admin_description_help = true %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Сопоставление данных{% endblock admin_title %}
@@ -78,10 +80,8 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="mode" value="ref">
             <button class="btn btn-warning" type="submit">Перейти на «только связи»</button>
-            <div class="form-text ui-hint">
-                Режим влияет только на видимость кабинета атлета: записи, отчёты, выгрузки
-                и модерация не меняются.
-            </div>
+            {% call help('Режим видимости кабинета') %}Режим влияет только на видимость кабинета атлета: записи, отчёты, выгрузки
+                и модерация не меняются.{% endcall %}
         </form>
         {% else %}
         <div class="alert alert-danger" role="alert">
@@ -96,10 +96,8 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <input type="hidden" name="mode" value="dual">
             <button class="btn btn-outline-secondary" type="submit">Вернуть двойной режим</button>
-            <div class="form-text ui-hint">
-                Режим влияет только на видимость кабинета атлета: записи, отчёты, выгрузки
-                и модерация не меняются.
-            </div>
+            {% call help('Режим видимости кабинета') %}Режим влияет только на видимость кабинета атлета: записи, отчёты, выгрузки
+                и модерация не меняются.{% endcall %}
         </form>
         {% endif %}
     </div>

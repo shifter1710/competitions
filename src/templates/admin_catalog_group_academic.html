@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Учебные данные группы{% endblock admin_title %}
@@ -44,7 +46,7 @@
                 <div class="text-muted mb-2">{{ course_preview }}</div>
                 <button class="btn btn-primary" type="submit">Сохранить</button>
                 <a class="btn btn-outline-secondary" href="/admin/catalogs">Отмена</a>
-                <div class="form-text ui-hint">От года поступления считается текущий курс студентов группы (учебный год начинается 1 сентября).</div>
+                {% call help('Как рассчитывается курс') %}От года поступления считается текущий курс студентов группы (учебный год начинается 1 сентября).{% endcall %}
             </div>
         </form>
     </div>

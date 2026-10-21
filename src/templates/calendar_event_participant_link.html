@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -87,7 +88,7 @@
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <h3 class="title mb-1">Найти студента</h3>
-        <div class="text-muted mb-3">Поиск по подстроке ФИО или псевдонима среди активных карточек.</div>
+        {% call help('Поиск и данные студента') %}Поиск по подстроке ФИО или псевдонима среди активных карточек.{% endcall %}
         <form action="/calendar/{{ event.id }}/participants/{{ record_id }}/link" class="d-flex flex-wrap gap-2 mb-3"
               method="get">
             <input aria-label="Поиск по ФИО" autocomplete="off" class="form-control" name="q"
@@ -148,10 +149,10 @@
                     <input class="form-control" id="participant-link-group" name="group" type="text"
                         value="{{ record.group or '' }}">
                 </div>
-                <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
+                <div class="col-md-3 ui-hint">{% call help('Поиск и данные студента') %}Год поступления и курс рассчитываются по группе после сохранения.{% endcall %}</div>
                 <div class="col-12">
                     <button class="btn btn-primary" type="submit">Создать и связать</button>
-                    <div class="form-text ui-hint">
+                    <div class="form-text">
                         Поля предзаполнены данными записи. Новая карточка сразу привяжется
                         к записи №{{ record_id }}; сама запись (снимок данных в ней) при этом не изменится.
                     </div>

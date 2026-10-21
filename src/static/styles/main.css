@@ -2427,3 +2427,26 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
 .gto-report-form .form-control, .gto-report-form .form-select { min-width: 0; }
 .gto-report-table { min-width: 1050px; }
 .gto-report-table td { max-width: 260px; overflow-wrap: anywhere; }
+
+/* Optional explanations use the existing global hint setting. Native details
+   keeps content closed before scripts load and supports no-JavaScript pages. */
+.context-help.ui-hint{display:inline-block;position:relative;vertical-align:middle;margin-inline-start:.3rem;font-size:.875rem;font-weight:400;line-height:1.5;text-align:start}
+html.hints-off .context-help.ui-hint{display:none!important}
+.context-help__trigger{display:inline-flex;align-items:center;justify-content:center;width:1.2rem;height:1.2rem;border:1px solid var(--bs-secondary-color);border-radius:50%;color:var(--bs-secondary-color);font:600 .8rem/1 sans-serif;cursor:pointer;list-style:none;vertical-align:middle}
+.context-help__trigger::-webkit-details-marker{display:none}
+.context-help__trigger:focus-visible{outline:3px solid var(--bs-primary);outline-offset:3px}
+.context-help:not([open])>.context-help__panel{display:none}
+.context-help__panel{position:absolute;inset-block-start:calc(100% + .5rem);inset-inline-start:0;z-index:1090;width:26rem;max-width:calc(100vw - 24px);max-height:min(32rem,calc(100dvh - 24px));overflow:auto;padding:.85rem 1rem;border:1px solid var(--bs-border-color);border-radius:.5rem;background:var(--bs-body-bg);color:var(--bs-body-color);box-shadow:0 .4rem 1.2rem #0003;white-space:normal;overflow-wrap:anywhere;font-size:.875rem;font-weight:400;line-height:1.5;text-transform:none;letter-spacing:normal}
+.context-help__heading{display:flex;align-items:start;justify-content:space-between;gap:1rem;margin-bottom:.4rem}
+.context-help__close{flex:none;border:0;padding:0 .25rem;background:transparent;color:inherit;font-size:1.3rem;line-height:1;cursor:pointer}
+.context-help__close[hidden]{display:none}
+.context-help__content>:last-child{margin-bottom:0}
+.context-help__content p{font-size:inherit;line-height:inherit}
+@media(prefers-reduced-motion:reduce){.context-help{scroll-behavior:auto}}
+.person-page .context-help>.context-help__panel{margin-top:0}
+.person-page .context-help[open]>.context-help__trigger{margin-bottom:0}
+
+/* Report sorting links inherit the dark table header's accessible foreground. */
+a.report-sort-link,a.report-sort-link:visited{color:inherit}
+.report-sort-link:hover{text-decoration-thickness:.12em}
+.report-sort-link:focus-visible{outline:2px solid currentColor;outline-offset:3px;border-radius:2px}

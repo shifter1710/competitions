@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Студенты{% endblock admin_title %}
@@ -147,8 +149,8 @@
                     <label class="form-label" for="student-create-group">Группа</label>
                     <input class="form-control" id="student-create-group" name="group" type="text">
                 </div>
-                <div class="form-text">Год поступления и курс определяются по группе.</div>
-                <div class="form-text ui-hint">Кроме ФИО, поля можно заполнить позже в карточке студента.</div>
+                {% call help('Данные студента') %}Год поступления и курс определяются по группе.{% endcall %}
+                {% call help('Данные студента') %}Кроме ФИО, поля можно заполнить позже в карточке студента.{% endcall %}
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>

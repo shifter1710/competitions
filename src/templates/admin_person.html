@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 {% block content %}
 {% from "shared/period_filter.html" import period_filter %}
@@ -87,7 +88,7 @@
                 </tbody>
             </table>
         </div>
-        <div class="text-muted">Поиск работает только по показанным записям.</div>
+        {% call help('Работа с карточкой студента') %}Поиск работает только по показанным записям.{% endcall %}
         {% else %}
         {% if period_error %}<div class="text-muted mb-3">Исправьте период, чтобы показать участия.</div>{% elif period_active and linked_records_count %}<div class="text-muted mb-3">За выбранный период участий нет. <a href="{{ history_reset_url }}">Сбросить период</a></div>{% else %}<div class="text-muted mb-3">Привязанных записей пока нет.</div>{% endif %}
         {% endif %}
@@ -105,8 +106,7 @@
    Таблица — всему штату (read-only), удаление/добавление — только admin. #}
 <div class="card shadow-sm">
     <div class="card-body">
-        <h2 class="card-title">Другие имена</h2>
-        <div class="text-muted mb-3">Другие написания ФИО этого студента, встречающиеся в записях и импорте.</div>
+        <div class="d-flex align-items-center gap-1"><h2 class="card-title">Другие имена</h2>{% call help('Работа с карточкой студента') %}Другие написания ФИО этого студента, встречающиеся в записях и импорте.{% endcall %}</div>
 
         {% if aliases %}
         <div class="table-responsive">
@@ -246,7 +246,7 @@
                     <button class="btn btn-sm btn-primary" type="submit">Создать доступ</button>
                 </div>
                 <div class="col-12">
-                    <div class="form-text ui-hint">
+                    <div class="form-text">
                         Минимум 6 символов. Скопируйте пароль до отправки — после создания он
                         больше не показывается; в базе только хеш.
                     </div>
@@ -378,13 +378,11 @@
                 <label class="form-label" for="person-group">Группа</label>
                 <input class="form-control" id="person-group" name="group" type="text" value="{{ student.group_name or '' }}">
             </div>
-            <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
+            <div class="col-md-3 ui-hint">{% call help('Работа с карточкой студента') %}Год поступления и курс рассчитываются по группе после сохранения.{% endcall %}</div>
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Сохранить</button>
-                <div class="form-text ui-hint">
-                    Сохранение меняет только актуальные данные карточки. ФИО и данные
-                    в существующих записях о соревнованиях, отчётах и выгрузках не переписываются.
-                </div>
+                {% call help('Исторические данные') %}Сохранение меняет только актуальные данные карточки. ФИО и данные
+                    в существующих записях о соревнованиях, отчётах и выгрузках не переписываются.{% endcall %}
             </div>
         </form>
         </details>
@@ -411,8 +409,7 @@
 {% if education %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h5 class="card-title">Образование</h5>
-        <div class="text-muted mb-3">Год поступления определяется по названию группы; курс рассчитывается автоматически — учебный год начинается 1 сентября.</div>
+        <div class="d-flex align-items-center gap-1"><h5 class="card-title">Образование</h5>{% call help('Работа с карточкой студента') %}Год поступления определяется по названию группы; курс рассчитывается автоматически — учебный год начинается 1 сентября.{% endcall %}</div>
         <dl class="row mb-0">
             <dt class="col-sm-4 fw-normal text-muted">Уровень образования</dt>
             <dd class="col-sm-8">{% if education.level_name %}{{ education.level_name }}{% else %}<span class="text-muted">не задан</span>{% endif %}</dd>
@@ -435,7 +432,7 @@
             </dd>
         </dl>
         {% if education.probably_finished %}
-        <div class="form-text ui-hint mt-2">
+        <div class="form-text mt-2">
             Курс больше длительности обучения — проверьте название группы и длительность
             в учебных данных группы. Карточка не архивируется автоматически.
         </div>
@@ -462,7 +459,7 @@
               onsubmit="return confirm('Удалить карточку «{{ student.full_name }}» (#{{ student.id }}) безвозвратно? Удаление возможно только для карточки без записей о соревнованиях, без привязанных аккаунтов атлета и без записей ГТО. Восстановить карточку будет нельзя.')">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
             <button class="btn btn-danger" type="submit">Удалить карточку</button>
-            <div class="form-text ui-hint">
+            <div class="form-text">
                 Карточка и её псевдонимы ФИО удалятся навсегда. Деактивация (кнопка в блоке
                 «Данные студента») скрывает карточку из поиска и импорта, сохраняя данные, —
                 используйте её, если карточка используется.

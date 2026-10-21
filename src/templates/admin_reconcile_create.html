@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Сопоставление данных — создание студента{% endblock admin_title %}
@@ -83,17 +85,17 @@
                 <input class="form-control" id="reconcile-group" name="group" type="text"
                        value="{{ form.group_name }}">
             </div>
-            <div class="col-md-3"><div class="form-text">Год поступления и курс рассчитываются по группе после сохранения.</div></div>
+            <div class="col-md-3 ui-hint">{% call help('Как рассчитывается курс') %}Год поступления и курс рассчитываются по группе после сохранения.{% endcall %}</div>
             <div class="col-12">
                 <button class="btn btn-primary" type="submit">Создать и привязать</button>
                 <a class="btn btn-outline-secondary" href="{{ back_url }}">Отмена</a>
                 {% if source == 'record' %}
-                <div class="form-text ui-hint">
+                <div class="form-text">
                     Поля предзаполнены данными записи. Созданный студент сразу привяжется
                     к записи №{{ record_id }}; сама запись (снимок данных в ней) при этом не изменится.
                 </div>
                 {% else %}
-                <div class="form-text ui-hint">
+                <div class="form-text">
                     Поля предзаполнены данными профиля. Псевдонимы ФИО аккаунта не переносятся —
                     студент получает только данные профиля. Созданный студент сразу привяжется к аккаунту.
                 </div>
