@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -53,10 +54,8 @@
                 </div>
             </div>
         </div>
-        <div class="form-text ui-hint mt-3 mb-0">
-            Студент участвует в соревновании; каждое такое участие — отдельная запись с дисциплиной,
-            местом и результатом.
-        </div>
+        {% call help('Что такое участие') %}Студент участвует в соревновании; каждое такое участие — отдельная запись с дисциплиной,
+            местом и результатом.{% endcall %}
     </div>
 </section>
 

@@ -1,3 +1,5 @@
+{% from 'macros/context_help.html' import help %}
+{% set admin_description_help = true %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Сопоставление данных{% endblock admin_title %}
@@ -127,9 +129,7 @@
             </select>
             <button class="btn btn-primary btn-sm" type="submit">Привязать выбранные</button>
         </form>
-        <div class="form-text ui-hint">
-            Привязка выполняется целиком: если хотя бы одна выбранная запись уже привязана, не изменится ничего.
-        </div>
+        {% call help('Сопоставление записей') %}Привязка выполняется целиком: если хотя бы одна выбранная запись уже привязана, не изменится ничего.{% endcall %}
 
         <div class="text-muted mt-3 mb-2">
             Всего по фильтру: {{ total }}; страница {{ page }} из {{ pages }}

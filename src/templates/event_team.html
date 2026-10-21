@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 {% block content %}
 <a class="backlink" href="/calendar/{{ event.id }}#event-teams">← {{ event.name }}</a>
@@ -13,7 +14,8 @@
 {% endif %}
 {% if team %}
 {% if can_manage %}<a class="btn btn-outline-primary mb-3" href="/calendar/{{ event.id }}?document_team={{ team.id }}#event-documents">Загрузить документ команды</a>{% endif %}
-<p>Состав: {{ members|length }} участий. Каждая дисциплина выбирается отдельно. Одно участие может входить в несколько команд.</p>
+<p>Состав: {{ members|length }} участий.</p>
+{{ help('Как устроен состав команды', 'Каждая дисциплина выбирается отдельно. Одно участие может входить в несколько команд.') }}
 <div class="alert alert-warning">Участие без связанной карточки можно добавить в команду, но оно не даёт доступа к документам через личный кабинет.</div>
 {% for mode, heading, button in [('remove', 'Текущий состав', 'Исключить выбранные'), ('add', 'Добавить участия соревнования', 'Добавить выбранные')] %}
 <section class="card card-body mb-3" data-team-roster>

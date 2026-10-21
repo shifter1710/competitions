@@ -6948,6 +6948,7 @@ V21_PUBLIC_API = [
     # Reports v2: опции фильтров и сводный агрегат по выборке.
     'get_report_admission_year_options',
     'get_report_course_options',
+    'get_report_event_ids',
     'get_report_drilldown',
     'get_report_period_year_options',
     'get_report_summary',
@@ -7039,7 +7040,8 @@ def test_v21_adapter_composition_and_api_surface(adapter):
     + Team Results: calendar_event_team_results
     + Event Documents: calendar_event_documents
     + ГТО: student_gto_records
-    + Reports/Calendar UX: два read-only метода учебных лет календаря/истории).
+    + Reports/Calendar UX: два read-only метода учебных лет календаря/истории
+    + CAL-02: read-only get_report_event_ids для точной выборки сводки).
     Регрессионный pin состава."""
     from src.storage.catalogs import CatalogsMixin
     from src.storage.education import EducationMixin

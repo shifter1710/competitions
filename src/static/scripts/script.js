@@ -985,6 +985,9 @@ class Main {
         if (!this.reportForm) {
             return;
         }
+        const customPeriod = this.reportForm.querySelector(".report__period").value === "custom";
+        this.reportForm.querySelector(".report__dates")?.classList.toggle("d-none", !customPeriod);
+        this.reportForm.querySelectorAll('[name="date_from"], [name="date_to"]').forEach(input => { input.disabled = !customPeriod; });
         this.reportInitialEntriesKey = Main.reportEntriesKey(Main.canonicalReportEntries(this.serializeReportForm()));
         this.initReportMultiselects();
         this.updateReportDirtyState();
@@ -1999,7 +2002,7 @@ class Main {
         const profile = this.loadProfile();
         const educationOutput = this.profileForm.querySelector("#profile-education");
         if (educationOutput) {
-            educationOutput.textContent = `Год поступления: ${profile.admission_year || "—"}. Текущий курс: ${profile.course || "—"}. Рассчитываются по группе после сохранения.`;
+            educationOutput.textContent = `Год поступления: ${profile.admission_year || "—"}. Текущий курс: ${profile.course || "—"}.`;
         }
         this.profileForm.querySelectorAll("input, select").forEach((input) => {
             const value = profile[input.name];
@@ -3218,8 +3221,8 @@ class Main {
     bindTableHeaderEvents() {
         // Реестр (data-server-sort) сортируется сервером: клик по заголовку —
         // GET-навигация с sort/order в URL (порядок применяется ко всей
-        // отфильтрованной выборке). Таблица отчёта (report_result.html)
-        // сохраняет клиентскую сортировку sortByHeader, как раньше.
+        // отфильтрованной выборке). В отчёте сортировка — нативные GET-ссылки.
+        // Общие обработчики переноса колонок нужны обоим представлениям.
         const serverSort = this.tableElement?.dataset.serverSort === "true";
         const headers = Array.from(this.tableElement.querySelectorAll("thead th"));
         headers.forEach((header) => {
@@ -3229,7 +3232,7 @@ class Main {
             header.dataset.bound = "true";
             header.draggable = header.dataset.columnKey !== "actions";
             header.classList.add("table-header-cell");
-            if (header.dataset.sortType !== "none") {
+            if (header.dataset.sortType !== "none" && !(serverSort && this.tableElement.dataset.reportTable === "true")) {
                 if (serverSort) {
                     if (header.dataset.sortable === "true") {
                         header.addEventListener("click", () => this.handleServerSortClick(header));

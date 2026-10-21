@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Справочники значений{% endblock admin_title %}
@@ -18,8 +20,7 @@
 {% macro value_catalog_section(title, hint, values, category, id_prefix) %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h5 class="card-title">{{ title }}</h5>
-        <div class="text-muted mb-3">{{ hint }}</div>
+        <div class="d-flex align-items-center gap-1"><h5 class="card-title">{{ title }}</h5>{% call help('Как работает справочник') %}{{ hint }}{% endcall %}</div>
 
         <form action="/admin/catalogs/{{ category }}" class="row g-2 align-items-end mb-3" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -73,7 +74,7 @@
                 </tbody>
             </table>
         </div>
-        <div class="text-muted">Удалить можно только значение, на котором не висит ни одной записи; скрытое не показывается в подсказках форм, но остаётся в записях и отчётах.</div>
+        {% call help('Как работает справочник') %}Удалить можно только значение, на котором не висит ни одной записи; скрытое не показывается в подсказках форм, но остаётся в записях и отчётах.{% endcall %}
         {% else %}
         <div class="text-muted">Значений пока нет — они появятся автоматически из новых записей и импорта.</div>
         {% endif %}
@@ -88,8 +89,7 @@
    (и институт — только без групп). См. docs/data-model-decisions.md. #}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h5 class="card-title">Институты и группы</h5>
-        <div class="text-muted mb-3">Каждая группа принадлежит институту. Пара институт→группа из новых записей и импорта попадает в справочник автоматически.</div>
+        <div class="d-flex align-items-center gap-1"><h5 class="card-title">Институты и группы</h5>{% call help('Как работает справочник') %}Каждая группа принадлежит институту. Пара институт→группа из новых записей и импорта попадает в справочник автоматически.{% endcall %}</div>
 
         <form action="/admin/catalogs/institute" class="row g-2 align-items-end mb-3" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
@@ -215,7 +215,7 @@
             </div>
             {% endfor %}
         </div>
-        <div class="text-muted">Удалить можно только значение, на котором не висит ни одной записи (у группы — по паре с институтом); скрытое не показывается в подсказках форм, но остаётся в записях и отчётах.</div>
+        {% call help('Как работает справочник') %}Удалить можно только значение, на котором не висит ни одной записи (у группы — по паре с институтом); скрытое не показывается в подсказках форм, но остаётся в записях и отчётах.{% endcall %}
         {% else %}
         <div class="text-muted">Институтов пока нет — они появятся автоматически из новых записей и импорта.</div>
         {% endif %}
@@ -299,7 +299,7 @@
                 </tbody>
             </table>
         </div>
-        <div class="text-muted">Скрытый уровень не выбирается в учебных данных групп, но остаётся у групп, где уже задан. Удалить можно только уровень без групп.</div>
+        {% call help('Как работает справочник') %}Скрытый уровень не выбирается в учебных данных групп, но остаётся у групп, где уже задан. Удалить можно только уровень без групп.{% endcall %}
         {% else %}
         <div class="text-muted">Уровней образования пока нет — добавьте первый выше.</div>
         {% endif %}
@@ -308,8 +308,7 @@
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h5 class="card-title">Уровни</h5>
-        <div class="text-muted mb-3">В формах можно выбрать только активный уровень. Добавление и переименование выполняет администратор здесь; импорт новые уровни не создаёт. Скрытый уровень остаётся в истории и отчётах. Удаление блокируется при использовании в участиях или календаре.</div>
+        <div class="d-flex align-items-center gap-1"><h5 class="card-title">Уровни</h5>{% call help('Как работает справочник') %}В формах можно выбрать только активный уровень. Добавление и переименование выполняет администратор здесь; импорт новые уровни не создаёт. Скрытый уровень остаётся в истории и отчётах. Удаление блокируется при использовании в участиях или календаре.{% endcall %}</div>
 
         <form action="/admin/levels" class="row g-2 align-items-end mb-3" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">

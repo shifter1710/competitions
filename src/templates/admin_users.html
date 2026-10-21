@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Пользователи{% endblock admin_title %}
@@ -120,7 +122,7 @@
                         <button class="btn btn-outline-secondary password-copy-button" data-password-input="#user-create-password" type="button">Копировать</button>
                     </div>
                 </div>
-                <div class="form-text ui-hint">Покажите пароль пользователю один раз — нигде не хранится в открытом виде (в базе только хеш).</div>
+                <div class="form-text">Покажите пароль пользователю один раз — нигде не хранится в открытом виде (в базе только хеш).</div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
@@ -149,7 +151,7 @@
                         <button class="btn btn-outline-secondary password-copy-button" data-password-input="#user-password-input" type="button">Копировать</button>
                     </div>
                 </div>
-                <div class="form-text ui-hint">Покажите пароль пользователю один раз — нигде не хранится в открытом виде (в базе только хеш).</div>
+                <div class="form-text">Покажите пароль пользователю один раз — нигде не хранится в открытом виде (в базе только хеш).</div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>
@@ -171,7 +173,7 @@
             <div class="modal-body">
                 <label class="form-label" for="user-alias-input">ФИО как в записях</label>
                 <input class="form-control" id="user-alias-input" list="student-names-list" name="name" required type="text">
-                <div class="form-text">По хешу этого ФИО записи подтягиваются в кабинет атлета. Список псевдонимов только растёт.</div>
+                {% call help('Привязка ФИО') %}По хешу этого ФИО записи подтягиваются в кабинет атлета. Список псевдонимов только растёт.{% endcall %}
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline-secondary" data-bs-dismiss="modal" type="button">Отмена</button>

@@ -127,4 +127,28 @@ sliced.rows.forEach((row, index) => { row.dataset.reportGroup = String(index); }
 sliced.controller.sortByHeader(sliced.controller.getHeaderByKey('count_participation'));
 assert.deepEqual(sliced.table.body.children.map(row => row.id), ['c1','d1','a1','b1','a2']);
 assert.deepEqual(sliced.table.body.children.map(row => row.querySelector('[data-column-key="index"]').textContent), ['1','2','3','4','5']);
+// Server-sorted Reports keep shared drag handlers while native anchors own sorting.
+const serverReport = createTable();
+serverReport.table.dataset.serverSort = 'true';
+let persisted = {order: [...keys], hidden: []};
+serverReport.controller.readTableState = () => persisted;
+serverReport.controller.saveTableState = state => { persisted = state; };
+serverReport.controller.renderColumnManager = () => {};
+serverReport.controller.bindTableHeaderEvents();
+const beforeIDs = serverReport.table.body.children.map(row => row.id);
+const groupHeader = serverReport.controller.getHeaderByKey('group');
+const instituteHeader = serverReport.controller.getHeaderByKey('institute');
+assert.ok(groupHeader.classes.has('table-header-cell'));
+for (const header of serverReport.table.head.children) {
+    assert.equal(header.events.click, undefined, 'Report sorting must remain native GET navigation');
+    assert.equal(header.events.keydown, undefined, 'Report sorting must not reorder rows on the client');
+    for (const name of ['dragstart', 'dragover', 'drop']) assert.equal(typeof header.events[name], 'function');
+}
+groupHeader.events.dragstart({dataTransfer: {}});
+instituteHeader.events.dragover({preventDefault() {}});
+instituteHeader.events.drop({preventDefault() {}});
+assert.deepEqual([...persisted.order], ['index','student_name','student_sex','group','institute','course','count_participation','count_wins','count_prizes']);
+assert.deepEqual(serverReport.table.head.children.map(header => header.dataset.columnKey), [...persisted.order]);
+assert.deepEqual(serverReport.table.body.children.map(row => row.id), beforeIDs);
+serverReport.table.body.children.forEach(row => assert.deepEqual(row.children.map(cell => cell.dataset.columnKey), [...persisted.order].filter(key => row.querySelector(`[data-column-key="${key}"]`))));
 console.log('Reports table regression PASS: all columns, both directions, ties, rowspan, renumbering, column order/hidden and generic table path.');

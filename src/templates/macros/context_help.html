@@ -1,0 +1,11 @@
+{# Native disclosure remains usable without JavaScript; the existing global
+   .ui-hint / html.hints-off state controls the complete element. #}
+{% macro help(title, text='', classes='') -%}
+<details class="context-help ui-hint {{ classes }}">
+    <summary class="context-help__trigger" aria-label="Справка: {{ title }}">?</summary>
+    <div class="context-help__panel" role="note" aria-label="{{ title }}">
+        <div class="context-help__heading"><strong>{{ title }}</strong><button class="context-help__close" type="button" aria-label="Закрыть справку" hidden>×</button></div>
+        <div class="context-help__content">{% if caller is defined %}{{ caller() }}{% else %}{{ text }}{% endif %}</div>
+    </div>
+</details>
+{%- endmacro %}

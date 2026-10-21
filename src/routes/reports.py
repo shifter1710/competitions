@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from io import BytesIO
 from typing import Sequence
+from urllib.parse import parse_qs
 from urllib.parse import urlencode
 
 from openpyxl import Workbook
@@ -114,7 +115,7 @@ def parse_report_slice(args: dict) -> str:
 
 
 def validate_report_filters(args: dict) -> str | None:
-    error = validate_report_period(args)
+    error = validate_report_sort(args) or validate_report_period(args)
     if error:
         return error
 
@@ -133,10 +134,10 @@ def validate_report_filters(args: dict) -> str | None:
     return None
 
 
-def collect_custom_filters(request: Request) -> tuple[list[tuple[str, str, str]], str | None]:
+def collect_custom_filters(request: Request, args: dict | None = None) -> tuple[list[tuple[str, str, str]], str | None]:
     fields = {field.key: field for field in get_storage(request.app).get_custom_fields()}
     filters: list[tuple[str, str, str]] = []
-    for key, raw_values in request.args.items():
+    for key, raw_values in (request.args if args is None else args).items():
         if not key.startswith('custom__'):
             continue
         field = fields.get(key.removeprefix('custom__'))
@@ -231,13 +232,41 @@ def collect_applied_report_query(args: dict, custom_fields: Sequence[CustomField
         value = (get_param(args, f'custom__{field.key}') or '').strip()
         if value:
             entries.append((f'custom__{field.key}', value))
+    for key in ('sort', 'order'):
+        value = get_param(args, key)
+        if value:
+            entries.append((key, value))
     return entries
 
 
-def build_report_filter_kwargs(request: Request) -> tuple[dict, str | None]:
+def effective_report_args(request: Request) -> dict:
+    tokens = parse_qs(request.query_string, keep_blank_values=True).get('report_context', [])
+    if tokens:
+        if len(tokens) != 1 or not tokens[0]:
+            raise ValueError('Некорректный контекст отчёта')
+        token = tokens[0]
+        from src.report_context import context_args, decode_report_context
+
+        return context_args(decode_report_context(token))
+    return dict(request.args)
+
+
+def build_report_filter_kwargs(request: Request, args: dict | None = None) -> tuple[dict, str | None]:
     """Общие kwargs фильтров для строк отчёта и сводки + текст ошибки."""
-    args = dict(request.args)
-    error = validate_report_filters(args) or collect_custom_filters(request)[1]
+    args = effective_report_args(request) if args is None else args
+    fields = get_storage(request.app).get_custom_fields()
+    if get_param(dict(request.args), 'report_context'):
+        known_custom = {f'custom__{field.key}' for field in fields}
+        if any(key.startswith('custom__') and key not in known_custom for key in args):
+            return {}, 'Дополнительное поле из отчёта больше недоступно; измените условия отчёта'
+    try:
+        from src.report_context import encode_report_context
+
+        encode_report_context(collect_applied_report_query(args, fields))
+    except ValueError:
+        return {}, 'Слишком много или слишком длинные условия отчёта; сократите выборку фильтров'
+    custom_filters, custom_error = collect_custom_filters(request, args)
+    error = validate_report_filters(args) or custom_error
     if error:
         return {}, error
     date_from, date_to = resolve_report_period(args)
@@ -252,7 +281,7 @@ def build_report_filter_kwargs(request: Request) -> tuple[dict, str | None]:
         sport=report_filter_values(args, 'sport'),
         course=(get_param(args, 'course') or '').strip(),
         admission_year=(get_param(args, 'admission_year') or '').strip(),
-        custom_filters=collect_custom_filters(request)[0],
+        custom_filters=custom_filters,
         event_id=report_filter_values(args, 'event_id'),
     )
     return filter_kwargs, None
@@ -294,8 +323,7 @@ REPORT_CHIP_LABELS: dict[str, str] = {
 
 def report_url_without(entries: Sequence[tuple[str, str]], removed_keys: set[str]) -> str:
     """/reports без перечисленных параметров применённого запроса."""
-    kept = urlencode([(key, value) for key, value in entries if key not in removed_keys])
-    return '/reports' + (f'?{kept}' if kept else '')
+    return safe_report_url([(key, value) for key, value in entries if key not in removed_keys])
 
 
 def report_chip_value(key: str, value: str, event_labels: dict[str, str]) -> str:
@@ -337,7 +365,7 @@ def build_report_chips(
                 continue
             display = report_chip_value(key, raw_value, event_labels or {})
             kept = [(k, v) for k, v in entries if (k, v) != (key, raw_value)]
-            chips.append({'label': label, 'value': display, 'remove_url': '/reports?' + urlencode(kept)})
+            chips.append({'label': label, 'value': display, 'remove_url': safe_report_url(kept)})
 
     field_labels = {f'custom__{field.key}': field.label for field in custom_fields}
     for key, value in entries:
@@ -415,11 +443,12 @@ def build_report_workbook(
     period_label: str,
     filter_chips: Sequence[dict],
     slice_label: str,
+    sort_args: dict | None = None,
 ) -> BytesIO:
     """XLSX отчёта: шапка параметров, заголовки, данные, «Итого».
 
-    Строки данных — в каноническом порядке сервера, до визуальной
-    группировки HTML. Защита от formula
+    Строки данных — в общем с HTML порядке блоков и сортировки.
+    Первая обязательная колонка № — числовая позиция строки. Защита от formula
     injection — sanitize_spreadsheet_value (как в реестре).
     """
     slice_column = REPORT_SLICE_COLUMNS[slice_key][0]
@@ -476,7 +505,8 @@ def build_report_workbook(
         ]
     )
     sheet.append([])
-    sheet.append(list(columns))
+    sheet.append(['№', *columns])
+    report_rows = [row for block in build_report_presentation(report_rows, slice_key, sort_args or {}) for row in block]
     if slice_key == DEFAULT_REPORT_SLICE:
         records = [dict(info.model_dump(by_alias=True)) for info in report_rows]
     else:
@@ -487,9 +517,9 @@ def build_report_workbook(
             }
             for row in report_rows
         ]
-    for record in records:
-        sheet.append([sanitize_spreadsheet_value(record.get(column, '')) for column in columns])
-    sheet.append(build_report_total_row(columns, summary))
+    for number, record in enumerate(records, 1):
+        sheet.append([number, *[sanitize_spreadsheet_value(record.get(column, '')) for column in columns]])
+    sheet.append(['', *build_report_total_row(columns, summary)])
     buffer = BytesIO()
     workbook.save(buffer)
     buffer.seek(0)
@@ -497,9 +527,9 @@ def build_report_workbook(
 
 
 def build_report_display_groups(report_rows: Sequence, slice_key: str) -> list[list]:
-    """HTML-only blocks. A confirmed card and exact historical name are required.
+    """Presentation blocks require a confirmed card and exact historical name.
 
-    Keep SQL/XLSX rows unchanged; an absent card or empty name is a singleton.
+    Keep SQL aggregate rows unchanged; an absent card or empty name is a singleton.
     Dict insertion order preserves the first canonical occurrence of each block.
     """
     groups: dict[tuple, list] = {}
@@ -511,6 +541,85 @@ def build_report_display_groups(report_rows: Sequence, slice_key: str) -> list[l
     return list(groups.values())
 
 
+REPORT_SORT_KEYS = frozenset(
+    {
+        'student_name',
+        'student_sex',
+        'institute',
+        'group',
+        'course',
+        'slice_value',
+        'count_participation',
+        'count_wins',
+        'count_prizes',
+        'count_unique_participants',
+        'count_unique_prizers',
+    }
+)
+
+
+def validate_report_sort(args: dict) -> str | None:
+    key = get_param(args, 'sort') or ''
+    order = get_param(args, 'order') or ''
+    if key and key not in REPORT_SORT_KEYS or order and order not in ('asc', 'desc'):
+        return 'Некорректная сортировка отчёта'
+    student = parse_report_slice(args) == DEFAULT_REPORT_SLICE
+    if key and (
+        (student and key in {'slice_value', 'count_unique_participants', 'count_unique_prizers'})
+        or (not student and key in {'student_name', 'student_sex', 'institute', 'group', 'course'})
+    ):
+        return 'Сортировка недоступна для выбранного среза'
+    return None
+
+
+def build_report_presentation(report_rows: Sequence, slice_key: str, args: dict) -> list[list]:
+    """One stable ordering of aggregate rows/blocks for HTML and numeric XLSX №."""
+    blocks = build_report_display_groups(report_rows, slice_key)
+    key = get_param(args, 'sort') or ''
+    if not key:
+        return blocks
+    numeric = (
+        key.startswith('count_') or key == 'course' or (key == 'slice_value' and slice_key in REPORT_SLICE_NUMERIC_KEYS)
+    )
+
+    def value(row):
+        raw = getattr(row, key)
+        if numeric:
+            return float(raw) if raw not in (None, '') else -1
+        return str(raw or '').casefold()
+
+    reverse = get_param(args, 'order') == 'desc'
+    for block in blocks:
+        block.sort(key=value, reverse=reverse)
+    blocks.sort(key=lambda block: value(block[0]), reverse=reverse)
+    return blocks
+
+
+def report_sort_url(entries: Sequence[tuple[str, str]], args: dict, key: str) -> str:
+    order = 'desc' if get_param(args, 'sort') == key and get_param(args, 'order') != 'desc' else 'asc'
+    return safe_report_url(
+        [(k, v) for k, v in entries if k not in ('sort', 'order')] + [('sort', key), ('order', order)]
+    )
+
+
+def confidential_report_entries(entries: Sequence[tuple[str, str]]) -> bool:
+    return any(key == 'name' or key.startswith('custom__') for key, _ in entries)
+
+
+def safe_report_url(entries: Sequence[tuple[str, str]]) -> str:
+    if confidential_report_entries(entries):
+        from src.report_context import encode_report_context
+
+        return '/reports?' + urlencode({'report_context': encode_report_context(entries)})
+    return '/reports' + ('?' + urlencode(entries) if entries else '')
+
+
+def report_calendar_url(entries: Sequence[tuple[str, str]]) -> str:
+    from src.report_context import encode_report_context
+
+    return '/calendar?' + urlencode({'report_context': encode_report_context(entries)})
+
+
 REPORT_DRILLDOWN_METRICS = {
     'participations': 'Участия',
     'wins': 'Победы',
@@ -519,7 +628,12 @@ REPORT_DRILLDOWN_METRICS = {
 
 
 def report_drilldown_url(entries: Sequence[tuple[str, str]], metric: str, slice_key: str = '', anchor=None) -> str:
-    params = [*entries, ('report_metric', metric)]
+    if confidential_report_entries(entries):
+        from src.report_context import encode_report_context
+
+        params = [('report_context', encode_report_context(entries)), ('report_metric', metric)]
+    else:
+        params = [*[(k, v) for k, v in entries if k not in ('sort', 'order')], ('report_metric', metric)]
     if slice_key and anchor is not None:
         params.extend([('report_slice', slice_key), ('report_anchor', str(anchor))])
     return '/?' + urlencode(params)
@@ -570,7 +684,7 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     агрегат по выборке), чипы-ссылки, счётчик строк и панель экспорта со
     скрытыми input применённого запроса.
     """
-    args = dict(request.args)
+    args = effective_report_args(request)
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
     entries = collect_applied_report_query(args, custom_fields)
@@ -578,16 +692,25 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
     report_rows = get_report_rows(storage, slice_key, filter_kwargs)
     summary = storage.get_report_summary(**filter_kwargs)
     rows_count = len(report_rows)
-    display_groups = build_report_display_groups(report_rows, slice_key)
+    display_groups = build_report_presentation(report_rows, slice_key, args)
+    export_params = entries
+    if confidential_report_entries(entries):
+        from src.report_context import encode_report_context
+
+        export_params = [('report_context', encode_report_context(entries))]
     return {
         'report_rows': report_rows,
+        'report_sort_url': lambda key: report_sort_url(entries, args, key),
+        'report_sort': get_param(args, 'sort') or '',
+        'report_order': get_param(args, 'order') or 'asc',
+        'report_calendar_url': report_calendar_url(entries or [('period', REPORT_PERIOD_ALL)]),
         'report_drilldown_url': lambda metric, anchor=None: report_drilldown_url(
             entries or [('period', REPORT_PERIOD_ALL)], metric, slice_key if anchor is not None else '', anchor
         ),
         'report_display_groups': display_groups,
         'visual_groups_count': len(display_groups),
         # Пустой /report — всё время; /reports без условий не показывает результат.
-        'report_return_url': '/reports?' + urlencode(entries or [('period', REPORT_PERIOD_ALL)]),
+        'report_return_url': safe_report_url(entries or [('period', REPORT_PERIOD_ALL)]),
         'report_slice': slice_key,
         'report_slice_column': REPORT_SLICE_COLUMNS[slice_key][0],
         'report_slice_sort_type': 'number' if slice_key in REPORT_SLICE_NUMERIC_KEYS else 'text',
@@ -600,7 +723,7 @@ def build_report_result_context(request: Request, filter_kwargs: dict) -> dict:
         'participations_label': ru_plural(summary.count_participation, 'участие', 'участия', 'участий'),
         # Панель экспорта: применённый запрос скрытыми input + колонки
         # применённого среза (серверный рендер, не текущие поля формы).
-        'report_export_params': entries,
+        'report_export_params': export_params,
         'report_export_columns': report_export_columns(slice_key),
     }
 
@@ -688,8 +811,11 @@ async def reports_page_handler(request: Request):
         return forbidden(request)
     storage = get_storage(request.app)
     custom_fields = storage.get_custom_fields()
-    args = dict(request.args)
-    filter_kwargs, error = build_report_filter_kwargs(request)
+    try:
+        args = effective_report_args(request)
+        filter_kwargs, error = build_report_filter_kwargs(request, args)
+    except ValueError:
+        return text('Ссылка отчёта повреждена или больше недоступна', status=400)
     entries = collect_applied_report_query(args, custom_fields)
     # Отчёт «сформирован», когда в URL есть хотя бы один применяемый
     # параметр; ошибка валидации — форма со значениями + alert, зоны
@@ -720,7 +846,7 @@ async def reports_page_handler(request: Request):
         'report_form': form_values,
         'report_error': error,
         'report_applied': applied,
-        'applied_query': urlencode(entries),
+        'applied_query': urlencode([(key, value) for key, value in entries if key not in ('sort', 'order')]),
     }
     for key, options_key in (
         ('institute', 'institute_options'),
@@ -742,7 +868,11 @@ async def report_fragment_handler(request: Request):
     # /reports — канонический адрес Reports v2.
     if user_is_athlete(request):
         return forbidden(request)
-    filter_kwargs, error = build_report_filter_kwargs(request)
+    try:
+        args = effective_report_args(request)
+        filter_kwargs, error = build_report_filter_kwargs(request, args)
+    except ValueError:
+        return text('Ссылка отчёта повреждена или больше недоступна', status=400)
     if error:
         return text(body=error, status=400)
     return await render(
@@ -757,11 +887,15 @@ async def export_report_handler(request: Request):
     # строится ТОЛЬКО из применённых параметров.
     if user_is_athlete(request):
         return forbidden(request)
-    filter_kwargs, error = build_report_filter_kwargs(request)
+    try:
+        args = effective_report_args(request)
+        filter_kwargs, error = build_report_filter_kwargs(request, args)
+    except ValueError:
+        return text('Ссылка отчёта повреждена или больше недоступна', status=400)
     if error:
         return text(body=error, status=400)
 
-    args = dict(request.args)
+    args = effective_report_args(request)
     slice_key = parse_report_slice(args)
     columns, columns_error = parse_report_export_columns(request, slice_key)
     if columns_error:
@@ -785,6 +919,7 @@ async def export_report_handler(request: Request):
         # (у них свои строки шапки).
         filter_chips=[chip for chip in chips if chip['label'] not in ('Период', 'Разрез')],
         slice_label=slice_label,
+        sort_args=args,
     )
 
     now_str = datetime.utcnow().strftime('%d-%m-%Y_%H-%M-%S')

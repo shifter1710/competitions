@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% macro drilldown_metric(value, metric, anchor=none) -%}
 {% if value > 0 and (anchor is none or anchor) %}<a class="report-metric-link" href="{{ report_drilldown_url(metric, anchor) }}" aria-label="{{ {'participations': 'Участия', 'wins': 'Победы', 'prizes': 'Призовые'}[metric] }}: {{ value }} — открыть записи в реестре">{{ value }}</a>{% else %}{{ value }}{% endif %}
 {%- endmacro %}
@@ -28,10 +29,10 @@
 <div class="table-meta">
     <span>{{ rows_count }} {{ rows_count_label }} · {{ total_participations }} {{ participations_label }}{% if report_slice_is_student %} · Блоков студентов: {{ visual_groups_count }}{% endif %}</span>
 </div>
-<p class="text-muted small" id="report-counts-help">{% if report_slice_is_student %}Строки отражают исторические состояния: институт, группа и курс могут различаться у одного студента.{% else %}Строки отражают значения выбранного среза по историческим данным записей.{% endif %}
+{% call help('Как считаются строки и участники') %}<p>{% if report_slice_is_student %}Строки отражают исторические состояния: институт, группа и курс могут различаться у одного студента.{% else %}Строки отражают значения выбранного среза по историческим данным записей.{% endif %}
     Уникальные участники считаются по Student Identity; каждая запись без связи — отдельно.
     {% if report_slice_is_student %}ФИО объединено только при подтверждённой общей карточке и одинаковом историческом имени.
-    При сортировке строки блока остаются рядом: внутри — по выбранному столбцу, блоки — по первой строке (минимум ↑, максимум ↓). Номера показывают текущие позиции строк.{% endif %}</p>
+    При сортировке строки блока остаются рядом: внутри — по выбранному столбцу, блоки — по первой строке (минимум ↑, максимум ↓). Номера показывают текущие позиции строк.{% endif %}</p>{% endcall %}
 <div class="report-stats">
     <div class="report-stat">
         <span class="report-stat__label">Участий</span>
@@ -54,34 +55,33 @@
         <span class="report-stat__value">{{ report_summary.count_unique_prizers }}</span>
     </div>
     <div class="report-stat">
-        <span class="report-stat__label">Соревнований</span>
-        <span class="report-stat__value">{{ report_summary.count_events }}</span>
+        <div class="report-stat__label d-flex align-items-center gap-1">Соревнований{{ help('Как считаются соревнования', 'Соревнования считаются по уникальным ID события, независимо от названия и числа участий. Участия без связи с событием не входят в число соревнований. Учитываются подтверждённые события и допущенные отчётом участия.') }}</div>
+        <span class="report-stat__value"><a class="report-metric-link" rel="noreferrer" href="{{ report_calendar_url }}" aria-label="Соревнований: {{ report_summary.count_events }} — открыть в календаре">{{ report_summary.count_events }}</a></span>
     </div>
 </div>
-<p class="text-muted small" id="report-events-help">Соревнования считаются по ID события, независимо от названия и числа участий.
-    Участий без связи с событием: {{ report_summary.count_unlinked_participations }} — они не входят в число соревнований.</p>
+<div class="text-muted small mb-2">Участий без связи с событием: {{ report_summary.count_unlinked_participations }} — не входят в число соревнований.</div>
 {% if report_rows %}
 <div class="table-card" data-table-view="report">
     <div class="table-responsive">
-        <table class="table table-striped table-bordered interactive-table report-table" data-report-table="true" aria-describedby="report-counts-help report-events-help">
+        <table class="table table-striped table-bordered interactive-table report-table" data-report-table="true" data-server-sort="true">
             <thead class="table-dark">
                 <tr>
                     <th scope="col" id="report-col-index" data-column-key="index" data-sort-type="none">№</th>
                     {% if report_slice_is_student %}
-                    <th scope="col" id="report-col-student_name" data-column-key="student_name" data-sort-type="text">ФИО</th>
-                    <th scope="col" id="report-col-student_sex" data-column-key="student_sex" data-sort-type="text">Пол</th>
-                    <th scope="col" id="report-col-institute" data-column-key="institute" data-sort-type="text">Институт</th>
-                    <th scope="col" id="report-col-group" data-column-key="group" data-sort-type="text">Группа</th>
-                    <th scope="col" id="report-col-course" data-column-key="course" data-sort-type="number">Курс</th>
+                    <th scope="col" id="report-col-student_name" data-column-key="student_name" data-sort-type="text" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'student_name' else 'none' }}"><a href="{{ report_sort_url('student_name') }}" class="report-sort-link" aria-label="ФИО — сортировать">ФИО{% if report_sort == 'student_name' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-student_sex" data-column-key="student_sex" data-sort-type="text" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'student_sex' else 'none' }}"><a href="{{ report_sort_url('student_sex') }}" class="report-sort-link" aria-label="Пол — сортировать">Пол{% if report_sort == 'student_sex' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-institute" data-column-key="institute" data-sort-type="text" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'institute' else 'none' }}"><a href="{{ report_sort_url('institute') }}" class="report-sort-link" aria-label="Институт — сортировать">Институт{% if report_sort == 'institute' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-group" data-column-key="group" data-sort-type="text" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'group' else 'none' }}"><a href="{{ report_sort_url('group') }}" class="report-sort-link" aria-label="Группа — сортировать">Группа{% if report_sort == 'group' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-course" data-column-key="course" data-sort-type="number" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'course' else 'none' }}"><a href="{{ report_sort_url('course') }}" class="report-sort-link" aria-label="Курс — сортировать">Курс{% if report_sort == 'course' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
                     {% else %}
-                    <th scope="col" id="report-col-slice_value" data-column-key="slice_value" data-sort-type="{{ report_slice_sort_type }}">{{ report_slice_column }}</th>
+                    <th scope="col" id="report-col-slice_value" data-column-key="slice_value" data-sort-type="{{ report_slice_sort_type }}" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'slice_value' else 'none' }}"><a href="{{ report_sort_url('slice_value') }}" class="report-sort-link" aria-label="{{ report_slice_column }} — сортировать">{{ report_slice_column }}{% if report_sort == 'slice_value' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
                     {% endif %}
-                    <th scope="col" id="report-col-count_participation" data-column-key="count_participation" data-sort-type="number">Участий</th>
-                    <th scope="col" id="report-col-count_wins" data-column-key="count_wins" data-sort-type="number">Побед</th>
-                    <th scope="col" id="report-col-count_prizes" data-column-key="count_prizes" data-sort-type="number">Призовых</th>
+                    <th scope="col" id="report-col-count_participation" data-column-key="count_participation" data-sort-type="number" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'count_participation' else 'none' }}"><a href="{{ report_sort_url('count_participation') }}" class="report-sort-link" aria-label="Участий — сортировать">Участий{% if report_sort == 'count_participation' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-count_wins" data-column-key="count_wins" data-sort-type="number" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'count_wins' else 'none' }}"><a href="{{ report_sort_url('count_wins') }}" class="report-sort-link" aria-label="Побед — сортировать">Побед{% if report_sort == 'count_wins' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-count_prizes" data-column-key="count_prizes" data-sort-type="number" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'count_prizes' else 'none' }}"><a href="{{ report_sort_url('count_prizes') }}" class="report-sort-link" aria-label="Призовых — сортировать">Призовых{% if report_sort == 'count_prizes' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
                     {% if not report_slice_is_student %}
-                    <th scope="col" id="report-col-count_unique_participants" data-column-key="count_unique_participants" data-sort-type="number">Уникальных участников</th>
-                    <th scope="col" id="report-col-count_unique_prizers" data-column-key="count_unique_prizers" data-sort-type="number">Уникальных призёров</th>
+                    <th scope="col" id="report-col-count_unique_participants" data-column-key="count_unique_participants" data-sort-type="number" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'count_unique_participants' else 'none' }}"><a href="{{ report_sort_url('count_unique_participants') }}" class="report-sort-link" aria-label="Уникальных участников — сортировать">Уникальных участников{% if report_sort == 'count_unique_participants' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
+                    <th scope="col" id="report-col-count_unique_prizers" data-column-key="count_unique_prizers" data-sort-type="number" aria-sort="{{ ('descending' if report_order == 'desc' else 'ascending') if report_sort == 'count_unique_prizers' else 'none' }}"><a href="{{ report_sort_url('count_unique_prizers') }}" class="report-sort-link" aria-label="Уникальных призёров — сортировать">Уникальных призёров{% if report_sort == 'count_unique_prizers' %} {{ '↓' if report_order == 'desc' else '↑' }}{% endif %}</a></th>
                     {% endif %}
                 </tr>
             </thead>
@@ -147,8 +147,7 @@
 {% endif %}
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h3 class="title mb-1">Выгрузить в Excel</h3>
-        <div class="text-muted mb-3">Файл формируется по применённым условиям отчёта — фильтры и разрез передаются из применённого запроса, отметьте колонки файла.</div>
+        <div class="d-flex align-items-center gap-2 mb-3"><h3 class="title mb-0">Выгрузить в Excel</h3>{{ help('Выгрузка отчёта', 'Файл формируется по применённым условиям и сортировке отчёта. № всегда идёт первым и показывает позицию строки; остальные колонки можно выбрать.') }}</div>
         <form class="report-export-form" method="get" action="/export/report">
             {# Применённые параметры (НЕ текущие поля формы): экспорт строится
                ровно по показанной таблице (Reports v2). #}
