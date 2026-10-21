@@ -8,6 +8,7 @@
         {% if is_moderator %}
         <details><summary>Удалить сертификат</summary>
             <form action="/admin/people/{{ row.student_id }}/gto/{{ row.id }}/certificates/{{ certificate.id }}/delete" method="post">
+                <input type="hidden" name="return" value="{{ person_return_url }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                 <label class="d-block"><input type="checkbox" name="confirm_delete" value="yes" required> Удалить этот сертификат безвозвратно</label>
                 <button class="btn btn-sm btn-outline-danger mt-2" type="submit">Подтвердить удаление</button>
@@ -20,7 +21,8 @@
 {% if is_moderator %}
 <details class="mt-2"><summary class="btn btn-sm btn-outline-secondary">Прикрепить сертификат</summary>
     <form action="/admin/people/{{ row.student_id }}/gto/{{ row.id }}/certificates" method="post" enctype="multipart/form-data" class="mt-2">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <input type="hidden" name="return" value="{{ person_return_url }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
         <label class="form-label" for="gto-file-{{ row.id }}">Сертификат награждения #{{ row.id }}</label>
         <input id="gto-file-{{ row.id }}" class="form-control form-control-sm" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg" required>
         <div class="form-text">PDF, PNG или JPEG, до 5 МБ. Можно прикрепить несколько документов по одному.</div>

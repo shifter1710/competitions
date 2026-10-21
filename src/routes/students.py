@@ -47,6 +47,7 @@ from src.periods import today_in_timezone
 from src.periods import validate_report_period
 from src.records import event_participation_effective_values
 from src.routes.gto import cleanup_certificate
+from src.routes.gto import gto_back_url
 from src.settings import settings
 from src.storage.sqlite import GTO_STATUS_LABELS
 from src.storage.sqlite import GTO_STATUSES
@@ -87,7 +88,11 @@ def safe_student_return(value: str | None) -> str | None:
         decoded = next_value
     try:
         url = urlsplit(value)
-        if url.scheme or url.netloc or not re.fullmatch(r'/admin/people|/calendar/[0-9]+|/reports', url.path):
+        if (
+            url.scheme
+            or url.netloc
+            or not re.fullmatch(r'/admin/people|/calendar/[0-9]+|/reports|/reports/gto', url.path)
+        ):
             return None
         query = urlencode(
             [
@@ -2035,7 +2040,7 @@ def register(app: Sanic) -> None:  # noqa: C901
 
         year, stage, status, form_error = parse_gto_form(request)
         if form_error is not None:
-            return build_redirect_with_message(error=form_error, url=f'/admin/people/{numeric_id}?tab=gto')
+            return build_redirect_with_message(error=form_error, url=gto_back_url(request, numeric_id))
 
         storage = get_storage(request.app)
         record_id, error = storage.create_student_gto_record(
@@ -2051,7 +2056,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             # Отказ не пишется в аудит (конвенция остальных проверок).
             return build_redirect_with_message(
                 error=gto_storage_error(error, year=year, stage=stage) or 'Запись ГТО не найдена.',
-                url=f'/admin/people/{numeric_id}?tab=gto',
+                url=gto_back_url(request, numeric_id),
             )
 
         log_audit_event(
@@ -2059,7 +2064,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             'student_gto_added',
             {'student_id': numeric_id, 'record_id': record_id, 'year': year, 'stage': stage, 'status': status},
         )
-        return build_redirect_with_message(message='Запись ГТО добавлена.', url=f'/admin/people/{numeric_id}?tab=gto')
+        return build_redirect_with_message(message='Запись ГТО добавлена.', url=gto_back_url(request, numeric_id))
 
     @app.post('/admin/people/<student_id>/gto/<record_id>/edit')
     async def admin_person_edit_gto(request: Request, student_id: str, record_id: str):
@@ -2076,7 +2081,7 @@ def register(app: Sanic) -> None:  # noqa: C901
 
         year, stage, status, form_error = parse_gto_form(request)
         if form_error is not None:
-            return build_redirect_with_message(error=form_error, url=f'/admin/people/{numeric_id}?tab=gto')
+            return build_redirect_with_message(error=form_error, url=gto_back_url(request, numeric_id))
 
         storage = get_storage(request.app)
         if storage.get_student_by_id(numeric_id) is None:
@@ -2085,9 +2090,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         # student_field_changes); отсутствие записи — «не найдена».
         existing = storage.get_student_gto_record(numeric_id, numeric_record_id)
         if existing is None:
-            return build_redirect_with_message(
-                error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}?tab=gto'
-            )
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=gto_back_url(request, numeric_id))
 
         updated, error = storage.update_student_gto_record(
             numeric_id,
@@ -2100,12 +2103,10 @@ def register(app: Sanic) -> None:  # noqa: C901
         if error is not None:
             return build_redirect_with_message(
                 error=gto_storage_error(error, year=year, stage=stage) or 'Запись ГТО не найдена.',
-                url=f'/admin/people/{numeric_id}?tab=gto',
+                url=gto_back_url(request, numeric_id),
             )
         if not updated:
-            return build_redirect_with_message(
-                error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}?tab=gto'
-            )
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=gto_back_url(request, numeric_id))
 
         changes = {
             field: {'old': existing[field], 'new': new_value}
@@ -2129,7 +2130,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'changed': changes,
             },
         )
-        return build_redirect_with_message(message='Запись ГТО обновлена.', url=f'/admin/people/{numeric_id}?tab=gto')
+        return build_redirect_with_message(message='Запись ГТО обновлена.', url=gto_back_url(request, numeric_id))
 
     @app.post('/admin/people/<student_id>/gto/<record_id>/delete')
     async def admin_person_delete_gto(request: Request, student_id: str, record_id: str):
@@ -2151,15 +2152,11 @@ def register(app: Sanic) -> None:  # noqa: C901
         # строки (паттерн admin_person_remove_alias).
         existing = storage.get_student_gto_record(numeric_id, numeric_record_id)
         if existing is None:
-            return build_redirect_with_message(
-                error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}?tab=gto'
-            )
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=gto_back_url(request, numeric_id))
 
         deleted, certificates = storage.delete_gto_record_with_certificates(numeric_id, numeric_record_id)
         if not deleted:
-            return build_redirect_with_message(
-                error='Запись ГТО не найдена.', url=f'/admin/people/{numeric_id}?tab=gto'
-            )
+            return build_redirect_with_message(error='Запись ГТО не найдена.', url=gto_back_url(request, numeric_id))
         log_audit_event(
             request,
             'student_gto_deleted',
@@ -2173,7 +2170,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         )
         for certificate in certificates:
             cleanup_certificate(numeric_record_id, certificate['stored_name'])
-        return build_redirect_with_message(message='Запись ГТО удалена.', url=f'/admin/people/{numeric_id}?tab=gto')
+        return build_redirect_with_message(message='Запись ГТО удалена.', url=gto_back_url(request, numeric_id))
 
     @app.post('/admin/people/<student_id>/delete')
     async def admin_person_delete(request: Request, student_id: str):

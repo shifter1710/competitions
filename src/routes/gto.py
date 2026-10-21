@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from urllib.parse import quote
+from urllib.parse import urlencode
 
 from sanic import text
 from sanic.response import raw
@@ -36,6 +37,18 @@ def live_moderator(request):
     return user if user and user['role'] in ('admin', 'editor') else None
 
 
+def gto_back_url(request, student_id):
+    # Deferred import avoids the existing students -> certificate cleanup import.
+    from src.routes.students import safe_student_return
+
+    pairs = [('tab', 'gto')]
+    return_url = safe_student_return(get_form_value(request, 'return'))
+    if return_url:
+        pairs.append(('return', return_url))
+    # Keep native flash visible at page top; never reintroduce a GTO anchor.
+    return f'/admin/people/{student_id}?' + urlencode(pairs)
+
+
 def register(app):  # noqa: C901 (route assembly follows the existing domain modules)
     @app.post('/admin/people/<student_id:int>/gto/uin')
     async def save_gto_uin(request, student_id):
@@ -48,7 +61,7 @@ def register(app):  # noqa: C901 (route assembly follows the existing domain mod
         storage = get_storage(request.app)
         before = storage.get_student_by_id(student_id)
         updated, code = storage.set_student_gto_uin(student_id, get_form_value(request, 'gto_uin'))
-        back = f'/admin/people/{student_id}?tab=gto'
+        back = gto_back_url(request, student_id)
         if not updated:
             messages = {
                 'duplicate_uin': 'Этот УИН уже указан у другого студента. Проверьте значение.',
@@ -73,7 +86,7 @@ def register(app):  # noqa: C901 (route assembly follows the existing domain mod
         if user is None:
             return forbidden(request)
         storage = get_storage(request.app)
-        back = f'/admin/people/{student_id}?tab=gto'
+        back = gto_back_url(request, student_id)
         award = storage.get_student_gto_record(student_id, record_id)
         if not award or award['status'] not in ('bronze', 'silver', 'gold'):
             return text('Награждение не найдено.', status=404)
@@ -116,7 +129,7 @@ def register(app):  # noqa: C901 (route assembly follows the existing domain mod
             return text('Сертификат не найден.', status=404)
         if get_form_value(request, 'confirm_delete') != 'yes':
             return build_redirect_with_message(
-                error='Подтвердите удаление сертификата.', url=f'/admin/people/{student_id}?tab=gto'
+                error='Подтвердите удаление сертификата.', url=gto_back_url(request, student_id)
             )
         if not storage.delete_gto_certificate(student_id, record_id, certificate_id):
             return text('Сертификат не найден.', status=404)
@@ -126,7 +139,7 @@ def register(app):  # noqa: C901 (route assembly follows the existing domain mod
             'student_gto_certificate_deleted',
             {'student_id': student_id, 'record_id': record_id, 'certificate_id': certificate_id},
         )
-        return build_redirect_with_message(message='Сертификат удалён.', url=f'/admin/people/{student_id}?tab=gto')
+        return build_redirect_with_message(message='Сертификат удалён.', url=gto_back_url(request, student_id))
 
     @app.get('/gto/<student_id:int>/awards/<record_id:int>/certificates/<certificate_id:int>')
     async def download_gto_certificate(request, student_id, record_id, certificate_id):

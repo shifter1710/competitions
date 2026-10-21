@@ -328,3 +328,38 @@ class GtoMixin:
             return next(
                 (c for c in self._list_gto_certificates(student_id, record_id) if c['id'] == certificate_id), None
             )
+
+    def list_gto_report_awards(self):
+        """A consistent read snapshot, one row per award plus separate documents.
+
+        Current Student Identity attributes classify the report; inactive cards
+        remain included. Orphaned/non-award facts never open a report row.
+        """
+        with self._lock:
+            self.connection.execute('SAVEPOINT gto_report_snapshot')
+            try:
+                rows = [
+                    dict(row)
+                    for row in self.connection.execute(
+                        'SELECT g.*, s.full_name, s.gto_uin, s.institute, s.group_name '
+                        'FROM student_gto_records g JOIN students s ON s.id=g.student_id '
+                        "WHERE g.status IN ('bronze', 'silver', 'gold') "
+                        'ORDER BY g.year DESC, g.stage ASC, (g.awarded_on IS NULL), g.awarded_on ASC, '
+                        's.full_name ASC, s.id ASC, g.id ASC'
+                    )
+                ]
+                documents = {}
+                for certificate in self.connection.execute(
+                    'SELECT c.id, c.gto_record_id, c.filename FROM student_gto_certificates c '
+                    'JOIN student_gto_records g ON g.id=c.gto_record_id JOIN students s ON s.id=g.student_id '
+                    "WHERE g.status IN ('bronze', 'silver', 'gold') ORDER BY c.id"
+                ):
+                    documents.setdefault(certificate['gto_record_id'], []).append(dict(certificate))
+                for row in rows:
+                    row['certificates'] = documents.get(row['id'], [])
+                self.connection.execute('RELEASE SAVEPOINT gto_report_snapshot')
+                return rows
+            except BaseException:
+                self.connection.execute('ROLLBACK TO SAVEPOINT gto_report_snapshot')
+                self.connection.execute('RELEASE SAVEPOINT gto_report_snapshot')
+                raise

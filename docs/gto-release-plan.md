@@ -57,7 +57,10 @@ ID, проверка равенства значений, замена табл�
 
 Это проверка полноты ссылок, а не доказательство успешного запуска приложения
 после restore. Перед production-миграцией всё ещё нужны отдельные Verified
-backup, изолированное восстановление и сравнение приватной инвентаризации.
+backup, изолированное восстановление и сравнение приватной инвентаризации:
+цепочка студент → награждение → сертификат, metadata, размеры и хеши файлов до
+и после restore. Эти production-проверки здесь не выполняются и их PASS не
+заявляется.
 
 ## Rollback
 
@@ -70,11 +73,39 @@ backup, изолированное восстановление и сравне�
 Для явного restore требуется отдельное разрешение и safety backup текущих
 данных по Production Operations.
 
+## Совместимый кандидат code rollback для GTO-03
+
+PR B добавляет только отчёт/навигацию и не меняет схему относительно PR A.
+Точный кандидат для отката кода B → A:
+
+- интегрированный PR A с проверкой GTO references: `c2f8fdddab0c1087a4317b6f97049419640e1fdb` ([PR 20](https://github.com/shifter1710/competitions/pull/20));
+- точный image ID нового A фиксируется в CI совместной версии, а не берётся
+  из старой сборки до интеграции main.
+
+A уже поддерживает стабильные награждения/УИН/сертификаты, в отличие от
+старого main до этой миграции. Перед признанием конкретного B → A rollback
+проверенным нужно открыть синтетическую БД после B обычным A startup,
+сравнить записи/файлы/флаги, прочитать новые награды/сертификаты и выполнить
+quick_check БЕЗ restore или замены БД. Результат этой проверки фиксируется
+в QA/runtime отчёте; известный SHA/image сам по себе не подменяет такую проверку.
+Нужно также иметь доступный воспроизводимый артефакт точного образа для будущего
+релиза: указанный CI image ID — идентификатор проверенной сборки, не обещание
+наличия опубликованного registry-образа. Автоматический restore по-прежнему запрещён.
+
 ## Повторение проверок
 
 Используйте QA-OPT-02 из docs/qa-opt-02.md и отдельное синтетическое окружение.
-Targeted: src/gto_test.py, src/gto_history_test.py, src/gto_certificates_test.py
-и GTO/profile/delete сценарии src/main_test.py. Затем полный regression,
+Targeted: src/gto_test.py, src/gto_history_test.py, src/gto_certificates_test.py,
+src/gto_report_test.py, src/gto_navigation_test.py и GTO/profile/delete сценарии src/main_test.py. Затем полный regression,
 pre-commit all-files, independent QA, обычный Sanic fresh/legacy/repeat startup.
 GTO exact-image workflow проверяет точный head PR; локальный доступ к Docker
 может быть недоступен — это ограничение среды, а не доказательство image PASS.
+Для PR B отдельный job собирает точные SHA A и B и запускает B → A → B на
+одном синтетическом Docker volume без восстановления БД. Он сверяет ID,
+УИН, metadata и хеши сертификатов после каждого переключения; SHA и image ID
+обоих образов публикуются в summary этого CI-запуска.
+
+Отдельный JS safe-return regression (`gto_navigation_test.py`) выполняется
+существующим Node в обычном QA/полном CI. В production Python-образ Node не
+добавляется; `gto_report_test.py` содержит полный HTTP/XLSX report matrix и
+целиком выполняется внутри exact-image CI без Node и без исключения тестов.

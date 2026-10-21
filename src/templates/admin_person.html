@@ -4,7 +4,7 @@
 {% from "shared/period_filter.html" import period_filter %}
 <script defer src="/static/scripts/period-filters.js"></script>
 <div class="person-page" data-person-page="{{ student.id }}">
-<a class="person-back" href="{{ person_return_url }}" data-person-back>← {% if person_return_url.split('?')[0].split('#')[0] == '/reports' %}К отчёту{% elif person_return_url.startswith('/calendar/') %}К соревнованию{% else %}К студентам{% endif %}</a>
+<a class="person-back" href="{{ person_return_url }}" data-person-back>← {% if person_return_url.split('?')[0].split('#')[0] in ('/reports', '/reports/gto') %}К отчёту{% elif person_return_url.startswith('/calendar/') %}К соревнованию{% else %}К студентам{% endif %}</a>
 <header class="person-header">
 <div class="person-heading"><h1>{{ student.full_name }}</h1><span class="badge {% if student.active %}text-bg-success{% else %}text-bg-secondary{% endif %}">{% if student.active %}активен{% else %}неактивен{% endif %}</span></div>
 <p class="person-summary">{{ student.institute or 'Институт не указан' }} · {{ student.group_name or 'Группа не указана' }} · Текущий курс: {{ student.course or 'не определён' }}</p>
