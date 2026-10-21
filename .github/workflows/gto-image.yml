@@ -29,7 +29,7 @@ jobs:
           AUTH_VIEWER_PASSWORD: ci-synthetic-gto-viewer-password
         run: |
           env_flags=(-e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD)
-          docker run --rm "${env_flags[@]}" competitions-gto:qa python -m pytest src/gto_test.py src/gto_history_test.py src/gto_certificates_test.py -q
+          docker run --rm "${env_flags[@]}" competitions-gto:qa python -m pytest src/gto_test.py src/gto_history_test.py src/gto_certificates_test.py src/gto_report_test.py -q
           docker volume create gto-synthetic-fresh
           docker volume create gto-synthetic-legacy
           docker run --rm -v gto-synthetic-legacy:/code/data -e GTO_SYNTHETIC_IMAGE_SMOKE=1 "${env_flags[@]}" competitions-gto:qa python -m src.gto_image_smoke seed-legacy

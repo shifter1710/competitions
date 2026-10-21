@@ -1,0 +1,74 @@
+{% extends "layout/base.html" %}
+{% block content %}
+<div class="gto-report-page">
+    <a href="/reports">← К отчётам</a>
+    <div class="page-head mt-2"><div>
+        <h1 class="page-title">Отчёт ГТО</h1>
+        <p class="page-sub">Отдельные награждения студентов. Один студент с тремя наградами — один уникальный студент и три награждения.</p>
+    </div></div>
+    {% if gto.error %}<div class="alert alert-danger" role="alert">{{ gto.error }}</div>{% endif %}
+    <div class="card shadow-sm mb-4"><div class="card-body">
+        <form class="gto-report-form row g-3" action="/reports/gto" method="get">
+            {% for key, label in [('year', 'Год записи ГТО'), ('institute', 'Институт'), ('group', 'Группа')] %}
+            <div class="col-12 col-md-4 col-xl-2">
+                <label class="form-label" for="gto-filter-{{ key }}">{{ label }}</label>
+                <select class="form-select" id="gto-filter-{{ key }}" name="{{ key }}">
+                    <option value="">Все</option>
+                    {% for value in gto.options[key] %}<option value="{{ value }}"{% if gto.filters[key] == value %} selected{% endif %}>{{ value }}</option>{% endfor %}
+                </select>
+            </div>
+            {% endfor %}
+            <div class="col-12 col-md-4 col-xl-2">
+                <label class="form-label" for="gto-filter-stage">Ступень</label>
+                <select class="form-select" id="gto-filter-stage" name="stage">
+                    <option value="">Все</option>
+                    {% for option in stages %}<option value="{{ option.value }}"{% if gto.filters.stage == option.value|string %} selected{% endif %}>{{ option.label }}</option>{% endfor %}
+                    {% if gto.filters.stage and gto.filters.stage not in stage_values %}<option value="{{ gto.filters.stage }}" selected>{{ gto.filters.stage }}</option>{% endif %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4 col-xl-2">
+                <label class="form-label" for="gto-filter-award">Награда</label>
+                <select class="form-select" id="gto-filter-award" name="award">
+                    <option value="">Все</option>
+                    {% for option in awards %}<option value="{{ option.value }}"{% if gto.filters.award == option.value %} selected{% endif %}>{{ option.label }}</option>{% endfor %}
+                    {% if gto.filters.award and gto.filters.award not in award_values %}<option value="{{ gto.filters.award }}" selected>{{ gto.filters.award }}</option>{% endif %}
+                </select>
+            </div>
+            <div class="col-12 col-md-4 col-xl-2">
+                <label class="form-label" for="gto-filter-q">Студент или УИН</label>
+                <input class="form-control" type="search" id="gto-filter-q" name="q" value="{{ gto.filters.q }}">
+            </div>
+            <div class="col-12 d-flex flex-wrap gap-2">
+                <button class="btn btn-primary" type="submit">Применить</button>
+                <a class="btn btn-outline-secondary" href="/reports/gto">Сбросить</a>
+            </div>
+        </form>
+    </div></div>
+    <p class="text-muted">Год — календарный год записи ГТО. Институт и группа — текущие сведения карточки студента. История награждений сохраняется при их изменении. Зарегистрированные и участвовавшие без награды в этот отчёт не входят.</p>
+    {% if not gto.error %}
+    <div class="report-stats" aria-label="Итоги ГТО">
+        {% for key, label in [('students', 'Уникальных студентов'), ('awards', 'Награждений'), ('bronze', 'Бронза'), ('silver', 'Серебро'), ('gold', 'Золото')] %}
+        <div class="report-stat"><span class="report-stat__label">{{ label }}</span><span class="report-stat__value" data-gto-metric="{{ key }}">{{ gto.metrics[key] }}</span></div>
+        {% endfor %}
+    </div>
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+        <a class="btn btn-outline-primary gto-report-export" href="{{ gto.export_url }}">Скачать XLSX</a>
+        <span class="text-muted">По применённым фильтрам; одна строка на награждение.</span>
+    </div>
+    {% if gto.applied %}<p class="small text-muted">Применено: {% for label, value in gto.applied %}{{ label }}: {{ value }}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+    <div class="card shadow-sm"><div class="card-body">
+        {% if gto.rows %}
+        <div class="table-responsive"><table class="table table-sm align-middle gto-report-table">
+            <thead><tr>{% for label in ['Студент', 'УИН', 'Институт (текущий)', 'Группа (текущая)', 'Год', 'Ступень', 'Награда', 'Дата награждения', 'Сертификат'] %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead>
+            <tbody>{% for row in gto.rows %}<tr data-gto-award-id="{{ row.id }}" data-gto-student-id="{{ row.student_id }}">
+                <td><a href="{{ row.student_url }}">{{ row.full_name }}</a> <small class="text-muted">#{{ row.student_id }}</small><br><small class="text-muted">Награждение #{{ row.id }}</small></td>
+                <td>{{ row.gto_uin or 'Не указан' }}</td><td>{{ row.institute or 'Не указан' }}</td><td>{{ row.group_name or 'Не указана' }}</td>
+                <td>{{ row.year }}</td><td>{{ row.stage_label }}</td><td>{{ row.status_label }}</td><td>{{ row.date_label or 'Не указана' }}</td>
+                <td>{% for certificate in row.certificates %}<div class="mb-2">{{ certificate.filename }}<div class="d-flex flex-wrap gap-2"><a href="{{ certificate.url }}?view=1" target="_blank" rel="noopener">Открыть</a><a href="{{ certificate.url }}">Скачать</a></div></div>{% else %}<span class="text-muted">Не прикреплён</span>{% endfor %}</td>
+            </tr>{% endfor %}</tbody>
+        </table></div>
+        {% else %}<p class="text-muted mb-0">По выбранным фильтрам награждений нет.</p>{% endif %}
+    </div></div>
+    {% endif %}
+</div>
+{% endblock %}

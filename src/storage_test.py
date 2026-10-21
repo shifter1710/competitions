@@ -7111,6 +7111,8 @@ def test_v21_adapter_composition_and_api_surface(adapter):
             'delete_gto_certificate',
             'get_gto_certificate_for_user',
             'delete_gto_record_with_certificates',
+            # GTO-03: one consistent award snapshot for HTML, counters and XLSX.
+            'list_gto_report_awards',
         ]
     )
 

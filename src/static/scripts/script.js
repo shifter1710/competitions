@@ -4500,7 +4500,7 @@ class StudentProfilePage {
         this.returnURL = this.safeReturn(params.get('return')) || this.safeReturn(document.referrer, true) || '/admin/people';
         const backLink = root.querySelector('[data-person-back]');
         backLink.href = this.returnURL;
-        backLink.textContent = this.returnURL.split(/[?#]/)[0] === '/reports' ? '← К отчёту' : this.returnURL.startsWith('/calendar/') ? '← К соревнованию' : '← К студентам';
+        backLink.textContent = ['/reports', '/reports/gto'].includes(this.returnURL.split(/[?#]/)[0]) ? '← К отчёту' : this.returnURL.startsWith('/calendar/') ? '← К соревнованию' : '← К студентам';
         root.classList.add('person-enhanced');
         root.querySelector('.person-tabs').setAttribute('role', 'tablist');
         this.tabs.forEach((tab, index) => {
@@ -4582,7 +4582,7 @@ class StudentProfilePage {
             if (value.startsWith('//')) return null;
             const url = new URL(value, location.origin);
             const rawPath = value.startsWith('/') ? value.split(/[?#]/)[0] : url.pathname;
-            if (url.origin !== location.origin || !(/^\/admin\/people$/.test(rawPath) || /^\/calendar\/[0-9]+$/.test(rawPath) || rawPath === '/reports')) return null;
+            if (url.origin !== location.origin || !(/^\/admin\/people$/.test(rawPath) || /^\/calendar\/[0-9]+$/.test(rawPath) || rawPath === '/reports' || rawPath === '/reports/gto')) return null;
             url.searchParams.delete('admin_message'); url.searchParams.delete('admin_error');
             return url.pathname + url.search + url.hash;
         } catch (error) { return null; }

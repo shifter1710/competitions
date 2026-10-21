@@ -2422,3 +2422,8 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
     .person-page .gto-history-table td[data-label="Сертификат"],
     .person-page .gto-history-table td[data-label="Действия"] { flex-basis: 100%; }
 }
+
+.gto-report-page { min-width: 0; }
+.gto-report-form .form-control, .gto-report-form .form-select { min-width: 0; }
+.gto-report-table { min-width: 1050px; }
+.gto-report-table td { max-width: 260px; overflow-wrap: anywhere; }
