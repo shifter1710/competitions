@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -18,6 +19,7 @@ from src.ops_state import update_component
 from src.ops_state import utcnow
 
 logger = logging.getLogger(__name__)
+GTO_CERTIFICATE_NAME = re.compile(r'[0-9a-f]{32}\.(?:pdf|png|jpe?g)')
 
 
 class BackupError(RuntimeError):
@@ -88,7 +90,7 @@ def inventory(root):
 
 
 def reference_names(database):  # noqa: C901
-    # Three explicitly enumerated schema references; no dynamic SQL identifiers.
+    # Explicitly enumerated schema references; no dynamic SQL identifiers.
     connection = sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True)
     try:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -109,6 +111,16 @@ def reference_names(database):  # noqa: C901
                     "WHERE regulation_stored_name IS NOT NULL AND regulation_stored_name != ''"
                 ):
                     result.add(f'calendar/{event}/{name}')
+        if 'student_gto_certificates' in tables:
+            for record, name in connection.execute('SELECT gto_record_id, stored_name FROM student_gto_certificates'):
+                if (
+                    not isinstance(record, int)
+                    or record <= 0
+                    or not isinstance(name, str)
+                    or not GTO_CERTIFICATE_NAME.fullmatch(name)
+                ):
+                    raise BackupError('unsafe_reference')
+                result.add(f'gto/{record}/{name}')
         for name in result:
             if Path(name).is_absolute() or '..' in Path(name).parts:
                 raise BackupError('unsafe_reference')
