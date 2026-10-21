@@ -5,6 +5,7 @@ on:
       - 'src/**'
       - 'Dockerfile'
       - 'requirements.txt'
+      - 'scripts/gto_image_roundtrip.py'
       - '.github/workflows/gto-image.yml'
 jobs:
   image:
@@ -56,3 +57,85 @@ jobs:
         run: |
           docker rm -f gto-startup || true
           docker volume rm gto-synthetic-fresh gto-synthetic-legacy || true
+
+  b-a-b-compatibility:
+    if: github.event.pull_request.number == 23
+    runs-on: ubuntu-latest
+    env:
+      A_SHA: ${{ github.event.pull_request.base.sha }}
+      B_SHA: ${{ github.event.pull_request.head.sha }}
+      VOLUME: gto-bab-${{ github.run_id }}-${{ github.run_attempt }}
+      AUTH_SECRET_KEY: ci-synthetic-gto-roundtrip-secret
+      AUTH_ADMIN_PASSWORD: ci-synthetic-gto-admin-password
+      AUTH_EDITOR_PASSWORD: ci-synthetic-gto-editor-password
+      AUTH_VIEWER_USERNAME: viewer
+      AUTH_VIEWER_PASSWORD: ci-synthetic-gto-viewer-password
+    steps:
+      - name: Checkout exact integrated A base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: gto-a
+          persist-credentials: false
+      - name: Checkout exact B head with ancestry
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: gto-b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and identify both exact images
+        run: |
+          test "$(git -C gto-a rev-parse HEAD)" = "$A_SHA"
+          test "$(git -C gto-b rev-parse HEAD)" = "$B_SHA"
+          git -C gto-b merge-base --is-ancestor "$A_SHA" "$B_SHA"
+          docker build --label "org.opencontainers.image.revision=$A_SHA" -t competitions-gto:a gto-a
+          docker build --label "org.opencontainers.image.revision=$B_SHA" -t competitions-gto:b gto-b
+          test "$(docker image inspect competitions-gto:a --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$A_SHA"
+          test "$(docker image inspect competitions-gto:b --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$B_SHA"
+          {
+            echo '### GTO B → A → B synthetic image compatibility'
+            echo '| Image | Exact revision | Docker image ID |'
+            echo '| --- | --- | --- |'
+            echo "| A | $A_SHA | $(docker image inspect competitions-gto:a --format '{{.Id}}') |"
+            echo "| B | $B_SHA | $(docker image inspect competitions-gto:b --format '{{.Id}}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Reuse one synthetic volume across B, A and B
+        run: |
+          set -euo pipefail
+          env_flags=(-e AUTH_SECRET_KEY -e AUTH_ADMIN_PASSWORD -e AUTH_EDITOR_PASSWORD -e AUTH_VIEWER_USERNAME -e AUTH_VIEWER_PASSWORD)
+          helper="$PWD/gto-b/scripts/gto_image_roundtrip.py"
+          docker volume create "$VOLUME"
+          docker run --rm -v "$VOLUME:/code/data" -e GTO_SYNTHETIC_IMAGE_SMOKE=1 "${env_flags[@]}" competitions-gto:b python -m src.gto_image_smoke seed-legacy
+          run_helper() {
+            docker run --rm -v "$VOLUME:/code/data" -v "$helper:/tmp/gto_image_roundtrip.py:ro" -e GTO_SYNTHETIC_IMAGE_SMOKE=1 "${env_flags[@]}" "$1" python /tmp/gto_image_roundtrip.py "$2"
+          }
+          startup() {
+            docker run --detach --name gto-roundtrip --publish 127.0.0.1:18082:8080 -v "$VOLUME:/code/data" "${env_flags[@]}" "$1"
+            for retry in $(seq 1 40); do
+              if curl --fail --silent http://127.0.0.1:18082/healthcheck; then break; fi
+              sleep 1
+            done
+            curl --fail http://127.0.0.1:18082/healthcheck
+            docker stop gto-roundtrip
+            docker rm gto-roundtrip
+          }
+          startup competitions-gto:b
+          docker run --rm -v "$VOLUME:/code/data" -e GTO_SYNTHETIC_IMAGE_SMOKE=1 "${env_flags[@]}" competitions-gto:b python -m src.gto_image_smoke verify
+          run_helper competitions-gto:b seed
+          run_helper competitions-gto:b verify
+          startup competitions-gto:a
+          run_helper competitions-gto:a verify
+          startup competitions-gto:b
+          result=$(run_helper competitions-gto:b verify)
+          echo "$result"
+          echo "$result" >> "$GITHUB_STEP_SUMMARY"
+          echo 'B → A → B preserved exact synthetic award IDs, UIN, certificate metadata and file SHA256 on one volume.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Diagnostic container logs
+        if: failure()
+        run: docker logs gto-roundtrip || true
+      - name: Clean synthetic container and volume
+        if: always()
+        run: |
+          docker rm -f gto-roundtrip || true
+          docker volume rm "$VOLUME" || true

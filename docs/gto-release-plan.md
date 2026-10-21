@@ -1,8 +1,8 @@
 # GTO-01/02: миграция и будущий релиз
 
 Этот документ — план, а не разрешение production-операций. Работа выполняется
-на синтетических изолированных БД. Merge, production deployment и restore
-в этой задаче не разрешены.
+на синтетических изолированных БД. Интеграция main в A и A в B разрешена;
+merge ГТО в main, production deployment и restore не разрешены.
 
 ## Модель и матрица legacy
 
@@ -88,9 +88,9 @@ ID, проверка равенства значений, замена табл�
 PR B добавляет только отчёт/навигацию и не меняет схему относительно PR A.
 Точный кандидат для отката кода B → A:
 
-- source PR A: `4a160af658ddad3934ae8f426fed701d70f0ca9b` ([PR 20](https://github.com/shifter1710/competitions/pull/20));
-- проверенный exact-head image ID A:
-  `sha256:601b3f2217c90113dcc693dd16a4eaf4b5270447ebaf9f5de31818b94e5a6a90`.
+- интегрированный PR A: `71ee9449533384091c4c90e8dda534490c9e4374` ([PR 20](https://github.com/shifter1710/competitions/pull/20));
+- точный image ID нового A фиксируется в CI совместной версии, а не берётся
+  из старой сборки до интеграции main.
 
 A уже поддерживает стабильные награждения/УИН/сертификаты, в отличие от
 старого main до этой миграции. Перед признанием конкретного B → A rollback
@@ -110,6 +110,10 @@ src/gto_report_test.py, src/gto_navigation_test.py и GTO/profile/delete сце�
 pre-commit all-files, independent QA, обычный Sanic fresh/legacy/repeat startup.
 GTO exact-image workflow проверяет точный head PR; локальный доступ к Docker
 может быть недоступен — это ограничение среды, а не доказательство image PASS.
+Для PR B отдельный job собирает точные SHA A и B и запускает B → A → B на
+одном синтетическом Docker volume без восстановления БД. Он сверяет ID,
+УИН, metadata и хеши сертификатов после каждого переключения; SHA и image ID
+обоих образов публикуются в summary этого CI-запуска.
 
 Отдельный JS safe-return regression (`gto_navigation_test.py`) выполняется
 существующим Node в обычном QA/полном CI. В production Python-образ Node не
