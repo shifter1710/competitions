@@ -1,3 +1,49 @@
+// Datepicker по умолчанию вставляет popup после input: внутри .table-responsive
+// он обрезается overflow. Держим все popup в body и размещаем относительно
+// поля в координатах viewport, включая прокрутку страницы и таблицы.
+function positionViewportDatepicker(picker) {
+    const popup = picker.pickerElement;
+    const input = picker.inputField;
+    if (!picker.active || !input.isConnected) {
+        return;
+    }
+    const rect = input.getBoundingClientRect();
+    const {width, height} = popup.getBoundingClientRect();
+    const margin = 8;
+    const gap = 4;
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    const left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin));
+    const above = viewportHeight - rect.bottom < height + gap && rect.top >= height + gap;
+    const top = above ? rect.top - height - gap : rect.bottom + gap;
+    popup.classList.toggle("datepicker-orient-top", above);
+    popup.classList.toggle("datepicker-orient-bottom", !above);
+    popup.style.left = `${left}px`;
+    popup.style.top = `${Math.max(margin, Math.min(top, viewportHeight - height - margin))}px`;
+}
+
+function attachViewportDatepicker(picker) {
+    const popup = picker.pickerElement;
+    popup.style.position = "fixed";
+    const reposition = () => positionViewportDatepicker(picker);
+    const stop = () => {
+        window.removeEventListener("scroll", reposition, true);
+        window.removeEventListener("resize", reposition);
+    };
+    picker.element.addEventListener("show", () => {
+        reposition();
+        window.addEventListener("scroll", reposition, true);
+        window.addEventListener("resize", reposition);
+    });
+    picker.element.addEventListener("hide", stop);
+    picker.viewportCleanup = stop;
+    return picker;
+}
+
+function createViewportDatepicker(input, options) {
+    return attachViewportDatepicker(new Datepicker(input, {...options, container: document.body}));
+}
+
 // Комбобокс инлайн-строки (№4): input + кнопка-стрелка + выпадающий список.
 // Ввод с клавиатуры фильтрует список по подстроке, значение можно ввести
 // свободно — подсказка, не валидация. Список живёт в <body> с position:
@@ -829,8 +875,10 @@ class Main {
     createInstances() {
         if (this.dateRangePickerElement) {
             this.dateRangePicker = new DateRangePicker(this.dateRangePickerElement, {
-                format: "dd.mm.yyyy"
+                format: "dd.mm.yyyy",
+                container: document.body
             });
+            this.dateRangePicker.datepickers.forEach(attachViewportDatepicker);
         }
         if (document.querySelector(".filter__level")) {
             this.levelSelect = NiceSelect.bind(document.querySelector(".filter__level"), {searchable: true, searchtext: "Найти"});
@@ -937,6 +985,9 @@ class Main {
         if (!this.reportForm) {
             return;
         }
+        const customPeriod = this.reportForm.querySelector(".report__period").value === "custom";
+        this.reportForm.querySelector(".report__dates")?.classList.toggle("d-none", !customPeriod);
+        this.reportForm.querySelectorAll('[name="date_from"], [name="date_to"]').forEach(input => { input.disabled = !customPeriod; });
         this.reportInitialEntriesKey = Main.reportEntriesKey(Main.canonicalReportEntries(this.serializeReportForm()));
         this.initReportMultiselects();
         this.updateReportDirtyState();
@@ -1557,7 +1608,7 @@ class Main {
             input.dataset.dateBound = "true";
             input.addEventListener("input", (event) => this.handleManualDateInput(event));
             input.addEventListener("blur", () => this.normalizeDateInput(input));
-            const picker = new Datepicker(input, {autohide: true, format: "dd.mm.yyyy"});
+            const picker = createViewportDatepicker(input, {autohide: true, format: "dd.mm.yyyy"});
             if (toggleButton) {
                 toggleButton.addEventListener("click", (event) => {
                     event.preventDefault();
@@ -1951,7 +2002,7 @@ class Main {
         const profile = this.loadProfile();
         const educationOutput = this.profileForm.querySelector("#profile-education");
         if (educationOutput) {
-            educationOutput.textContent = `Год поступления: ${profile.admission_year || "—"}. Текущий курс: ${profile.course || "—"}. Рассчитываются по группе после сохранения.`;
+            educationOutput.textContent = `Год поступления: ${profile.admission_year || "—"}. Текущий курс: ${profile.course || "—"}.`;
         }
         this.profileForm.querySelectorAll("input, select").forEach((input) => {
             const value = profile[input.name];
@@ -2433,7 +2484,7 @@ class Main {
             }
             input.addEventListener("input", (event) => this.handleManualDateInput(event));
             input.addEventListener("blur", () => this.normalizeDateInput(input));
-            const picker = new Datepicker(input, {
+            const picker = createViewportDatepicker(input, {
                 autohide: true,
                 format: "dd.mm.yyyy"
             });
@@ -2450,7 +2501,10 @@ class Main {
     }
 
     destroyRowDatePickers(pickers) {
-        (pickers || []).forEach((picker) => picker.destroy());
+        (pickers || []).forEach((picker) => {
+            picker.viewportCleanup();
+            picker.destroy();
+        });
     }
 
     startInlineEdit(button) {
@@ -2601,13 +2655,14 @@ class Main {
         return Boolean(this.inlineEditRow || this.newEditRow);
     }
 
-    // Открытый выпадающий список (комбобокс или резолвер ФИО) работает в два
-    // шага: Enter выбирает вариант, Esc закрывает список. Пока список открыт,
-    // строковый обработчик Enter/Escape строку не сохраняет и не отменяет.
+    // Открытый виджет строки первым обрабатывает Enter/Escape. В частности,
+    // Datepicker закрывается по Escape, сохраняя строку и фокус в поле даты.
     hasOpenRowDropdown() {
         return (
             this.activeComboBoxes.some((combo) => combo.isOpen()) ||
-            this.activeFioResolvers.some((resolver) => resolver.isOpen())
+            this.activeFioResolvers.some((resolver) => resolver.isOpen()) ||
+            [...(this.inlineDatePickers || []), ...(this.newRowDatePickers || [])]
+                .some((picker) => picker.active)
         );
     }
 
@@ -3166,8 +3221,8 @@ class Main {
     bindTableHeaderEvents() {
         // Реестр (data-server-sort) сортируется сервером: клик по заголовку —
         // GET-навигация с sort/order в URL (порядок применяется ко всей
-        // отфильтрованной выборке). Таблица отчёта (report_result.html)
-        // сохраняет клиентскую сортировку sortByHeader, как раньше.
+        // отфильтрованной выборке). В отчёте сортировка — нативные GET-ссылки.
+        // Общие обработчики переноса колонок нужны обоим представлениям.
         const serverSort = this.tableElement?.dataset.serverSort === "true";
         const headers = Array.from(this.tableElement.querySelectorAll("thead th"));
         headers.forEach((header) => {
@@ -3177,7 +3232,7 @@ class Main {
             header.dataset.bound = "true";
             header.draggable = header.dataset.columnKey !== "actions";
             header.classList.add("table-header-cell");
-            if (header.dataset.sortType !== "none") {
+            if (header.dataset.sortType !== "none" && !(serverSort && this.tableElement.dataset.reportTable === "true")) {
                 if (serverSort) {
                     if (header.dataset.sortable === "true") {
                         header.addEventListener("click", () => this.handleServerSortClick(header));

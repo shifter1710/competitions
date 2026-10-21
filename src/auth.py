@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 from datetime import timedelta
@@ -374,6 +375,10 @@ def touch_user_seen(request: Request) -> None:
     Активность — сам факт запроса с валидной сессией; сбой обновления не
     должен ломать запрос, поэтому ошибки глотаем с логом.
     """
+    if request.method in {'GET', 'HEAD'} and (
+        request.path == '/calendar' or re.fullmatch(r'/calendar/[1-9]\d*', request.path)
+    ):
+        return
     try:
         user = get_auth_user(request) or {}
         user_id = user.get('id')

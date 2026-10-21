@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -5,8 +6,7 @@
 {# Заголовок по прототипу 04: .page-head над карточкой формы. #}
 <div class="page-head">
     <div>
-        <h1 class="page-title">Профиль атлета</h1>
-        <p class="page-sub">Данные профиля подставляются в форму добавления записи (поля остаются редактируемыми). ФИО связывает кабинет с записями, заведёнными модераторами.</p>
+        <div class="d-flex align-items-center gap-1"><h1 class="page-title">Профиль атлета</h1>{% call help('Как используется профиль') %}Данные профиля подставляются в форму добавления записи (поля остаются редактируемыми). ФИО связывает кабинет с записями, заведёнными модераторами.{% endcall %}</div>
     </div>
 </div>
 
@@ -33,7 +33,7 @@
                 <label class="form-label" for="profile-group">Группа</label>
                 <input class="form-control" id="profile-group" name="group" type="text">
             </div>
-            <div class="col-md-6"><div id="profile-education" class="form-text">Год поступления и текущий курс рассчитываются по группе после сохранения.</div></div>
+            <div class="col-md-6"><div id="profile-education" class="form-text">Год поступления: —. Текущий курс: —.</div>{{ help('Как рассчитывается курс', 'Год поступления и текущий курс рассчитываются по группе после сохранения.') }}</div>
             <div class="col-md-3 d-flex align-items-end">
                 <button class="btn btn-primary w-100" type="submit">Сохранить</button>
             </div>

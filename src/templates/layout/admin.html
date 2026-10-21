@@ -1,3 +1,4 @@
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/base.html" %}
 
 {% block content %}
@@ -7,8 +8,11 @@
    «Студенты» переопределяет блок admin_back на «← К студентам». #}
 <div class="page-head">
     <div>
-        <h1 class="page-title">{% block admin_title %}{% endblock admin_title %}</h1>
-        <p class="page-sub">{% block admin_description %}{% endblock admin_description %}</p>
+        <div class="d-flex align-items-center gap-1">
+            <h1 class="page-title">{% block admin_title %}{% endblock admin_title %}</h1>
+            {% if admin_description_help %}{% call help('Об этом разделе') %}{{ self.admin_description() }}{% endcall %}{% endif %}
+        </div>
+        {% if not admin_description_help %}<div class="page-sub">{% block admin_description %}{% endblock admin_description %}</div>{% endif %}
     </div>
     {% block admin_back %}
     <a class="btn btn-outline-secondary" href="/admin">← В админку</a>

@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Импорт реестра{% endblock admin_title %}
@@ -8,14 +10,14 @@
 
 {% block admin_content %}
 <p class="text-muted">Уровни должны быть из действующего справочника. Неизвестное значение отменяет весь импорт; сначала добавьте его {% if is_admin %}<a href="/admin/catalogs">в справочник уровней</a>{% else %}через администратора{% endif %}, затем повторите загрузку.</p>
-<p class="text-muted">Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.</p>
+{% call help('Правила импорта реестра') %}Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.{% endcall %}
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">
         <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-center">
             <div>
                 <h3 class="title mb-1">Загрузка данных</h3>
-                <div class="text-muted">Импортируйте заполненный Excel-файл. Дубли записей пропускаются автоматически.</div>
+                {% call help('Правила импорта реестра') %}Импортируйте заполненный Excel-файл. Дубли записей пропускаются автоматически.{% endcall %}
             </div>
             <a class="btn btn-outline-primary" href="/template/empty.xlsx">Скачать пустой шаблон</a>
         </div>

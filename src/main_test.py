@@ -80,12 +80,18 @@ def get_xlsx_rows(content: bytes) -> list[tuple]:
 def get_report_xlsx_rows(content: bytes, first_column: str) -> list[tuple]:
     """Rows of the report XLSX from the column header row (Reports v2: above it is the
     parameters header block — title, period, filters, slice, metrics). Rows are trimmed of trailing
-    Nones (rows of different widths in the block)."""
+    Nones (rows of different widths in the block). RPT-10: business-column
+    compatibility helper strips mandatory №; dedicated contract tests verify it."""
     rows = get_xlsx_rows(content)
-    header_index = next(index for index, row in enumerate(rows) if row and str(row[0]) == first_column)
+    header_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row and (str(row[0]) == first_column or (row[0] == '№' and str(row[1]) == first_column))
+    )
     trimmed = []
+    numbered = rows[header_index][0] == '№'
     for row in rows[header_index:]:
-        values = list(row)
+        values = list(row[1:] if numbered else row)
         while values and values[-1] is None:
             values.pop()
         trimmed.append(tuple(values))
@@ -98,7 +104,11 @@ def get_report_xlsx_header_rows(content: bytes, first_column: str) -> list[tuple
     date/row count, metrics with values. Trailing Nones are trimmed (rows of
     different widths in the block)."""
     rows = get_xlsx_rows(content)
-    header_index = next(index for index, row in enumerate(rows) if row and str(row[0]) == first_column)
+    header_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row and (str(row[0]) == first_column or (row[0] == '№' and str(row[1]) == first_column))
+    )
     trimmed = []
     for row in rows[:header_index]:
         values = list(row)
@@ -1124,8 +1134,14 @@ def test_reports_page_restores_form_and_renders_result(reports_client: SanicTest
     assert 'value="Смит"' in response.text
     # Применённый запрос — на форме (dirty-детект), экспорт скрытыми input.
     assert 'data-applied-query=' in response.text
-    assert '<input type="hidden" name="period" value="custom">' in response.text
-    assert '<input type="hidden" name="custom__trainer" value="Смит">' in response.text
+    from src.report_context import context_args
+    from src.report_context import decode_report_context
+
+    export_form = re.search(r'<form class="report-export-form".*?</form>', response.text, re.S).group(0)
+    token = re.search(r'<input type="hidden" name="report_context" value="([^"]+)">', export_form).group(1)
+    assert context_args(decode_report_context(html.unescape(token))) == parse_qs(params)
+    assert 'type="hidden" name="custom__trainer"' not in export_form
+    assert 'type="hidden" name="name"' not in export_form
     # Зона результата по применённому запросу.
     assert 'report-stats' in response.text
     assert 'report-export-form' in response.text
@@ -1526,7 +1542,10 @@ def test_report_page_slice_rows(reports_client: SanicTestClient, group_by, heade
     _, response = reports_client.get(f'/report?group_by={group_by}', headers=get_auth_headers())
 
     assert response.status == 200
-    assert f'>{header}</th>' in response.text
+    column = re.search(r'<th\b[^>]*id="report-col-slice_value"[^>]*>(.*?)</th>', response.text, re.S).group(1)
+    assert html.unescape(re.sub(r'<[^>]*>', '', column)).strip() == header
+    assert f'aria-label="{header} — сортировать"' in column
+    assert 'sort=slice_value' in html.unescape(column)
     assert get_report_cells(response.text) == expected
 
 
@@ -1583,7 +1602,22 @@ def test_report_url_is_reproducible(reports_client: SanicTestClient):
     _, second = reports_client.get(url, headers=get_auth_headers())
 
     assert first.status == second.status == 200
-    assert first.text == second.text
+    # Fernet randomizes ciphertext on every render. Normalize only those
+    # tokens to their authenticated payload; all markup and report state must
+    # still reproduce exactly, including rows, metrics, order and filters.
+    from urllib.parse import unquote
+
+    from src.report_context import decode_report_context
+
+    def normalized_contexts(html):
+        tokens = re.findall(r'gAAAA[A-Za-z0-9_%=-]+', html)
+        assert tokens
+        for token in tokens:
+            payload = json.dumps(decode_report_context(unquote(token)), ensure_ascii=True)
+            html = html.replace(token, payload)
+        return html
+
+    assert normalized_contexts(first.text) == normalized_contexts(second.text)
     assert get_report_cells(first.text) == [
         ['1', 'ПГС-102', '1', '0', '0', '1', '0'],
         ['2', 'ПГС-101', '4', '2', '3', '4', '3'],
@@ -2685,7 +2719,14 @@ def test_index_athlete_empty_renders_table_skeleton_and_cta(athlete_empty_index_
     )
     # Тулбар «+ Пустая строка» и подсказка жестов сосуществуют с CTA.
     assert 'add-empty-row-button' in response.text
-    assert 'table-gestures-hint' in response.text
+    registry_help = re.findall(
+        r'<details[^>]*>\s*<summary[^>]*aria-label="Справка: Работа с реестром".*?</details>',
+        response.text,
+        re.S,
+    )
+    gesture_help = next(item for item in registry_help if 'Двойной клик по строке — редактирование' in item)
+    assert 'class="context-help__trigger"' in gesture_help
+    assert 'Enter — сохранить, Esc — отменить.' in gesture_help
     # Прежний маркер пустого реестра и футер «Показано 0 из 0» не рендерятся.
     assert 'Нет данных' not in response.text
     assert 'Показано <strong>' not in response.text
@@ -23451,7 +23492,16 @@ def test_report_links_use_explicit_cards_and_preserve_filtered_return(people_cli
         back = html.unescape(re.search(r'href="([^\"]+)" data-person-back', card.text).group(1))
         assert back.startswith('/reports?')
         assert 'К отчёту' in card.text
-        assert parse_qs(urlsplit(back).query) == {key: [value] for key, value in query.items()}
+        from src.report_context import context_args
+        from src.report_context import decode_report_context
+
+        protected = parse_qs(urlsplit(back).query)
+        assert set(protected) == {'report_context'}
+        assert 'name=' not in back and 'custom__' not in back
+        assert quote(query['name']) not in link and 'custom__' not in link
+        assert context_args(decode_report_context(protected['report_context'][0])) == {
+            key: [value] for key, value in query.items()
+        }
         _, returned = people_client.get(back, headers=headers)
         assert get_report_cells(returned.text) == get_report_cells(response.text)
     assert storage.get_filtered()[0].student_ref_id in (None, first, second)

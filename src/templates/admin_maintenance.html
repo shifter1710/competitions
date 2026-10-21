@@ -1,3 +1,5 @@
+{% set admin_description_help = true %}
+{% from 'macros/context_help.html' import help %}
 {% extends "layout/admin.html" %}
 
 {% block admin_title %}Обслуживание базы{% endblock admin_title %}
@@ -61,12 +63,9 @@
 
 <div class="card shadow-sm mb-4">
     <div class="card-body">
-        <h3 class="title mb-1">Выгрузка базы</h3>
-        <div class="text-muted mb-3">
-            Один xlsx-файл со всеми данными по листам: записи (все колонки, включая кастомные),
+        <div class="d-flex align-items-center gap-1"><h3 class="title mb-1">Выгрузка базы</h3>{% call help('Содержимое выгрузки') %}Один xlsx-файл со всеми данными по листам: записи (все колонки, включая кастомные),
             пользователи с ролями, активностью и ФИО-псевдонимами, справочник уровней и виды спорта
-            из записей. Существующие выгрузки таблицы и отчёта остаются на своих страницах.
-        </div>
+            из записей. Существующие выгрузки таблицы и отчёта остаются на своих страницах.{% endcall %}</div>
         <a class="btn btn-primary" href="/admin/maintenance/export">Выгрузить базу (xlsx)</a>
     </div>
 </div>
