@@ -43,33 +43,20 @@ def raw_gto_count(adapter, student_id: int) -> int:
 # ---- Схема: свежая БД, легаси-БД, идемпотентность ----
 
 
-def test_fresh_db_creates_gto_table_with_unique_constraint(adapter, student_id):
-    """Таблица создаётся на свежей БД; UNIQUE (student_id, year, stage)
-    держит дубль на уровне БД (сырой INSERT → IntegrityError)."""
+def test_fresh_db_accepts_independent_same_year_stage_awards(adapter, student_id):
     columns = {row['name'] for row in adapter.connection.execute('PRAGMA table_info(student_gto_records)')}
-    assert {
-        'id',
-        'student_id',
-        'year',
-        'stage',
-        'status',
-        'created_at',
-        'updated_at',
-    } <= columns
-
-    now = '2026-01-01T00:00:00'
-    adapter.connection.execute(
-        'INSERT INTO student_gto_records (student_id, year, stage, status, created_at, updated_at) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        (student_id, 2026, 8, 'gold', now, now),
-    )
-    with pytest.raises(sqlite3.IntegrityError):
-        adapter.connection.execute(
-            'INSERT INTO student_gto_records (student_id, year, stage, status, created_at, updated_at) '
-            'VALUES (?, ?, ?, ?, ?, ?)',
-            (student_id, 2026, 8, 'bronze', now, now),
-        )
-    adapter.connection.rollback()
+    assert {'id', 'student_id', 'year', 'stage', 'status', 'created_at', 'updated_at', 'awarded_on'} <= columns
+    ids = [
+        adapter.create_student_gto_record(student_id, year=2026, stage=8, status=status)[0]
+        for status in ('bronze', 'silver', 'gold', 'gold')
+    ]
+    assert len(set(ids)) == 4
+    assert [row['status'] for row in adapter.list_student_gto_records(student_id)] == [
+        'bronze',
+        'silver',
+        'gold',
+        'gold',
+    ]
 
 
 def test_legacy_db_gains_gto_table_on_construction(tmp_path):
@@ -171,43 +158,24 @@ def test_gto_records_scoped_by_student_id(adapter):
 # ---- Дубли: create и update ----
 
 
-def test_gto_duplicate_create_rejected_no_row(adapter, student_id):
+def test_gto_repeated_award_preserves_previous_record(adapter, student_id):
     record_id, error = adapter.create_student_gto_record(student_id, year=2025, stage=8, status='gold')
     assert error is None
-
-    duplicate_id, error = adapter.create_student_gto_record(student_id, year=2025, stage=8, status='bronze')
-    assert duplicate_id is None
-    assert error == 'duplicate'
-    assert adapter.count_student_gto_records(student_id) == 1
-    # Исходная строка не тронута
+    repeated_id, error = adapter.create_student_gto_record(student_id, year=2025, stage=8, status='bronze')
+    assert repeated_id != record_id and error is None
+    assert adapter.count_student_gto_records(student_id) == 2
     assert adapter.get_student_gto_record(student_id, record_id)['status'] == 'gold'
 
 
-def test_gto_update_moves_between_pairs_and_hits_occupied(adapter, student_id):
-    """Правка — полная замена тройки: свободная пара ок, занятая (год,
-    ступень) — duplicate, обе строки не меняются."""
+def test_gto_correction_can_share_year_stage_without_merging(adapter, student_id):
     first, _ = adapter.create_student_gto_record(student_id, year=2024, stage=3, status='bronze')
     second, _ = adapter.create_student_gto_record(student_id, year=2025, stage=8, status='silver')
-
-    # Свободная пара: тройка меняется целиком
-    ok, error = adapter.update_student_gto_record(student_id, first, year=2026, stage=9, status='gold')
-    assert (ok, error) == (True, None)
-    moved = adapter.get_student_gto_record(student_id, first)
-    assert (moved['year'], moved['stage'], moved['status']) == (2026, 9, 'gold')
-
-    # Занятая пара (2025, 8): дубль, строки не меняются
-    ok, error = adapter.update_student_gto_record(student_id, first, year=2025, stage=8, status='registered')
-    assert (ok, error) == (False, 'duplicate')
-    untouched = adapter.get_student_gto_record(student_id, first)
-    assert (untouched['year'], untouched['stage'], untouched['status']) == (2026, 9, 'gold')
-    occupied = adapter.get_student_gto_record(student_id, second)
-    assert (occupied['year'], occupied['stage'], occupied['status']) == (2025, 8, 'silver')
+    assert adapter.update_student_gto_record(student_id, first, year=2026, stage=9, status='gold') == (True, None)
+    assert adapter.update_student_gto_record(student_id, first, year=2025, stage=8, status='registered') == (True, None)
+    assert adapter.get_student_gto_record(student_id, first)['status'] == 'registered'
+    assert adapter.get_student_gto_record(student_id, second)['status'] == 'silver'
     assert adapter.count_student_gto_records(student_id) == 2
-
-    # Правка «на себя» той же парой — не дубль (exclude самой записи в UPDATE
-    # не нужен: UNIQUE роняет только конфликт с ДРУГОЙ строкой)
-    ok, error = adapter.update_student_gto_record(student_id, second, year=2025, stage=8, status='gold')
-    assert (ok, error) == (True, None)
+    assert adapter.update_student_gto_record(student_id, second, year=2025, stage=8, status='gold') == (True, None)
 
 
 def test_gto_update_updates_updated_at_not_student(adapter, student_id):
@@ -355,6 +323,11 @@ def test_build_gto_rows_and_stage_options():
     assert rows == [
         {
             'id': 5,
+            'student_id': 1,
+            'awarded_on': None,
+            'awarded_on_label': '',
+            'is_award': True,
+            'certificates': [],
             'year': 2025,
             'stage': 8,
             'stage_label': 'VIII ступень (20–24)',

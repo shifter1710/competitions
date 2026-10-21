@@ -26,6 +26,7 @@ from src.levels import InvalidCompetitionLevelError
 from src.routes import admin
 from src.routes import auth
 from src.routes import calendar
+from src.routes import gto
 from src.routes import registry
 from src.routes import reports
 from src.routes import students
@@ -226,5 +227,6 @@ registry.register(app)
 calendar.register(app)
 teams.register(app)
 students.register(app)
+gto.register(app)
 reports.register(app)
 admin.register(app)

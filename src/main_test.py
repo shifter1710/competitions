@@ -11417,22 +11417,17 @@ def test_admin_person_gto_non_numeric_ids_return_400(people_client: SanicTestCli
         assert response.status == 400
 
 
-def test_admin_person_gto_duplicate_rejected(people_client: SanicTestClient):
-    """Повтор той же пары (год, ступень) — error flash, второй строки нет,
-    аудит не пишется (блок — не успех)."""
+def test_admin_person_gto_independent_awards_same_year_stage(people_client: SanicTestClient):
     storage = app.ctx.storage
     create_person(people_client)
     headers = get_auth_headers()
-    assert add_gto_record(people_client, headers).status == 302
-
-    response = add_gto_record(people_client, headers, status='bronze')
-    assert response.status == 302
-    location = unquote_plus(response.headers['location'])
-    assert 'Запись ГТО VIII ступень (20–24) за 2025 год уже существует.' in location
-
-    assert storage.count_student_gto_records(1) == 1
-    assert storage.list_student_gto_records(1)[0]['status'] == 'gold'
-    assert len(audit_details(storage, 'student_gto_added')) == 1
+    for status in ('bronze', 'silver', 'gold'):
+        assert add_gto_record(people_client, headers, status=status).status == 302
+    rows = storage.list_student_gto_records(1)
+    assert len(rows) == 3
+    assert len({row['id'] for row in rows}) == 3
+    assert [row['status'] for row in rows] == ['bronze', 'silver', 'gold']
+    assert len(audit_details(storage, 'student_gto_added')) == 3
 
 
 def test_admin_person_gto_validation_errors(people_client: SanicTestClient):
@@ -11463,14 +11458,12 @@ def test_admin_person_gto_validation_errors(people_client: SanicTestClient):
     assert audit_details(storage, 'student_gto_added') == []
 
 
-def test_admin_person_gto_edit_onto_occupied_pair(people_client: SanicTestClient):
-    """Правка на занятую пару (год, ступень) — дубль; обе строки целы."""
+def test_admin_person_gto_correction_onto_shared_pair(people_client: SanicTestClient):
     storage = app.ctx.storage
     create_person(people_client)
     headers = get_auth_headers()
     assert add_gto_record(people_client, headers, year='2025', stage='8', status='gold').status == 302
     assert add_gto_record(people_client, headers, year='2026', stage='9', status='silver').status == 302
-
     second_id = [row['id'] for row in storage.list_student_gto_records(1) if row['year'] == 2026][0]
     _, response = people_client.post(
         f'/admin/people/1/gto/{second_id}/edit',
@@ -11479,11 +11472,10 @@ def test_admin_person_gto_edit_onto_occupied_pair(people_client: SanicTestClient
         allow_redirects=False,
     )
     assert response.status == 302
-    assert 'уже существует' in unquote_plus(response.headers['location'])
-
-    statuses = {(row['year'], row['stage']): row['status'] for row in storage.list_student_gto_records(1)}
-    assert statuses == {(2025, 8): 'gold', (2026, 9): 'silver'}
-    assert audit_details(storage, 'student_gto_updated') == []
+    assert 'Запись ГТО обновлена.' in unquote_plus(response.headers['location'])
+    rows = storage.list_student_gto_records(1)
+    assert [(row['year'], row['stage'], row['status']) for row in rows] == [(2025, 8, 'gold'), (2025, 8, 'bronze')]
+    assert len(audit_details(storage, 'student_gto_updated')) == 1
 
 
 def test_admin_person_gto_unknown_record_and_student(people_client: SanicTestClient):

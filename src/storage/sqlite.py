@@ -100,7 +100,12 @@ class SQLiteAdapter(
         self.connection.create_function('app_today', 0, lambda: today_in_timezone(settings.app_timezone).isoformat())
         self.connection.row_factory = sqlite3.Row
         self.connection.execute('PRAGMA journal_mode=WAL')
-        self._create_schema()
+        try:
+            self._create_schema()
+            self._migrate_gto_history()
+        except BaseException:
+            self.connection.close()
+            raise
 
     def _migrate_event_results(self, columns: set[str]) -> None:
         """Atomic one-time legacy confirmation; new rows keep DEFAULT 0.
@@ -484,18 +489,8 @@ class SQLiteAdapter(
                 )
                 '''
             )
-            # Записи ГТО (Готов к труду и обороне): история ступеней и
-            # результатов студента по годам. Принадлежит Student (НЕ Event
-            # и не участие): identity — только стабильный students.id,
-            # легаси-режим dual/ref и ФИО-хеши значения не имеют. Одна
-            # запись на (student_id, year, stage) — UNIQUE держит дубль,
-            # правка меняет статус той же строки. Ступень/статус/год —
-            # исторический факт, из возраста не пересчитывается (DOB в
-            # модели нет и не планируется). Логический FK и отсутствие
-            # CHECK — по конвенции соседних таблиц (валидация в GtoMixin),
-            # cascade НЕТ: удаление карточки блокируется записями ГТО.
-            # Миграция чисто аддитивная и идемпотентная (паттерн
-            # calendar_event_documents), без backfill.
+            # Stable historical facts; old installations are rebuilt atomically
+            # by _migrate_gto_history after the baseline schema has committed.
             self.connection.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS student_gto_records (
@@ -506,7 +501,7 @@ class SQLiteAdapter(
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE (student_id, year, stage)
+                    awarded_on TEXT
                 )
                 '''
             )

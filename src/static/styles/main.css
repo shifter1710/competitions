@@ -2411,3 +2411,14 @@ html:has(.person-page) { margin-right: 0; overflow-x: visible; }
     white-space: normal;
     overflow-wrap: anywhere;
 }
+
+/* GTO forms and user-provided filenames stay inside narrow student cards. */
+.gto-history-table { table-layout: auto; }
+.gto-history-table td { overflow-wrap: anywhere; }
+.gto-history-table input, .gto-history-table select { min-width: 0; max-width: 100%; }
+.gto-history-table td form { min-width: 0; }
+@media (max-width: 600px) {
+    .person-page .gto-history-table td { flex: 1 1 40%; }
+    .person-page .gto-history-table td[data-label="Сертификат"],
+    .person-page .gto-history-table td[data-label="Действия"] { flex-basis: 100%; }
+}

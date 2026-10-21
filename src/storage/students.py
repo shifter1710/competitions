@@ -76,7 +76,7 @@ class StudentsMixin:
         with self._lock:
             row = self.connection.execute(
                 'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
-                'created_at, updated_at FROM students WHERE id = ?',
+                'gto_uin, created_at, updated_at FROM students WHERE id = ?',
                 (student_id,),
             ).fetchone()
             return current_student_values(row) if row else None
@@ -115,7 +115,7 @@ class StudentsMixin:
                 current_student_values(row)
                 for row in self.connection.execute(
                     f'SELECT id, full_name, sex, institute, group_name, course, active, merged_into_id, '
-                    f'created_at, updated_at FROM students ORDER BY {order_by}'
+                    f'gto_uin, created_at, updated_at FROM students ORDER BY {order_by}'
                 ).fetchall()
             ]
             if not target:
@@ -186,11 +186,13 @@ class StudentsMixin:
         """
         with self._lock:
             try:
+                self.connection.execute('BEGIN IMMEDIATE')
                 row = self.connection.execute(
                     'SELECT id FROM students WHERE id = ?',
                     (int(student_id),),
                 ).fetchone()
                 if row is None:
+                    self.connection.rollback()
                     return 'not_found', {}
                 blockers = {
                     'records': self.connection.execute(
@@ -211,6 +213,7 @@ class StudentsMixin:
                     ).fetchone()['total'],
                 }
                 if any(blockers.values()):
+                    self.connection.rollback()
                     return 'blocked', blockers
                 self.connection.execute(
                     'DELETE FROM student_aliases WHERE student_id = ?',

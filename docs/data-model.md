@@ -884,37 +884,59 @@ admin-backfill годов отключён (старые GET/POST возвращ
 той же транзакцией. Аудит: `group_academic_updated`,
 `group_admission_backfill_applied`.
 
-### 16. `student_gto_records` — записи ГТО студента
+### 16. `student_gto_records` — история ГТО студента
 
-История комплекса ГТО (Готов к труду и обороне): одна строка = «в году
-`year` студент выполнял ступень `stage` с результатом `status`».
-Принадлежит Student (НЕ событию календаря и не участию): identity — только
-стабильный `students.id`, тёзки изолированы id, легаси-ключ sha256(ФИО) и
-режим идентификации кабинета (dual/ref) к ГТО отношения не имеют. Записи —
-исторический факт: ничего не пересчитывает ступень из возраста (DOB в
-модели нет), «последний статус побеждает» без event sourcing.
+Одна строка со стабильным `id` — отдельный исторический факт Student Identity
+(`students.id`), независимо от календаря и участия. Статусы `bronze`, `silver`,
+`gold` обозначают награждения; `registered`, `participated` — участие без награды.
+Несколько строк одного студента, года, ступени и типа награды допустимы.
+Новое награждение не меняет старое; исправление меняет ровно выбранный ID.
+Ступень не пересчитывается из возраста; неизвестные даты не выдумываются.
 
 | Колонка | Тип / ограничение | Смысл |
 |---|---|---|
-| `id` | PK AUTOINCREMENT | |
-| `student_id` | INTEGER NOT NULL | логический FK `students.id`; владение строкой — карточка |
-| `year` | INTEGER NOT NULL | год выполнения, 2000..текущий+1 (верхняя граница считается в момент вызова) |
-| `stage` | INTEGER NOT NULL | ступень 1..18 (римские цифры и возрастные группы — константы `GTO_STAGES`, хранится числом) |
-| `status` | TEXT NOT NULL | фиксированный enum `GTO_STATUSES`: `registered` / `participated` / `bronze` / `silver` / `gold` (своего справочника нет) |
-| `created_at` | TEXT NOT NULL | UTC |
-| `updated_at` | TEXT NOT NULL | UTC; меняется при правке записи |
-| `UNIQUE (student_id, year, stage)` | | одна запись на пару год+ступень у карточки; дубль create и правка «на занятую пару» — ошибка `duplicate` (авторитетно IntegrityError с rollback) |
+| `id` | INTEGER PK AUTOINCREMENT | стабильный ID записи/награждения |
+| `student_id` | INTEGER NOT NULL | логическая связь с `students.id` |
+| `year` | INTEGER NOT NULL | календарный год записи, 2000..текущий+1 |
+| `stage` | INTEGER NOT NULL | ступень 1..18 |
+| `status` | TEXT NOT NULL | registered / participated / bronze / silver / gold |
+| `created_at`, `updated_at` | TEXT NOT NULL | UTC; при миграции сохраняются буквально |
+| `awarded_on` | TEXT NULL | известная дата награждения ISO YYYY-MM-DD; только для награды |
 
-Кто пишет строки: модераторы (admin/editor) с карточки студента —
-`POST /admin/people/<id>/gto` (создание), `POST /admin/people/<id>/gto/<record_id>/edit`
-(полная замена тройки год/ступень/статус), `POST /admin/people/<id>/gto/<record_id>/delete`.
-Валидация — в storage (`GtoMixin`), не в CHECK-ограничениях (конвенция
-проекта): отказ ничего не пишет. Порядок чтения — `year DESC, stage ASC,
-id ASC`. Каскада при удалении карточки НЕТ: записи ГТО — блокер
-hard delete (см. раздел 11). Атлет видит свои записи (read-only) в
-кабинете на главной — по связи `users.student_ref_id`. Аудит:
-`student_gto_added` / `student_gto_updated` (с diff old→new) /
-`student_gto_deleted`.
+Старая уникальность `(student_id, year, stage)` удалена атомарной миграцией,
+ID и выданный максимум AUTOINCREMENT сохранены. Маркер `app_settings.gto_history_v1`
+записывается последним. Повторный startup проверяет схему без копирования истории.
+Порядок: год DESC, ступень ASC, известные даты ASC, неизвестные после известных,
+стабильный ID как последний ключ. Неизвестный legacy-статус сохраняется, но
+не считается наградой и не открывает доступ к сертификатам.
+
+`students.gto_uin` — nullable TEXT с UNIQUE partial index для значений не NULL.
+Окружающие пробелы убираются, пустое значение — NULL; ведущие нули сохраняются,
+числа/управляющие символы отклоняются. Произвольного ограничения длины нет.
+УИН не используется для автоматического сопоставления или слияния карточек.
+Обычная правка карточки/импорт УИН не обнуляет. Редактирование — только admin:
+`POST /admin/people/<id>/gto/uin`.
+
+`student_gto_certificates`: `id` INTEGER PK AUTOINCREMENT, `gto_record_id` INTEGER
+NOT NULL, `filename`, `stored_name` (UNIQUE), `content_type` TEXT NOT NULL,
+`size` INTEGER NOT NULL, `uploaded_by` INTEGER NULL, `created_at` TEXT NOT NULL.
+На одно награждение возможно 0..N документов. Файлы — `data/files/gto/<award_id>/`
+с UUID-именами; старые вложения/документы событий не меняются. Новая загрузка
+никогда не переносит документ другого награждения. Сертифицированную награду
+нельзя исправить на статус участия до явного удаления её сертификатов.
+
+Существующие POST `/admin/people/<id>/gto`, `/gto/<record_id>/edit|delete`
+сохраняются (admin/editor). Даты и документы необязательны. Аудит
+`student_gto_added/updated/deleted` отличает добавление от исправления (old/new);
+добавлены `student_gto_uin_updated` и `student_gto_certificate_added/deleted`.
+Viewer читает; athlete читает только свою историю/файлы по актуальному
+`users.student_ref_id`. Выдача сертификата повторно проверяет текущие роль,
+активность, версию пароля, связь и файл после чтения; ответы private/no-store.
+Все изменения защищены CSRF. Удаление награды удаляет её метаданные сертификатов
+одной транзакцией, файлы чистятся после commit. Записи ГТО блокируют удаление
+карточки; SQLite write-транзакция защищает проверку от конкурентного добавления.
+
+[Workflow](gto-workflow.md), [матрица миграции и rollback](gto-release-plan.md).
 
 ## Как устроена личность сегодня
 
