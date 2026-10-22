@@ -1870,6 +1870,7 @@ class Main {
     }
 
     handleClickExportButton() {
+        if (this.blockPendingRowSave()) return;
         // Несохранённая правка не отменяется молча (UX P0): подтверждение.
         // Отказ — остаёмся в правке, выгрузки не происходит.
         if (this.hasActiveRowEdit()
@@ -2484,10 +2485,22 @@ class Main {
             }
             input.addEventListener("input", (event) => this.handleManualDateInput(event));
             input.addEventListener("blur", () => this.normalizeDateInput(input));
+            // Datepicker understands a single date only: feeding it a manual
+            // range can reinterpret the year and overwrite the draft on init.
+            const initialValue = input.value;
+            if (key === "date" && initialValue.includes("-")) input.value = "";
             const picker = createViewportDatepicker(input, {
                 autohide: true,
                 format: "dd.mm.yyyy"
             });
+            input.value = initialValue;
+            if (key === "date") {
+                // Outside clicks and edit-mode exit call update() again. Keep
+                // manual ranges for the server parser; explicit calendar day
+                // selection still uses setDate() and may replace the range.
+                const updateFromInput = picker.update.bind(picker);
+                picker.update = (...args) => input.value.includes("-") ? picker : updateFromInput(...args);
+            }
             const toggleButton = input.closest(".inline-date-group")?.querySelector(".inline-date-toggle");
             if (toggleButton) {
                 toggleButton.addEventListener("click", (event) => {
@@ -2512,6 +2525,11 @@ class Main {
         if (!row) {
             return;
         }
+        if (row === this.inlineEditRow) {
+            this.focusCurrentRowEdit();
+            return;
+        }
+        if (!this.confirmRowEditSwitch()) return;
         this.cancelInlineEdit();
         this.cancelNewRowEdit();
 
@@ -2569,6 +2587,7 @@ class Main {
         this.inlineDatePickers = this.attachRowDatePickers(row);
         this.linkRowCombos(row);
         this.attachFioResolver(row);
+        this.trackRowEdit(row);
         this.inlineKeydownHandler = (event) => {
             if (this.hasOpenRowDropdown()) {
                 return;
@@ -2618,10 +2637,11 @@ class Main {
                 body: formData,
             },
             onSuccess: () => {
-                this.inlineSaving = false;
+                this.cancelInlineEdit({afterSave: true});
                 notify({type: "success", text: "Запись успешно обновлена"});
-                this.refreshCurrentContent();
+                this.refreshCurrentContent().finally(() => { this.inlineSaving = false; });
             },
+            onFailure: () => { this.inlineSaving = false; },
             onError: (message) => {
                 this.inlineSaving = false;
                 notify({type: "error", text: message || "Ошибка сохранения записи"});
@@ -2629,11 +2649,13 @@ class Main {
         });
     }
 
-    cancelInlineEdit() {
+    cancelInlineEdit({afterSave = false} = {}) {
+        if (!afterSave && this.blockPendingRowSave()) return;
         if (!this.inlineEditRow) {
             return;
         }
         const row = this.inlineEditRow;
+        this.clearRowEditTracking(row);
         if (this.inlineKeydownHandler) {
             row.removeEventListener("keydown", this.inlineKeydownHandler, true);
             this.inlineKeydownHandler = null;
@@ -2653,6 +2675,61 @@ class Main {
 
     hasActiveRowEdit() {
         return Boolean(this.inlineEditRow || this.newEditRow);
+    }
+
+    // Один редактор: снимок только доступных пользователю полей, по ключам,
+    // чтобы перестановка колонок и программные изменения value были безопасны.
+    rowEditValues(row) {
+        return new Map(Array.from(row.querySelectorAll("[data-edit-key]:not([disabled])"))
+            .map((input) => [input.dataset.editKey, input.value]));
+    }
+
+    trackRowEdit(row) {
+        this.rowEditSnapshot = this.rowEditValues(row);
+        this.rowEditLastFocus = null;
+        this.rowEditFocusHandler = (event) => {
+            if (event.target.matches("[data-edit-key]:not([disabled])")) {
+                this.rowEditLastFocus = event.target;
+            }
+        };
+        row.addEventListener("focusin", this.rowEditFocusHandler);
+    }
+
+    clearRowEditTracking(row) {
+        if (this.rowEditFocusHandler) row.removeEventListener("focusin", this.rowEditFocusHandler);
+        this.rowEditFocusHandler = null;
+        this.rowEditSnapshot = null;
+        this.rowEditLastFocus = null;
+    }
+
+    focusCurrentRowEdit() {
+        const row = this.inlineEditRow || this.newEditRow;
+        if (!row) return;
+        const visible = (input) => input && !input.disabled && input.getClientRects().length > 0;
+        const input = visible(this.rowEditLastFocus) ? this.rowEditLastFocus
+            : Array.from(row.querySelectorAll("[data-edit-key]:not([disabled])")).find(visible);
+        input?.focus({preventScroll: true});
+    }
+
+    blockPendingRowSave() {
+        if (!this.inlineSaving && !this.newRowSaving) return false;
+        notify({type: "warning", text: "Идёт сохранение. Дождитесь его завершения."});
+        this.focusCurrentRowEdit();
+        return true;
+    }
+
+    confirmRowEditSwitch() {
+        if (this.blockPendingRowSave()) return false;
+        const row = this.inlineEditRow || this.newEditRow;
+        if (!row) return true;
+        const values = this.rowEditValues(row);
+        const original = this.rowEditSnapshot || new Map();
+        const dirty = values.size !== original.size || [...values].some(([key, value]) => original.get(key) !== value);
+        if (dirty && !confirm("В текущей строке есть несохранённые изменения. Отменить их и открыть другую строку?")) {
+            this.focusCurrentRowEdit();
+            return false;
+        }
+        return true;
     }
 
     // Открытый виджет строки первым обрабатывает Enter/Escape. В частности,
@@ -2705,9 +2782,12 @@ class Main {
             notify({type: "error", text: "Таблица недоступна: нет данных"});
             return;
         }
-        if (this.hasActiveRowEdit()) {
+        if (this.newEditRow) {
+            this.focusCurrentRowEdit();
             return;
         }
+        if (!this.confirmRowEditSwitch()) return;
+        this.cancelInlineEdit();
         const tbody = this.tableElement.querySelector("tbody");
         if (!tbody) {
             return;
@@ -2751,6 +2831,7 @@ class Main {
         this.newRowDatePickers = this.attachRowDatePickers(row);
         this.linkRowCombos(row);
         this.attachFioResolver(row);
+        this.trackRowEdit(row);
         this.newRowKeydownHandler = this.bindRowKeyboardNavigation(
             row,
             () => this.saveNewRowEdit(),
@@ -2787,10 +2868,11 @@ class Main {
                 body: formData,
             },
             onSuccess: () => {
-                this.newRowSaving = false;
+                this.cancelNewRowEdit({afterSave: true});
                 notify({type: "success", text: "Запись успешно добавлена"});
-                this.refreshCurrentContent();
+                this.refreshCurrentContent().finally(() => { this.newRowSaving = false; });
             },
+            onFailure: () => { this.newRowSaving = false; },
             onError: (message) => {
                 this.newRowSaving = false;
                 notify({type: "error", text: message || "Ошибка добавления записи"});
@@ -2798,11 +2880,13 @@ class Main {
         });
     }
 
-    cancelNewRowEdit() {
+    cancelNewRowEdit({afterSave = false} = {}) {
+        if (!afterSave && this.blockPendingRowSave()) return;
         if (!this.newEditRow) {
             return;
         }
         const row = this.newEditRow;
+        this.clearRowEditTracking(row);
         if (this.newRowKeydownHandler) {
             row.removeEventListener("keydown", this.newRowKeydownHandler, true);
             this.newRowKeydownHandler = null;
@@ -2860,7 +2944,12 @@ class Main {
 
     reviewCompetition(recordId, decision) {
         if (decision === "reject") {
-            const comment = prompt("Комментарий для владельца записи (необязательно):") ?? "";
+            const trigger = document.activeElement;
+            const comment = prompt("Комментарий для владельца записи (необязательно):");
+            if (comment === null) {
+                trigger?.focus({preventScroll: true});
+                return;
+            }
             this.makeRequest({
                 url: `/competition/${recordId}/review/reject`,
                 options: {
@@ -3032,7 +3121,7 @@ class Main {
         return meta ? meta.content : "";
     }
 
-    makeRequest({ url, options = {}, onSuccess = () => {}, onError = () => {} }) {
+    makeRequest({ url, options = {}, onSuccess = () => {}, onError = () => {}, onFailure = () => {} }) {
         const csrfToken = this.getCsrfToken();
         if (options.body instanceof FormData) {
             if (!options.body.has("csrf_token")) {
@@ -3071,6 +3160,7 @@ class Main {
             })
             .catch((error) => {
                 this.setLoading(false);
+                onFailure();
                 if (error.message === "Redirected to login" || error.message === "Unauthorized") {
                     return;
                 }
@@ -3090,7 +3180,7 @@ class Main {
     refreshCurrentContent() {
         // Reports v2: отчёт больше не обновляется fetch-ом — применённое
         // состояние это URL страницы, правок записей на /reports нет.
-        this.refreshIndexContent();
+        return this.refreshIndexContent();
     }
 
     refreshIndexContent() {
@@ -3099,7 +3189,7 @@ class Main {
         // чтобы применённые условия и страница не терялись.
         this.setLoading(true);
         const currentUrl = window.location.pathname + window.location.search;
-        fetch(currentUrl, {method: "GET"})
+        return fetch(currentUrl, {method: "GET"})
             .then((response) => response.text())
             .then((html) => {
                 const doc = new DOMParser().parseFromString(html, "text/html");
@@ -4792,7 +4882,7 @@ function initializeLevelSelects() {
         const strict = enhanceLevelSelect(select);
         parent.insertBefore(strict.wrapper, next);
         const form = select.form;
-        if (form && !form.dataset.levelPreserve) {
+        if (form && !form.hasAttribute("data-native-validation-response") && !form.dataset.levelPreserve) {
             form.dataset.levelPreserve = "1";
             form.addEventListener("submit", async event => {
                 if (event.defaultPrevented) return;

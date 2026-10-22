@@ -30,7 +30,7 @@
                 </form>
                 {% endif %}
                 <button class="btn btn-primary" type="button" data-bs-toggle="collapse"
-                        data-bs-target="#edit-{{ entry.id }}" aria-expanded="false"
+                        data-bs-target="#edit-{{ entry.id }}" aria-expanded="{{ 'true' if entry.edit_error else 'false' }}"
                         aria-controls="edit-{{ entry.id }}">Решить вручную</button>
             </div>
         </div>
@@ -41,7 +41,7 @@
                 <table class="table table-sm table-striped align-middle mb-0">
                     <tbody>
                         {% for label, value in entry.candidate %}
-                        <tr><th style="width: 40%">{{ label }}</th><td>{{ value }}</td></tr>
+                        <tr><th style="width: 40%">{{ label }}</th><td class="text-break">{{ value }}</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -62,6 +62,9 @@
                         <tr><th>Название соревнований</th><td>{{ entry.matched.name }}</td></tr>
                         <tr><th>Место</th><td>{{ entry.matched.position or '—' }}</td></tr>
                         <tr><th>Дисциплина</th><td>{{ entry.matched.discipline or '' }}</td></tr>
+                        {% for field in custom_fields %}
+                        <tr><th>{{ field.label }}</th><td class="text-break">{{ entry.matched_custom[field.key] or '—' }}</td></tr>
+                        {% endfor %}
                     </tbody>
                 </table>
                 <div class="form-text mt-2">«Заменить существующую» перезапишет эту запись полями кандидата (запись №{{ entry.matched.record_id }}), прежние значения зафиксируются в аудите.</div>
@@ -73,10 +76,13 @@
             </div>
         </div>
 
-        <div class="collapse mt-3" id="edit-{{ entry.id }}">
+        <div class="collapse{% if entry.edit_error %} show{% endif %} mt-3" id="edit-{{ entry.id }}">
             <div class="border rounded p-3 bg-light">
                 <h5 class="mb-3">Ручная правка кандидата</h5>
-                <form action="/admin/import-queue/{{ entry.id }}/edit" method="post">
+                {% if entry.edit_error %}
+                <div class="alert alert-danger" role="alert">Не удалось принять строку: {{ entry.edit_error }}. Проверьте поля и повторите сохранение.</div>
+                {% endif %}
+                <form action="/admin/import-queue/{{ entry.id }}/edit" method="post" data-native-validation-response>
                     <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
                     <div class="row g-3">
                         <div class="col-md-6">
@@ -85,7 +91,7 @@
                             <div class="form-text">Определяет конфликт — редактировать нельзя.</div>
                         </div>
                         <div class="col-md-6">
-                            <label class="form-label">Пол</label>
+                            <label class="form-label" for="edit-{{ entry.id }}-student_sex">Пол</label>
                             <input class="form-control" id="edit-{{ entry.id }}-student_sex" name="student_sex"
                                    value="{{ entry.edit_values.student_sex }}">
                         </div>
@@ -129,6 +135,19 @@
                             <input class="form-control" id="edit-{{ entry.id }}-discipline" name="discipline"
                                    value="{{ entry.edit_values.discipline }}">
                         </div>
+                        {% for field in custom_fields %}
+                        {% set input_id = 'edit-' ~ entry.id ~ '-custom-' ~ field.key %}
+                        <div class="col-md-6">
+                            <label class="form-label" for="{{ input_id }}">{{ field.label }}{% if field.required %} (обязательно){% endif %}</label>
+                            <input class="form-control" type="text" id="{{ input_id }}" name="custom__{{ field.key }}"
+                                   value="{{ entry.edit_values.custom[field.key] }}"{% if field.required %} required{% endif %}
+                                   {% if field.field_type == 'number' %}inputmode="decimal"{% endif %}
+                                   {% if field.field_type == 'date' %}placeholder="дд.мм.гггг" aria-describedby="{{ input_id }}-hint"{% endif %}
+                                   {% if field.field_type == 'url' %}inputmode="url" aria-describedby="{{ input_id }}-hint"{% endif %}>
+                            {% if field.field_type == 'date' %}<div class="form-text" id="{{ input_id }}-hint">Формат: дд.мм.гггг</div>{% endif %}
+                            {% if field.field_type == 'url' %}<div class="form-text" id="{{ input_id }}-hint">Ссылка с http:// или https://</div>{% endif %}
+                        </div>
+                        {% endfor %}
                     </div>
                     <div class="mt-3">
                         <button class="btn btn-success" type="submit">Сохранить и принять</button>
