@@ -56,6 +56,7 @@ from src.records import event_participation_effective_values
 from src.records import event_participation_matched_duplicate_guard
 from src.records import FIELD_TYPE_OPTIONS
 from src.records import IMPORT_DISCIPLINE_COLUMN
+from src.records import parse_custom_field_value
 from src.records import REQUIRED_IMPORT_COLUMNS
 from src.records import select_export_custom_fields
 from src.records import select_template_custom_fields
@@ -467,6 +468,50 @@ def queue_edit_values(payload: dict) -> dict:
         # Event Model, P5a: легаси-payload без ключа даёт пустую строку.
         'discipline': '' if payload.get('discipline') is None else str(payload.get('discipline')),
     }
+
+
+def queue_custom_values(payload: dict, custom_fields: Sequence[CustomField]) -> dict[str, str]:
+    extra_data = payload.get('extra_data') or {}
+    return {
+        field.key: '' if extra_data.get(field.key) is None else str(extra_data[field.key]) for field in custom_fields
+    }
+
+
+async def render_import_queue(request: Request, *, failed_entry=None, edit_values=None, error=None):
+    """A validation error renders the same pending candidate with its raw input."""
+    storage = get_storage(request.app)
+    custom_fields = storage.get_custom_fields()
+    pending = storage.list_import_queue('pending')
+    if failed_entry is not None and not any(entry['id'] == failed_entry['id'] for entry in pending):
+        pending = [*pending, failed_entry]
+    entries = []
+    for entry in pending:
+        matched = storage.get_competition_by_id(int(entry['matched_record_id'])) if entry['matched_record_id'] else None
+        values = queue_edit_values(entry['payload'])
+        values['custom'] = queue_custom_values(entry['payload'], custom_fields)
+        failed = failed_entry is not None and entry['id'] == failed_entry['id']
+        entries.append(
+            {
+                **entry,
+                'candidate': queue_candidate_view(entry['payload'])
+                + [(field.label, values['custom'][field.key] or '—') for field in custom_fields],
+                'edit_values': edit_values if failed else values,
+                'edit_error': error if failed else None,
+                'matched': matched,
+                'matched_custom': queue_custom_values(matched.model_dump(), custom_fields) if matched else {},
+            }
+        )
+    return await render(
+        template_name=jinja_env.get_template('admin_import_queue.html'),
+        status=400 if error else 200,
+        context={
+            'request': request,
+            'queue_entries': entries,
+            'custom_fields': custom_fields,
+            'level_options': storage.get_level_names(),
+            **get_flash_args(request),
+        },
+    )
 
 
 def queue_field_changes(old: Competition, new: Competition) -> dict:
@@ -1104,29 +1149,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         auth_error = require_admin(request)
         if auth_error is not None:
             return auth_error
-        storage = get_storage(request.app)
-        entries = []
-        for entry in storage.list_import_queue('pending'):
-            matched = None
-            if entry['matched_record_id']:
-                matched = storage.get_competition_by_id(int(entry['matched_record_id']))
-            entries.append(
-                {
-                    **entry,
-                    'candidate': queue_candidate_view(entry['payload']),
-                    'edit_values': queue_edit_values(entry['payload']),
-                    'matched': matched,
-                }
-            )
-        return await render(
-            template_name=jinja_env.get_template('admin_import_queue.html'),
-            context={
-                'request': request,
-                'queue_entries': entries,
-                'level_options': storage.get_level_names(),
-                **get_flash_args(request),
-            },
-        )
+        return await render_import_queue(request)
 
     @app.post('/admin/import-queue/<entry_id>/accept')
     async def accept_import_queue_entry(request: Request, entry_id: str):
@@ -1233,29 +1256,55 @@ def register(app: Sanic) -> None:  # noqa: C901
             return error
         storage = get_storage(request.app)
         custom_fields = storage.get_custom_fields()
-        # №27в: ФИО и дата задают конфликт с существующей записью — из формы не
-        # берутся (подмена игнорируется), только из payload очереди. Остальные
-        # поля приходят из формы. Дату форматируем в дд.мм.гггг (с диапазоном),
-        # так её понимает ручной парсер build_competition.
+        # Identity and dates come only from the original candidate. Missing
+        # controls preserve payload values; an explicitly posted empty clears.
         payload = entry['payload']
+        edit_values = queue_edit_values(payload)
+        for key in ('student_sex', 'institute', 'group', 'sport', 'level', 'name', 'position', 'discipline'):
+            if form_key_present(request, key):
+                edit_values[key] = get_form_value(request, key)
+        edit_values['custom'] = queue_custom_values(payload, custom_fields)
+        for field in custom_fields:
+            if form_key_present(request, f'custom__{field.key}'):
+                edit_values['custom'][field.key] = get_form_value(request, f'custom__{field.key}')
         record = {
-            'ФИО': '' if payload.get('student_name') is None else str(payload['student_name']),
-            'Пол': get_form_value(request, 'student_sex'),
-            'Институт': get_form_value(request, 'institute'),
-            'Группа': get_form_value(request, 'group'),
-            'Вид спорта': get_form_value(request, 'sport'),
-            'Дата': queue_edit_values(payload)['date'],
-            'Уровень соревнований': get_form_value(request, 'level'),
-            'Название соревнований': get_form_value(request, 'name'),
-            'Место': get_form_value(request, 'position'),
-            'Курс': '',
-            # Event Model, P5a: дисциплина правится вместе с остальными полями.
-            'Дисциплина': get_form_value(request, 'discipline'),
+            QUEUE_FIELD_LABELS[key]: edit_values[key]
+            for key in (
+                'student_name',
+                'student_sex',
+                'institute',
+                'group',
+                'sport',
+                'date',
+                'level',
+                'name',
+                'position',
+                'discipline',
+            )
         }
         try:
-            competition = build_competition(record, custom_fields=custom_fields, manual_input=True, storage=storage)
-        except (TypeError, ValueError) as exc:
-            return text(body=f'Invalid row data: {exc}', status=400)
+            # Parse custom values by key, separately from base labels: a custom
+            # label such as «Дисциплина» must not overwrite the base value.
+            extra_data = dict(payload.get('extra_data') or {})
+            for field in custom_fields:
+                try:
+                    extra_data[field.key] = parse_custom_field_value(edit_values['custom'][field.key], field)
+                except (TypeError, ValueError, OverflowError):
+                    if edit_values['custom'][field.key].strip() and field.field_type in ('number', 'date'):
+                        expected = 'числом' if field.field_type == 'number' else 'датой в формате дд.мм.гггг'
+                        raise ValueError(f'Поле "{field.label}" должно быть {expected}') from None
+                    raise
+            competition = build_competition(record, custom_fields=[], manual_input=True, storage=storage)
+            preserved = {
+                key: payload[key]
+                for key in ('student_id', 'record_id', 'created_at', 'result', 'student_ref_id', 'calendar_event_id')
+                if key in payload
+            }
+            competition = Competition.model_validate(
+                {**competition.model_dump(), **preserved, 'extra_data': extra_data}
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            return await render_import_queue(request, failed_entry=entry, edit_values=edit_values, error=str(exc))
 
         # Тот же анти-дубликат, что и у «Принять»: строка вставляется только
         # по явному решению админа.
