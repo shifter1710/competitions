@@ -13274,7 +13274,7 @@ def test_student_import_infile_duplicates_flagged_and_both_creatable(
     page = get_preview(student_import_client, token)
     # Обе строки — «Требуют решения» с перечнем строк группы дублей
     assert 'Всего строк: 2 · новые: 0 · требуют решения: 2' in page.text
-    assert 'Одинаковые ФИО в файле: строки 2, 3' in page.text
+    assert 'Одинаковые ФИО в файле: строки Excel 2, 3' in page.text
 
     # Полные тёзки — разные люди: обе строки создаются явно и раздельно
     first = post_import_action(student_import_client, token, 'row/2/create')
@@ -13945,6 +13945,8 @@ def test_student_import_post_routes_reject_missing_csrf(student_import_client: S
     token = import_session_token(response)
     suffixes = [
         'bulk-create',
+        'bulk-skip/prepare',
+        'bulk-skip/apply',
         'row/2/create',
         'row/2/use-existing',
         'row/2/skip',
@@ -13975,7 +13977,15 @@ def test_student_import_action_roles(student_import_client: SanicTestClient):
 
     _, response = student_import_client.get(f'/admin/people/import/preview/{token}', headers=editor_headers)
     assert response.status == 403
-    for suffix in ('bulk-create', 'row/2/create', 'row/2/skip', 'finish', 'discard'):
+    for suffix in (
+        'bulk-create',
+        'bulk-skip/prepare',
+        'bulk-skip/apply',
+        'row/2/create',
+        'row/2/skip',
+        'finish',
+        'discard',
+    ):
         _, response = student_import_client.post(
             f'/admin/people/import/preview/{token}/{suffix}',
             headers=editor_headers,
@@ -14113,6 +14123,277 @@ def test_student_import_isolation_and_reconcile_compat(student_import_client: Sa
     _, page = student_import_client.get('/admin/people/reconcile', headers=get_auth_headers())
     assert page.status == 200
     assert f'<a href="/admin/people/{student_id}">Иванов Иван</a>' in page.text
+
+
+def prepare_student_skip(client, token, *, mode='selected', rows=()):
+    return post_import_action(client, token, 'bulk-skip/prepare', {'mode': mode, 'row_number': list(rows)})
+
+
+def apply_student_skip(client, token):
+    nonce = student_import_sessions[token]['skip_confirmation']['nonce']
+    return post_import_action(client, token, 'bulk-skip/apply', {'nonce': nonce})
+
+
+def test_student_import_bulk_skip_preserves_created_and_existing_and_finish(student_import_client):
+    storage = app.ctx.storage
+    for number in range(5):
+        storage.create_student(f'Синтетический Существующий {number}', 'М', 'Тестовый институт', 'ТЕСТ-26', '')
+    original = students_snapshot(storage)
+    rows = [{'ФИО': f'Синтетический Новый {number}'} for number in range(5)]
+    rows += [{'ФИО': row[1]} for row in original]
+    token = import_session_token(upload_student_xlsx(student_import_client, rows))
+    get_preview(student_import_client, token)
+    created = post_import_action(student_import_client, token, 'bulk-create')
+    assert 'Создано студентов: 5.' in unquote_plus(created.headers['location'])
+    after_create = students_snapshot(storage)
+    before_tables = storage.connection.iterdump()
+    before_skip = list(before_tables)
+    created_at = student_import_sessions[token]['created_at']
+    confirmation = prepare_student_skip(student_import_client, token, mode='found')
+    assert confirmation.status == 200
+    assert 'Пропустить 5 строк' in confirmation.text
+    assert 'Карточки студентов и их связи сохранятся' in confirmation.text
+    assert 'Уже созданные карточки останутся' in confirmation.text
+    assert student_import_sessions[token]['created_at'] == created_at
+    assert [row['status'] for row in student_import_sessions[token]['rows']] == ['created'] * 5 + ['pending'] * 5
+    nonce = student_import_sessions[token]['skip_confirmation']['nonce']
+    applied = apply_student_skip(student_import_client, token)
+    assert 'Пропущено строк: 5.' in unquote_plus(applied.headers['location'])
+    assert list(storage.connection.iterdump()) == before_skip
+    assert students_snapshot(storage) == after_create
+    assert students_snapshot(storage)[:5] == original
+    replay = post_import_action(student_import_client, token, 'bulk-skip/apply', {'nonce': nonce})
+    assert 'уже использовано' in unquote_plus(replay.headers['location'])
+    assert students_snapshot(storage) == after_create
+    page = get_preview(student_import_client, token)
+    assert 'создано 5 · использовано существующих 0 · пропущено 5' in page.text
+    assert 'Всего строк: 10 · новые: 0 · требуют решения: 0 · ошибочные: 0' in page.text
+    assert '<button class="btn btn-primary" type="submit" >Завершить импорт</button>' in page.text
+    finished = post_import_action(student_import_client, token, 'finish')
+    assert 'создано 5, использовано существующих 0, пропущено 5' in unquote_plus(finished.headers['location'])
+    assert audit_details(storage, 'student_import_completed') == [
+        {'created': 5, 'reused_existing': 0, 'skipped': 5, 'errors': 0, 'total': 10}
+    ]
+    assert students_snapshot(storage) == after_create
+
+
+def test_student_import_bulk_skip_found_ambiguous_namesakes_and_file_only_duplicates(student_import_client):
+    storage = app.ctx.storage
+    for group in ('ТЕСТ-25А', 'ТЕСТ-25Б'):
+        storage.create_student('Синтетический Тёзка', 'М', 'Тест', group, '')
+    storage.create_student('Синтетический Однофамилец Первый', 'М', '', '', '')
+    inactive = storage.create_student('Синтетический Неактивный', 'М', '', '', '')
+    storage.set_student_active(inactive, False)
+    token = import_session_token(
+        upload_student_xlsx(
+            student_import_client,
+            [
+                {'ФИО': 'Синтетический Тёзка'},
+                {'ФИО': 'Синтетический Однофамилец Второй'},
+                {'ФИО': 'Синтетический Дубль'},
+                {'ФИО': 'Синтетический Дубль'},
+                {'ФИО': 'Синтетический Неактивный'},
+                {'ФИО': 'Синтетический Тёзка', 'Пол': 'ошибка'},
+            ],
+        )
+    )
+    before = list(storage.connection.iterdump())
+    confirmation = prepare_student_skip(student_import_client, token, mode='found')
+    assert 'Пропустить 1 строк' in confirmation.text
+    assert [row['row_number'] for row in student_import_sessions[token]['skip_confirmation']['rows']] == [2]
+    apply_student_skip(student_import_client, token)
+    assert [row['status'] for row in student_import_sessions[token]['rows']] == [
+        'skipped',
+        'pending',
+        'pending',
+        'pending',
+        'pending',
+        'error',
+    ]
+    assert all(row['student_id'] is None for row in student_import_sessions[token]['rows'])
+    assert list(storage.connection.iterdump()) == before
+
+
+def test_student_import_bulk_skip_selected_error_empty_duplicate_ids_and_terminal_rows(student_import_client):
+    token = import_session_token(
+        upload_student_xlsx(
+            student_import_client,
+            [
+                {'ФИО': 'Синтетический Первый'},
+                {'ФИО': 'Синтетический Ошибка', 'Пол': 'ошибка'},
+                {'ФИО': 'Синтетический Третий'},
+            ],
+        )
+    )
+    empty = prepare_student_skip(student_import_client, token)
+    assert 'Выберите строки для пропуска.' in unquote_plus(empty.headers['location'])
+    assert 'skip_confirmation' not in student_import_sessions[token]
+    confirmation = prepare_student_skip(student_import_client, token, rows=['2', '3', '2'])
+    assert confirmation.status == 200
+    assert 'Пропустить 2 строк' in confirmation.text
+    apply_student_skip(student_import_client, token)
+    rows = student_import_sessions[token]['rows']
+    assert [row['status'] for row in rows] == ['skipped', 'skipped', 'pending']
+    rejected = prepare_student_skip(student_import_client, token, rows=['4', '2'])
+    assert 'часть строк уже разобрана' in unquote_plus(rejected.headers['location'])
+    assert rows[2]['status'] == 'pending'
+    assert len(students_snapshot(app.ctx.storage)) == 0
+
+
+@pytest.mark.parametrize('invalid_id', ['bogus', '2.5', '-1', '0', '999', ''])
+def test_student_import_bulk_skip_invalid_ids_reject_entire_batch(student_import_client, invalid_id):
+    token = import_session_token(upload_student_xlsx(student_import_client, [{'ФИО': 'Синтетический Первый'}]))
+    response = prepare_student_skip(student_import_client, token, rows=['2', invalid_id])
+    assert response.status == 400
+    assert student_import_sessions[token]['rows'][0]['status'] == 'pending'
+    assert 'skip_confirmation' not in student_import_sessions[token]
+
+
+@pytest.mark.parametrize('change', ['edit', 'resolve', 'candidate_added', 'candidate_removed', 'candidate_edited'])
+def test_student_import_bulk_skip_rechecks_whole_snapshot(student_import_client, change):
+    storage = app.ctx.storage
+    candidate = storage.create_student('Синтетический Первый', 'М', 'Тест', 'ТЕСТ-26', '')
+    token = import_session_token(
+        upload_student_xlsx(
+            student_import_client,
+            [
+                {'ФИО': 'Синтетический Первый'},
+                {'ФИО': 'Синтетический Второй'},
+            ],
+        )
+    )
+    assert prepare_student_skip(student_import_client, token, rows=['2', '3']).status == 200
+    rows = student_import_sessions[token]['rows']
+    if change == 'edit':
+        post_import_action(
+            student_import_client, token, 'row/3/edit', {'full_name': 'Синтетический Изменённый', 'sex': 'М'}
+        )
+    elif change == 'resolve':
+        post_import_action(student_import_client, token, 'row/3/skip')
+    elif change == 'candidate_added':
+        storage.create_student('Синтетический Второй', 'М', '', '', '')
+    elif change == 'candidate_removed':
+        storage.set_student_active(candidate, False)
+    elif change == 'candidate_edited':
+        storage.update_student(candidate, 'Синтетический Первый', 'М', 'Изменённый тест', '', '')
+    before = list(storage.connection.iterdump())
+    response = apply_student_skip(student_import_client, token)
+    assert 'Ничего не пропущено: строки или найденные карточки изменились.' in unquote_plus(
+        response.headers['location']
+    )
+    assert rows[0]['status'] == 'pending'
+    assert rows[1]['status'] == ('skipped' if change == 'resolve' else 'pending')
+    assert 'skip_confirmation' not in student_import_sessions[token]
+    assert list(storage.connection.iterdump()) == before
+
+
+def test_student_import_bulk_skip_does_not_broaden_confirmed_found_set(student_import_client):
+    storage = app.ctx.storage
+    storage.create_student('Синтетический Первый', 'М', '', '', '')
+    token = import_session_token(
+        upload_student_xlsx(
+            student_import_client,
+            [
+                {'ФИО': 'Синтетический Первый'},
+                {'ФИО': 'Синтетический Второй'},
+            ],
+        )
+    )
+    prepare_student_skip(student_import_client, token, mode='found')
+    storage.create_student('Синтетический Второй', 'М', '', '', '')
+    response = apply_student_skip(student_import_client, token)
+    assert 'Пропущено строк: 1.' in unquote_plus(response.headers['location'])
+    assert [row['status'] for row in student_import_sessions[token]['rows']] == ['skipped', 'pending']
+
+
+@pytest.mark.parametrize('access', ['missing', 'foreign', 'expired'])
+def test_student_import_bulk_skip_session_access_both_stages(student_import_client, access):
+    token = import_session_token(upload_student_xlsx(student_import_client, [{'ФИО': 'Синтетический Первый'}]))
+    prepare_student_skip(student_import_client, token, rows=['2'])
+    session = student_import_sessions[token]
+    nonce = session['skip_confirmation']['nonce']
+    if access == 'foreign':
+        session['user_id'] = 999
+    elif access == 'expired':
+        session['created_at'] = time.time() - (2 * 60 * 60 + 1)
+    else:
+        token = 'missing-session'
+    for suffix, data in [
+        ('bulk-skip/prepare', {'mode': 'selected', 'row_number': ['2']}),
+        ('bulk-skip/apply', {'nonce': nonce}),
+    ]:
+        response = post_import_action(student_import_client, token, suffix, data)
+        assert 'Время сессии предпросмотра истекло.' in unquote_plus(response.headers['location'])
+    assert session['rows'][0]['status'] == 'pending'
+    assert len(students_snapshot(app.ctx.storage)) == 0
+
+
+def test_student_import_bulk_skip_nonce_invalid_replaced_and_cross_session(student_import_client):
+    token = import_session_token(upload_student_xlsx(student_import_client, [{'ФИО': 'Синтетический Первый'}]))
+    prepare_student_skip(student_import_client, token, rows=['2'])
+    old_nonce = student_import_sessions[token]['skip_confirmation']['nonce']
+    prepare_student_skip(student_import_client, token, rows=['2'])
+    for nonce in ('', 'bogus', old_nonce):
+        response = post_import_action(student_import_client, token, 'bulk-skip/apply', {'nonce': nonce})
+        assert 'Подтверждение недействительно' in unquote_plus(response.headers['location'])
+    assert student_import_sessions[token]['rows'][0]['status'] == 'pending'
+    apply_student_skip(student_import_client, token)
+    new_token = import_session_token(upload_student_xlsx(student_import_client, [{'ФИО': 'Синтетический Второй'}]))
+    prepare_student_skip(student_import_client, new_token, rows=['2'])
+    response = post_import_action(student_import_client, new_token, 'bulk-skip/apply', {'nonce': old_nonce})
+    assert 'Подтверждение недействительно' in unquote_plus(response.headers['location'])
+    assert student_import_sessions[new_token]['rows'][0]['status'] == 'pending'
+
+
+def test_student_import_record_number_stable_after_grouping_and_resolution(student_import_client):
+    token = import_session_token(
+        upload_student_xlsx(
+            student_import_client,
+            [
+                {'ФИО': 'Синтетический Первый'},
+                {'ФИО': 'Синтетический Второй'},
+            ],
+        )
+    )
+    # Excel can have gaps; UI ordinal is based on original full list, not row_number - 1.
+    student_import_sessions[token]['rows'][1]['row_number'] = 9
+    page = get_preview(student_import_client, token)
+    assert 'Выбрать запись 1, строка Excel 2' in page.text
+    assert 'Выбрать запись 2, строка Excel 9' in page.text
+    assert '<th scope="col">№ записи</th>' in page.text
+    assert '<th scope="col">Строка Excel</th>' in page.text
+    prepare_student_skip(student_import_client, token, rows=['9'])
+    apply_student_skip(student_import_client, token)
+    page = get_preview(student_import_client, token)
+    assert re.search(r'<td class="text-muted">2</td>\s*<td class="text-muted">9</td>', page.text)
+    assert 'Выбрать запись 2' not in page.text
+    assert '/row/2/create' in page.text
+    assert '/row/9/create' not in page.text
+
+
+def test_event_import_record_number_stable_after_grouping_and_resolution(event_import_client):
+    storage = app.ctx.storage
+    event_id = make_calendar_event(storage)
+    token = import_session_token(
+        upload_event_xlsx(
+            event_import_client,
+            event_id,
+            [
+                {'ФИО': 'Синтетический Первый'},
+                {'ФИО': 'Синтетический Второй'},
+            ],
+        )
+    )
+    event_import_sessions[token]['rows'][1]['row_number'] = 9
+    page = get_event_preview(event_import_client, event_id, token)
+    assert '<th scope="col">№ записи</th>' in page.text
+    assert '<th scope="col">Строка Excel</th>' in page.text
+    assert re.search(r'<td class="text-muted">1</td>\s*<td class="text-muted">2</td>', page.text)
+    assert '/row/9/skip' in page.text
+    post_event_import_action(event_import_client, event_id, token, 'row/9/skip')
+    page = get_event_preview(event_import_client, event_id, token)
+    assert re.search(r'<td class="text-muted">2</td>\s*<td class="text-muted">9</td>', page.text)
+    assert event_import_sessions[token]['rows'][1]['row_number'] == 9
 
 
 # --- Student-backed participant entry + импорт участников события. ---
@@ -16202,7 +16483,7 @@ def test_event_import_duplicate_rows_warn_without_silent_drop(event_import_clien
     assert 'готовы к добавлению: 1' in page.text
     assert 'требуют решения: 0' in page.text
     assert 'дубликат в файле — пропускается' in collapsed
-    assert 'повтор строки 2' in collapsed
+    assert 'повтор строки Excel 2' in collapsed
     assert 'Решено: дубликатов в файле 1' in collapsed
     # Копия не входит в bulk — вставляется ровно якорь.
     response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
@@ -16735,7 +17016,7 @@ def test_event_import_duplicate_addable_after_sibling_resolved(event_import_clie
     collapsed = re.sub(r'\s+', ' ', page.text)
     # P4: якорь (строка 2) готов, копия (строка 3) — производный пропуск.
     assert 'готовы к добавлению: 1' in page.text
-    assert 'повтор строки 2' in collapsed
+    assert 'повтор строки Excel 2' in collapsed
 
     # Якорь ПРОПУЩЕН → копия продвигается (флаг не sticky) и добавляема —
     # «оставить одну» достижима из UI без правки файла.
@@ -17154,7 +17435,7 @@ def test_p4_cardless_infile_duplicate_deterministic_skip(event_import_client: Sa
     assert 'готовы к добавлению: 1' in page.text
     assert 'требуют решения: 0' in page.text
     assert 'дубликат в файле — пропускается' in collapsed
-    assert 'повтор строки 2' in collapsed
+    assert 'повтор строки Excel 2' in collapsed
     response = post_event_import_action(event_import_client, event_id, token, 'bulk-commit')
     assert 'Добавлено участников из Excel: 1.' in unquote_plus(response.headers['location'])
     rows = storage.connection.execute('SELECT * FROM competitions').fetchall()

@@ -1,0 +1,28 @@
+{% extends "layout/admin.html" %}
+
+{% block admin_title %}Подтверждение массового пропуска{% endblock admin_title %}
+{% block admin_back %}
+<a class="btn btn-outline-secondary" href="/admin/people/import/preview/{{ token }}">Вернуться к предпросмотру</a>
+{% endblock admin_back %}
+{% block admin_description %}Файл: {{ filename }}{% endblock admin_description %}
+
+{% block admin_content %}
+<p>Будет пропущено строк: <strong>{{ rows | length }}</strong>.</p>
+<p>Изменятся только строки текущего импорта. Карточки студентов и их связи сохранятся.
+    Уже созданные карточки останутся. Новые карточки не создаются.</p>
+<div class="table-responsive mb-3">
+    <table class="table table-sm">
+        <thead><tr><th scope="col">№ записи</th><th scope="col">Строка Excel</th><th scope="col">ФИО</th></tr></thead>
+        <tbody>
+        {% for row in rows %}
+        <tr><td>{{ row.record_number }}</td><td>{{ row.row_number }}</td><td>{{ row.full_name }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+<form action="/admin/people/import/preview/{{ token }}/bulk-skip/apply" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+    <input type="hidden" name="nonce" value="{{ nonce }}">
+    <button class="btn btn-primary" type="submit">Пропустить {{ rows | length }} строк</button>
+</form>
+{% endblock admin_content %}

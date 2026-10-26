@@ -92,11 +92,12 @@
 
 {% macro import_data_row(row, token, category, request, is_admin, event, custom_columns, custom_keys, search_row=None, search_query='', search_results=(), search_truncated=False) %}
 <tr>
+    <td class="text-muted">{{ row.record_number }}</td>
     <td class="text-muted">{{ row.row_number }}</td>
     <td>
         <strong>{{ row.full_name }}</strong>
         {% if row.duplicate_rows %}
-        <div class="small text-muted">Одинаковые строки в файле: строки {{ row.duplicate_rows | join(', ') }}</div>
+        <div class="small text-muted">Одинаковые строки в файле: строки Excel {{ row.duplicate_rows | join(', ') }}</div>
         {% endif %}
     </td>
     <td>{{ row.display.sex or '—' }}</td>
@@ -172,9 +173,9 @@
             существует</span>
         {% elif row.import_status == 'file-duplicate' %}
         <span class="badge text-bg-light border"
-              title="Точная копия строки {{ row.file_anchor }} — сервер не создаёт оба участия; якорь можно добавить или пропустить">дубликат
+              title="Точная копия строки Excel {{ row.file_anchor }} — сервер не создаёт оба участия; якорь можно добавить или пропустить">дубликат
             в файле — пропускается</span>
-        <span class="small text-muted">повтор строки {{ row.file_anchor }}</span>
+        <span class="small text-muted">повтор строки Excel {{ row.file_anchor }}</span>
         {% else %}
         <span class="badge text-bg-secondary">пропущен</span>
         {% endif %}
@@ -196,7 +197,7 @@
         {% elif row.import_status == 'conflict' %}
         <div class="mb-1">
             <span class="badge text-bg-warning">конфликт строк в файле</span>
-            <span class="small text-muted">та же карточка/ФИО и дисциплина, данные разные — строки {{ row.conflict_rows | join(', ') }}.
+            <span class="small text-muted">та же карточка/ФИО и дисциплина, данные разные — строки Excel {{ row.conflict_rows | join(', ') }}.
                 Разберите по одной: обе не добавятся.</span>
         </div>
         {% else %}
@@ -315,7 +316,7 @@
 </tr>
 {% if category != 'resolved' %}
 <tr>
-    <td colspan="{{ 11 + custom_columns | length }}">
+    <td colspan="{{ 12 + custom_columns | length }}">
         {# Правка строки — bootstrap-collapse по data-атрибутам (без JS).
            Поля предзаполнены значениями строки файла (до автозаполнения). #}
         <div class="collapse" id="import-row-{{ row.row_number }}-edit">
@@ -427,6 +428,7 @@
 {% endmacro %}
 
 {% block content %}
+<p class="form-text">№ записи — порядок в загруженном списке, строка Excel — исходная строка файла.</p>
 {% call help('Данные участника') %}Год поступления и курс рассчитываются по группе. Значения в прежней колонке «Курс» не используются.{% endcall %}
 
 <div class="page-head">
@@ -493,7 +495,8 @@
             <table class="table table-sm align-middle">
                 <thead>
                     <tr>
-                        <th>Стр.</th>
+                        <th scope="col">№ записи</th>
+                        <th scope="col">Строка Excel</th>
                         <th>ФИО</th>
                         <th>Пол</th>
                         <th>Институт</th>
@@ -512,7 +515,7 @@
                 {% if groups.ready %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Готовы к добавлению
+                        <th class="text-muted" colspan="{{ 12 + custom_columns | length }}">Готовы к добавлению
                             <span class="badge text-bg-light border">{{ groups.ready | length }}</span></th>
                     </tr>
                     {% for row in groups.ready %}{{ import_data_row(row, token, 'ready', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
@@ -521,7 +524,7 @@
                 {% if groups.review %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Требуют решения
+                        <th class="text-muted" colspan="{{ 12 + custom_columns | length }}">Требуют решения
                             <span class="badge text-bg-light border">{{ groups.review | length }}</span></th>
                     </tr>
                     {% for row in groups.review %}{{ import_data_row(row, token, 'review', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
@@ -530,7 +533,7 @@
                 {% if groups.error %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Ошибочные
+                        <th class="text-muted" colspan="{{ 12 + custom_columns | length }}">Ошибочные
                             <span class="badge text-bg-light border">{{ groups.error | length }}</span></th>
                     </tr>
                     {% for row in groups.error %}{{ import_data_row(row, token, 'error', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
@@ -539,7 +542,7 @@
                 {% if groups.resolved %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="{{ 11 + custom_columns | length }}">Решено
+                        <th class="text-muted" colspan="{{ 12 + custom_columns | length }}">Решено
                             <span class="badge text-bg-light border">{{ groups.resolved | length }}</span></th>
                     </tr>
                     {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request, is_admin, event, custom_columns, custom_keys, search_row, search_query, search_results, search_truncated) }}{% endfor %}
