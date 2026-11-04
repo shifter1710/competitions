@@ -376,7 +376,9 @@ def touch_user_seen(request: Request) -> None:
     должен ломать запрос, поэтому ошибки глотаем с логом.
     """
     if request.method in {'GET', 'HEAD'} and (
-        request.path == '/calendar' or re.fullmatch(r'/calendar/[1-9]\d*', request.path)
+        request.path == '/calendar'
+        or request.path.rstrip('/') in {'/reports/gto', '/reports/gto/export.xlsx'}
+        or re.fullmatch(r'/calendar/[1-9]\d*', request.path)
     ):
         return
     try:
