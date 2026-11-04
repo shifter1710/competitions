@@ -4,7 +4,7 @@
     <a href="/reports">← К отчётам</a>
     <div class="page-head mt-2"><div>
         <h1 class="page-title">Отчёт ГТО</h1>
-        <p class="page-sub">Отдельные награждения студентов. Один студент с тремя наградами — один уникальный студент и три награждения.</p>
+        <p class="page-sub">Студенты с УИН, их записи ГТО и исторические награждения, в том числе без УИН.</p>
     </div></div>
     {% if gto.error %}<div class="alert alert-danger" role="alert">{{ gto.error }}</div>{% endif %}
     <div class="card shadow-sm mb-4"><div class="card-body">
@@ -44,30 +44,31 @@
             </div>
         </form>
     </div></div>
-    <p class="text-muted">Год — календарный год записи ГТО. Институт и группа — текущие сведения карточки студента. История награждений сохраняется при их изменении. Зарегистрированные и участвовавшие без награды в этот отчёт не входят.</p>
+    <p class="text-muted">Институт и группа — текущие сведения карточки студента. Год и ступень относятся к записи ГТО: при их выборе студенты без подходящей записи не включаются. Фильтр награды оставляет только соответствующие награждения.</p>
     {% if not gto.error %}
     <div class="report-stats" aria-label="Итоги ГТО">
-        {% for key, label in [('students', 'Уникальных студентов'), ('awards', 'Награждений'), ('bronze', 'Бронза'), ('silver', 'Серебро'), ('gold', 'Золото')] %}
+        {% for key, label in [('students', 'Уникальные студенты в выборке'), ('awards', 'Награждения'), ('bronze', 'Бронза'), ('silver', 'Серебро'), ('gold', 'Золото')] %}
         <div class="report-stat"><span class="report-stat__label">{{ label }}</span><span class="report-stat__value" data-gto-metric="{{ key }}">{{ gto.metrics[key] }}</span></div>
         {% endfor %}
     </div>
+    <p class="small text-muted">Уникальные студенты считаются по Student ID. Один студент с тремя наградами — один студент и три награждения. Регистрация и участие не являются наградами; несколько сертификатов одной награды не увеличивают итоги.</p>
     <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
         <a class="btn btn-outline-primary gto-report-export" href="{{ gto.export_url }}">Скачать XLSX</a>
-        <span class="text-muted">По применённым фильтрам; одна строка на награждение.</span>
+        <span class="text-muted">По применённым фильтрам; одна строка на запись ГТО или на студента без записей.</span>
     </div>
     {% if gto.applied %}<p class="small text-muted">Применено: {% for label, value in gto.applied %}{{ label }}: {{ value }}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
     <div class="card shadow-sm"><div class="card-body">
         {% if gto.rows %}
         <div class="table-responsive"><table class="table table-sm align-middle gto-report-table">
-            <thead><tr>{% for label in ['Студент', 'УИН', 'Институт (текущий)', 'Группа (текущая)', 'Год', 'Ступень', 'Награда', 'Дата награждения', 'Сертификат'] %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead>
-            <tbody>{% for row in gto.rows %}<tr data-gto-award-id="{{ row.id }}" data-gto-student-id="{{ row.student_id }}">
-                <td><a href="{{ row.student_url }}">{{ row.full_name }}</a> <small class="text-muted">#{{ row.student_id }}</small><br><small class="text-muted">Награждение #{{ row.id }}</small></td>
+            <thead><tr>{% for label in ['Студент', 'УИН', 'Институт (текущий)', 'Группа (текущая)', 'Год', 'Ступень', 'Статус / награда', 'Дата награждения', 'Сертификат'] %}<th scope="col">{{ label }}</th>{% endfor %}</tr></thead>
+            <tbody>{% for row in gto.rows %}<tr{% if row.id is not none %} data-gto-award-id="{{ row.id }}"{% endif %} data-gto-student-id="{{ row.student_id }}">
+                <td><a href="{{ row.student_url }}">{{ row.full_name }}</a> <small class="text-muted">#{{ row.student_id }}</small><br><small class="text-muted">{% if row.id is not none %}Запись ГТО #{{ row.id }}{% else %}Нет отображаемых записей ГТО{% endif %}</small></td>
                 <td>{{ row.gto_uin or 'Не указан' }}</td><td>{{ row.institute or 'Не указан' }}</td><td>{{ row.group_name or 'Не указана' }}</td>
-                <td>{{ row.year }}</td><td>{{ row.stage_label }}</td><td>{{ row.status_label }}</td><td>{{ row.date_label or 'Не указана' }}</td>
-                <td>{% for certificate in row.certificates %}<div class="mb-2">{{ certificate.filename }}<div class="d-flex flex-wrap gap-2"><a href="{{ certificate.url }}?view=1" target="_blank" rel="noopener">Открыть</a><a href="{{ certificate.url }}">Скачать</a></div></div>{% else %}<span class="text-muted">Не прикреплён</span>{% endfor %}</td>
+                <td>{{ row.year if row.year is not none else '—' }}</td><td>{{ row.stage_label or '—' }}</td><td>{{ row.status_label or '—' }}</td><td>{{ row.date_label or ('Не указана' if row.is_award else '—') }}</td>
+                <td>{% for certificate in row.certificates %}<div class="mb-2">{{ certificate.filename }}<div class="d-flex flex-wrap gap-2"><a href="{{ certificate.url }}?view=1" target="_blank" rel="noopener">Открыть</a><a href="{{ certificate.url }}">Скачать</a></div></div>{% else %}<span class="text-muted">{{ 'Не прикреплён' if row.is_award else '—' }}</span>{% endfor %}</td>
             </tr>{% endfor %}</tbody>
         </table></div>
-        {% else %}<p class="text-muted mb-0">По выбранным фильтрам награждений нет.</p>{% endif %}
+        {% else %}<p class="text-muted mb-0">По выбранным фильтрам студентов и записей ГТО нет.</p>{% endif %}
     </div></div>
     {% endif %}
 </div>

@@ -330,10 +330,11 @@ class GtoMixin:
             )
 
     def list_gto_report_awards(self):
-        """A consistent read snapshot, one row per award plus separate documents.
+        """A consistent read snapshot of UIN cards and historical awards.
 
         Current Student Identity attributes classify the report; inactive cards
-        remain included. Orphaned/non-award facts never open a report row.
+        remain included. UIN cards without eligible facts get a display-only row
+        with NULL fact fields. Unknown/orphaned facts never open a report row.
         """
         with self._lock:
             self.connection.execute('SAVEPOINT gto_report_snapshot')
@@ -341,10 +342,16 @@ class GtoMixin:
                 rows = [
                     dict(row)
                     for row in self.connection.execute(
-                        'SELECT g.*, s.full_name, s.gto_uin, s.institute, s.group_name '
-                        'FROM student_gto_records g JOIN students s ON s.id=g.student_id '
-                        "WHERE g.status IN ('bronze', 'silver', 'gold') "
-                        'ORDER BY g.year DESC, g.stage ASC, (g.awarded_on IS NULL), g.awarded_on ASC, '
+                        'SELECT g.id, s.id AS student_id, g.year, g.stage, g.status, '
+                        'g.created_at, g.updated_at, g.awarded_on, '
+                        's.full_name, s.gto_uin, s.institute, s.group_name '
+                        'FROM students s LEFT JOIN student_gto_records g ON g.student_id=s.id AND '
+                        "(g.status IN ('bronze', 'silver', 'gold') OR "
+                        "(NULLIF(TRIM(s.gto_uin), '') IS NOT NULL AND g.status IN ('registered', 'participated'))) "
+                        "WHERE NULLIF(TRIM(s.gto_uin), '') IS NOT NULL OR g.id IS NOT NULL "
+                        'ORDER BY g.year DESC, g.stage ASC, '
+                        "(CASE WHEN g.status IN ('bronze', 'silver', 'gold') THEN g.awarded_on END IS NULL), "
+                        "CASE WHEN g.status IN ('bronze', 'silver', 'gold') THEN g.awarded_on END ASC, "
                         's.full_name ASC, s.id ASC, g.id ASC'
                     )
                 ]

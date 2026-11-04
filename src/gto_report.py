@@ -1,4 +1,4 @@
-"""Small GTO report contract: the same filtered award rows drive every output."""
+"""Small GTO report contract: the same filtered student/fact rows drive every output."""
 import re
 from io import BytesIO
 from urllib.parse import urlencode
@@ -24,7 +24,7 @@ FILTER_LABELS = {
     'q': 'Студент или УИН',
 }
 EXPORT_COLUMNS = (
-    'ID награждения',
+    'ID записи ГТО',
     'ID студента',
     'Студент',
     'УИН',
@@ -32,7 +32,7 @@ EXPORT_COLUMNS = (
     'Группа (текущая)',
     'Год записи ГТО',
     'Ступень',
-    'Награда',
+    'Статус / награда',
     'Дата награждения',
     'Сертификаты',
     'Защищённые ссылки',
@@ -87,15 +87,20 @@ def build_gto_report(records, args):
     query = urlencode([(key, filters[key]) for key in FILTER_KEYS if filters[key]])
     report_url = '/reports/gto' + ('?' + query if query else '')
     for row in rows:
-        row['stage_label'] = gto_stage_label(row['stage'])
-        row['status_label'] = gto_status_label(row['status'])
+        row['stage_label'] = gto_stage_label(row['stage']) if row['stage'] is not None else ''
+        row['status_label'] = gto_status_label(row['status']) if row['status'] is not None else ''
+        row['is_award'] = row['status'] in GTO_AWARDS
+        # Even malformed legacy participation facts must not expose award metadata.
+        if not row['is_award']:
+            row['awarded_on'] = None
         row['date_label'] = '.'.join(reversed(row['awarded_on'].split('-'))) if row['awarded_on'] else ''
         row['student_url'] = f'/admin/people/{row["student_id"]}?' + urlencode({'tab': 'gto', 'return': report_url})
         row['certificates'] = [
             {**certificate, 'url': f'/gto/{row["student_id"]}/awards/{row["id"]}/certificates/{certificate["id"]}'}
             for certificate in row['certificates']
+            if row['is_award']
         ]
-    metrics = {'students': len({row['student_id'] for row in rows}), 'awards': len(rows)}
+    metrics = {'students': len({row['student_id'] for row in rows}), 'awards': sum(row['is_award'] for row in rows)}
     metrics.update({status: sum(row['status'] == status for row in rows) for status in GTO_AWARDS})
     options = {}
     for key, column in (('year', 'year'), ('institute', 'institute'), ('group', 'group_name')):
@@ -124,6 +129,7 @@ def build_gto_xlsx(report):
     sheet.title = 'ГТО'
     sheet.append(['Отчёт ГТО'])
     sheet.append(['Институт и группа — текущие сведения карточки студента.'])
+    sheet.append(['Уникальные студенты — по Student ID; награждения — только бронза, серебро и золото.'])
     for label, value in report['applied']:
         safe_value = sanitize_spreadsheet_value(value)
         sheet.append([label, safe_value])
@@ -132,9 +138,9 @@ def build_gto_xlsx(report):
     metrics = report['metrics']
     sheet.append(
         [
-            'Уникальных студентов',
+            'Уникальные студенты в выборке',
             metrics['students'],
-            'Награждений',
+            'Награждения',
             metrics['awards'],
             'Бронза',
             metrics['bronze'],
