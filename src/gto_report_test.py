@@ -1,4 +1,4 @@
-"""GTO-03: synthetic award-set parity, identity, text UIN and safe navigation."""
+"""GTO reports: synthetic student/fact parity, identity, text UIN and safe navigation."""
 import re
 from html import unescape
 from io import BytesIO
@@ -11,6 +11,7 @@ import pytest
 from openpyxl import load_workbook
 
 from src.auth import create_auth_cookie_value
+from src.auth import reset_presence_tracking
 from src.gto_files import store_certificate
 from src.gto_report import build_gto_report
 from src.main_test import csrf_for
@@ -44,7 +45,7 @@ def report_case(http_client, tmp_path, monkeypatch):
     ids['other'], _ = storage.create_student_gto_record(second, year=2025, stage=7, status='bronze')
     for status in ('registered', 'participated'):
         storage.create_student_gto_record(non_award, year=2026, stage=8, status=status)
-    # Preserved corrupt/unknown legacy facts cannot enter a staff award set.
+    # No-UIN participation and corrupt/unknown legacy facts stay excluded.
     storage.connection.execute(
         'INSERT INTO student_gto_records(student_id,year,stage,status,created_at,updated_at) '
         "VALUES (99999,2026,8,'gold','synthetic','synthetic'), (?,2026,8,'unknown','synthetic','synthetic')",
@@ -86,8 +87,8 @@ def metric(response, key):
 def workbook_rows(response):
     book = load_workbook(BytesIO(response.body), data_only=False)
     sheet = book.active
-    header = next(row[0].row for row in sheet.iter_rows() if row[0].value == 'ID награждения')
-    return book, [row for row in sheet.iter_rows(min_row=header + 1) if row[0].value is not None]
+    header = next(row[0].row for row in sheet.iter_rows() if row[0].value == 'ID записи ГТО')
+    return book, [row for row in sheet.iter_rows(min_row=header + 1) if row[1].value is not None]
 
 
 def outputs(case, query=''):
@@ -160,7 +161,7 @@ def test_every_applied_filter_has_exact_html_counter_xlsx_parity(report_case, qu
     assert [row[0].value for row in workbook_rows(excel)[1]] == expected
     if not expected:
         assert metric(html, 'students') == 0
-        assert 'По выбранным фильтрам награждений нет.' in html.text
+        assert 'По выбранным фильтрам студентов и записей ГТО нет.' in html.text
     if 'SyntheticUnknown' in query:
         assert 'value="SyntheticUnknown" selected' in html.text
     if 'SyntheticMissing' in query:
@@ -235,8 +236,9 @@ def test_repeated_awards_missing_date_inactive_history_and_current_group_change(
 def test_staff_report_and_discovery_available_without_mutation_controls(report_case, role):
     case = report_case
     headers = get_auth_headers(role)
-    for path in ('/reports/gto', '/reports/gto/export.xlsx'):
-        assert case['client'].get(path, headers=headers)[1].status == 200
+    for method in ('get', 'head'):
+        for path in ('/reports/gto', '/reports/gto/', '/reports/gto/export.xlsx', '/reports/gto/export.xlsx/'):
+            assert getattr(case['client'], method)(path, headers=headers)[1].status == 200
     discovery = case['client'].get('/reports', headers=headers)[1]
     assert 'href="/reports/gto"' in discovery.text
     page = case['client'].get('/reports/gto', headers=headers)[1]
@@ -249,13 +251,15 @@ def test_athlete_and_current_revoked_staff_denied_report_and_export(report_case)
     case = report_case
     value = create_auth_cookie_value('synthetic-gto-athlete', 'athlete')
     headers = {'cookie': f'{settings.auth_cookie_name}={value}'}
-    for path in ('/reports/gto', '/reports/gto/export.xlsx'):
-        assert case['client'].get(path, headers=headers)[1].status == 403
+    for method in ('get', 'head'):
+        for path in ('/reports/gto', '/reports/gto/', '/reports/gto/export.xlsx', '/reports/gto/export.xlsx/'):
+            assert getattr(case['client'], method)(path, headers=headers)[1].status == 403
     viewer = case['storage'].get_user(settings.auth_viewer_username or 'viewer')['id']
     case['storage'].connection.execute("UPDATE users SET role='athlete' WHERE id=?", (viewer,))
     case['storage'].connection.commit()
-    for path in ('/reports/gto', '/reports/gto/export.xlsx'):
-        assert case['client'].get(path, headers=get_auth_headers('viewer'))[1].status == 403
+    for method in ('get', 'head'):
+        for path in ('/reports/gto', '/reports/gto/', '/reports/gto/export.xlsx', '/reports/gto/export.xlsx/'):
+            assert getattr(case['client'], method)(path, headers=get_auth_headers('viewer'))[1].status == 403
 
 
 def test_literal_uin_formula_safety_for_identity_filename_and_filter_text(report_case):
@@ -384,3 +388,169 @@ def test_export_rechecks_current_staff_authority_after_workbook_await(report_cas
     response = report_case['client'].get('/reports/gto/export.xlsx', headers=get_auth_headers('viewer'))[1]
     assert response.status == 403
     assert not response.body.startswith(b'PK')
+
+
+@pytest.fixture
+def expanded_report_case(report_case):
+    """The REPORT-02 matrix extends the same-name/inactive/multi-certificate case."""
+    case = report_case
+    storage = case['storage']
+    students, records = {}, {}
+    for index, status in enumerate(('blank', 'registered', 'participated', 'bronze', 'silver', 'gold', 'unknown'), 1):
+        student = storage.create_student(f'Синтетический {index:02d} Образец', '', 'Демо Матрица', 'СИН-М', '')
+        students[status] = student
+        assert storage.set_student_gto_uin(student, f'0000{index}') == (True, None)
+        if status not in ('blank', 'unknown'):
+            records[status], error = storage.create_student_gto_record(student, year=2026, stage=9, status=status)
+            assert error is None
+    # Legacy-only UIN card gets a blank display row, not an invented status/ID.
+    storage.connection.execute(
+        'INSERT INTO student_gto_records(student_id,year,stage,status,created_at,updated_at) '
+        "VALUES (?,2024,4,'unknown','synthetic-created','synthetic-updated')",
+        (students['unknown'],),
+    )
+    # Corrupt legacy certificate/date on participation must never be exposed.
+    storage.connection.execute(
+        "UPDATE student_gto_records SET awarded_on='2026-01-01' WHERE id=?", (records['participated'],)
+    )
+    storage.connection.execute(
+        'INSERT INTO student_gto_certificates '
+        '(gto_record_id,filename,stored_name,content_type,size,created_at) '
+        "VALUES (?,'synthetic-legacy-private.pdf','synthetic-private-path','application/pdf',1,'synthetic')",
+        (records['participated'],),
+    )
+    # Whitespace-only legacy UIN is empty and does not open a row.
+    whitespace = storage.create_student('Синтетический Пробел Пример', '', '', '', '')
+    storage.connection.execute("UPDATE students SET gto_uin='   ' WHERE id=?", (whitespace,))
+    storage.connection.commit()
+    case.update(matrix_students=students, matrix_records=records)
+    return case
+
+
+def html_row_keys(response):
+    return [
+        (int(student), int(record) if record else None)
+        for record, student in re.findall(
+            r'<tr(?: data-gto-award-id="([0-9]+)")? data-gto-student-id="([0-9]+)">', response.text
+        )
+    ]
+
+
+def test_uin_matrix_preserves_real_facts_blank_fields_metrics_order_and_certificate_privacy(expanded_report_case):
+    case = expanded_report_case
+    html, excel = outputs(case)
+    assert html.status == excel.status == 200
+    students, records, ids = case['matrix_students'], case['matrix_records'], case['ids']
+    expected = (
+        [(case['first'], ids[status]) for status in ('bronze', 'silver', 'gold')]
+        + [(students[status], records[status]) for status in ('registered', 'participated', 'bronze', 'silver', 'gold')]
+        + [(case['second'], ids['other']), (students['blank'], None), (students['unknown'], None)]
+    )
+    assert html_row_keys(html) == expected
+    book, rows = workbook_rows(excel)
+    assert [(row[1].value, row[0].value) for row in rows] == expected
+    assert [metric(html, key) for key in ('students', 'awards', 'bronze', 'silver', 'gold')] == [9, 7, 3, 2, 2]
+    summary = next(row for row in book.active.iter_rows() if row[0].value == 'Уникальные студенты в выборке')
+    assert [summary[index].value for index in (1, 3, 5, 7, 9)] == [9, 7, 3, 2, 2]
+    assert html.text.count('Нет отображаемых записей ГТО') == 2
+    assert 'None' not in html.text and 'unknown' not in html.text
+    assert 'synthetic-legacy-private' not in html.text and 'synthetic-private-path' not in html.text
+    assert 'Синтетический Участник Пример' not in html.text and 'Синтетический Пробел Пример' not in html.text
+    for row in rows:
+        if row[1].value in (students['blank'], students['unknown']):
+            assert row[0].value is None
+            assert all(cell.value is None for cell in row[6:12])
+        if row[1].value in (students['registered'], students['participated']):
+            assert all(cell.value is None for cell in row[9:12])
+        if row[1].value in students.values():
+            assert row[3].value.startswith('0000') and row[3].data_type == 's' and row[3].number_format == '@'
+    assert all(cell.data_type != 'f' for row in book.active for cell in row)
+    assert sum(bool(row[10].value) for row in rows) == 2  # Three files, two award rows.
+
+
+@pytest.mark.parametrize(
+    'filters,expected_keys,students_count,awards_count',
+    [
+        ({'q': '00001'}, ['blank'], 1, 0),
+        ({'q': '00002'}, ['registered'], 1, 0),
+        ({'q': '00003'}, ['participated'], 1, 0),
+        (
+            {'institute': 'Демо Матрица'},
+            ['registered', 'participated', 'bronze', 'silver', 'gold', 'blank', 'unknown'],
+            7,
+            3,
+        ),
+        ({'group': 'СИН-М'}, ['registered', 'participated', 'bronze', 'silver', 'gold', 'blank', 'unknown'], 7, 3),
+        ({'year': '2026', 'group': 'СИН-М'}, ['registered', 'participated', 'bronze', 'silver', 'gold'], 5, 3),
+        ({'stage': '9'}, ['registered', 'participated', 'bronze', 'silver', 'gold'], 5, 3),
+        ({'award': 'gold', 'group': 'СИН-М'}, ['gold'], 1, 1),
+        ({'award': 'silver', 'group': 'СИН-М'}, ['silver'], 1, 1),
+        ({'year': '2024', 'group': 'СИН-М'}, [], 0, 0),
+        ({'stage': '4', 'q': '00007'}, [], 0, 0),
+        ({'stage': '9', 'q': '00001'}, [], 0, 0),
+        ({'award': 'bronze', 'q': '00002'}, [], 0, 0),
+        (
+            {
+                'year': '2026',
+                'stage': '9',
+                'institute': 'Демо Матрица',
+                'group': 'СИН-М',
+                'award': 'bronze',
+                'q': '00004',
+            },
+            ['bronze'],
+            1,
+            1,
+        ),
+    ],
+)
+def test_uin_matrix_filters_keep_html_xlsx_keys_metrics_and_applied_values(
+    expanded_report_case, filters, expected_keys, students_count, awards_count
+):
+    case = expanded_report_case
+    html, excel = outputs(case, urlencode(filters))
+    assert html.status == excel.status == 200
+    expected = [(case['matrix_students'][key], case['matrix_records'].get(key)) for key in expected_keys]
+    assert html_row_keys(html) == expected
+    book, rows = workbook_rows(excel)
+    assert [(row[1].value, row[0].value) for row in rows] == expected
+    assert metric(html, 'students') == students_count and metric(html, 'awards') == awards_count
+    assert sum(metric(html, key) for key in ('bronze', 'silver', 'gold')) == awards_count
+    summary = next(row for row in book.active.iter_rows() if row[0].value == 'Уникальные студенты в выборке')
+    assert summary[1].value == students_count and summary[3].value == awards_count
+    applied = {row[0].value: row[1].value for row in book.active.iter_rows(min_row=4, max_row=3 + len(filters))}
+    for label, value in build_gto_report([], filters)['applied']:
+        assert applied[label] == value
+
+
+def test_expanded_report_gets_preserve_sqlite_rows_ids_timestamps_and_schema(expanded_report_case):
+    case = expanded_report_case
+    storage = case['storage']
+    # Finish normal application startup seeding before measuring request writes.
+    assert case['client'].get('/login')[1].status == 200
+    before = '\n'.join(storage.connection.iterdump())
+    changes = storage.connection.total_changes
+    for query in ('', 'year=2026&stage=9', 'award=gold', 'q=00001', 'award=bad'):
+        outputs(case, query)
+    for method in ('get', 'head'):
+        for path in ('/reports/gto', '/reports/gto/', '/reports/gto/export.xlsx', '/reports/gto/export.xlsx/'):
+            # Each alias must be read-only even without the presence throttle.
+            reset_presence_tracking()
+            snapshot = '\n'.join(storage.connection.iterdump())
+            previous_changes = storage.connection.total_changes
+            response = getattr(case['client'], method)(path, headers=get_auth_headers('viewer'), allow_redirects=False)[
+                1
+            ]
+            assert response.status == 200
+            assert '\n'.join(storage.connection.iterdump()) == snapshot
+            assert storage.connection.total_changes == previous_changes
+    assert '\n'.join(storage.connection.iterdump()) == before
+    assert storage.connection.total_changes == changes
+    statements = []
+    storage.connection.set_trace_callback(statements.append)
+    try:
+        assert len(storage.list_gto_report_awards()) == 11
+    finally:
+        storage.connection.set_trace_callback(None)
+    assert len([sql for sql in statements if sql.lstrip().startswith('SELECT')]) == 2
+    assert not storage.connection.in_transaction
