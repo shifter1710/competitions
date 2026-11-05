@@ -1588,10 +1588,11 @@ def event_import_preview_context(
     existing_participants = storage.list_calendar_event_participants(event['id'])
     states = event_import_pending_states(storage, event, session, custom_fields)
     groups: dict[str, list[dict]] = {'ready': [], 'review': [], 'error': [], 'resolved': []}
-    for row in session['rows']:
+    for record_number, row in enumerate(session['rows'], start=1):
         status = row['status']
         view = {
             **row,
+            'record_number': record_number,
             'candidates': [],
             'effective_student': None,
             'auto_preselected': False,

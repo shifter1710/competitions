@@ -387,6 +387,19 @@ def student_import_bulk_rows(session: dict) -> list[dict]:
     ]
 
 
+def student_import_skip_snapshot(storage: SQLiteAdapter, row: dict) -> str:
+    """Снимок содержимого/решения строки и актуальных предложений карточек.
+
+    Признак последнего рендера не является содержимым строки. Снимок не
+    выбирает карточку и никогда не используется для записи в students.
+    """
+    value = {
+        'row': {key: value for key, value in row.items() if key != 'had_candidates'},
+        'candidates': storage.find_student_candidates(row['full_name']),
+    }
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dict:
     """Контекст предпросмотра. Всё производное (кандидаты, подсказки
     справочников, группы дублей, категории, счётчики) пересчитывается при
@@ -399,7 +412,7 @@ def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dic
     groups: dict[str, list[dict]] = {'new': [], 'review': [], 'error': [], 'resolved': []}
     resolved_counts = {'created': 0, 'reused_existing': 0, 'skipped': 0}
     pending = 0
-    for row in session['rows']:
+    for record_number, row in enumerate(session['rows'], start=1):
         status = row['status']
         if status == 'pending':
             pending += 1
@@ -407,6 +420,7 @@ def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dic
             resolved_counts[status] += 1
         view = {
             **row,
+            'record_number': record_number,
             'course': current_group_course(row['group']),
             'candidates': [],
             'hints': None,
@@ -442,6 +456,7 @@ def student_import_preview_context(storage: SQLiteAdapter, session: dict) -> dic
         'created_count': resolved_counts['created'],
         'reused_count': resolved_counts['reused_existing'],
         'skipped_count': resolved_counts['skipped'],
+        'found_count': sum(bool(row['candidates']) for row in groups['review']),
     }
 
 
@@ -1360,7 +1375,7 @@ def register(app: Sanic) -> None:  # noqa: C901
         одной транзакцией.
 
         Неразобранные строки с кандидатами в батч не входят — их решает админ
-        по отдельности. Предпроверка: кандидаты каждой строки БАТЧА
+        отдельно или массово пропускает. Предпроверка: кандидаты каждой строки БАТЧА
         пересчитываются на момент клика — если у любой «чистой» строки
         появились совпадения с момента рендера, не создаётся ничего (строки
         перейдут в «Требуют решения» при следующем рендере).
@@ -1402,6 +1417,124 @@ def register(app: Sanic) -> None:  # noqa: C901
             )
         return build_redirect_with_message(
             message=f'Создано студентов: {len(student_ids)}.',
+            url=student_import_preview_url(token),
+        )
+
+    @app.post('/admin/people/import/preview/<token>/bulk-skip/prepare')
+    async def admin_student_import_bulk_skip_prepare(request: Request, token: str):
+        """Подтверждение фиксированного набора строк; staging ещё не меняется."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        session, session_error = get_student_import_session(request, token)
+        if session_error is not None:
+            return session_error
+        storage = get_storage(request.app)
+        mode = get_form_value(request, 'mode')
+        if mode == 'selected':
+            targets = []
+            raw_ids = request.form.getlist('row_number')
+            # Sanic отбрасывает пустые urlencoded-значения. Пустой ID в
+            # смешанном списке должен отклонить пакет, а не исчезнуть из него.
+            if 'application/x-www-form-urlencoded' in request.content_type:
+                try:
+                    raw_ids = [
+                        value
+                        for key, value in parse_qsl(request.body.decode(), keep_blank_values=True)
+                        if key == 'row_number'
+                    ]
+                except UnicodeDecodeError:
+                    return text(body='Invalid row number', status=400)
+            # Сначала проверяется ВЕСЬ список. Неверный ID не превращает
+            # запрос в частичный пропуск остальных корректных строк.
+            for raw_id in raw_ids:
+                row, row_error = student_import_row(session, raw_id)
+                if row_error is not None:
+                    return row_error
+                if row not in targets:
+                    targets.append(row)
+        elif mode == 'found':
+            targets = [
+                row
+                for row in session['rows']
+                if row['status'] == 'pending' and storage.find_student_candidates(row['full_name'])
+            ]
+        else:
+            return text(body='Invalid skip mode', status=400)
+        if not targets:
+            return build_redirect_with_message(
+                error='Выберите строки для пропуска.' if mode == 'selected' else 'Нет строк с найденными карточками.',
+                url=student_import_preview_url(token),
+            )
+        if any(row['status'] not in ('pending', 'error') for row in targets):
+            return build_redirect_with_message(
+                error='Ничего не пропущено: часть строк уже разобрана. Проверьте предпросмотр.',
+                url=student_import_preview_url(token),
+            )
+        target_ids = {row['row_number'] for row in targets}
+        confirmation_rows = [
+            {
+                'row_number': row['row_number'],
+                'record_number': record_number,
+                'full_name': row['full_name'],
+                'snapshot': student_import_skip_snapshot(storage, row),
+            }
+            for record_number, row in enumerate(session['rows'], start=1)
+            if row['row_number'] in target_ids
+        ]
+        nonce = secrets.token_urlsafe(24)
+        # Одна одноразовая форма на staging-сессию; её подготовка не
+        # продлевает TTL. Следующая подготовка заменяет старое подтверждение.
+        session['skip_confirmation'] = {'nonce': nonce, 'rows': confirmation_rows}
+        return await render(
+            template_name=jinja_env.get_template('admin_people_import_skip_confirm.html'),
+            context={
+                'request': request,
+                'token': token,
+                'nonce': nonce,
+                'rows': confirmation_rows,
+                'filename': session['filename'],
+            },
+        )
+
+    @app.post('/admin/people/import/preview/<token>/bulk-skip/apply')
+    async def admin_student_import_bulk_skip_apply(request: Request, token: str):
+        """Пропуск только подтверждённых строк, целиком либо без изменений."""
+        auth_error = require_admin(request)
+        if auth_error is not None:
+            return auth_error
+        session, session_error = get_student_import_session(request, token)
+        if session_error is not None:
+            return session_error
+        confirmation = session.get('skip_confirmation')
+        nonce = get_form_value(request, 'nonce')
+        if not confirmation or not secrets.compare_digest(confirmation['nonce'].encode(), nonce.encode()):
+            return build_redirect_with_message(
+                error='Подтверждение недействительно или уже использовано. Выберите строки заново.',
+                url=student_import_preview_url(token),
+            )
+        session.pop('skip_confirmation')
+        storage = get_storage(request.app)
+        targets = []
+        for target in confirmation['rows']:
+            row, row_error = student_import_row(session, str(target['row_number']))
+            if (
+                row_error is not None
+                or row['status'] not in ('pending', 'error')
+                or student_import_skip_snapshot(storage, row) != target['snapshot']
+            ):
+                return build_redirect_with_message(
+                    error='Ничего не пропущено: строки или найденные карточки изменились. '
+                    'Проверьте предпросмотр и подтвердите действие заново.',
+                    url=student_import_preview_url(token),
+                )
+            targets.append(row)
+        # Между перепроверкой и изменением staging нет await и записей в БД.
+        for row in targets:
+            row['status'] = 'skipped'
+            row['student_id'] = None
+        return build_redirect_with_message(
+            message=f'Пропущено строк: {len(targets)}. Карточки студентов сохранены.',
             url=student_import_preview_url(token),
         )
 

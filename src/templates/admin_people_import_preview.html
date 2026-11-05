@@ -15,11 +15,18 @@
    сопоставления (admin_reconcile.html). #}
 {% macro import_data_row(row, token, category, request) %}
 <tr>
+    <td>
+        {% if category != 'resolved' %}
+        <input class="form-check-input" type="checkbox" name="row_number" value="{{ row.row_number }}"
+               form="student-import-bulk-skip" aria-label="Выбрать запись {{ row.record_number }}, строка Excel {{ row.row_number }}">
+        {% endif %}
+    </td>
+    <td class="text-muted">{{ row.record_number }}</td>
     <td class="text-muted">{{ row.row_number }}</td>
     <td>
         <strong>{{ row.full_name }}</strong>
         {% if row.duplicate_rows %}
-        <div class="small text-muted">Одинаковые ФИО в файле: строки {{ row.duplicate_rows | join(', ') }}</div>
+        <div class="small text-muted">Одинаковые ФИО в файле: строки Excel {{ row.duplicate_rows | join(', ') }}</div>
         {% endif %}
     </td>
     <td>{{ row.sex or '—' }}</td>
@@ -107,7 +114,7 @@
 </tr>
 {% if category != 'resolved' %}
 <tr>
-    <td colspan="8">
+    <td colspan="10">
         {# Правка строки — bootstrap-collapse по data-атрибутам (без JS).
            Поля предзаполнены значениями строки файла (до подсказок). #}
         <div class="collapse" id="import-row-{{ row.row_number }}-edit">
@@ -175,8 +182,25 @@
 </div>
 {% endif %}
 
-{# Тулбар — три независимые формы (как мини-формы сопоставления), confirm —
-   только с числами, значения файла в подтверждения не подставляются. #}
+<p class="form-text">№ записи — порядок в загруженном списке, строка Excel — исходная строка файла.
+    Пропуск меняет только текущий импорт: карточки студентов и их связи сохраняются,
+    уже созданные карточки остаются. Действие «Пропустить всех с найденными карточками»
+    включает неразобранные строки хотя бы с одним совпадением, в том числе неоднозначным.
+    Совпадения только внутри файла в это действие не входят.</p>
+<div class="d-flex flex-wrap gap-2 mb-3">
+    <form id="student-import-bulk-skip" action="/admin/people/import/preview/{{ token }}/bulk-skip/prepare" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <input type="hidden" name="mode" value="selected">
+        <button class="btn btn-outline-secondary" type="submit">Пропустить выбранных</button>
+    </form>
+    <form action="/admin/people/import/preview/{{ token }}/bulk-skip/prepare" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token(request) }}">
+        <input type="hidden" name="mode" value="found">
+        <button class="btn btn-outline-secondary" type="submit" {% if not found_count %}disabled{% endif %}>Пропустить всех с найденными карточками</button>
+    </form>
+</div>
+
+{# Завершение и отмена импорта остаются отдельными действиями. #}
 <div class="d-flex flex-wrap gap-2 mb-2">
     <form action="/admin/people/import/preview/{{ token }}/bulk-create" method="post"
           onsubmit="return confirm('Создать {{ new_count }} новых студентов?')">
@@ -205,7 +229,9 @@
             <table class="table table-sm align-middle">
                 <thead>
                     <tr>
-                        <th>Стр.</th>
+                        <th scope="col">Выбор</th>
+                        <th scope="col">№ записи</th>
+                        <th scope="col">Строка Excel</th>
                         <th>ФИО</th>
                         <th>Пол</th>
                         <th>Институт</th>
@@ -218,7 +244,7 @@
                 {% if groups.new %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="8">Новые
+                        <th class="text-muted" colspan="10">Новые
                             <span class="badge text-bg-light border">{{ groups.new | length }}</span></th>
                     </tr>
                     {% for row in groups.new %}{{ import_data_row(row, token, 'new', request) }}{% endfor %}
@@ -227,7 +253,7 @@
                 {% if groups.review %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="8">Требуют решения
+                        <th class="text-muted" colspan="10">Требуют решения
                             <span class="badge text-bg-light border">{{ groups.review | length }}</span></th>
                     </tr>
                     {% for row in groups.review %}{{ import_data_row(row, token, 'review', request) }}{% endfor %}
@@ -236,7 +262,7 @@
                 {% if groups.error %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="8">Ошибочные
+                        <th class="text-muted" colspan="10">Ошибочные
                             <span class="badge text-bg-light border">{{ groups.error | length }}</span></th>
                     </tr>
                     {% for row in groups.error %}{{ import_data_row(row, token, 'error', request) }}{% endfor %}
@@ -245,7 +271,7 @@
                 {% if groups.resolved %}
                 <tbody>
                     <tr class="table-secondary">
-                        <th class="text-muted" colspan="8">Решено
+                        <th class="text-muted" colspan="10">Решено
                             <span class="badge text-bg-light border">{{ groups.resolved | length }}</span></th>
                     </tr>
                     {% for row in groups.resolved %}{{ import_data_row(row, token, 'resolved', request) }}{% endfor %}
