@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const context = {window: {addEventListener() {}}, console};
+const context = {window: {addEventListener() {}}, console, URLSearchParams};
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/static/scripts/script.js'), 'utf8') + '\nglobalThis.MainController = Main;', context);
 class Element {
@@ -151,4 +151,62 @@ assert.deepEqual([...persisted.order], ['index','student_name','student_sex','gr
 assert.deepEqual(serverReport.table.head.children.map(header => header.dataset.columnKey), [...persisted.order]);
 assert.deepEqual(serverReport.table.body.children.map(row => row.id), beforeIDs);
 serverReport.table.body.children.forEach(row => assert.deepEqual(row.children.map(cell => cell.dataset.columnKey), [...persisted.order].filter(key => row.querySelector(`[data-column-key="${key}"]`))));
+// ORG-01 registry server sorting: keyboard and mouse share the guarded GET action.
+const registry = createTable(false);
+registry.table.dataset.serverSort = 'true';
+const organizerHeader = new Element('organizer');
+Object.assign(organizerHeader.dataset, {sortType: 'text', sortable: 'true', sortDirection: 'asc'});
+organizerHeader.setAttribute('aria-sort', 'ascending'); // Rendered by the server; keep this state.
+registry.table.head.appendChild(organizerHeader);
+registry.controller.bindTableHeaderEvents();
+assert.equal(organizerHeader.tabIndex, 0, 'Sortable registry headers must enter the Tab order');
+assert.equal(organizerHeader.attrs['aria-sort'], 'ascending');
+assert.equal(registry.controller.getHeaderByKey('index').tabIndex, undefined);
+assert.equal(registry.controller.getHeaderByKey('index').events.keydown, undefined);
+const registryQuery = '?name=%D0%94%D0%B5%D0%BC%D0%BE&sport=One&sport=Two&per_page=10&page=4&sort=organizer&order=asc';
+function setRegistryURL(search = registryQuery) { context.window.location = {search, href: 'unchanged'}; }
+function verifyRegistryNavigation(order, columnKey = 'organizer') {
+    const params = new URL(context.window.location.href, 'http://example.invalid').searchParams;
+    assert.equal(params.get('sort'), columnKey); assert.equal(params.get('order'), order);
+    assert.equal(params.get('name'), 'Демо'); assert.deepEqual(params.getAll('sport'), ['One', 'Two']);
+    assert.equal(params.get('per_page'), '10'); assert.equal(params.has('page'), false);
+}
+for (const key of ['Enter', ' ']) {
+    setRegistryURL(); let prevented = false;
+    organizerHeader.events.keydown({key, preventDefault() { prevented = true; }});
+    assert.equal(prevented, true, `${key} must prevent its default browser action`);
+    verifyRegistryNavigation('desc');
+}
+organizerHeader.dataset.sortDirection = 'desc'; setRegistryURL();
+organizerHeader.events.keydown({key: 'Enter', preventDefault() {}});
+verifyRegistryNavigation('asc');
+setRegistryURL(); organizerHeader.events.click(); verifyRegistryNavigation('asc');
+registry.controller.hasActiveRowEdit = () => true;
+for (const key of ['Enter', ' ']) {
+    setRegistryURL(); let prevented = false;
+    organizerHeader.events.keydown({key, preventDefault() { prevented = true; }});
+    assert.equal(prevented, true); assert.equal(context.window.location.href, 'unchanged');
+}
+setRegistryURL(); organizerHeader.events.click(); assert.equal(context.window.location.href, 'unchanged');
+registry.controller.hasActiveRowEdit = () => false;
+organizerHeader.events.keydown({key: 'Escape', preventDefault() { throw new Error('Unrelated keys must stay native'); }});
+assert.equal(context.window.location.href, 'unchanged');
+const keyboardHandler = organizerHeader.events.keydown;
+registry.controller.bindTableHeaderEvents();
+assert.equal(organizerHeader.events.keydown, keyboardHandler, 'Repeated binding must preserve one handler');
+// Both legal stored custom keys keep distinct, keyboard-sortable DOM aliases.
+for (const columnKey of ['custom:organizer', 'custom__organizer']) {
+    const customHeader = new Element(columnKey);
+    Object.assign(customHeader.dataset, {sortType: 'text', sortable: 'true'});
+    registry.table.head.appendChild(customHeader);
+    registry.controller.bindTableHeaderEvents();
+    assert.equal(registry.controller.getHeaderByKey(columnKey), customHeader);
+    assert.equal(customHeader.tabIndex, 0);
+    setRegistryURL(); customHeader.events.keydown({key: 'Enter', preventDefault() {}});
+    verifyRegistryNavigation('asc', columnKey);
+    customHeader.dataset.sortDirection = 'asc';
+    setRegistryURL(); customHeader.events.keydown({key: ' ', preventDefault() {}});
+    verifyRegistryNavigation('desc', columnKey);
+}
+
 console.log('Reports table regression PASS: all columns, both directions, ties, rowspan, renumbering, column order/hidden and generic table path.');

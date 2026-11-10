@@ -19,6 +19,9 @@ from src.education import parse_group_admission_year
 from src.levels import resolve_competition_level
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
+from src.organizers import organizer_custom_collision
+from src.organizers import ORGANIZER_LABEL
+from src.organizers import validate_organizer
 from src.settings import settings
 from src.storage.sqlite import dedup_discipline
 from src.storage.sqlite import participation_content_key
@@ -39,12 +42,15 @@ BASE_FIELD_SPECS: Sequence[dict[str, str]] = (
     {'key': 'date', 'label': 'Дата'},
     {'key': 'level', 'label': 'Уровень соревнований'},
     {'key': 'name', 'label': 'Название соревнований'},
+    {'key': 'organizer', 'label': ORGANIZER_LABEL},
     {'key': 'position', 'label': 'Место'},
     {'key': 'course', 'label': 'Курс'},
 )
 
 
-REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(field['label'] for field in BASE_FIELD_SPECS if field['key'] != 'course')
+REQUIRED_IMPORT_COLUMNS: Sequence[str] = tuple(
+    field['label'] for field in BASE_FIELD_SPECS if field['key'] not in {'course', 'organizer'}
+)
 
 
 # Event Model, P5a (docs/data-model-decisions.md «Event Model, P5a»):
@@ -72,7 +78,7 @@ def select_export_custom_fields(custom_fields: Sequence[CustomField]) -> list[Cu
     с фиксированными «Дисциплина»/«Результат» — заголовок в выгрузке один,
     значение отдаётся из базовой колонки записи. Определение поля и его
     значения в реестре/extra_data не трогаются."""
-    fold_labels = {'дисциплина', 'результат'}
+    fold_labels = {'дисциплина', 'результат', ORGANIZER_LABEL.casefold()}
     return [
         field
         for field in custom_fields
@@ -84,7 +90,7 @@ def select_template_custom_fields(custom_fields: Sequence[CustomField]) -> list[
     """Кастомные поля шаблона импорта: show_in_template и без коллизии label
     с фиксированной опциональной колонкой «Дисциплина» (в шаблоне «Результата»
     нет — кастомное поле с таким label в шаблон попадает как обычно)."""
-    fold_labels = {'дисциплина'}
+    fold_labels = {'дисциплина', ORGANIZER_LABEL.casefold()}
     return [
         field
         for field in custom_fields
@@ -107,6 +113,7 @@ BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
     'date': ('text', True),
     'level': ('text', False),
     'name': ('text', False),
+    'organizer': ('text', False),
     'position': ('number', False),
     'course': ('number', False),
 }
@@ -159,6 +166,7 @@ def get_base_field_settings(storage: SQLiteAdapter | None) -> dict[str, dict]:
         # даже если в таблице оказалась иная настройка.
         default_type = BASE_FIELD_SETTING_DEFAULTS[key][0]
         merged[key] = {'value_type': default_type, 'required': True}
+    merged['organizer'] = {'value_type': 'text', 'required': False}
     merged['course'] = {'value_type': 'number', 'required': False, 'readonly': True}
     return merged
 
@@ -255,6 +263,8 @@ def parse_custom_field_value(raw_value, field: CustomField) -> str:
 def extract_custom_field_values(record: dict, custom_fields: Sequence[CustomField]) -> dict[str, str]:
     extra_data = {}
     for field in custom_fields:
+        if organizer_custom_collision(field):
+            continue
         raw_value = record.get(field.label, '')
         value = parse_custom_field_value(raw_value, field)
         extra_data[field.key] = value
@@ -267,6 +277,8 @@ def extract_custom_field_values_from_request(
 ) -> dict[str, str]:
     extra_data = {}
     for field in custom_fields:
+        if organizer_custom_collision(field):
+            continue
         extra_data[field.key] = parse_custom_field_value(
             get_form_value(request, f'custom__{field.key}'),
             field,
@@ -327,6 +339,11 @@ def build_competition(
         name=parse_base_text_field(
             record['Название соревнований'], label=BASE_FIELD_LABELS['name'], setting=field_settings['name']
         ),
+        organizer=(
+            existing.organizer
+            if existing is not None and record.get(ORGANIZER_LABEL, existing.organizer) == existing.organizer
+            else validate_organizer(record.get(ORGANIZER_LABEL))
+        ),
         position=parse_position(record['Место'], setting=field_settings['position']),
         # Event Model, P5a: опциональная колонка «Дисциплина» импорта/форм —
         # в базовую колонку записи, пустая ячейка → None. Если активен кастом
@@ -335,6 +352,8 @@ def build_competition(
         discipline=clean_str(record.get(IMPORT_DISCIPLINE_COLUMN)) or None,
         extra_data=extract_custom_field_values(record, custom_fields),
     )
+    if existing is not None:
+        competition.extra_data = {**existing.extra_data, **competition.extra_data}
     if storage is not None:
         apply_catalog_canonical_values(storage, competition)
     competition.course = group_course(competition.group, competition.date)
@@ -545,9 +564,10 @@ def event_participation_matched_duplicate_guard(
     return None
 
 
-# Человекочитаемые метки 5 event-owned полей для диффа и подтверждений.
+# Человекочитаемые метки 6 event-owned полей для диффа и подтверждений.
 LINK_EVENT_FIELD_LABELS: dict[str, str] = {
     'name': 'название',
+    'organizer': ORGANIZER_LABEL.lower(),
     'sport': 'вид спорта',
     'date': 'дата',
     'date_to': 'дата окончания',
@@ -562,11 +582,13 @@ def participation_field_changes(
     date_to: str | None,
     level: str,
     event: dict,
+    organizer: str = '',
 ) -> dict[str, dict[str, str | None]]:
-    """old/new по 5 event-owned полям записи против события (сырые значения,
+    """old/new по 6 event-owned полям записи против события (сырые значения,
     паттерн аудита calendar_event_edited)."""
     return {
         'name': {'old': name, 'new': event['name']},
+        'organizer': {'old': organizer or '', 'new': event.get('organizer') or ''},
         'sport': {'old': sport, 'new': event['sport']},
         'date': {'old': date, 'new': event['date']},
         'date_to': {'old': date_to, 'new': event.get('date_to')},

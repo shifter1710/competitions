@@ -1,0 +1,6 @@
+{% macro organizer_input(id, value='') -%}
+<div class="col-md-6">
+    <label class="form-label" for="{{ id }}">{{ organizer_label }}</label>
+    <input class="form-control" id="{{ id }}" name="organizer" type="text" value="{{ value or '' }}" maxlength="{{ organizer_max_length }}">
+</div>
+{%- endmacro %}

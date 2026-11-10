@@ -178,7 +178,7 @@ def parse_base_field_settings_form(request: Request) -> dict[str, tuple[str, boo
     settings_form: dict[str, tuple[str, bool]] = {}
     for key in BASE_FIELD_SETTING_DEFAULTS:
         default_type, default_required = BASE_FIELD_SETTING_DEFAULTS[key]
-        if key == 'course':
+        if key in {'course', 'organizer'}:
             settings_form[key] = (default_type, False)
             continue
         if key in ALWAYS_REQUIRED_BASE_FIELDS:
@@ -535,7 +535,7 @@ def collect_maintenance_stats() -> dict:
 # Предпросмотр по P0-семантике стартового backfill (однозначный пресет
 # name + date + date_to): matched — можно связать, ambiguous — только
 # вручную со страницы записи, unmatched — нет события. Apply проводит
-# ТОЛЬКО matched со синхронизацией 5 полей; гонки закрывает guarded
+# ТОЛЬКО matched со синхронизацией 6 полей; гонки закрывает guarded
 # UPDATE (пропуск, не откат пакета).
 
 
@@ -552,7 +552,15 @@ def decorate_calendar_link_preview(preview: dict, events_by_id: dict[int, dict])
         if event is None:
             continue
         diff = build_link_diff_rows(
-            participation_field_changes(row['name'], row['sport'], row['date'], row['date_to'], row['level'], event)
+            participation_field_changes(
+                row['name'],
+                row['sport'],
+                row['date'],
+                row['date_to'],
+                row['level'],
+                event,
+                organizer=row.get('organizer') or '',
+            )
         )
         for item in diff:
             if item['clears']:
@@ -590,7 +598,7 @@ def decorate_calendar_link_preview(preview: dict, events_by_id: dict[int, dict])
     matched_total = preview['counters']['matched']
     apply_confirm = (
         f'Связать {matched_total} записей с найденными соревнованиями? '
-        'Название, вид спорта, дату и уровень записи возьмут из соревнований.'
+        f'Название, вид спорта, дату, уровень и {LINK_EVENT_FIELD_LABELS["organizer"]} записи возьмут из соревнований.'
     )
     if clearing_labels:
         apply_confirm += f' У {clearing_total} записей станут пустыми: {", ".join(clearing_labels)}.'

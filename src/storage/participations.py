@@ -18,6 +18,7 @@ from src.models.competition import Competition
 from src.models.http.report_row import ReportSliceRow
 from src.models.http.report_row import ReportSummary
 from src.models.http.student_info import StudentInfo
+from src.organizers import validate_organizer
 from src.settings import settings
 from src.storage.helpers import competition_insert_records
 from src.storage.helpers import COMPETITION_INSERT_SQL
@@ -874,6 +875,10 @@ class ParticipationsMixin:
         with self._lock:
             competitions = list(competitions)
             for competition in competitions:
+                if competition.calendar_event_id is not None:
+                    event = self.get_calendar_event(competition.calendar_event_id)
+                    if event is not None:
+                        competition.organizer = event.get('organizer') or ''
                 competition.level = resolve_competition_level(self, competition.level)
             records = competition_insert_records(
                 self._fill_admission_year_snapshots(list(competitions)),
@@ -1048,7 +1053,11 @@ class ParticipationsMixin:
         транзакцией."""
         with self._lock:
             try:
+                live_event = self.get_calendar_event(event_id)
+                if live_event is None:
+                    raise EventParticipationConflictError('event not found')
                 for competition in inserts:
+                    competition.organizer = validate_organizer(live_event.get('organizer'))
                     competition.level = resolve_competition_level(self, competition.level)
                 live_identities, live_contents, collision_custom_keys = self._event_participation_recheck_context(
                     event_id
@@ -1112,6 +1121,13 @@ class ParticipationsMixin:
             competition.level = resolve_competition_level(
                 self, competition.level, existing=existing.level if existing is not None else None
             )
+            if existing is not None and existing.calendar_event_id is not None:
+                event = self.get_calendar_event(existing.calendar_event_id)
+                competition.organizer = (event.get('organizer') or '') if event else existing.organizer
+            elif existing is not None and 'organizer' not in competition.model_fields_set:
+                competition.organizer = existing.organizer
+            if existing is None or competition.organizer != existing.organizer:
+                competition.organizer = validate_organizer(competition.organizer)
             self.connection.execute(
                 '''
                 UPDATE competitions
@@ -1129,7 +1145,8 @@ class ParticipationsMixin:
                     position = ?,
                     extra_data = ?,
                     discipline = ?,
-                    result = ?
+                    result = ?,
+                    organizer = ?
                 WHERE id = ?
                 ''',
                 (
@@ -1147,6 +1164,7 @@ class ParticipationsMixin:
                     json.dumps(competition.extra_data, ensure_ascii=False),
                     competition.discipline,
                     competition.result,
+                    competition.organizer,
                     int(record_id),
                 ),
             )
@@ -1203,7 +1221,7 @@ class ParticipationsMixin:
                     id, student_id, student_name, student_sex, institute, "group", course,
                     sport, date, date_to, level, name, position, created_at, extra_data,
                     review_status, owner_id, review_comment, student_ref_id,
-                    discipline, result, calendar_event_id, admission_year
+                    discipline, result, calendar_event_id, admission_year, organizer
                 FROM competitions
                 WHERE date < ?
                 ORDER BY created_at ASC

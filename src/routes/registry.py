@@ -45,7 +45,12 @@ from src.files import remove_attachment_record_dirs
 from src.gto import build_gto_rows
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
+from src.organizers import custom_field_column_key
+from src.organizers import organizer_custom_collision
+from src.organizers import ORGANIZER_LABEL
+from src.organizers import validate_organizer
 from src.records import BASE_FIELD_LABELS
+from src.records import BASE_FIELD_SPECS
 from src.records import build_competition
 from src.records import build_index_dataframe
 from src.records import competition_duplicate_key
@@ -135,6 +140,7 @@ INDEX_SORT_BASE_COLUMNS: dict[str, tuple[str, str]] = {
     'date': ('date', 'iso'),
     'level': ('level', 'text'),
     'name': ('name', 'text'),
+    'organizer': ('organizer', 'text'),
     'position': ('position', 'number'),
     'course': ('course', 'course'),
     'status': ('review_status', 'text'),
@@ -151,7 +157,11 @@ def parse_index_sort(args: dict, custom_fields: Sequence[CustomField]) -> tuple[
     order = (get_param(args, 'order') or '').strip()
     if order not in INDEX_SORT_ORDERS:
         return '', ''
-    if sort in INDEX_SORT_BASE_COLUMNS or sort in {field.key for field in custom_fields if field.show_in_table}:
+    if sort in INDEX_SORT_BASE_COLUMNS or sort in {
+        custom_field_column_key(field)
+        for field in custom_fields
+        if field.show_in_table and not organizer_custom_collision(field)
+    }:
         return sort, order
     return '', ''
 
@@ -222,7 +232,11 @@ def build_index_sort_key(sort: str, custom_fields: Sequence[CustomField]):
     дефолтный порядок. Кастомные колонки читаются из extra_data строки."""
     if not sort:
         return None
-    custom_by_key = {field.key: field for field in custom_fields}
+    if sort == 'organizer':
+        return lambda row: _index_sort_triple(row['organizer'], 'text')
+    custom_by_key = {
+        custom_field_column_key(field): field for field in custom_fields if not organizer_custom_collision(field)
+    }
     field = custom_by_key.get(sort)
     if field is not None:
         kind = {'number': 'number', 'date': 'date'}.get(field.field_type, 'text')
@@ -381,7 +395,7 @@ def build_link_bindings(custom_fields: Sequence[CustomField]) -> dict[str, str]:
     """
     bindings: dict[str, str] = {}
     for field in custom_fields:
-        if field.field_type == 'url' and field.link_target and field.active:
+        if field.field_type == 'url' and field.link_target and field.active and not organizer_custom_collision(field):
             bindings[field.link_target] = field.key
     return bindings
 
@@ -412,6 +426,7 @@ QUEUE_FIELD_ORDER: Sequence[str] = (
     'date_to',
     'level',
     'name',
+    'organizer',
     'position',
     # Event Model, P5a: дисциплина кандидата видна при разборе конфликта
     # (разные дисциплины — не дубль) и участвует в diff аудита replace.
@@ -464,6 +479,7 @@ def queue_edit_values(payload: dict) -> dict:
         'date': date_display,
         'level': '' if payload.get('level') is None else str(payload.get('level')),
         'name': '' if payload.get('name') is None else str(payload.get('name')),
+        'organizer': '' if payload.get('organizer') is None else str(payload.get('organizer')),
         'position': '' if payload.get('position') is None else str(payload.get('position')),
         # Event Model, P5a: легаси-payload без ключа даёт пустую строку.
         'discipline': '' if payload.get('discipline') is None else str(payload.get('discipline')),
@@ -494,7 +510,11 @@ async def render_import_queue(request: Request, *, failed_entry=None, edit_value
             {
                 **entry,
                 'candidate': queue_candidate_view(entry['payload'])
-                + [(field.label, values['custom'][field.key] or '—') for field in custom_fields],
+                + [
+                    (field.label, values['custom'][field.key] or '—')
+                    for field in custom_fields
+                    if not organizer_custom_collision(field)
+                ],
                 'edit_values': edit_values if failed else values,
                 'edit_error': error if failed else None,
                 'matched': matched,
@@ -731,6 +751,8 @@ def competition_update_custom_values(
     values: dict[str, str] = {}
     discipline_from_form_custom = False
     for field in custom_fields:
+        if organizer_custom_collision(field):
+            continue
         form_key = f'custom__{field.key}'
         # Присутствие — включая пустое значение (очистка): form_key_present
         # читает сырое тело, request.form пустые значения теряет.
@@ -836,12 +858,16 @@ def competition_update_record(
         'Дата': get_form_value(request, 'date'),
         'Уровень соревнований': get_form_value(request, 'level'),
         'Название соревнований': get_form_value(request, 'name'),
+        ORGANIZER_LABEL: get_form_value(request, 'organizer'),
         'Место': get_form_value(request, 'position'),
         'Курс': '',
     }
+    if existing is not None and not form_key_present(request, 'organizer'):
+        record[ORGANIZER_LABEL] = existing.organizer
     custom_values, discipline_from_form_custom = competition_update_custom_values(request, existing, custom_fields)
     record.update(custom_values)
     if existing is not None and existing.calendar_event_id is not None:
+        record[ORGANIZER_LABEL] = existing.organizer
         record['Название соревнований'] = existing.name
         record['Вид спорта'] = existing.sport
         record['Уровень соревнований'] = existing.level
@@ -1115,7 +1141,11 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'index_sort_column': sort_column,
                 'index_sort_order': sort_order,
                 'index_sort_columns': set(INDEX_SORT_BASE_COLUMNS)
-                | {field.key for field in custom_fields if field.show_in_table},
+                | {
+                    custom_field_column_key(field)
+                    for field in custom_fields
+                    if field.show_in_table and not organizer_custom_collision(field)
+                },
                 'total_count': total_count,
                 'shown_count': len(competitions),
                 'page': page,
@@ -1227,6 +1257,14 @@ def register(app: Sanic) -> None:  # noqa: C901
             return text(body='Matched record not found', status=404)
 
         competition = Competition.model_validate(entry['payload'])
+        competition.organizer = validate_organizer(competition.organizer) or existing.organizer
+        competition.extra_data = {**existing.extra_data, **competition.extra_data}
+        for field in storage.get_custom_fields():
+            if organizer_custom_collision(field) and field.key in existing.extra_data:
+                competition.extra_data[field.key] = existing.extra_data[field.key]
+        if existing.calendar_event_id is not None:
+            event = storage.get_calendar_event(existing.calendar_event_id)
+            competition.organizer = (event.get('organizer') or '') if event else existing.organizer
         ensure_catalog_values(storage, [competition], existing=existing)
         changes = queue_field_changes(existing, competition)
         storage.update_competition(int(entry['matched_record_id']), competition)
@@ -1260,7 +1298,17 @@ def register(app: Sanic) -> None:  # noqa: C901
         # controls preserve payload values; an explicitly posted empty clears.
         payload = entry['payload']
         edit_values = queue_edit_values(payload)
-        for key in ('student_sex', 'institute', 'group', 'sport', 'level', 'name', 'position', 'discipline'):
+        for key in (
+            'student_sex',
+            'institute',
+            'group',
+            'sport',
+            'level',
+            'name',
+            'organizer',
+            'position',
+            'discipline',
+        ):
             if form_key_present(request, key):
                 edit_values[key] = get_form_value(request, key)
         edit_values['custom'] = queue_custom_values(payload, custom_fields)
@@ -1278,6 +1326,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'date',
                 'level',
                 'name',
+                'organizer',
                 'position',
                 'discipline',
             )
@@ -1287,6 +1336,8 @@ def register(app: Sanic) -> None:  # noqa: C901
             # label such as «Дисциплина» must not overwrite the base value.
             extra_data = dict(payload.get('extra_data') or {})
             for field in custom_fields:
+                if organizer_custom_collision(field):
+                    continue
                 try:
                     extra_data[field.key] = parse_custom_field_value(edit_values['custom'][field.key], field)
                 except (TypeError, ValueError, OverflowError):
@@ -1346,7 +1397,11 @@ def register(app: Sanic) -> None:  # noqa: C901
         custom_fields = select_template_custom_fields(storage.get_custom_fields())
         # «Дисциплина» — опциональная фиксированная колонка шаблона (P5a):
         # колонки без неё продолжают импортироваться, «Результата» в шаблоне нет.
-        columns = [*REQUIRED_IMPORT_COLUMNS, IMPORT_DISCIPLINE_COLUMN, *(field.label for field in custom_fields)]
+        columns = [
+            *(field['label'] for field in BASE_FIELD_SPECS if field['key'] != 'course'),
+            IMPORT_DISCIPLINE_COLUMN,
+            *(field.label for field in custom_fields),
+        ]
 
         df = pd.DataFrame(columns=columns)
         buffer = BytesIO()
@@ -1518,10 +1573,17 @@ def register(app: Sanic) -> None:  # noqa: C901
             'Дата': get_form_value(request, 'date'),
             'Уровень соревнований': get_form_value(request, 'level'),
             'Название соревнований': get_form_value(request, 'name'),
+            ORGANIZER_LABEL: get_form_value(request, 'organizer'),
             'Место': get_form_value(request, 'position'),
             'Курс': '',
         }
-        record.update({field.label: get_form_value(request, f'custom__{field.key}') for field in custom_fields})
+        record.update(
+            {
+                field.label: get_form_value(request, f'custom__{field.key}')
+                for field in custom_fields
+                if not organizer_custom_collision(field)
+            }
+        )
 
         profile_defaults = get_athlete_profile_defaults(request, storage)
         for form_key, profile_key in (

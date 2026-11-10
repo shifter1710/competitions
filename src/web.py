@@ -23,6 +23,10 @@ from sanic import Request
 from sanic import Sanic
 from sanic import text
 
+from src.organizers import custom_field_column_key
+from src.organizers import organizer_custom_collision
+from src.organizers import ORGANIZER_LABEL
+from src.organizers import ORGANIZER_MAX_LENGTH
 from src.settings import settings
 from src.storage.sqlite import SQLiteAdapter
 
@@ -41,6 +45,15 @@ jinja_env_sync = Environment(
     loader=PackageLoader('src'),
     autoescape=select_autoescape(),
 )
+
+
+for environment in (jinja_env, jinja_env_sync):
+    environment.globals.update(
+        organizer_label=ORGANIZER_LABEL,
+        organizer_max_length=ORGANIZER_MAX_LENGTH,
+        organizer_custom_collision=organizer_custom_collision,
+        custom_field_column_key=custom_field_column_key,
+    )
 
 
 def get_storage(app: Sanic) -> SQLiteAdapter:

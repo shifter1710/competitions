@@ -283,6 +283,7 @@ class SQLiteAdapter(
             calendar_columns = {
                 row['name'] for row in self.connection.execute('PRAGMA table_info(calendar_events)').fetchall()
             }
+            self._migrate_organizer_columns()
             self._migrate_event_results(calendar_columns)
             if 'regulation_filename' not in calendar_columns:
                 self.connection.execute('ALTER TABLE calendar_events ADD COLUMN regulation_filename TEXT')
@@ -597,6 +598,13 @@ class SQLiteAdapter(
                 "ALTER TABLE calendar_event_documents ADD COLUMN document_type TEXT NOT NULL DEFAULT 'generic'"
             )
 
+    def _migrate_organizer_columns(self) -> None:
+        """ORG-01 adds nullable snapshots without touching existing data."""
+        for table in ('competitions', 'calendar_events'):
+            columns = {row['name'] for row in self.connection.execute(f'PRAGMA table_info({table})')}
+            if 'organizer' not in columns:
+                self.connection.execute(f'ALTER TABLE {table} ADD COLUMN organizer TEXT')
+
     def _migrate_competitions_columns(self, columns: set[str]) -> None:
         """Порционная миграция легаси-таблицы записей: недостающие колонки
         добавляются ALTER'ом, существующие данные не трогаются."""
@@ -766,6 +774,7 @@ class SQLiteAdapter(
                 'Дата по': row['date_to'],
                 'Уровень соревнований': row['level'],
                 'Название соревнований': row['name'],
+                'organizer': row['organizer'] or '',
                 'Место': row['position'],
                 'Время создания записи (UTC)': row['created_at'],
                 'extra_data': json.loads(row['extra_data'] or '{}'),

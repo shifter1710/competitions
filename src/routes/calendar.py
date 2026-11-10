@@ -50,6 +50,9 @@ from src.files import read_event_document_version
 from src.files import regulation_source_path
 from src.models.competition import Competition
 from src.models.custom_field import CustomField
+from src.organizers import organizer_custom_collision
+from src.organizers import ORGANIZER_LABEL
+from src.organizers import validate_organizer
 from src.periods import period_filter_context
 from src.periods import resolve_report_period
 from src.periods import today_in_timezone
@@ -202,10 +205,12 @@ def parse_calendar_event_form(request: Request) -> tuple[dict, str | None]:
         return {}, 'Название обязательно'
     try:
         date_from, date_to = parse_date_value(get_form_value(request, 'date'), manual_input=True)
+        organizer = validate_organizer(get_form_value(request, 'organizer'))
     except ValueError as exc:
         return {}, str(exc)
     return {
         'name': name,
+        'organizer': organizer,
         'date': date_from,
         'date_to': date_to,
         'level': get_form_value(request, 'level'),
@@ -942,6 +947,7 @@ def event_import_custom_fields(custom_fields: Sequence[CustomField]) -> list[Cus
         if field.active
         and field.show_in_template
         and field.field_type != 'url'
+        and not organizer_custom_collision(field)
         and not collides_with_fixed_columns(field.label, {'дисциплина', 'результат'})
     ]
 
@@ -1120,6 +1126,7 @@ def event_participant_preset(event: dict) -> dict:
         'Дата': format_date_range(event_date, event_date_to),
         'Уровень соревнований': event['level'],
         'Название соревнований': event['name'],
+        ORGANIZER_LABEL: event.get('organizer') or '',
     }
 
 
@@ -2106,6 +2113,7 @@ def competition_link_changes(record: Competition, event: dict) -> dict[str, dict
         record.date_to.isoformat() if record.date_to else None,
         record.level,
         event,
+        organizer=record.organizer,
     )
 
 
@@ -2116,7 +2124,7 @@ def decorate_link_event_candidates(
     """Кандидаты связывания для страницы записи: пресеты первыми (без очистки
     полей выше пресетов с очисткой), затем остальные в порядке списка событий
     (list_calendar_events — новые первыми); каждому —
-    дифф 5 полей и готовый текст confirm. Возвращает (строки, всего до капа)."""
+    дифф 6 полей и готовый текст confirm. Возвращает (строки, всего до капа)."""
     decorated = []
     for event in events:
         diff = build_link_diff_rows(competition_link_changes(record, event))
@@ -2140,7 +2148,7 @@ def decorate_link_event_candidates(
 def build_link_confirm_text(record_id: int, event_name: str, cleared_fields: Sequence[str]) -> str:
     base = (
         f'Связать запись №{record_id} с соревнованием «{event_name}»? '
-        'Название, вид спорта, дату и уровень запись возьмёт из соревнования.'
+        f'Название, вид спорта, дату, уровень и {ORGANIZER_LABEL.lower()} запись возьмёт из соревнования.'
     )
     if cleared_fields:
         labels = ', '.join(LINK_EVENT_FIELD_LABELS[key] for key in cleared_fields)
@@ -2390,6 +2398,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 date_to=new_date_to,
                 level=values['level'],
                 sport=values['sport'],
+                organizer=values['organizer'],
                 links=links,
             )
         except CalendarEventDuplicateError:
@@ -2483,6 +2492,8 @@ def register(app: Sanic) -> None:  # noqa: C901
         values, error = parse_calendar_event_form(request)
         if error is not None:
             return text(body=error, status=400)
+        if not form_key_present(request, 'organizer'):
+            values['organizer'] = event.get('organizer') or ''
         links, links_error = parse_calendar_event_links(request)
         if links_error is not None:
             return text(body=links_error, status=400)
@@ -2502,6 +2513,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 date_to=new_date_to,
                 level=values['level'],
                 sport=values['sport'],
+                organizer=values['organizer'],
                 links=links,
             )
         except CalendarEventDuplicateError:
@@ -2524,6 +2536,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                 'date_to': {'old': event.get('date_to'), 'new': new_date_to},
                 'sport': {'old': event['sport'], 'new': values['sport']},
                 'level': {'old': event['level'], 'new': values['level']},
+                'organizer': {'old': event.get('organizer') or '', 'new': values['organizer']},
                 # Ссылки — full-replace, в аудит идёт итоговый состав.
                 'links': {
                     'old': [dict(link) for link in event.get('links') or []],
@@ -2854,6 +2867,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             'Дата': format_date_range(event_date, event_date_to),
             'Уровень соревнований': event['level'],
             'Название соревнований': event['name'],
+            ORGANIZER_LABEL: event.get('organizer') or '',
             # Место опционально («можно дописать позже»): пусто → position = 0.
             'Место': get_form_value(request, 'position'),
             'Курс': '',
@@ -4661,6 +4675,7 @@ def register(app: Sanic) -> None:  # noqa: C901
             date_to=new_date_to,
             level=values['level'],
             sport=values['sport'],
+            organizer=values['organizer'],
             links=links,
             record_id=numeric_id,
         )
@@ -4716,6 +4731,7 @@ def register(app: Sanic) -> None:  # noqa: C901
                         'date': new_date,
                         'date_to': new_date_to,
                         'level': values['level'],
+                        'organizer': values['organizer'],
                     },
                 ),
                 'event_created': True,

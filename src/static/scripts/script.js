@@ -751,7 +751,8 @@ class FioResolver {
 // У строк с data-calendar-event-id они рендерятся заблокированными — значения
 // берутся из соревнования (правка — со страницы события), сервер подделку
 // формы тоже отвергает. Один и тот же title — «Изменяется в соревновании».
-const EVENT_OWNED_EDIT_KEYS = ["sport", "date", "level", "name"];
+const ORGANIZER_CUSTOM_COLUMN_KEY = "custom:organizer";
+const EVENT_OWNED_EDIT_KEYS = ["sport", "date", "level", "name", "organizer"];
 const EVENT_OWNED_FIELD_TITLE = "Изменяется в соревновании";
 
 // Мульти-фильтры главной: открытие/закрытие меню — собственная механика,
@@ -2423,6 +2424,7 @@ class Main {
             }
             input.value = value ?? "";
         }
+        if (key === 'organizer') input.maxLength = Number(this.tableElement?.dataset.organizerMaxLength || 255);
         input.dataset.editKey = key;
         input.className = "form-control form-control-sm";
         if (key === "level" && !readOnly) {
@@ -2548,6 +2550,7 @@ class Main {
             date: dataset.date,
             level: dataset.level,
             name: dataset.name,
+            organizer: dataset.organizer,
             position: dataset.position,
             course: dataset.course,
         };
@@ -2579,7 +2582,7 @@ class Main {
             }
             const value = Object.prototype.hasOwnProperty.call(values, key)
                 ? values[key]
-                : extraData[key] ?? "";
+                : extraData[key === ORGANIZER_CUSTOM_COLUMN_KEY ? "organizer" : key] ?? "";
             cell.textContent = "";
             cell.append(this.createInlineInput(key, value, fieldTypes, eventOwned));
         });
@@ -2622,7 +2625,7 @@ class Main {
         this.inlineEditRow.querySelectorAll("[data-edit-key]").forEach((input) => {
             const key = input.dataset.editKey;
             const name = Object.prototype.hasOwnProperty.call(fieldTypes, key)
-                ? `custom__${key}`
+                ? (key === ORGANIZER_CUSTOM_COLUMN_KEY ? "custom__organizer" : `custom__${key}`)
                 : key;
             formData.append(name, input.value);
         });
@@ -2854,7 +2857,7 @@ class Main {
         this.newEditRow.querySelectorAll("[data-edit-key]").forEach((input) => {
             const key = input.dataset.editKey;
             const name = Object.prototype.hasOwnProperty.call(fieldTypes, key)
-                ? `custom__${key}`
+                ? (key === ORGANIZER_CUSTOM_COLUMN_KEY ? "custom__organizer" : `custom__${key}`)
                 : key;
             formData.append(name, input.value);
         });
@@ -3325,7 +3328,14 @@ class Main {
             if (header.dataset.sortType !== "none" && !(serverSort && this.tableElement.dataset.reportTable === "true")) {
                 if (serverSort) {
                     if (header.dataset.sortable === "true") {
+                        header.tabIndex = 0;
                         header.addEventListener("click", () => this.handleServerSortClick(header));
+                        header.addEventListener("keydown", (event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                this.handleServerSortClick(header);
+                            }
+                        });
                     }
                 } else {
                     header.addEventListener("click", () => this.sortByHeader(header));

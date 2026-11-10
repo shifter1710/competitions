@@ -6757,6 +6757,7 @@ def test_calendar_link_backfill_preview_groups_and_cap(adapter):
             'date_to': None,
             'sport': 'Бег',
             'level': 'внутривузовские',
+            'organizer': '',
             'event_id': matched_event,
             'event_name': 'Кубок',
         }

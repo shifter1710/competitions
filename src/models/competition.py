@@ -7,6 +7,7 @@ from pydantic import model_validator
 from src.education import group_course
 from src.education import parse_group_admission_year
 from src.models.student import Student
+from src.organizers import ORGANIZER_LABEL
 
 
 class Competition(Student):
@@ -22,6 +23,7 @@ class Competition(Student):
     date_to: datetime | None = Field(default=None, alias='Дата по')
     level: str = Field(alias='Уровень соревнований')
     name: str = Field(alias='Название соревнований')
+    organizer: str = Field(default='', alias=ORGANIZER_LABEL)
     # Лёгкий реестр полей: Место тоже настраивается как text (строка вместо
     # числа); дефолт (number) — прежнее int-поведение.
     position: int | str = Field(alias='Место')

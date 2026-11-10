@@ -279,6 +279,7 @@
                фильтрует список выбранным институтом. Только активные. #}
             <table class="table table-striped table-bordered interactive-table"
                    data-server-sort="true"
+                   data-organizer-max-length="{{ organizer_max_length }}"
                    data-levels='{{ levels | tojson }}'
                    data-groups-by-institute='{{ groups_by_institute | tojson }}'>
                 <thead class="table-dark">
@@ -292,14 +293,16 @@
                         <th scope="col" data-column-key="date" data-sort-type="date" {{ index_sort_th_attrs('date') }}{% if index_sort_column == 'date' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Дата</th>
                         <th scope="col" data-column-key="level" data-sort-type="text" {{ index_sort_th_attrs('level') }}{% if index_sort_column == 'level' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Уровень соревнований</th>
                         <th scope="col" data-column-key="name" data-sort-type="text" {{ index_sort_th_attrs('name') }}{% if index_sort_column == 'name' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Название соревнований</th>
+                        <th scope="col" data-column-key="organizer" data-sort-type="text" {{ index_sort_th_attrs('organizer') }}{% if index_sort_column == 'organizer' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>{{ organizer_label }}</th>
                         <th scope="col" data-column-key="position" data-sort-type="number" {{ index_sort_th_attrs('position') }}{% if index_sort_column == 'position' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Место</th>
                         <th scope="col" data-column-key="course" data-sort-type="number" {{ index_sort_th_attrs('course') }}{% if index_sort_column == 'course' %} class="table-header-cell sorted-{{ index_sort_order }}"{% endif %}>Курс</th>
-                        {% for field in custom_fields if field.show_in_table %}
+                        {% for field in custom_fields if field.show_in_table and not organizer_custom_collision(field) %}
                         {# Привязанное link-поле колонкой скрыто (d-none), но
                            остаётся в DOM: script.js читает типы полей с th для
                            инлайн-строки. #}
-                        {% set field_is_sorted = index_sort_column == field.key %}
-                        <th scope="col" data-column-key="{{ field.key }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}" {{ index_sort_th_attrs(field.key) }}
+                        {% set field_column_key = custom_field_column_key(field) %}
+                        {% set field_is_sorted = index_sort_column == field_column_key %}
+                        <th scope="col" data-column-key="{{ custom_field_column_key(field) }}" data-field-type="{{ field.field_type }}" data-sort-type="{{ field.field_type }}" {{ index_sort_th_attrs(field_column_key) }}
                             class="{% if field.key in bound_link_keys %}d-none {% endif %}{% if field_is_sorted %}table-header-cell sorted-{{ index_sort_order }}{% endif %}">{{ field.label }}</th>
                         {% endfor %}
                         {% if has_unapproved %}
@@ -341,12 +344,13 @@
                             {{ bound_cell(competition.name, link_bindings.get('name'), competition.extra_data) }}
                         {%- endif -%}
                         </td>
+                        <td data-column-key="organizer">{{ competition.organizer or '—' }}</td>
                         <td data-column-key="position">{{ competition.position or '—' }}</td>
                         {# Курс вычисляется по собственной исторической группе и дате начала;
                            прежние сохранённые курс/год не используются. #}
                         <td data-column-key="course">{% set course_cell = course_cells.get(competition.record_id) %}{% if course_cell %}{% if course_cell.title %}<span title="{{ course_cell.title }}">{{ course_cell.value }}</span>{% else %}{{ course_cell.value }}{% endif %}{% else %}{{ competition.course or '—' }}{% endif %}</td>
-                        {% for field in custom_fields if field.show_in_table %}
-                        <td data-column-key="{{ field.key }}" {% if field.key in bound_link_keys %}class="d-none"{% endif %}>
+                        {% for field in custom_fields if field.show_in_table and not organizer_custom_collision(field) %}
+                        <td data-column-key="{{ custom_field_column_key(field) }}" {% if field.key in bound_link_keys %}class="d-none"{% endif %}>
                             {%- set field_value = competition.extra_data.get(field.key, '') -%}
                             {%- if field.key in bound_link_keys -%}
                             {# Привязанное link-поле: колонка скрыта, данные
@@ -417,6 +421,7 @@
                                 data-date="{{ format_date_range(competition.date, competition.date_to) }}"
                                 data-level="{{ competition.level }}"
                                 data-name="{{ competition.name }}"
+                                data-organizer="{{ competition.organizer }}"
                                 data-position="{{ competition.position }}"
                                 data-extra-json='{{ competition.extra_data | tojson }}'
                                 {# P2: непустая ссылка на событие — event-owned
@@ -479,7 +484,7 @@
     {% if can_write %}
     {# Подсказка о жестах строки (замечания №5/№9): колонка действий
        закреплена, Enter/Esc работают в режиме правки. #}
-    {% call help('Работа с реестром') %}Двойной клик по строке — редактирование; Enter — сохранить, Esc — отменить. В строках, связанных со соревнованием, поля «Название», «Вид спорта», «Дата» и «Уровень» не редактируются — они берутся из соревнования.{% endcall %}
+    {% call help('Работа с реестром') %}Двойной клик по строке — редактирование; Enter — сохранить, Esc — отменить. В строках, связанных со соревнованием, поля «Название», «Вид спорта», «Дата», «Уровень» и «{{ organizer_label }}» не редактируются — они берутся из соревнования.{% endcall %}
     {% endif %}
     {% else %}
     <div class="empty-content">{% if index_is_filtered %}Записей с текущим фильтром не найдено{% else %}Нет данных{% endif %}</div>
