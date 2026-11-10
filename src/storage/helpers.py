@@ -9,6 +9,7 @@ from typing import Collection
 from typing import Iterable
 
 from src.models.competition import Competition
+from src.organizers import validate_organizer
 
 # Справочники значений ведут себя как уровни: записи остаются свободным
 # текстом, справочник — только подсказки (docs/data-model-decisions.md,
@@ -198,7 +199,8 @@ COMPETITION_SELECT_SQL = '''
         discipline,
         result,
         calendar_event_id,
-        admission_year
+        admission_year,
+        organizer
     FROM competitions
     '''
 
@@ -231,8 +233,9 @@ COMPETITION_INSERT_SQL = '''
         discipline,
         result,
         calendar_event_id,
-        admission_year
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        admission_year,
+        organizer
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     '''
 
 
@@ -376,6 +379,7 @@ def competition_insert_records(
             item.calendar_event_id,
             # Legacy column retained solely for database compatibility.
             None,  # no independent admission-year snapshot
+            validate_organizer(item.organizer),
         )
         for item in competitions
     ]
@@ -393,6 +397,7 @@ BASE_FIELD_SETTING_DEFAULTS: dict[str, tuple[str, bool]] = {
     'date': ('text', True),
     'level': ('text', False),
     'name': ('text', False),
+    'organizer': ('text', False),
     'position': ('number', False),
     'course': ('number', False),
 }

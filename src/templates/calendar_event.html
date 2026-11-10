@@ -1,3 +1,4 @@
+{% from "macros/organizer.html" import organizer_input %}
 {% from 'macros/context_help.html' import help %}
 {% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
@@ -96,6 +97,7 @@
     <div>
         <a class="backlink" href="{{ calendar_return_url }}">← {% if calendar_return_url.startswith('/admin/people/') %}К студенту{% else %}В календарь{% endif %}</a>
         <h1 class="page-title mt-2">{{ event.name }}</h1>
+        {% if event.organizer %}<div class="text-muted text-break">{{ organizer_label }}: {{ event.organizer }}</div>{% endif %}
         <div class="d-flex align-items-center flex-wrap gap-2 mt-1 text-muted">
             <span class="text-nowrap">{{ event.date_label }}</span>
             <span>·</span>
@@ -956,7 +958,7 @@
 {% if not event.regulation_filename and not protocols and not documents and not can_manage %}<div class="card card-body"><h2 class="title">Документы</h2><p>Документы пока не прикреплены.</p></div>{% endif %}
 </section>
 <section id="event-about" class="event-tab-panel" data-event-panel="about">
-<div class="card mb-3"><div class="card-body"><h2 class="title">О событии</h2><p>{{ event.date_label }} · {{ event.sport }} · {{ event.level }}</p>        {% if event.links %}
+<div class="card mb-3"><div class="card-body"><h2 class="title">О событии</h2><p class="text-break">{{ organizer_label }}: {{ event.organizer or '—' }}</p><p>{{ event.date_label }} · {{ event.sport }} · {{ event.level }}</p>        {% if event.links %}
         {# Ссылки события (Multiple Event Links): компактный список; уставо-
            вшиеся значения могли быть сохранены без проверки схемы — безопасный
            адрес рисуем <a>, прочие — обычным текстом. #}
@@ -991,6 +993,7 @@
                 <input class="form-control" id="event-edit-name" name="name" type="text" value="{{ event.name }}"
                     required>
             </div>
+            {{ organizer_input('event-edit-organizer', event.organizer) }}
             <div class="col-md-3">
                 <label class="label" for="event-edit-date">Период<span class="req">*</span></label>
                 <div class="range-picker">

@@ -68,6 +68,41 @@ function field(controller, key) {
     return (controller.inlineEditRow || controller.newEditRow).querySelectorAll('[data-edit-key]').find(input => input.dataset.editKey === key);
 }
 async function run() {
+    // ORG-01 uses the real factory: optional standalone input and event-owned lock.
+    const orgPage = main(); orgPage.tableElement.dataset = {organizerMaxLength: "255"};
+    const standaloneOrg = context.Controller.prototype.createInlineInput.call(orgPage, "organizer", "Демо центр", {}, false);
+    const eventOrg = context.Controller.prototype.createInlineInput.call(orgPage, "organizer", "Демо центр", {}, true);
+    assert.equal(standaloneOrg.disabled, false); assert.equal(standaloneOrg.maxLength, 255);
+    assert.equal(standaloneOrg.value, "Демо центр"); assert.equal(eventOrg.disabled, true);
+    assert.equal(eventOrg.title, "Изменяется в соревновании");
+    // Base organizer, renamed key organizer and an actual custom__organizer key coexist.
+    orgPage.getCustomFieldTypes = () => ({"custom:organizer": "text", custom__organizer: "text"});
+    const triple = existing(99);
+    for (const key of ["organizer", "custom:organizer", "custom__organizer"]) {
+        const cell = new Element("td"); cell.dataset.columnKey = key; triple.row.append(cell);
+    }
+    triple.button.dataset.organizer = "Базовое значение";
+    triple.button.dataset.extraJson = JSON.stringify({organizer: "Прежнее custom значение", custom__organizer: "Другое custom значение"});
+    orgPage.startInlineEdit(triple.button);
+    assert.equal(field(orgPage, "organizer").value, "Базовое значение");
+    assert.equal(field(orgPage, "custom:organizer").value, "Прежнее custom значение");
+    assert.equal(field(orgPage, "custom__organizer").value, "Другое custom значение");
+    field(orgPage, "organizer").value = "Новое базовое";
+    field(orgPage, "custom:organizer").value = "Новое прежнее custom";
+    field(orgPage, "custom__organizer").value = "Новое другое custom";
+    orgPage.saveInlineEdit();
+    const orgBody = orgPage.requests[0].options.body;
+    assert.equal(orgBody.get("organizer"), "Новое базовое");
+    assert.equal(orgBody.get("custom__organizer"), "Новое прежнее custom");
+    assert.equal(orgBody.get("custom__custom__organizer"), "Новое другое custom");
+    assert.equal(orgBody.has("custom:organizer"), false);
+    orgPage.inlineSaving = false; orgPage.newEditRow = orgPage.inlineEditRow;
+    orgPage.saveNewRowEdit();
+    const newOrgBody = orgPage.requests[1].options.body;
+    for (const name of ["organizer", "custom__organizer", "custom__custom__organizer"]) {
+        assert.equal(newOrgBody.get(name), orgBody.get(name));
+    }
+
     // Strict null is cancellation; explicit empty OK remains a modifying request.
     let page = main(), trigger = new Element('button'); document.activeElement = trigger;
     for (let i = 0; i < 3; i++) page.reviewCompetition('42', 'reject');

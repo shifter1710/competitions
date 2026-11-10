@@ -1,3 +1,4 @@
+{% from "macros/organizer.html" import organizer_input %}
 {% from 'macros/context_help.html' import help %}
 {% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
@@ -37,13 +38,14 @@
             <tbody>
                 <tr><th style="width: 40%">ФИО</th><td>{{ record.student_name }}</td></tr>
                 <tr><th>Название</th><td>{{ record.name }}</td></tr>
+                <tr><th>{{ organizer_label }}</th><td>{{ record.organizer or '—' }}</td></tr>
                 <tr><th>Вид спорта</th><td>{{ record.sport }}</td></tr>
                 <tr><th>Дата</th><td><span class="text-nowrap">{{ format_date_range(record.date, record.date_to) }}</span></td></tr>
                 <tr><th>Уровень</th><td>{{ record.level }}</td></tr>
             </tbody>
         </table>
         <div class="form-text mt-2 mb-0">
-            После связывания «Название», «Вид спорта», «Дата» и «Уровень» запись берёт из соревнования —
+            После связывания «Название», «Вид спорта», «Дата», «Уровень» и «{{ organizer_label }}» запись берёт из соревнования —
             остальные поля записи не меняются.
         </div>
     </div>
@@ -153,6 +155,7 @@
                 <label class="label" for="link-new-name">Название<span class="req">*</span></label>
                 <input class="form-control" id="link-new-name" name="name" type="text" value="{{ record.name }}" required>
             </div>
+            {{ organizer_input('link-new-organizer', record.organizer) }}
             <div class="col-md-3">
                 <label class="label" for="link-new-date">Период<span class="req">*</span></label>
                 <div class="range-picker">

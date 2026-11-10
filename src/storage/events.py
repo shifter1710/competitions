@@ -11,6 +11,7 @@ from datetime import timezone
 from typing import Sequence
 
 from src.levels import resolve_competition_level
+from src.organizers import validate_organizer
 from src.periods import academic_years_for_ranges
 from src.periods import today_in_timezone
 from src.settings import settings
@@ -517,6 +518,7 @@ class EventsMixin:
         level: str,
         sport: str,
         links: Sequence[tuple[str, str]],
+        organizer: str = '',
     ) -> int:
         """Новое событие календаря с 0..N ссылками и guard'ом точных дублей
         (2026-09-27).
@@ -533,9 +535,9 @@ class EventsMixin:
             if duplicate is not None:
                 raise CalendarEventDuplicateError(duplicate)
             cursor = self.connection.execute(
-                'INSERT INTO calendar_events (name, date, date_to, level, sport, created_at)'
-                ' VALUES (?, ?, ?, ?, ?, ?)',
-                (name, date, date_to, level, sport, datetime.utcnow().isoformat()),
+                'INSERT INTO calendar_events (name, date, date_to, level, sport, created_at, organizer)'
+                ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (name, date, date_to, level, sport, datetime.utcnow().isoformat(), validate_organizer(organizer)),
             )
             event_id = cursor.lastrowid
             self._insert_event_links(event_id, links)
@@ -545,7 +547,7 @@ class EventsMixin:
     def get_calendar_event(self, event_id: int) -> dict | None:
         with self._lock:
             row = self.connection.execute(
-                'SELECT id, name, date, date_to, level, sport, url, created_at, '
+                'SELECT id, name, date, date_to, level, sport, organizer, url, created_at, '
                 'regulation_filename, regulation_stored_name, results_confirmed, '
                 'results_confirmed_at, results_confirmed_by FROM calendar_events WHERE id = ?',
                 (event_id,),
@@ -617,12 +619,13 @@ class EventsMixin:
         level: str,
         sport: str,
         links: Sequence[tuple[str, str]],
+        organizer: str | None = None,
     ) -> int:
         """Правка события + полная замена ссылок + синхронизация связанных
         записей одной транзакцией.
 
         Event Model, Wave 1 P2: событие — владелец полей участия
-        name/date/date_to/sport/level, правка пресета переносится в записи
+        name/date/date_to/sport/level/organizer, правка пресета переносится в записи
         со ссылкой calendar_event_id (NULL-legacy-строки не трогаются —
         ссылки у них нет). Сбой любого шага — откат всего (паттерн
         import_competitions). Возвращает synced — число синхронизированных
@@ -639,6 +642,8 @@ class EventsMixin:
         with self._lock:
             try:
                 existing = self.get_calendar_event(event_id)
+                if organizer is None:
+                    organizer = existing.get('organizer') if existing else ''
                 level = resolve_competition_level(self, level, existing=existing['level'] if existing else None)
                 level_changed = existing is None or level != existing['level']
                 duplicate = self._find_calendar_event_duplicate(name, date, date_to, sport, level, exclude_id=event_id)
@@ -646,18 +651,18 @@ class EventsMixin:
                     raise CalendarEventDuplicateError(duplicate)
                 self.connection.execute(
                     'UPDATE calendar_events'
-                    ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?'
+                    ' SET name = ?, date = ?, date_to = ?, level = ?, sport = ?, organizer = ?'
                     ' WHERE id = ?',
-                    (name, date, date_to, level, sport, event_id),
+                    (name, date, date_to, level, sport, validate_organizer(organizer), event_id),
                 )
                 self.connection.execute('DELETE FROM calendar_event_links WHERE calendar_event_id = ?', (event_id,))
                 self._insert_event_links(event_id, links)
                 cursor = self.connection.execute(
                     'UPDATE competitions'
                     ' SET name = ?, date = ?, date_to = ?, sport = ?,'
-                    ' level = CASE WHEN ? THEN ? ELSE level END'
+                    ' level = CASE WHEN ? THEN ? ELSE level END, organizer = ?'
                     ' WHERE calendar_event_id = ?',
-                    (name, date, date_to, sport, level_changed, level, event_id),
+                    (name, date, date_to, sport, level_changed, level, validate_organizer(organizer), event_id),
                 )
                 synced = cursor.rowcount
                 self.connection.commit()
@@ -743,6 +748,7 @@ class EventsMixin:
                 SELECT
                     e.id,
                     e.name,
+                    e.organizer,
                     e.date,
                     e.date_to,
                     e.level,
@@ -772,6 +778,7 @@ class EventsMixin:
                     'date': row['date'],
                     'date_to': row['date_to'],
                     'level': row['level'],
+                    'organizer': row['organizer'] or '',
                     'sport': row['sport'],
                     'url': row['url'],
                     'created_at': row['created_at'],
@@ -844,8 +851,8 @@ class EventsMixin:
     # ---- P5b: явные связки «запись → событие» (Registry ↔ Calendar) ----
     #
     # Явное связывание существующей NULL-записи со событием календаря:
-    # ссылка calendar_event_id + синхронизация 5 event-owned полей
-    # (name/date/date_to/sport/level) — тот же состав, что у edit-sync
+    # ссылка calendar_event_id + синхронизация 6 event-owned полей
+    # (name/date/date_to/sport/level/organizer) — тот же состав, что у edit-sync
     # update_calendar_event. Правило гонок: guarded UPDATE
     # (WHERE calendar_event_id IS NULL) — запись, которую успел связать
     # кто-то другой, не перезаписывается (already_linked), существующая
@@ -877,7 +884,8 @@ class EventsMixin:
                 level = resolve_competition_level(self, event['level'], existing=record['level'])
                 cursor = self.connection.execute(
                     'UPDATE competitions'
-                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?,'
+                    ' sport = ?, level = ?, organizer = ?'
                     ' WHERE id = ? AND calendar_event_id IS NULL',
                     (
                         event_id,
@@ -886,6 +894,7 @@ class EventsMixin:
                         event['date_to'],
                         event['sport'],
                         level,
+                        validate_organizer(event['organizer']),
                         record_id,
                     ),
                 )
@@ -911,12 +920,13 @@ class EventsMixin:
         sport: str,
         links: Sequence[tuple[str, str]],
         record_id: int,
+        organizer: str = '',
     ) -> tuple[int | None, str | None]:
         """Создать событие календаря (со ссылками) и сразу связать с ним запись.
 
         Атомарно (одна транзакция): INSERT события + ссылки (без собственного
         commit, паттерн create_calendar_event) + guarded UPDATE записи
-        с синхронизацией 5 полей. Проверки записи (существует + ещё NULL)
+        с синхронизацией 6 полей. Проверки записи (существует + ещё NULL)
         выполняются ДО вставки, чтобы не оставлять событий-сирот; гонку на
         UPDATE закрывает rowcount (=0 → already_linked, откат всего).
         Возвращает (event_id, None) или (None, record_not_found /
@@ -944,17 +954,18 @@ class EventsMixin:
                 if duplicate is not None:
                     return int(duplicate['id']), 'duplicate_event'
                 cursor = self.connection.execute(
-                    'INSERT INTO calendar_events (name, date, date_to, level, sport, created_at)'
-                    ' VALUES (?, ?, ?, ?, ?, ?)',
-                    (name, date, date_to, level, sport, datetime.utcnow().isoformat()),
+                    'INSERT INTO calendar_events (name, date, date_to, level, sport, created_at, organizer)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (name, date, date_to, level, sport, datetime.utcnow().isoformat(), validate_organizer(organizer)),
                 )
                 event_id = cursor.lastrowid
                 self._insert_event_links(event_id, links)
                 linked = self.connection.execute(
                     'UPDATE competitions'
-                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                    ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?,'
+                    ' sport = ?, level = ?, organizer = ?'
                     ' WHERE id = ? AND calendar_event_id IS NULL',
-                    (event_id, name, date, date_to, sport, level, record_id),
+                    (event_id, name, date, date_to, sport, level, validate_organizer(organizer), record_id),
                 )
                 if linked.rowcount == 0:
                     self.connection.rollback()
@@ -998,6 +1009,7 @@ class EventsMixin:
                     c.date_to,
                     c.sport,
                     c.level,
+                    c.organizer,
                     (SELECT COUNT(*) FROM calendar_events e WHERE {predicate}) AS candidate_count
                 FROM competitions c
                 WHERE c.calendar_event_id IS NULL
@@ -1021,6 +1033,7 @@ class EventsMixin:
                     'date_to': row['date_to'],
                     'sport': row['sport'],
                     'level': row['level'],
+                    'organizer': row['organizer'] or '',
                 }
                 # Кандидаты строки — тот же предикат пресета, что и в
                 # подсчёте выше (синхронно с _calendar_preset_match_sql):
@@ -1072,7 +1085,7 @@ class EventsMixin:
 
         В батч входят ТОЛЬКО строки с единственным пресет-кандидатом
         (=1) — ambiguous не линкуются никогда, unmatched нечего линковать.
-        Для каждой строки — guarded UPDATE с синхронизацией 5 полей:
+        Для каждой строки — guarded UPDATE с синхронизацией 6 полей:
         rowcount = 0 (запись успели связать между предпросмотром и apply)
         — пропуск (skipped), не откат пакета. Возвращает счётчики
         {matched, linked, skipped} и список связанных
@@ -1097,14 +1110,15 @@ class EventsMixin:
             try:
                 for pair in pairs:
                     event = self.connection.execute(
-                        'SELECT name, date, date_to, sport, level FROM calendar_events WHERE id = ?',
+                        'SELECT name, date, date_to, sport, level, organizer FROM calendar_events WHERE id = ?',
                         (pair['event_id'],),
                     ).fetchone()
                     record = self.get_competition_by_id(pair['record_id'])
                     level = resolve_competition_level(self, event['level'], existing=record.level)
                     cursor = self.connection.execute(
                         'UPDATE competitions'
-                        ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?, sport = ?, level = ?'
+                        ' SET calendar_event_id = ?, name = ?, date = ?, date_to = ?,'
+                        ' sport = ?, level = ?, organizer = ?'
                         ' WHERE id = ? AND calendar_event_id IS NULL',
                         (
                             pair['event_id'],
@@ -1113,6 +1127,7 @@ class EventsMixin:
                             event['date_to'],
                             event['sport'],
                             level,
+                            validate_organizer(event['organizer']),
                             pair['record_id'],
                         ),
                     )

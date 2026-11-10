@@ -28,9 +28,9 @@
                     <tbody>
                         {% for key in base_field_labels if key != 'course' %}
                         {% set setting = base_field_settings[key] %}
-                        {% set locked = key in always_required_base_fields %}
+                        {% set locked = key in always_required_base_fields or key == 'organizer' %}
                         <tr>
-                            <td>{{ base_field_labels[key] }}{% if locked %} <span class="text-muted">(всегда обязательное)</span>{% endif %}</td>
+                            <td>{{ base_field_labels[key] }}{% if key == 'organizer' %} <span class="text-muted">(текстовое, необязательное)</span>{% elif locked %} <span class="text-muted">(всегда обязательное)</span>{% endif %}</td>
                             <td>
                                 {% if locked %}
                                 <input type="hidden" name="type_{{ key }}" value="{{ setting.value_type }}">
@@ -53,7 +53,7 @@
                                            type="checkbox"
                                            {% if setting.required %}checked{% endif %}
                                            {% if locked %}disabled{% endif %}>
-                                    {% if locked %}<input type="hidden" name="required_{{ key }}" value="on">{% endif %}
+                                    {% if locked and key != 'organizer' %}<input type="hidden" name="required_{{ key }}" value="on">{% endif %}
                                     <label class="form-check-label" for="base-required-{{ key }}">обязательное</label>
                                 </div>
                             </td>
@@ -122,6 +122,7 @@
                 </thead>
                 <tbody>
                     {% for field in admin_custom_fields %}
+                    {% if organizer_custom_collision(field) %}<tr><td colspan="8" class="text-muted">Название «{{ field.label }}» совпадает с базовым полем. Сохранённые значения не удалены; измените название, чтобы снова показывать отдельную колонку и поле ввода.</td></tr>{% endif %}
                     <tr>
                         <td colspan="5">
                             <form action="/admin/fields/{{ field.field_id }}" class="row g-2 field-form align-items-end" method="post">

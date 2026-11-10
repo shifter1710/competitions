@@ -1,3 +1,4 @@
+{% from "macros/organizer.html" import organizer_input %}
 {% from "macros/level_select.html" import level_select %}
 {% extends "layout/base.html" %}
 
@@ -122,6 +123,7 @@
                 <input class="form-control" id="calendar-new-name" name="name" type="text" required
                     placeholder="Например: Осенний кросс СибАДИ">
             </div>
+            {{ organizer_input('calendar-new-organizer') }}
             <div class="col-md-3">
                 <label class="label" for="calendar-new-date">Период<span class="req">*</span></label>
                 <div class="range-picker">
@@ -177,6 +179,7 @@
             {# Волна B (прототип 16): карточка ведёт внутрь соревнования —
                на страницу участников. #}
             <a class="calendar-comp-row__name" href="/calendar/{{ event.id }}?{{ calendar_event_query }}">{{ event.name }}</a>
+            {% if event.organizer %}<div class="calendar-comp-row__meta text-break">{{ organizer_label }}: {{ event.organizer }}</div>{% endif %}
             <div class="calendar-comp-row__meta">{{ event.level }}{% if event.level and event.sport %} · {% endif %}{{ event.sport }}</div>
             {% if can_manage %}
             <div class="collapse mt-2" id="calendar-edit-{{ event.id }}">
@@ -187,6 +190,7 @@
                         <label class="label">Название<span class="req">*</span></label>
                         <input class="form-control form-control-sm" name="name" type="text" value="{{ event.name }}" required>
                     </div>
+                    {{ organizer_input('calendar-edit-organizer-' ~ event.id, event.organizer) }}
                     <div class="col-md-3">
                         <label class="label">Период<span class="req">*</span></label>
                         <div class="range-picker">

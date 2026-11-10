@@ -41,6 +41,7 @@ from src.models.competition import Competition
 from src.models.custom_field import CustomField
 from src.models.http.report_row import ReportSummary
 from src.models.http.student_info import StudentInfo
+from src.organizers import ORGANIZER_LABEL
 from src.records import build_competition
 from src.records import competition_duplicate_key
 from src.records import competition_to_export_row
@@ -750,6 +751,7 @@ def test_export_index_omits_dataframe_index_and_created_at(client: SanicTestClie
         'Дата',
         'Уровень соревнований',
         'Название соревнований',
+        ORGANIZER_LABEL,
         'Место',
         'Курс',
         # Event Model, P5a: фиксированные колонки дисциплины/результата
@@ -15021,6 +15023,7 @@ def test_calendar_edit_route_syncs_participations_and_audits(event_import_client
             'date_to': {'old': '2026-05-11T00:00:00', 'new': '2026-06-21T00:00:00'},
             'sport': {'old': 'Бег', 'new': 'Лыжи'},
             'level': {'old': 'внутривузовские', 'new': 'межвузовские'},
+            'organizer': {'old': '', 'new': ''},
             # Multiple Event Links: аудит несёт итоговый состав ссылок.
             'links': {
                 'old': [],
@@ -15574,7 +15577,10 @@ def test_batch_preview_counts_and_apply_links_matched(event_import_client: Sanic
     assert 'Связать 1 записей' in response.text
     # Confirm у кнопки уходит в onsubmit через |tojson — кириллица в
     # \uXXXX-эскейпах JSON (браузер декодирует их в confirm() сам).
-    assert json.dumps('Название, вид спорта, дату и уровень записи возьмут из соревнований.')[1:-1] in response.text
+    assert (
+        json.dumps('Название, вид спорта, дату, уровень и организатор записи возьмут из соревнований.')[1:-1]
+        in response.text
+    )
 
     _, response = event_import_client.post(
         '/admin/maintenance/calendar-links/apply',
@@ -15684,6 +15690,7 @@ def test_link_routes_write_audit_events(event_import_client: SanicTestClient):
                 'date': {'old': '2026-04-10T00:00:00', 'new': '2026-05-10T00:00:00'},
                 'date_to': {'old': None, 'new': '2026-05-11T00:00:00'},
                 'level': {'old': 'внутривузовские', 'new': 'внутривузовские'},
+                'organizer': {'old': '', 'new': ''},
             },
         }
     ]
@@ -15995,7 +16002,7 @@ def test_batch_apply_confirm_onsubmit_is_valid_js(event_import_client: SanicTest
     assert len(messages) == 1
     message = messages[0]
     assert 'Связать 1 записей с найденными соревнованиями?' in message
-    assert 'Название, вид спорта, дату и уровень записи возьмут из соревнований.' in message
+    assert 'Название, вид спорта, дату, уровень и организатор записи возьмут из соревнований.' in message
     assert 'У 1 записей станут пустыми: вид спорта, уровень.' in message
 
 
@@ -18856,6 +18863,7 @@ def test_exports_do_not_leak_student_ref_id(event_import_client: SanicTestClient
         'Дата',
         'Уровень соревнований',
         'Название соревнований',
+        ORGANIZER_LABEL,
         'Место',
         'Дисциплина',
         'Результат',
@@ -21136,6 +21144,7 @@ def test_export_index_unchanged_with_admission_year(client: SanicTestClient):
         'Дата',
         'Уровень соревнований',
         'Название соревнований',
+        ORGANIZER_LABEL,
         'Место',
         'Курс',
         'Дисциплина',
